@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { startDeltaChat } from '@deltachat/stdio-rpc-server';
 import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
@@ -37,7 +38,11 @@ class DeltaChatChannel implements Channel {
     // DeltaChat RPC server requires accounts.toml to exist on startup
     const accountsToml = path.join(this.dataDir, 'accounts.toml');
     if (!fs.existsSync(accountsToml)) {
-      fs.writeFileSync(accountsToml, 'selected_account = 0\nnext_id = 1\naccounts = []\n', 'utf8');
+      fs.writeFileSync(
+        accountsToml,
+        'selected_account = 0\nnext_id = 1\naccounts = []\n',
+        'utf8',
+      );
     }
 
     this.dc = await startDeltaChat(this.dataDir);
@@ -86,38 +91,50 @@ class DeltaChatChannel implements Channel {
     const emitter = this.dc.getContextEvents(account.id);
     const seenMsgIds = new Set<number>();
 
-    emitter.on('IncomingMsg', async ({ chatId, msgId }: { chatId: number; msgId: number }) => {
-      if (seenMsgIds.has(msgId)) return;
-      seenMsgIds.add(msgId);
-      setTimeout(() => seenMsgIds.delete(msgId), 60_000);
+    emitter.on(
+      'IncomingMsg',
+      async ({ chatId, msgId }: { chatId: number; msgId: number }) => {
+        if (seenMsgIds.has(msgId)) return;
+        seenMsgIds.add(msgId);
+        setTimeout(() => seenMsgIds.delete(msgId), 60_000);
 
-      try {
-        const dc = this.dc!;
-        const aid = this.accountId!;
-        const msg = await dc.rpc.getMessage(aid, msgId);
-        if (!msg.text) return;
+        try {
+          const dc = this.dc!;
+          const aid = this.accountId!;
+          const msg = await dc.rpc.getMessage(aid, msgId);
+          if (!msg.text) return;
 
-        const chat = await dc.rpc.getBasicChatInfo(aid, chatId);
-        const contact = await dc.rpc.getContact(aid, msg.fromId);
-        const isGroup = chat.chatType !== 100; // 100 = single/DM in DC
+          const chat = await dc.rpc.getBasicChatInfo(aid, chatId);
+          const contact = await dc.rpc.getContact(aid, msg.fromId);
+          const isGroup = chat.chatType !== 100; // 100 = single/DM in DC
 
-        const jid = jidForChat(chatId);
-        const sender = contact.address ?? String(msg.fromId);
-        const senderName = contact.displayName ?? sender;
+          const jid = jidForChat(chatId);
+          const sender = contact.address ?? String(msg.fromId);
+          const senderName = contact.displayName ?? sender;
 
-        this.onChatMetadata(jid, new Date().toISOString(), chat.name, 'deltachat', isGroup);
-        this.onMessage(jid, {
-          id: String(msgId),
-          chat_jid: jid,
-          sender,
-          sender_name: senderName,
-          content: msg.text,
-          timestamp: new Date(msg.timestamp * 1000).toISOString(),
-        });
-      } catch (err) {
-        logger.error({ err, chatId, msgId }, 'DeltaChat: failed to process IncomingMsg');
-      }
-    });
+          this.onChatMetadata(
+            jid,
+            new Date().toISOString(),
+            chat.name,
+            'deltachat',
+            isGroup,
+          );
+          this.onMessage(jid, {
+            id: String(msgId),
+            chat_jid: jid,
+            sender,
+            sender_name: senderName,
+            content: msg.text,
+            timestamp: new Date(msg.timestamp * 1000).toISOString(),
+          });
+        } catch (err) {
+          logger.error(
+            { err, chatId, msgId },
+            'DeltaChat: failed to process IncomingMsg',
+          );
+        }
+      },
+    );
 
     this._connected = true;
     logger.info('DeltaChat channel connected');
@@ -171,7 +188,10 @@ registerChannel('deltachat', (opts) => {
     return null; // not configured
   }
 
-  const dataDir = path.resolve(env.DELTACHAT_DATA_DIR ?? 'store/deltachat');
+  const rawDataDir = env.DELTACHAT_DATA_DIR ?? 'store/deltachat';
+  const dataDir = path.resolve(
+    rawDataDir.replace(/^~/, process.env.HOME ?? os.homedir()),
+  );
 
   return new DeltaChatChannel(
     chatmailQr,

@@ -23,7 +23,16 @@ export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
-const HOME_DIR = process.env.HOME || os.homedir();
+export const HOME_DIR = process.env.HOME || os.homedir();
+
+/** Expand a leading ~ and resolve to an absolute path, falling back to defaultPath. */
+function resolveConfigDir(
+  raw: string | undefined,
+  defaultPath: string,
+): string {
+  const expanded = (raw || '').replace(/^~/, HOME_DIR);
+  return path.resolve(expanded || defaultPath);
+}
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(
@@ -38,17 +47,13 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'sender-allowlist.json',
 );
-export const STORE_DIR = path.resolve(
-  (process.env.STORE_DIR || envConfig.STORE_DIR || '').replace(
-    /^~/,
-    HOME_DIR,
-  ) || path.join(PROJECT_ROOT, 'store'),
+export const STORE_DIR = resolveConfigDir(
+  process.env.STORE_DIR || envConfig.STORE_DIR,
+  path.join(PROJECT_ROOT, 'store'),
 );
-export const GROUPS_DIR = path.resolve(
-  (process.env.GROUPS_DIR || envConfig.GROUPS_DIR || '').replace(
-    /^~/,
-    HOME_DIR,
-  ) || path.join(PROJECT_ROOT, 'groups'),
+export const GROUPS_DIR = resolveConfigDir(
+  process.env.GROUPS_DIR || envConfig.GROUPS_DIR,
+  path.join(PROJECT_ROOT, 'groups'),
 );
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 

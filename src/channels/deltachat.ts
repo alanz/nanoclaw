@@ -1,11 +1,11 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { startDeltaChat } from '@deltachat/stdio-rpc-server';
 import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 import { registerChannel } from './registry.js';
 import type { Channel, OnInboundMessage, OnChatMetadata } from '../types.js';
 import { readEnvFile } from '../env.js';
+import { HOME_DIR } from '../config.js';
 import { logger } from '../logger.js';
 
 function jidForChat(chatId: number): string {
@@ -189,9 +189,7 @@ registerChannel('deltachat', (opts) => {
   }
 
   const rawDataDir = env.DELTACHAT_DATA_DIR ?? 'store/deltachat';
-  const dataDir = path.resolve(
-    rawDataDir.replace(/^~/, process.env.HOME ?? os.homedir()),
-  );
+  const dataDir = path.resolve(rawDataDir.replace(/^~/, HOME_DIR));
 
   return new DeltaChatChannel(
     chatmailQr,

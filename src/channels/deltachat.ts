@@ -10,7 +10,7 @@ import type {
   RegisteredGroup,
 } from '../types.js';
 import { readEnvFile } from '../env.js';
-import { HOME_DIR } from '../config.js';
+import { HOME_DIR, ASSISTANT_NAME } from '../config.js';
 import { logger } from '../logger.js';
 
 function jidForChat(chatId: number): string {
@@ -180,6 +180,12 @@ export class DeltaChatChannel implements Channel {
             'deltachat',
             isGroup,
           );
+
+          // /ping works in any chat (registered or not)
+          if (text.trim() === '/ping') {
+            await this.sendMessage(jid, `${ASSISTANT_NAME} is online.`);
+            return;
+          }
 
           // Filter unregistered chats before routing to the agent
           const groups = this.opts.registeredGroups();

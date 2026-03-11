@@ -253,22 +253,88 @@ describe('DeltaChatChannel', () => {
     });
   });
 
+  describe('/ping command', () => {
+    it('replies in registered chat', async () => {
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/ping' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: 'Andy is online.' }),
+      );
+    });
+
+    it('replies in unregistered chat', async () => {
+      const { dc } = await buildConnectedChannel({ registered: false });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/ping' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: 'Andy is online.' }),
+      );
+    });
+
+    it('does not route /ping to onMessage', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/ping' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
   describe('non-text message placeholders', () => {
     const cases: [string, Partial<any>, string][] = [
       ['Image', { viewType: 'Image', text: '' }, '[Image]'],
-      ['Image with caption', { viewType: 'Image', text: 'Nice pic' }, '[Image]\nNice pic'],
+      [
+        'Image with caption',
+        { viewType: 'Image', text: 'Nice pic' },
+        '[Image]\nNice pic',
+      ],
       ['GIF', { viewType: 'Gif', text: '' }, '[GIF]'],
       ['Sticker', { viewType: 'Sticker', text: '' }, '[Sticker]'],
       ['Audio', { viewType: 'Audio', text: '' }, '[Audio]'],
       ['Voice', { viewType: 'Voice', text: '' }, '[Voice message]'],
       ['Video', { viewType: 'Video', text: '' }, '[Video]'],
-      ['File with name', { viewType: 'File', fileName: 'doc.pdf', text: '' }, '[File: doc.pdf]'],
-      ['File without name', { viewType: 'File', fileName: null, text: '' }, '[File]'],
-      ['VideochatInvitation', { viewType: 'VideochatInvitation', text: '' }, '[Video chat invitation]'],
+      [
+        'File with name',
+        { viewType: 'File', fileName: 'doc.pdf', text: '' },
+        '[File: doc.pdf]',
+      ],
+      [
+        'File without name',
+        { viewType: 'File', fileName: null, text: '' },
+        '[File]',
+      ],
+      [
+        'VideochatInvitation',
+        { viewType: 'VideochatInvitation', text: '' },
+        '[Video chat invitation]',
+      ],
       ['Call', { viewType: 'Call', text: '' }, '[Call]'],
       ['Webxdc', { viewType: 'Webxdc', text: '' }, '[Webxdc app]'],
       ['Vcard', { viewType: 'Vcard', text: '' }, '[Contact (vCard)]'],
-      ['Unknown attachment', { viewType: 'SomeFutureType', text: '' }, '[Attachment]'],
+      [
+        'Unknown attachment',
+        { viewType: 'SomeFutureType', text: '' },
+        '[Attachment]',
+      ],
     ];
 
     for (const [label, msgOverrides, expected] of cases) {
@@ -290,7 +356,9 @@ describe('DeltaChatChannel', () => {
 
     it('skips truly empty Text messages', async () => {
       const { opts, dc } = await buildConnectedChannel({ registered: true });
-      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Text', text: '' }));
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ viewType: 'Text', text: '' }),
+      );
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
 

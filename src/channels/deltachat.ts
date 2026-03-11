@@ -3,7 +3,12 @@ import path from 'path';
 import { startDeltaChat } from '@deltachat/stdio-rpc-server';
 import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 import { registerChannel } from './registry.js';
-import type { Channel, OnInboundMessage, OnChatMetadata } from '../types.js';
+import type {
+  Channel,
+  OnInboundMessage,
+  OnChatMetadata,
+  RegisteredGroup,
+} from '../types.js';
 import { readEnvFile } from '../env.js';
 import { HOME_DIR } from '../config.js';
 import { logger } from '../logger.js';
@@ -17,26 +22,30 @@ function chatIdFromJid(jid: string): number | null {
   return m ? parseInt(m[1], 10) : null;
 }
 
-class DeltaChatChannel implements Channel {
+export interface DeltaChatChannelOpts {
+  chatmailQr: string | undefined;
+  addr: string | undefined;
+  mailPw: string | undefined;
+  dataDir: string;
+  onMessage: OnInboundMessage;
+  onChatMetadata: OnChatMetadata;
+  registeredGroups: () => Record<string, RegisteredGroup>;
+}
+
+export class DeltaChatChannel implements Channel {
   name = 'deltachat';
   private dc: DeltaChatOverJsonRpcServer | null = null;
   private accountId: number | null = null;
   private _connected = false;
 
-  constructor(
-    private readonly chatmailQr: string | undefined,
-    private readonly addr: string | undefined,
-    private readonly mailPw: string | undefined,
-    private readonly dataDir: string,
-    private readonly onMessage: OnInboundMessage,
-    private readonly onChatMetadata: OnChatMetadata,
-  ) {}
+  constructor(private readonly opts: DeltaChatChannelOpts) {}
 
   async connect(): Promise<void> {
-    fs.mkdirSync(this.dataDir, { recursive: true });
+    const { chatmailQr, addr, mailPw, dataDir } = this.opts;
+    fs.mkdirSync(dataDir, { recursive: true });
 
     // DeltaChat RPC server requires accounts.toml to exist on startup
-    const accountsToml = path.join(this.dataDir, 'accounts.toml');
+    const accountsToml = path.join(dataDir, 'accounts.toml');
     if (!fs.existsSync(accountsToml)) {
       fs.writeFileSync(
         accountsToml,
@@ -45,7 +54,7 @@ class DeltaChatChannel implements Channel {
       );
     }
 
-    this.dc = await startDeltaChat(this.dataDir);
+    this.dc = await startDeltaChat(dataDir);
 
     // Get or create account
     let accounts = await this.dc.rpc.getAllAccounts();
@@ -60,18 +69,18 @@ class DeltaChatChannel implements Channel {
 
     // Configure if unconfigured
     if (account.kind === 'Unconfigured') {
-      if (this.chatmailQr) {
+      if (chatmailQr) {
         await this.dc.rpc.batchSetConfig(account.id, {
           bot: '1',
           e2ee_enabled: '1',
           displayname: 'NanoClaw',
         });
-        await this.dc.rpc.setConfigFromQr(account.id, this.chatmailQr);
+        await this.dc.rpc.setConfigFromQr(account.id, chatmailQr);
         await this.dc.rpc.configure(account.id);
-      } else if (this.addr && this.mailPw) {
+      } else if (addr && mailPw) {
         await this.dc.rpc.batchSetConfig(account.id, {
-          addr: this.addr,
-          mail_pw: this.mailPw,
+          addr,
+          mail_pw: mailPw,
           bot: '1',
           e2ee_enabled: '1',
           displayname: 'NanoClaw',
@@ -102,7 +111,9 @@ class DeltaChatChannel implements Channel {
           const dc = this.dc!;
           const aid = this.accountId!;
           const msg = await dc.rpc.getMessage(aid, msgId);
-          if (!msg.text) return;
+
+          // Skip info/system messages
+          if (msg.isInfo) return;
 
           const chat = await dc.rpc.getBasicChatInfo(aid, chatId);
           const contact = await dc.rpc.getContact(aid, msg.fromId);
@@ -111,20 +122,35 @@ class DeltaChatChannel implements Channel {
           const jid = jidForChat(chatId);
           const sender = contact.address ?? String(msg.fromId);
           const senderName = contact.displayName ?? sender;
+          const text = msg.text ?? '';
 
-          this.onChatMetadata(
+          // Always emit chat metadata (enables group discovery for unregistered chats)
+          this.opts.onChatMetadata(
             jid,
             new Date().toISOString(),
             chat.name,
             'deltachat',
             isGroup,
           );
-          this.onMessage(jid, {
+
+          // Filter unregistered chats before routing to the agent
+          const groups = this.opts.registeredGroups();
+          if (!(jid in groups)) {
+            logger.debug(
+              { jid },
+              'DeltaChat: ignoring message from unregistered chat',
+            );
+            return;
+          }
+
+          if (!text) return; // skip empty messages
+
+          this.opts.onMessage(jid, {
             id: String(msgId),
             chat_jid: jid,
             sender,
             sender_name: senderName,
-            content: msg.text,
+            content: text,
             timestamp: new Date(msg.timestamp * 1000).toISOString(),
           });
         } catch (err) {
@@ -191,12 +217,13 @@ registerChannel('deltachat', (opts) => {
   const rawDataDir = env.DELTACHAT_DATA_DIR ?? 'store/deltachat';
   const dataDir = path.resolve(rawDataDir.replace(/^~/, HOME_DIR));
 
-  return new DeltaChatChannel(
+  return new DeltaChatChannel({
     chatmailQr,
     addr,
     mailPw,
     dataDir,
-    opts.onMessage,
-    opts.onChatMetadata,
-  );
+    onMessage: opts.onMessage,
+    onChatMetadata: opts.onChatMetadata,
+    registeredGroups: opts.registeredGroups,
+  });
 });

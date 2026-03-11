@@ -299,6 +299,52 @@ describe('DeltaChatChannel', () => {
     });
   });
 
+  describe('/help command', () => {
+    it('replies with command list in registered chat', async () => {
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/help' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: expect.stringContaining('/ping') }),
+      );
+    });
+
+    it('replies with command list in unregistered chat', async () => {
+      const { dc } = await buildConnectedChannel({ registered: false });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/help' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: expect.stringContaining('/chatid') }),
+      );
+    });
+
+    it('does not route /help to onMessage', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/help' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
   describe('/chatid command', () => {
     it('replies with JID and "registered" for registered chat', async () => {
       const { dc } = await buildConnectedChannel({ registered: true });
@@ -355,7 +401,9 @@ describe('DeltaChatChannel', () => {
       emitIncomingMsg();
       await flush();
 
-      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['👀']);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, [
+        '👀',
+      ]);
     });
 
     it('does NOT send 👀 for unregistered chats', async () => {
@@ -382,7 +430,9 @@ describe('DeltaChatChannel', () => {
       dc.rpc.sendReaction.mockClear();
       await channel.setTyping(JID, true);
 
-      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['💭']);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, [
+        '💭',
+      ]);
     });
 
     it('sends ✅ reaction when setTyping(false) is called', async () => {
@@ -397,7 +447,9 @@ describe('DeltaChatChannel', () => {
       dc.rpc.sendReaction.mockClear();
       await channel.setTyping(JID, false);
 
-      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['✅']);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, [
+        '✅',
+      ]);
     });
 
     it('setTyping does nothing when no message has been received', async () => {
@@ -440,7 +492,9 @@ describe('DeltaChatChannel', () => {
 
       // Message in chat 2
       dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'hey' }));
-      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat({ name: 'Group 2' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(
+        makeChat({ name: 'Group 2' }),
+      );
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
       emitIncomingMsg(CHAT_ID_2, MSG_ID_2);
       await flush();
@@ -455,12 +509,16 @@ describe('DeltaChatChannel', () => {
       dc.rpc.sendReaction.mockClear();
 
       await channel.setTyping(JID, false);
-      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_1B, ['✅']);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_1B, [
+        '✅',
+      ]);
 
       dc.rpc.sendReaction.mockClear();
 
       await channel.setTyping(JID_2, false);
-      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, ['✅']);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, [
+        '✅',
+      ]);
     });
   });
 

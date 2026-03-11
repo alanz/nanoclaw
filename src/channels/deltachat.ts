@@ -189,6 +189,15 @@ export class DeltaChatChannel implements Channel {
             return;
           }
 
+          // /help works in any chat (registered or not)
+          if (text.trim() === '/help') {
+            await this.sendMessage(
+              jid,
+              'Available commands:\n/ping — check if Andy is online\n/chatid — show this chat\'s ID and registration status\n/help — show this message',
+            );
+            return;
+          }
+
           // /chatid works in any chat (registered or not)
           if (text.trim() === '/chatid') {
             const groups = this.opts.registeredGroups();

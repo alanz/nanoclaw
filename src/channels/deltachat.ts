@@ -13,7 +13,12 @@ import { readEnvFile } from '../env.js';
 import { HOME_DIR, ASSISTANT_NAME, DATA_DIR } from '../config.js';
 import { logger } from '../logger.js';
 
-const AVATAR_SOURCE = path.resolve(DATA_DIR, '..', 'assets', 'nanoclaw-profile.jpeg');
+const AVATAR_SOURCE = path.resolve(
+  DATA_DIR,
+  '..',
+  'assets',
+  'nanoclaw-profile.jpeg',
+);
 
 /** Copy the NanoClaw avatar into the DC data directory and return its path, or null on failure. */
 function copyAvatarToDataDir(dataDir: string): string | null {
@@ -185,6 +190,10 @@ export class DeltaChatChannel implements Channel {
 
           // Skip info/system messages
           if (msg.isInfo) return;
+
+          // Skip messages sent by this account (DC fires IncomingMsg for the bot's
+          // own group messages, which would overwrite lastMsgId and break ✅ reactions)
+          if (msg.fromId === 1) return; // DC_CONTACT_ID_SELF = 1
 
           const chat = await dc.rpc.getBasicChatInfo(aid, chatId);
           const contact = await dc.rpc.getContact(aid, msg.fromId);

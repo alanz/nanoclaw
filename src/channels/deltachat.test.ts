@@ -242,6 +242,17 @@ describe('DeltaChatChannel', () => {
       );
     });
 
+    it('skips messages from the bot itself (fromId === 1)', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ fromId: 1 }));
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+
     it('skips info/system messages', async () => {
       const { opts, dc } = await buildConnectedChannel({ registered: true });
       dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ isInfo: true }));

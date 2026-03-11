@@ -2,6 +2,7 @@ import path from 'path';
 
 import { describe, expect, it } from 'vitest';
 
+import { GROUPS_DIR } from './config.js';
 import {
   isValidGroupFolder,
   resolveGroupFolderPath,
@@ -24,9 +25,7 @@ describe('group folder validation', () => {
 
   it('resolves safe paths under groups directory', () => {
     const resolved = resolveGroupFolderPath('family-chat');
-    expect(resolved.endsWith(`${path.sep}groups${path.sep}family-chat`)).toBe(
-      true,
-    );
+    expect(resolved).toBe(path.join(GROUPS_DIR, 'family-chat'));
   });
 
   it('resolves safe paths under data ipc directory', () => {

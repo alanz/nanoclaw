@@ -10,8 +10,22 @@ import type {
   RegisteredGroup,
 } from '../types.js';
 import { readEnvFile } from '../env.js';
-import { HOME_DIR, ASSISTANT_NAME } from '../config.js';
+import { HOME_DIR, ASSISTANT_NAME, DATA_DIR } from '../config.js';
 import { logger } from '../logger.js';
+
+const AVATAR_SOURCE = path.resolve(DATA_DIR, '..', 'assets', 'nanoclaw-profile.jpeg');
+
+/** Copy the NanoClaw avatar into the DC data directory and return its path, or null on failure. */
+function copyAvatarToDataDir(dataDir: string): string | null {
+  try {
+    if (!fs.existsSync(AVATAR_SOURCE)) return null;
+    const dest = path.join(dataDir, 'nanoclaw-avatar.jpeg');
+    fs.copyFileSync(AVATAR_SOURCE, dest);
+    return dest;
+  } catch {
+    return null;
+  }
+}
 
 function jidForChat(chatId: number): string {
   return `dc:${chatId}`;
@@ -144,6 +158,13 @@ export class DeltaChatChannel implements Channel {
       logger.info('DeltaChat account configured');
     }
 
+    // Set avatar on every startup so it's applied even if the image was added after initial config
+    const avatarPath = copyAvatarToDataDir(dataDir);
+    if (avatarPath) {
+      await this.dc.rpc.batchSetConfig(account.id, { selfavatar: avatarPath });
+      logger.debug('DeltaChat: avatar set');
+    }
+
     await this.dc.rpc.startIo(account.id);
 
     // Listen for incoming messages
@@ -193,7 +214,7 @@ export class DeltaChatChannel implements Channel {
           if (text.trim() === '/help') {
             await this.sendMessage(
               jid,
-              'Available commands:\n/ping — check if Andy is online\n/chatid — show this chat\'s ID and registration status\n/help — show this message',
+              "Available commands:\n/ping — check if Andy is online\n/chatid — show this chat's ID and registration status\n/help — show this message",
             );
             return;
           }

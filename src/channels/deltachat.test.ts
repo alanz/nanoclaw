@@ -7,6 +7,7 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   HOME_DIR: '/home/testuser',
+  DATA_DIR: '/tmp/dc-test/data',
 }));
 vi.mock('fs', () => ({
   default: {

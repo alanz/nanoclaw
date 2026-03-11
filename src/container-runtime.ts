@@ -8,8 +8,14 @@ import os from 'os';
 
 import { logger } from './logger.js';
 
-/** The container runtime binary name. */
-export const CONTAINER_RUNTIME_BIN = 'container';
+/**
+ * The container runtime binary name.
+ * Override with CONTAINER_RUNTIME env var (e.g. CONTAINER_RUNTIME=docker for Linux).
+ * Defaults to 'container' (Apple Container) on macOS, 'docker' on Linux.
+ */
+export const CONTAINER_RUNTIME_BIN =
+  process.env.CONTAINER_RUNTIME ??
+  (os.platform() === 'darwin' ? 'container' : 'docker');
 
 /**
  * Hostname or IP containers use to reach the host machine.
@@ -17,7 +23,7 @@ export const CONTAINER_RUNTIME_BIN = 'container';
  * Docker Desktop resolves host.docker.internal automatically.
  */
 export const CONTAINER_HOST_GATEWAY =
-  os.platform() === 'darwin'
+  CONTAINER_RUNTIME_BIN === 'container'
     ? (detectAppleContainerBridgeIp() ?? 'host.docker.internal')
     : 'host.docker.internal';
 
@@ -46,13 +52,15 @@ function detectAppleContainerBridgeIp(): string | null {
 }
 
 function detectProxyBindHost(): string {
-  if (os.platform() === 'darwin') {
+  if (CONTAINER_RUNTIME_BIN === 'container') {
     // Apple Container VMs use a bridge network — bind to the bridge IP so containers can reach us.
-    // Docker Desktop doesn't create a visible bridge; fall back to loopback for that case.
+    // Fall back to loopback if the bridge isn't up yet (shouldn't happen after ensureContainerRuntimeRunning).
     const bridgeIp = detectAppleContainerBridgeIp();
     if (bridgeIp) return bridgeIp;
     return '127.0.0.1';
   }
+
+  if (os.platform() === 'darwin') return '127.0.0.1'; // Docker Desktop on macOS
 
   // WSL uses Docker Desktop (same VM routing as macOS) — loopback is correct.
   // Check /proc filesystem, not env vars — WSL_DISTRO_NAME isn't set under systemd.

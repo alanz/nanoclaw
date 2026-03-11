@@ -299,6 +299,52 @@ describe('DeltaChatChannel', () => {
     });
   });
 
+  describe('/chatid command', () => {
+    it('replies with JID and "registered" for registered chat', async () => {
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/chatid' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: `Chat ID: ${JID} (registered)` }),
+      );
+    });
+
+    it('replies with JID and "not registered" for unregistered chat', async () => {
+      const { dc } = await buildConnectedChannel({ registered: false });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/chatid' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: `Chat ID: ${JID} (not registered)` }),
+      );
+    });
+
+    it('does not route /chatid to onMessage', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/chatid' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
   describe('non-text message placeholders', () => {
     const cases: [string, Partial<any>, string][] = [
       ['Image', { viewType: 'Image', text: '' }, '[Image]'],

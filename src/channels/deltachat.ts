@@ -187,6 +187,15 @@ export class DeltaChatChannel implements Channel {
             return;
           }
 
+          // /chatid works in any chat (registered or not)
+          if (text.trim() === '/chatid') {
+            const groups = this.opts.registeredGroups();
+            const isRegistered = jid in groups;
+            const status = isRegistered ? 'registered' : 'not registered';
+            await this.sendMessage(jid, `Chat ID: ${jid} (${status})`);
+            return;
+          }
+
           // Filter unregistered chats before routing to the agent
           const groups = this.opts.registeredGroups();
           if (!(jid in groups)) {

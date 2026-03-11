@@ -85,6 +85,8 @@ export class DeltaChatChannel implements Channel {
   private dc: DeltaChatOverJsonRpcServer | null = null;
   private accountId: number | null = null;
   private _connected = false;
+  /** Track the last incoming message ID per JID for reactions. */
+  private lastMsgId = new Map<string, number>();
 
   constructor(private readonly opts: DeltaChatChannelOpts) {}
 
@@ -206,6 +208,17 @@ export class DeltaChatChannel implements Channel {
             return;
           }
 
+          // React with 👀 to acknowledge receipt
+          this.lastMsgId.set(jid, msgId);
+          try {
+            await dc.rpc.sendReaction(aid, msgId, ['👀']);
+          } catch (err) {
+            logger.warn(
+              { err, msgId },
+              'DeltaChat: failed to send 👀 reaction',
+            );
+          }
+
           // Build content: text or media placeholder
           let content: string;
           const viewType = msg.viewType ?? 'Unknown';
@@ -251,6 +264,21 @@ export class DeltaChatChannel implements Channel {
       quotedMessageId: null,
       quotedText: null,
     });
+  }
+
+  /** Update reaction on the last incoming message for this JID. */
+  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    const msgId = this.lastMsgId.get(jid);
+    if (msgId === undefined || !this.dc || this.accountId === null) return;
+    const emoji = isTyping ? '💭' : '✅';
+    try {
+      await this.dc.rpc.sendReaction(this.accountId, msgId, [emoji]);
+    } catch (err) {
+      logger.warn(
+        { err, jid, emoji },
+        'DeltaChat: failed to send typing reaction',
+      );
+    }
   }
 
   isConnected(): boolean {

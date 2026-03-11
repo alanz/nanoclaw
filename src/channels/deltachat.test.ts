@@ -345,6 +345,125 @@ describe('DeltaChatChannel', () => {
     });
   });
 
+  describe('progress reactions', () => {
+    it('sends 👀 reaction on receipt from registered chat', async () => {
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['👀']);
+    });
+
+    it('does NOT send 👀 for unregistered chats', async () => {
+      const { dc } = await buildConnectedChannel({ registered: false });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('sends 💭 reaction when setTyping(true) is called', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      dc.rpc.sendReaction.mockClear();
+      await channel.setTyping(JID, true);
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['💭']);
+    });
+
+    it('sends ✅ reaction when setTyping(false) is called', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      dc.rpc.sendReaction.mockClear();
+      await channel.setTyping(JID, false);
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['✅']);
+    });
+
+    it('setTyping does nothing when no message has been received', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.setTyping(JID, true);
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('tracks lastMsgId per JID independently', async () => {
+      const CHAT_ID_2 = 99;
+      const JID_2 = `dc:${CHAT_ID_2}`;
+      const MSG_ID_2 = 200;
+      const MSG_ID_1B = 150;
+
+      const { channel, dc } = await buildConnectedChannel({
+        registeredGroups: vi.fn(() => ({
+          [JID]: {
+            name: 'Group 1',
+            folder: 'g1',
+            trigger: '@Andy',
+            added_at: '',
+          },
+          [JID_2]: {
+            name: 'Group 2',
+            folder: 'g2',
+            trigger: '@Andy',
+            added_at: '',
+          },
+        })),
+      });
+
+      // Message in chat 1
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'hi' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg(CHAT_ID, MSG_ID);
+      await flush();
+
+      // Message in chat 2
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'hey' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat({ name: 'Group 2' }));
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg(CHAT_ID_2, MSG_ID_2);
+      await flush();
+
+      // Second message in chat 1
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'again' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg(CHAT_ID, MSG_ID_1B);
+      await flush();
+
+      dc.rpc.sendReaction.mockClear();
+
+      await channel.setTyping(JID, false);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_1B, ['✅']);
+
+      dc.rpc.sendReaction.mockClear();
+
+      await channel.setTyping(JID_2, false);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, ['✅']);
+    });
+  });
+
   describe('non-text message placeholders', () => {
     const cases: [string, Partial<any>, string][] = [
       ['Image', { viewType: 'Image', text: '' }, '[Image]'],

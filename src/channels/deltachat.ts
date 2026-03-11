@@ -22,6 +22,54 @@ function chatIdFromJid(jid: string): number | null {
   return m ? parseInt(m[1], 10) : null;
 }
 
+/** Format a non-text viewType as a readable placeholder with optional caption. */
+function mediaPlaceholder(
+  viewType: string,
+  fileName: string | null,
+  caption: string,
+): string {
+  let label: string;
+  switch (viewType) {
+    case 'Image':
+      label = '[Image]';
+      break;
+    case 'Gif':
+      label = '[GIF]';
+      break;
+    case 'Sticker':
+      label = '[Sticker]';
+      break;
+    case 'Audio':
+      label = '[Audio]';
+      break;
+    case 'Voice':
+      label = '[Voice message]';
+      break;
+    case 'Video':
+      label = '[Video]';
+      break;
+    case 'File':
+      label = fileName ? `[File: ${fileName}]` : '[File]';
+      break;
+    case 'VideochatInvitation':
+      label = '[Video chat invitation]';
+      break;
+    case 'Call':
+      label = '[Call]';
+      break;
+    case 'Webxdc':
+      label = '[Webxdc app]';
+      break;
+    case 'Vcard':
+      label = '[Contact (vCard)]';
+      break;
+    default:
+      label = '[Attachment]';
+      break;
+  }
+  return caption ? `${label}\n${caption}` : label;
+}
+
 export interface DeltaChatChannelOpts {
   chatmailQr: string | undefined;
   addr: string | undefined;
@@ -143,14 +191,22 @@ export class DeltaChatChannel implements Channel {
             return;
           }
 
-          if (!text) return; // skip empty messages
+          // Build content: text or media placeholder
+          let content: string;
+          const viewType = msg.viewType ?? 'Unknown';
+          if (viewType === 'Text' || viewType === 'Unknown') {
+            if (!text) return; // truly empty message
+            content = text;
+          } else {
+            content = mediaPlaceholder(viewType, msg.fileName ?? null, text);
+          }
 
           this.opts.onMessage(jid, {
             id: String(msgId),
             chat_jid: jid,
             sender,
             sender_name: senderName,
-            content: text,
+            content,
             timestamp: new Date(msg.timestamp * 1000).toISOString(),
           });
         } catch (err) {

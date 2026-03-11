@@ -55,9 +55,9 @@ vi.mock('@deltachat/stdio-rpc-server', () => ({
 
     const dc = {
       rpc: {
-        getAllAccounts: vi.fn().mockResolvedValue([
-          { id: 1, kind: 'Configured' },
-        ]),
+        getAllAccounts: vi
+          .fn()
+          .mockResolvedValue([{ id: 1, kind: 'Configured' }]),
         addAccount: vi.fn().mockResolvedValue(2),
         batchSetConfig: vi.fn().mockResolvedValue(undefined),
         setConfigFromQr: vi.fn().mockResolvedValue(undefined),
@@ -109,7 +109,11 @@ function makeOpts(
     onMessage: vi.fn(),
     onChatMetadata: vi.fn(),
     registeredGroups: vi.fn(
-      () => (registered ? { [JID]: registeredGroup } : {}) as Record<string, RegisteredGroup>,
+      () =>
+        (registered ? { [JID]: registeredGroup } : {}) as Record<
+          string,
+          RegisteredGroup
+        >,
     ),
     ...overrides,
   };
@@ -246,6 +250,54 @@ describe('DeltaChatChannel', () => {
 
       expect(opts.onMessage).not.toHaveBeenCalled();
       expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('non-text message placeholders', () => {
+    const cases: [string, Partial<any>, string][] = [
+      ['Image', { viewType: 'Image', text: '' }, '[Image]'],
+      ['Image with caption', { viewType: 'Image', text: 'Nice pic' }, '[Image]\nNice pic'],
+      ['GIF', { viewType: 'Gif', text: '' }, '[GIF]'],
+      ['Sticker', { viewType: 'Sticker', text: '' }, '[Sticker]'],
+      ['Audio', { viewType: 'Audio', text: '' }, '[Audio]'],
+      ['Voice', { viewType: 'Voice', text: '' }, '[Voice message]'],
+      ['Video', { viewType: 'Video', text: '' }, '[Video]'],
+      ['File with name', { viewType: 'File', fileName: 'doc.pdf', text: '' }, '[File: doc.pdf]'],
+      ['File without name', { viewType: 'File', fileName: null, text: '' }, '[File]'],
+      ['VideochatInvitation', { viewType: 'VideochatInvitation', text: '' }, '[Video chat invitation]'],
+      ['Call', { viewType: 'Call', text: '' }, '[Call]'],
+      ['Webxdc', { viewType: 'Webxdc', text: '' }, '[Webxdc app]'],
+      ['Vcard', { viewType: 'Vcard', text: '' }, '[Contact (vCard)]'],
+      ['Unknown attachment', { viewType: 'SomeFutureType', text: '' }, '[Attachment]'],
+    ];
+
+    for (const [label, msgOverrides, expected] of cases) {
+      it(`formats ${label} correctly`, async () => {
+        const { opts, dc } = await buildConnectedChannel({ registered: true });
+        dc.rpc.getMessage.mockResolvedValueOnce(makeMsg(msgOverrides));
+        dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+        dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+        emitIncomingMsg();
+        await flush();
+
+        expect(opts.onMessage).toHaveBeenCalledWith(
+          JID,
+          expect.objectContaining({ content: expected }),
+        );
+      });
+    }
+
+    it('skips truly empty Text messages', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Text', text: '' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
     });
   });
 });

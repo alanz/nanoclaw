@@ -43,15 +43,15 @@ When you learn something important:
 - Split files larger than 500 lines into folders
 - Keep an index in your memory for the files you create
 
-## WhatsApp Formatting (and other messaging apps)
+## Messaging Formatting
 
-Do NOT use markdown headings (##) in WhatsApp messages. Only use:
+Do NOT use markdown headings (##) in messages. Only use:
 - *Bold* (single asterisks) (NEVER **double asterisks**)
 - _Italic_ (underscores)
 - • Bullets (bullet points)
 - ```Code blocks``` (triple backticks)
 
-Keep messages clean and readable for WhatsApp.
+Keep messages clean and readable.
 
 ---
 
@@ -65,13 +65,12 @@ Main has read-only access to the project and read-write access to its group fold
 
 | Container Path | Host Path | Access |
 |----------------|-----------|--------|
-| `/workspace/project` | Project root | read-only |
-| `/workspace/group` | `groups/main/` | read-write |
+| `/workspace/project` | Project root (`~/nanoclaw/`) | read-only |
+| `/workspace/group` | `~/nanoclaw-workspaces/main/` | read-write |
 
 Key paths inside the container:
-- `/workspace/project/store/messages.db` - SQLite database
-- `/workspace/project/store/messages.db` (registered_groups table) - Group config
-- `/workspace/project/groups/` - All group folders
+- `/workspace/ipc/available_groups.json` - available groups
+- SQLite DB is on the host at `~/nanoclaw-state/messages.db` (not mounted into container)
 
 ---
 
@@ -85,162 +84,79 @@ Available groups are provided in `/workspace/ipc/available_groups.json`:
 {
   "groups": [
     {
-      "jid": "120363336345536173@g.us",
-      "name": "Family Chat",
-      "lastActivity": "2026-01-31T12:00:00.000Z",
-      "isRegistered": false
+      "jid": "dc:10",
+      "name": "Main Chat",
+      "lastActivity": "2026-03-10T22:05:44.000Z",
+      "isRegistered": true
     }
   ],
-  "lastSync": "2026-01-31T12:00:00.000Z"
+  "lastSync": "2026-03-10T22:05:44.000Z"
 }
-```
-
-Groups are ordered by most recent activity. The list is synced from WhatsApp daily.
-
-If a group the user mentions isn't in the list, request a fresh sync:
-
-```bash
-echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).json
-```
-
-Then wait a moment and re-read `available_groups.json`.
-
-**Fallback**: Query the SQLite database directly:
-
-```bash
-sqlite3 /workspace/project/store/messages.db "
-  SELECT jid, name, last_message_time
-  FROM chats
-  WHERE jid LIKE '%@g.us' AND jid != '__group_sync__'
-  ORDER BY last_message_time DESC
-  LIMIT 10;
-"
 ```
 
 ### Registered Groups Config
 
-Groups are registered in the SQLite `registered_groups` table:
-
-```json
-{
-  "1234567890-1234567890@g.us": {
-    "name": "Family Chat",
-    "folder": "whatsapp_family-chat",
-    "trigger": "@Andy",
-    "added_at": "2024-01-31T12:00:00.000Z"
-  }
-}
-```
+Groups are registered in the SQLite `registered_groups` table (on host at `~/nanoclaw-state/messages.db`).
 
 Fields:
-- **Key**: The chat JID (unique identifier — WhatsApp, Telegram, Slack, Discord, etc.)
+- **Key**: The chat JID (e.g. `dc:10` for DeltaChat chat ID 10)
 - **name**: Display name for the group
-- **folder**: Channel-prefixed folder name under `groups/` for this group's files and memory
-- **trigger**: The trigger word (usually same as global, but could differ)
-- **requiresTrigger**: Whether `@trigger` prefix is needed (default: `true`). Set to `false` for solo/personal chats where all messages should be processed
+- **folder**: Folder name under `~/nanoclaw-workspaces/` for this group's files and memory
+- **trigger**: The trigger word (usually `@Andy`)
+- **requiresTrigger**: Whether `@trigger` prefix is needed (default: `true`). Set to `false` for solo/personal chats
 - **isMain**: Whether this is the main control group (elevated privileges, no trigger required)
-- **added_at**: ISO timestamp when registered
 
 ### Trigger Behavior
 
 - **Main group** (`isMain: true`): No trigger needed — all messages are processed automatically
-- **Groups with `requiresTrigger: false`**: No trigger needed — all messages processed (use for 1-on-1 or solo chats)
-- **Other groups** (default): Messages must start with `@AssistantName` to be processed
+- **Groups with `requiresTrigger: false`**: No trigger needed — all messages processed
+- **Other groups** (default): Messages must start with `@Andy` to be processed
 
 ### Adding a Group
 
 1. Query the database to find the group's JID
 2. Use the `register_group` MCP tool with the JID, name, folder, and trigger
-3. Optionally include `containerConfig` for additional mounts
-4. The group folder is created automatically: `/workspace/project/groups/{folder-name}/`
-5. Optionally create an initial `CLAUDE.md` for the group
+3. The group folder is created automatically under `~/nanoclaw-workspaces/{folder-name}/`
+4. Optionally create an initial `CLAUDE.md` for the group
 
 Folder naming convention — channel prefix with underscore separator:
-- WhatsApp "Family Chat" → `whatsapp_family-chat`
+- DeltaChat "Family Chat" → `deltachat_family-chat`
 - Telegram "Dev Team" → `telegram_dev-team`
-- Discord "General" → `discord_general`
 - Slack "Engineering" → `slack_engineering`
 - Use lowercase, hyphens for the group name part
 
-#### Adding Additional Directories for a Group
-
-Groups can have extra directories mounted. Add `containerConfig` to their entry:
-
-```json
-{
-  "1234567890@g.us": {
-    "name": "Dev Team",
-    "folder": "dev-team",
-    "trigger": "@Andy",
-    "added_at": "2026-01-31T12:00:00Z",
-    "containerConfig": {
-      "additionalMounts": [
-        {
-          "hostPath": "~/projects/webapp",
-          "containerPath": "webapp",
-          "readonly": false
-        }
-      ]
-    }
-  }
-}
-```
-
-The directory will appear at `/workspace/extra/webapp` in that group's container.
-
-#### Sender Allowlist
-
-After registering a group, explain the sender allowlist feature to the user:
-
-> This group can be configured with a sender allowlist to control who can interact with me. There are two modes:
->
-> - **Trigger mode** (default): Everyone's messages are stored for context, but only allowed senders can trigger me with @{AssistantName}.
-> - **Drop mode**: Messages from non-allowed senders are not stored at all.
->
-> For closed groups with trusted members, I recommend setting up an allow-only list so only specific people can trigger me. Want me to configure that?
-
-If the user wants to set up an allowlist, edit `~/.config/nanoclaw/sender-allowlist.json` on the host:
-
-```json
-{
-  "default": { "allow": "*", "mode": "trigger" },
-  "chats": {
-    "<chat-jid>": {
-      "allow": ["sender-id-1", "sender-id-2"],
-      "mode": "trigger"
-    }
-  },
-  "logDenied": true
-}
-```
-
-Notes:
-- Your own messages (`is_from_me`) explicitly bypass the allowlist in trigger checks. Bot messages are filtered out by the database query before trigger evaluation, so they never reach the allowlist.
-- If the config file doesn't exist or is invalid, all senders are allowed (fail-open)
-- The config file is on the host at `~/.config/nanoclaw/sender-allowlist.json`, not inside the container
-
 ### Removing a Group
 
-1. Read `/workspace/project/data/registered_groups.json`
-2. Remove the entry for that group
-3. Write the updated JSON back
-4. The group folder and its files remain (don't delete them)
-
-### Listing Groups
-
-Read `/workspace/project/data/registered_groups.json` and format it nicely.
+1. Use the `unregister_group` MCP tool or remove the entry from the `registered_groups` table
+2. The group folder and its files remain (don't delete them)
 
 ---
 
 ## Global Memory
 
-You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
+You can read and write to `/workspace/global/CLAUDE.md` (host: `~/nanoclaw-workspaces/global/CLAUDE.md`) for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
 
 ---
 
 ## Scheduling for Other Groups
 
-When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID from `registered_groups.json`:
-- `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "120363336345536173@g.us")`
+When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID:
+- `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "dc:10")`
 
-The task will run in that group's context with access to their files and memory.
+---
+
+## Setup Notes
+
+- Container runtime: Colima (headless Docker, runs as brew service)
+- Channel: DeltaChat — bot address `z19wef0zr@nine.testrun.org`
+- Workspaces: `~/nanoclaw-workspaces/` (under version control)
+- State/DBs: `~/nanoclaw-state/` (for Borg backup)
+- NanoClaw source: `~/nanoclaw/`
+
+## TODO
+
+- [ ] Configure additional directory mounts — see example config in the repo (mount-allowlist)
+
+- [ ] Add a web console (read-only log viewer to start, full dashboard longer term — registered groups, message history, service status; SQLite DBs have everything needed)
+- [ ] Set up Borg backup of `~/nanoclaw-state/` (messages.db, nanoclaw.db, deltachat/) to BorgBase offsite
+- [ ] Add a way to reset the agent session (e.g. IPC command or message trigger like "reset session") — currently requires manual DB edit: `DELETE FROM router_state WHERE key LIKE 'session%'`. Should write a summary to CLAUDE.md before clearing so nothing important is lost.

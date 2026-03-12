@@ -611,7 +611,11 @@ describe('DeltaChatChannel', () => {
     it('copies image file to IPC attachments dir and includes container path in content', async () => {
       const { opts, dc } = await buildConnectedChannel({ registered: true });
       dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ viewType: 'Image', text: '', file: '/dc/data/blobs/photo.jpg' }),
+        makeMsg({
+          viewType: 'Image',
+          text: '',
+          file: '/dc/data/blobs/photo.jpg',
+        }),
       );
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
@@ -648,7 +652,8 @@ describe('DeltaChatChannel', () => {
       );
       // Attachment file should NOT have been copied (only the avatar copy from connect() is allowed)
       const attachmentCopyCalls = (fs.copyFileSync as any).mock.calls.filter(
-        ([src]: [string]) => src === null || src === undefined || src.includes('dc/data/blobs'),
+        ([src]: [string]) =>
+          src === null || src === undefined || src.includes('dc/data/blobs'),
       );
       expect(attachmentCopyCalls).toHaveLength(0);
     });
@@ -656,7 +661,11 @@ describe('DeltaChatChannel', () => {
     it('includes caption after the image container path', async () => {
       const { opts, dc } = await buildConnectedChannel({ registered: true });
       dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ viewType: 'Image', text: 'Look!', file: '/dc/data/blobs/photo.jpg' }),
+        makeMsg({
+          viewType: 'Image',
+          text: 'Look!',
+          file: '/dc/data/blobs/photo.jpg',
+        }),
       );
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
@@ -671,14 +680,14 @@ describe('DeltaChatChannel', () => {
     });
 
     const fileTypes: [string, string, string, string][] = [
-      ['Image',  'photo.jpg',  '[Image',       'Image'],
-      ['Gif',    'anim.gif',   '[GIF',         'GIF'],
-      ['Video',  'clip.mp4',   '[Video',       'Video'],
-      ['Sticker','sticker.webp','[Sticker',    'Sticker'],
-      ['Audio',  'track.ogg',  '[Audio',       'Audio'],
-      ['Voice',  'voice.ogg',  '[Voice message','Voice'],
-      ['Vcard',  'contact.vcf','[Contact (vCard)','Vcard'],
-      ['Webxdc', 'app.xdc',    '[Webxdc app',  'Webxdc'],
+      ['Image', 'photo.jpg', '[Image', 'Image'],
+      ['Gif', 'anim.gif', '[GIF', 'GIF'],
+      ['Video', 'clip.mp4', '[Video', 'Video'],
+      ['Sticker', 'sticker.webp', '[Sticker', 'Sticker'],
+      ['Audio', 'track.ogg', '[Audio', 'Audio'],
+      ['Voice', 'voice.ogg', '[Voice message', 'Voice'],
+      ['Vcard', 'contact.vcf', '[Contact (vCard)', 'Vcard'],
+      ['Webxdc', 'app.xdc', '[Webxdc app', 'Webxdc'],
     ];
 
     for (const [viewType, filename, labelPrefix, label] of fileTypes) {
@@ -693,7 +702,8 @@ describe('DeltaChatChannel', () => {
         emitIncomingMsg();
         await flush();
 
-        const content: string = (opts.onMessage as any).mock.calls[0][1].content;
+        const content: string = (opts.onMessage as any).mock.calls[0][1]
+          .content;
         expect(content).toContain('/workspace/ipc/attachments/');
         expect(content).toContain(labelPrefix);
       });
@@ -702,7 +712,12 @@ describe('DeltaChatChannel', () => {
     it('copies file attachments and uses container path as label', async () => {
       const { opts, dc } = await buildConnectedChannel({ registered: true });
       dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ viewType: 'File', fileName: 'doc.pdf', text: '', file: '/dc/data/blobs/doc.pdf' }),
+        makeMsg({
+          viewType: 'File',
+          fileName: 'doc.pdf',
+          text: '',
+          file: '/dc/data/blobs/doc.pdf',
+        }),
       );
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
@@ -711,13 +726,20 @@ describe('DeltaChatChannel', () => {
       await flush();
 
       const content: string = (opts.onMessage as any).mock.calls[0][1].content;
-      expect(content).toMatch(/^\[File: \/workspace\/ipc\/attachments\/\d+-doc\.pdf\]$/);
+      expect(content).toMatch(
+        /^\[File: \/workspace\/ipc\/attachments\/\d+-doc\.pdf\]$/,
+      );
     });
 
     it('falls back to fileName for File type when file is null', async () => {
       const { opts, dc } = await buildConnectedChannel({ registered: true });
       dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ viewType: 'File', fileName: 'report.xlsx', text: '', file: null }),
+        makeMsg({
+          viewType: 'File',
+          fileName: 'report.xlsx',
+          text: '',
+          file: null,
+        }),
       );
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());

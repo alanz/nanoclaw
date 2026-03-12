@@ -63,6 +63,53 @@ server.tool(
 );
 
 server.tool(
+  'send_file',
+  `Send a file or image to the user. The file must exist at a path under /workspace/ipc/ (e.g. /workspace/ipc/outgoing/result.jpg). For images you generate or download, write them there first, then call this tool.`,
+  {
+    file_path: z
+      .string()
+      .describe(
+        'Absolute path to the file. Must be under /workspace/ipc/ (the only directory visible to both the container and the host).',
+      ),
+    caption: z.string().optional().describe('Optional caption text'),
+  },
+  async (args) => {
+    const IPC_PREFIX = '/workspace/ipc/';
+    if (!args.file_path.startsWith(IPC_PREFIX)) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `file_path must be under ${IPC_PREFIX}. Got: ${args.file_path}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    const relativePath = args.file_path.slice(IPC_PREFIX.length);
+    // Reject path traversal
+    if (relativePath.includes('..')) {
+      return {
+        content: [
+          { type: 'text' as const, text: 'file_path must not contain ..' },
+        ],
+        isError: true,
+      };
+    }
+    const data: Record<string, string | undefined> = {
+      type: 'file',
+      chatJid,
+      groupFolder,
+      ipcRelativePath: relativePath,
+      caption: args.caption,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(MESSAGES_DIR, data);
+    return { content: [{ type: 'text' as const, text: 'File queued for sending.' }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

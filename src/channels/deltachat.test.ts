@@ -14,6 +14,7 @@ vi.mock('fs', () => ({
     mkdirSync: vi.fn(),
     existsSync: vi.fn(() => true),
     writeFileSync: vi.fn(),
+    copyFileSync: vi.fn(),
   },
 }));
 vi.mock('../logger.js', () => ({
@@ -82,6 +83,7 @@ vi.mock('@deltachat/stdio-rpc-server', () => ({
 import { DeltaChatChannel } from './deltachat.js';
 import type { DeltaChatChannelOpts } from './deltachat.js';
 import type { RegisteredGroup } from '../types.js';
+import fs from 'fs';
 
 // --- Helpers ---
 
@@ -125,6 +127,7 @@ function makeMsg(overrides?: Partial<any>) {
     text: 'Hello',
     viewType: 'Text',
     fileName: null,
+    file: null,
     isInfo: false,
     fromId: 5,
     timestamp: Math.floor(Date.now() / 1000),
@@ -601,6 +604,171 @@ describe('DeltaChatChannel', () => {
       await flush();
 
       expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('attachment file handling', () => {
+    it('copies image file to IPC attachments dir and includes container path in content', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ viewType: 'Image', text: '', file: '/dc/data/blobs/photo.jpg' }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(fs.copyFileSync).toHaveBeenCalledWith(
+        '/dc/data/blobs/photo.jpg',
+        expect.stringContaining(`${MSG_ID}-photo.jpg`),
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          content: expect.stringContaining('/workspace/ipc/attachments/'),
+        }),
+      );
+    });
+
+    it('uses [Image] placeholder when file is null', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ viewType: 'Image', text: '', file: null }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ content: '[Image]' }),
+      );
+      // Attachment file should NOT have been copied (only the avatar copy from connect() is allowed)
+      const attachmentCopyCalls = (fs.copyFileSync as any).mock.calls.filter(
+        ([src]: [string]) => src === null || src === undefined || src.includes('dc/data/blobs'),
+      );
+      expect(attachmentCopyCalls).toHaveLength(0);
+    });
+
+    it('includes caption after the image container path', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ viewType: 'Image', text: 'Look!', file: '/dc/data/blobs/photo.jpg' }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      const content: string = (opts.onMessage as any).mock.calls[0][1].content;
+      expect(content).toMatch(
+        /^\[Image: \/workspace\/ipc\/attachments\/\d+-photo\.jpg\]\nLook!$/,
+      );
+    });
+
+    const fileTypes: [string, string, string, string][] = [
+      ['Image',  'photo.jpg',  '[Image',       'Image'],
+      ['Gif',    'anim.gif',   '[GIF',         'GIF'],
+      ['Video',  'clip.mp4',   '[Video',       'Video'],
+      ['Sticker','sticker.webp','[Sticker',    'Sticker'],
+      ['Audio',  'track.ogg',  '[Audio',       'Audio'],
+      ['Voice',  'voice.ogg',  '[Voice message','Voice'],
+      ['Vcard',  'contact.vcf','[Contact (vCard)','Vcard'],
+      ['Webxdc', 'app.xdc',    '[Webxdc app',  'Webxdc'],
+    ];
+
+    for (const [viewType, filename, labelPrefix, label] of fileTypes) {
+      it(`includes container path for ${label} when file is present`, async () => {
+        const { opts, dc } = await buildConnectedChannel({ registered: true });
+        dc.rpc.getMessage.mockResolvedValueOnce(
+          makeMsg({ viewType, text: '', file: `/dc/data/blobs/${filename}` }),
+        );
+        dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+        dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+        emitIncomingMsg();
+        await flush();
+
+        const content: string = (opts.onMessage as any).mock.calls[0][1].content;
+        expect(content).toContain('/workspace/ipc/attachments/');
+        expect(content).toContain(labelPrefix);
+      });
+    }
+
+    it('copies file attachments and uses container path as label', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ viewType: 'File', fileName: 'doc.pdf', text: '', file: '/dc/data/blobs/doc.pdf' }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      const content: string = (opts.onMessage as any).mock.calls[0][1].content;
+      expect(content).toMatch(/^\[File: \/workspace\/ipc\/attachments\/\d+-doc\.pdf\]$/);
+    });
+
+    it('falls back to fileName for File type when file is null', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ viewType: 'File', fileName: 'report.xlsx', text: '', file: null }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ content: '[File: report.xlsx]' }),
+      );
+    });
+  });
+
+  describe('sendFile', () => {
+    it('sends a file with caption via DC RPC', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendFile(JID, '/host/path/result.jpg', 'Here you go');
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({
+          file: '/host/path/result.jpg',
+          text: 'Here you go',
+        }),
+      );
+    });
+
+    it('sends a file without caption (text is null)', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendFile(JID, '/host/path/image.png');
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({
+          file: '/host/path/image.png',
+          text: null,
+        }),
+      );
+    });
+
+    it('does nothing when not connected', async () => {
+      const channel = new DeltaChatChannel(makeOpts());
+      // Not connected — dc is null
+      await channel.sendFile(JID, '/some/file.jpg');
+      // No error thrown, dc.rpc.sendMsg not called (dc is null)
+      expect(dcRef.current?.rpc.sendMsg).not.toHaveBeenCalled();
     });
   });
 });

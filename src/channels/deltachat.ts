@@ -11,6 +11,7 @@ import type {
 } from '../types.js';
 import { readEnvFile } from '../env.js';
 import { HOME_DIR, ASSISTANT_NAME, DATA_DIR } from '../config.js';
+import { resolveGroupIpcPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 
 const AVATAR_SOURCE = path.resolve(
@@ -41,46 +42,59 @@ function chatIdFromJid(jid: string): number | null {
   return m ? parseInt(m[1], 10) : null;
 }
 
-/** Format a non-text viewType as a readable placeholder with optional caption. */
+/**
+ * Format a non-text viewType as a readable placeholder with optional caption.
+ * When containerPath is provided (the file was copied to the IPC attachments
+ * directory), it is embedded in the label so the agent can read the file.
+ */
 function mediaPlaceholder(
   viewType: string,
   fileName: string | null,
   caption: string,
+  containerPath?: string | null,
 ): string {
   let label: string;
   switch (viewType) {
     case 'Image':
-      label = '[Image]';
+      label = containerPath ? `[Image: ${containerPath}]` : '[Image]';
       break;
     case 'Gif':
-      label = '[GIF]';
-      break;
-    case 'Sticker':
-      label = '[Sticker]';
-      break;
-    case 'Audio':
-      label = '[Audio]';
-      break;
-    case 'Voice':
-      label = '[Voice message]';
+      label = containerPath ? `[GIF: ${containerPath}]` : '[GIF]';
       break;
     case 'Video':
-      label = '[Video]';
+      label = containerPath ? `[Video: ${containerPath}]` : '[Video]';
       break;
     case 'File':
-      label = fileName ? `[File: ${fileName}]` : '[File]';
+      label = containerPath
+        ? `[File: ${containerPath}]`
+        : fileName
+          ? `[File: ${fileName}]`
+          : '[File]';
+      break;
+    case 'Sticker':
+      label = containerPath ? `[Sticker: ${containerPath}]` : '[Sticker]';
+      break;
+    case 'Audio':
+      label = containerPath ? `[Audio: ${containerPath}]` : '[Audio]';
+      break;
+    case 'Voice':
+      label = containerPath
+        ? `[Voice message: ${containerPath}]`
+        : '[Voice message]';
+      break;
+    case 'Vcard':
+      label = containerPath
+        ? `[Contact (vCard): ${containerPath}]`
+        : '[Contact (vCard)]';
+      break;
+    case 'Webxdc':
+      label = containerPath ? `[Webxdc app: ${containerPath}]` : '[Webxdc app]';
       break;
     case 'VideochatInvitation':
       label = '[Video chat invitation]';
       break;
     case 'Call':
       label = '[Call]';
-      break;
-    case 'Webxdc':
-      label = '[Webxdc app]';
-      break;
-    case 'Vcard':
-      label = '[Contact (vCard)]';
       break;
     default:
       label = '[Attachment]';
@@ -265,7 +279,34 @@ export class DeltaChatChannel implements Channel {
             if (!text) return; // truly empty message
             content = text;
           } else {
-            content = mediaPlaceholder(viewType, msg.fileName ?? null, text);
+            // If the message has an attachment file on disk, copy it into
+            // the group's IPC attachments directory so the container agent
+            // can read it (the directory is mounted at /workspace/ipc/).
+            let containerPath: string | null = null;
+            if (msg.file) {
+              try {
+                const groupFolder = groups[jid].folder;
+                const attachmentsDir = path.join(
+                  resolveGroupIpcPath(groupFolder),
+                  'attachments',
+                );
+                fs.mkdirSync(attachmentsDir, { recursive: true });
+                const destName = `${msgId}-${path.basename(msg.file)}`;
+                fs.copyFileSync(msg.file, path.join(attachmentsDir, destName));
+                containerPath = `/workspace/ipc/attachments/${destName}`;
+              } catch (err) {
+                logger.warn(
+                  { err, msgId },
+                  'DeltaChat: failed to copy attachment to IPC dir',
+                );
+              }
+            }
+            content = mediaPlaceholder(
+              viewType,
+              msg.fileName ?? null,
+              text,
+              containerPath,
+            );
           }
 
           this.opts.onMessage(jid, {
@@ -297,6 +338,26 @@ export class DeltaChatChannel implements Channel {
       html: null,
       viewtype: null,
       file: null,
+      filename: null,
+      location: null,
+      overrideSenderName: null,
+      quotedMessageId: null,
+      quotedText: null,
+    });
+  }
+
+  async sendFile(
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ): Promise<void> {
+    const chatId = chatIdFromJid(jid);
+    if (chatId === null || !this.dc || this.accountId === null) return;
+    await this.dc.rpc.sendMsg(this.accountId, chatId, {
+      text: caption ?? null,
+      html: null,
+      viewtype: null,
+      file: filePath,
       filename: null,
       location: null,
       overrideSenderName: null,

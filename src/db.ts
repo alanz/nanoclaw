@@ -131,7 +131,7 @@ function createSchema(database: Database.Database): void {
       `UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net'`,
     );
     database.exec(
-      `UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`,
+      `UPDATE chats SET channel = 'deltachat', is_group = 1 WHERE jid LIKE 'dc:%'`,
     );
     database.exec(
       `UPDATE chats SET channel = 'telegram', is_group = 1 WHERE jid LIKE 'tg:%'`,
@@ -498,6 +498,12 @@ export function logTaskRun(log: TaskRunLog): void {
 
 // --- Router state accessors ---
 
+export function getAllRouterStateRows(): Array<{ key: string; value: string }> {
+  return db
+    .prepare('SELECT key, value FROM router_state ORDER BY key')
+    .all() as Array<{ key: string; value: string }>;
+}
+
 export function getRouterState(key: string): string | undefined {
   const row = db
     .prepare('SELECT value FROM router_state WHERE key = ?')
@@ -632,6 +638,42 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+export function getChatMessages(
+  chatJid: string,
+  limit: number = 200,
+): Array<{
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: number;
+  is_bot_message: number;
+}> {
+  return db
+    .prepare(
+      `SELECT * FROM (
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message
+        FROM messages WHERE chat_jid = ?
+        ORDER BY timestamp DESC LIMIT ?
+      ) ORDER BY timestamp`,
+    )
+    .all(chatJid, limit) as ReturnType<typeof getChatMessages>;
+}
+
+export function getTaskRunLogs(
+  taskId: string,
+  limit: number = 50,
+): Array<TaskRunLog & { id: number }> {
+  return db
+    .prepare(
+      `SELECT id, task_id, run_at, duration_ms, status, result, error
+       FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC LIMIT ?`,
+    )
+    .all(taskId, limit) as Array<TaskRunLog & { id: number }>;
 }
 
 // --- JSON migration ---

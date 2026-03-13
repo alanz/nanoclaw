@@ -453,6 +453,45 @@ async function startMessageLoop(): Promise<void> {
 
           const isMainGroup = group.isMain === true;
 
+          // --- /esc interrupt interception (message loop) ---
+          // /esc <context> interrupts the running agent and injects new context.
+          const escMsg = groupMessages.find((m) => {
+            const stripped = m.content
+              .trim()
+              .replace(TRIGGER_PATTERN, '')
+              .trim();
+            return stripped === '/esc' || stripped.startsWith('/esc ');
+          });
+          if (escMsg) {
+            if (
+              isSessionCommandAllowed(isMainGroup, escMsg.is_from_me === true)
+            ) {
+              const stripped = escMsg.content
+                .trim()
+                .replace(TRIGGER_PATTERN, '')
+                .trim();
+              const extra = stripped.slice('/esc'.length).trim();
+              const ipcText = extra
+                ? `[User interrupted — adjust your plan accordingly]\n${extra}`
+                : '[User interrupted — stop what you are doing and check in]';
+              if (queue.sendInterrupt(chatJid, ipcText)) {
+                logger.info(
+                  { chatJid, extra },
+                  '/esc interrupt sent to active container',
+                );
+                lastAgentTimestamp[chatJid] = escMsg.timestamp;
+                saveState();
+              } else {
+                logger.debug(
+                  { chatJid },
+                  '/esc: no active container, ignoring',
+                );
+              }
+            }
+            continue;
+          }
+          // --- End /esc interrupt interception ---
+
           // --- Session command interception (message loop) ---
           // Scan ALL messages in the batch for a session command.
           const loopCmdMsg = groupMessages.find(

@@ -269,11 +269,16 @@ function shouldClose(): boolean {
   return false;
 }
 
+interface IpcDrainResult {
+  messages: string[];
+  interrupt: string | null;
+}
+
 /**
  * Drain all pending IPC input messages.
- * Returns messages found, or empty array.
+ * Returns regular messages and any interrupt signal found.
  */
-function drainIpcInput(): string[] {
+function drainIpcInput(): IpcDrainResult {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
@@ -281,12 +286,15 @@ function drainIpcInput(): string[] {
       .sort();
 
     const messages: string[] = [];
+    let interrupt: string | null = null;
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
-        if (data.type === 'message' && data.text) {
+        if (data.type === 'interrupt' && data.text) {
+          interrupt = data.text;
+        } else if (data.type === 'message' && data.text) {
           messages.push(data.text);
         }
       } catch (err) {
@@ -294,16 +302,17 @@ function drainIpcInput(): string[] {
         try { fs.unlinkSync(filePath); } catch { /* ignore */ }
       }
     }
-    return messages;
+    return { messages, interrupt };
   } catch (err) {
     log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
-    return [];
+    return { messages: [], interrupt: null };
   }
 }
 
 /**
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages as a single string, or null if _close.
+ * An interrupt received between queries is treated as a regular message.
  */
 function waitForIpcMessage(): Promise<string | null> {
   return new Promise((resolve) => {
@@ -312,9 +321,11 @@ function waitForIpcMessage(): Promise<string | null> {
         resolve(null);
         return;
       }
-      const messages = drainIpcInput();
-      if (messages.length > 0) {
-        resolve(messages.join('\n'));
+      const { messages, interrupt } = drainIpcInput();
+      // Interrupt between queries: no active query to interrupt, treat as regular message
+      const all = interrupt ? [interrupt, ...messages] : messages;
+      if (all.length > 0) {
+        resolve(all.join('\n'));
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -336,13 +347,14 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; interruptText?: string }> {
   const stream = new MessageStream();
   stream.push(prompt);
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
   let closedDuringQuery = false;
+  let interruptText: string | undefined;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
@@ -352,7 +364,15 @@ async function runQuery(
       ipcPolling = false;
       return;
     }
-    const messages = drainIpcInput();
+    const { messages, interrupt } = drainIpcInput();
+    if (interrupt) {
+      log(`Interrupt received during query (${interrupt.length} chars), ending stream`);
+      interruptText = interrupt;
+      for (const text of messages) stream.push(text);
+      stream.end();
+      ipcPolling = false;
+      return;
+    }
     for (const text of messages) {
       log(`Piping IPC message into active query (${text.length} chars)`);
       stream.push(text);
@@ -460,8 +480,8 @@ async function runQuery(
   }
 
   ipcPolling = false;
-  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interrupted: ${!!interruptText}`);
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptText };
 }
 
 async function main(): Promise<void> {
@@ -500,9 +520,9 @@ async function main(): Promise<void> {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
   const pending = drainIpcInput();
-  if (pending.length > 0) {
-    log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+  if (pending.messages.length > 0) {
+    log(`Draining ${pending.messages.length} pending IPC messages into initial prompt`);
+    prompt += '\n' + pending.messages.join('\n');
   }
 
   // --- Slash command handling ---
@@ -625,6 +645,14 @@ async function main(): Promise<void> {
       if (queryResult.closedDuringQuery) {
         log('Close sentinel consumed during query, exiting');
         break;
+      }
+
+      // If interrupted (/esc), skip the idle wait and use the interrupt text as next prompt.
+      if (queryResult.interruptText) {
+        log(`Interrupted, using interrupt text as next prompt (${queryResult.interruptText.length} chars)`);
+        writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+        prompt = queryResult.interruptText;
+        continue;
       }
 
       // Emit session update so host can track it

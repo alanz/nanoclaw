@@ -237,7 +237,7 @@ export class DeltaChatChannel implements Channel {
           if (text.trim() === '/help') {
             await this.sendMessage(
               jid,
-              "Available commands:\n/ping — check if Andy is online\n/chatid — show this chat's ID and registration status\n/help — show this message",
+              "Available commands:\n/ping — check if Andy is online\n/chatid — show this chat's ID and registration status\n/esc [context] — interrupt the running agent and inject new context\n/compact — compact the conversation to free up context\n/help — show this message",
             );
             return;
           }

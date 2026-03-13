@@ -165,8 +165,17 @@ function emitIncomingMsg(chatId = CHAT_ID, msgId = MSG_ID) {
   emitterRef.current.emit('IncomingMsg', { chatId, msgId });
 }
 
-// Give event handlers a chance to run
-const flush = () => new Promise((r) => setTimeout(r, 10));
+// Give event handlers a chance to run, then advance past the debounce window.
+// Reactions and commands fire before debounce so they are unaffected; tests
+// that check onMessage need the full window to pass.
+const flush = async () => {
+  await new Promise<void>((r) => setTimeout(r, 10));
+  vi.advanceTimersByTime(1500);
+};
+
+// Advance time just enough for async handlers without firing the debounce.
+// Use this when you need to interleave multiple IncomingMsg events.
+const settle = () => new Promise<void>((r) => setTimeout(r, 10));
 
 // --- Tests ---
 
@@ -906,6 +915,272 @@ describe('DeltaChatChannel', () => {
         JID,
         expect.objectContaining({ id: 'reaction-200-7' }),
       );
+    });
+  });
+
+  describe('setup message filtering', () => {
+    it('skips autocrypt setup messages', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ isSetupmessage: true }),
+      );
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('debouncing', () => {
+    it('does not deliver a message before the debounce window expires', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'hello' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await settle(); // let async handler run — debounce NOT yet fired
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('delivers a single message after the debounce window', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'hello' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush(); // settle + advance past debounce
+
+      expect(opts.onMessage).toHaveBeenCalledOnce();
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ content: 'hello' }),
+      );
+    });
+
+    it('combines rapid messages from the same JID into one delivery', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'first' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'second' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg(CHAT_ID, 101);
+      await settle();
+      emitIncomingMsg(CHAT_ID, 102);
+      await settle();
+
+      expect(opts.onMessage).not.toHaveBeenCalled(); // still in debounce window
+
+      vi.advanceTimersByTime(1500);
+
+      expect(opts.onMessage).toHaveBeenCalledOnce();
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ content: 'first\nsecond', id: '102' }),
+      );
+    });
+
+    it('uses the last msgId as the delivery id', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'a' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'b' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg(CHAT_ID, 201);
+      await settle();
+      emitIncomingMsg(CHAT_ID, 202);
+      await settle();
+      vi.advanceTimersByTime(1500);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ id: '202' }),
+      );
+    });
+
+    it('keeps debounce timers per JID independent', async () => {
+      const CHAT_ID_2 = 99;
+      const JID_2 = `dc:${CHAT_ID_2}`;
+      const { opts, dc } = await buildConnectedChannel({
+        registeredGroups: vi.fn(() => ({
+          [JID]: { name: 'G1', folder: 'g1', trigger: '@Andy', added_at: '' },
+          [JID_2]: {
+            name: 'G2',
+            folder: 'g2',
+            trigger: '@Andy',
+            added_at: '',
+          },
+        })),
+      });
+
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'jid1' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'jid2' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg(CHAT_ID, 301);
+      emitIncomingMsg(CHAT_ID_2, 302);
+      await settle();
+      vi.advanceTimersByTime(1500);
+
+      expect(opts.onMessage).toHaveBeenCalledTimes(2);
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ content: 'jid1' }),
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID_2,
+        expect.objectContaining({ content: 'jid2' }),
+      );
+    });
+  });
+
+  describe('MsgsChanged (message edits)', () => {
+    function emitMsgsChanged(chatId = CHAT_ID, msgId = MSG_ID) {
+      emitterRef.current.emit('MsgsChanged', { chatId, msgId });
+    }
+
+    it('routes edited message to agent with [Message edited] prefix', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      // First deliver original message so it's in processedMsgIds
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'original' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      (opts.onMessage as ReturnType<typeof vi.fn>).mockClear();
+
+      // Now the user edits it
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'edited' }));
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitMsgsChanged();
+      await settle();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          id: `edit-${MSG_ID}`,
+          content: '[Message edited]\nedited',
+        }),
+      );
+    });
+
+    it('ignores MsgsChanged for messages not previously delivered', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'something' }));
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitMsgsChanged(CHAT_ID, 999); // never processed
+      await settle();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('ignores MsgsChanged with msgId = 0', async () => {
+      const { opts } = await buildConnectedChannel({ registered: true });
+
+      emitMsgsChanged(CHAT_ID, 0);
+      await settle();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('ignores edits from the bot itself', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'original' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      (opts.onMessage as ReturnType<typeof vi.fn>).mockClear();
+
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ fromId: 1, text: 'bot edit' }),
+      );
+      emitMsgsChanged();
+      await settle();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('ignores edits in unregistered chats', async () => {
+      // Register first, process a message, then unregister
+      let registered = true;
+      const { opts, dc } = await buildConnectedChannel({
+        registeredGroups: vi.fn(
+          () =>
+            (registered
+              ? {
+                  [JID]: {
+                    name: 'G',
+                    folder: 'g',
+                    trigger: '@Andy',
+                    added_at: '',
+                  },
+                }
+              : {}) as Record<string, any>,
+        ),
+      });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'hi' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      (opts.onMessage as ReturnType<typeof vi.fn>).mockClear();
+
+      registered = false; // unregister before the edit arrives
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'edited' }));
+      emitMsgsChanged();
+      await settle();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('connectivity events', () => {
+    it('logs ConnectivityChanged', async () => {
+      const { logger } = await import('../logger.js');
+      await buildConnectedChannel();
+      emitterRef.current.emit('ConnectivityChanged');
+      expect(logger.info).toHaveBeenCalledWith(
+        'DeltaChat: connectivity changed',
+      );
+    });
+
+    it('logs ImapConnected', async () => {
+      const { logger } = await import('../logger.js');
+      await buildConnectedChannel();
+      emitterRef.current.emit('ImapConnected');
+      expect(logger.info).toHaveBeenCalledWith('DeltaChat: IMAP connected');
+    });
+
+    it('logs ImapInboxIdle', async () => {
+      const { logger } = await import('../logger.js');
+      await buildConnectedChannel();
+      emitterRef.current.emit('ImapInboxIdle');
+      expect(logger.info).toHaveBeenCalledWith(
+        'DeltaChat: IMAP inbox idle (ready for instant delivery)',
+      );
+    });
+
+    it('logs SmtpConnected', async () => {
+      const { logger } = await import('../logger.js');
+      await buildConnectedChannel();
+      emitterRef.current.emit('SmtpConnected');
+      expect(logger.info).toHaveBeenCalledWith('DeltaChat: SMTP connected');
     });
   });
 

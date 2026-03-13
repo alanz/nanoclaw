@@ -103,6 +103,20 @@ function mediaPlaceholder(
   return caption ? `${label}\n${caption}` : label;
 }
 
+/** How long to wait for additional messages from the same sender before routing to the agent. */
+const DEBOUNCE_MS = 1500;
+
+/** How long to remember a delivered message ID for edit tracking. */
+const EDIT_TRACK_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+type DebounceEntry = {
+  msgIds: number[];
+  parts: string[];
+  sender: string;
+  senderName: string;
+  firstTimestamp: string;
+};
+
 export interface DeltaChatChannelOpts {
   chatmailQr: string | undefined;
   addr: string | undefined;
@@ -120,8 +134,102 @@ export class DeltaChatChannel implements Channel {
   private _connected = false;
   /** Track the last incoming message ID per JID for reactions. */
   private lastMsgId = new Map<string, number>();
+  /** Debounce state: accumulate rapid messages per JID before routing. */
+  private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private debounceEntries = new Map<string, DebounceEntry>();
+  /** Message IDs delivered to the agent, kept for edit tracking. */
+  private processedMsgIds = new Set<number>();
 
   constructor(private readonly opts: DeltaChatChannelOpts) {}
+
+  /**
+   * Build the content string for a message, including quote prefix and
+   * media placeholder. Returns null if the message has no deliverable content.
+   */
+  private buildContent(
+    msg: any,
+    msgId: number,
+    groups: Record<string, RegisteredGroup>,
+    jid: string,
+  ): string | null {
+    const text = msg.text ?? '';
+
+    // Prepend quoted reply context if present
+    let quotePrefix = '';
+    if (msg.quote) {
+      const q = msg.quote as
+        | {
+            kind: 'WithMessage';
+            text: string;
+            authorDisplayName?: string;
+            messageId?: number;
+          }
+        | { kind: 'JustText'; text: string };
+      if (q.kind === 'WithMessage' && q.text) {
+        const author = q.authorDisplayName ? ` (${q.authorDisplayName})` : '';
+        quotePrefix = `[Replying to${author}: "${q.text}"]\n`;
+      } else if (q.kind === 'JustText' && q.text) {
+        quotePrefix = `[Quoting: "${q.text}"]\n`;
+      }
+    }
+
+    const viewType = msg.viewType ?? 'Unknown';
+    if (viewType === 'Text' || viewType === 'Unknown') {
+      if (!text && !quotePrefix) return null; // truly empty message
+      return quotePrefix + text;
+    }
+
+    // Non-text: copy attachment to IPC dir if present
+    let containerPath: string | null = null;
+    if (msg.file) {
+      try {
+        const groupFolder = groups[jid].folder;
+        const attachmentsDir = path.join(
+          resolveGroupIpcPath(groupFolder),
+          'attachments',
+        );
+        fs.mkdirSync(attachmentsDir, { recursive: true });
+        const destName = `${msgId}-${path.basename(msg.file)}`;
+        fs.copyFileSync(msg.file, path.join(attachmentsDir, destName));
+        containerPath = `/workspace/ipc/attachments/${destName}`;
+      } catch (err) {
+        logger.warn(
+          { err, msgId },
+          'DeltaChat: failed to copy attachment to IPC dir',
+        );
+      }
+    }
+    return (
+      quotePrefix +
+      mediaPlaceholder(viewType, msg.fileName ?? null, text, containerPath)
+    );
+  }
+
+  /** Flush a debounce entry: combine parts and deliver to the agent. */
+  private flushDebounce(jid: string): void {
+    const entry = this.debounceEntries.get(jid);
+    if (!entry) return;
+    this.debounceEntries.delete(jid);
+    this.debounceTimers.delete(jid);
+
+    const content = entry.parts.join('\n');
+    const lastMsgId = entry.msgIds[entry.msgIds.length - 1];
+
+    // Track all delivered msgIds for edit detection
+    for (const id of entry.msgIds) {
+      this.processedMsgIds.add(id);
+      setTimeout(() => this.processedMsgIds.delete(id), EDIT_TRACK_TTL_MS);
+    }
+
+    this.opts.onMessage(jid, {
+      id: String(lastMsgId),
+      chat_jid: jid,
+      sender: entry.sender,
+      sender_name: entry.senderName,
+      content,
+      timestamp: entry.firstTimestamp,
+    });
+  }
 
   async connect(): Promise<void> {
     const { chatmailQr, addr, mailPw, dataDir } = this.opts;
@@ -204,7 +312,8 @@ export class DeltaChatChannel implements Channel {
 
           // Skip info/system messages
           if (msg.isInfo) return;
-
+          // Skip autocrypt setup messages
+          if (msg.isSetupmessage) return;
           // Skip messages sent by this account (DC fires IncomingMsg for the bot's
           // own group messages, which would overwrite lastMsgId and break ✅ reactions)
           if (msg.fromId === 1) return; // DC_CONTACT_ID_SELF = 1
@@ -216,7 +325,6 @@ export class DeltaChatChannel implements Channel {
           const jid = jidForChat(chatId);
           const sender = contact.address ?? String(msg.fromId);
           const senderName = contact.displayName ?? sender;
-          const text = msg.text ?? '';
 
           // Always emit chat metadata (enables group discovery for unregistered chats)
           this.opts.onChatMetadata(
@@ -226,6 +334,8 @@ export class DeltaChatChannel implements Channel {
             'deltachat',
             isGroup,
           );
+
+          const text = msg.text ?? '';
 
           // /ping works in any chat (registered or not)
           if (text.trim() === '/ping') {
@@ -261,7 +371,7 @@ export class DeltaChatChannel implements Channel {
             return;
           }
 
-          // React with 👀 to acknowledge receipt
+          // React with 👀 to acknowledge receipt; track for 💭/✅ reactions
           this.lastMsgId.set(jid, msgId);
           try {
             await dc.rpc.sendReaction(aid, msgId, ['👀']);
@@ -272,78 +382,76 @@ export class DeltaChatChannel implements Channel {
             );
           }
 
-          // Prepend quoted reply context if present
-          let quotePrefix = '';
-          if (msg.quote) {
-            const q = msg.quote as
-              | {
-                  kind: 'WithMessage';
-                  text: string;
-                  authorDisplayName?: string;
-                  messageId?: number;
-                }
-              | { kind: 'JustText'; text: string };
-            if (q.kind === 'WithMessage' && q.text) {
-              const author = q.authorDisplayName
-                ? ` (${q.authorDisplayName})`
-                : '';
-              quotePrefix = `[Replying to${author}: "${q.text}"]\n`;
-            } else if (q.kind === 'JustText' && q.text) {
-              quotePrefix = `[Quoting: "${q.text}"]\n`;
-            }
-          }
+          const content = this.buildContent(msg, msgId, groups, jid);
+          if (content === null) return;
 
-          // Build content: text or media placeholder
-          let content: string;
-          const viewType = msg.viewType ?? 'Unknown';
-          if (viewType === 'Text' || viewType === 'Unknown') {
-            if (!text && !quotePrefix) return; // truly empty message
-            content = quotePrefix + text;
+          // Debounce: accumulate rapid messages and flush as one to the agent
+          const existing = this.debounceEntries.get(jid);
+          if (existing) {
+            existing.msgIds.push(msgId);
+            existing.parts.push(content);
+            clearTimeout(this.debounceTimers.get(jid));
           } else {
-            // If the message has an attachment file on disk, copy it into
-            // the group's IPC attachments directory so the container agent
-            // can read it (the directory is mounted at /workspace/ipc/).
-            let containerPath: string | null = null;
-            if (msg.file) {
-              try {
-                const groupFolder = groups[jid].folder;
-                const attachmentsDir = path.join(
-                  resolveGroupIpcPath(groupFolder),
-                  'attachments',
-                );
-                fs.mkdirSync(attachmentsDir, { recursive: true });
-                const destName = `${msgId}-${path.basename(msg.file)}`;
-                fs.copyFileSync(msg.file, path.join(attachmentsDir, destName));
-                containerPath = `/workspace/ipc/attachments/${destName}`;
-              } catch (err) {
-                logger.warn(
-                  { err, msgId },
-                  'DeltaChat: failed to copy attachment to IPC dir',
-                );
-              }
-            }
-            content =
-              quotePrefix +
-              mediaPlaceholder(
-                viewType,
-                msg.fileName ?? null,
-                text,
-                containerPath,
-              );
+            this.debounceEntries.set(jid, {
+              msgIds: [msgId],
+              parts: [content],
+              sender,
+              senderName,
+              firstTimestamp: new Date(msg.timestamp * 1000).toISOString(),
+            });
           }
-
-          this.opts.onMessage(jid, {
-            id: String(msgId),
-            chat_jid: jid,
-            sender,
-            sender_name: senderName,
-            content,
-            timestamp: new Date(msg.timestamp * 1000).toISOString(),
-          });
+          this.debounceTimers.set(
+            jid,
+            setTimeout(() => this.flushDebounce(jid), DEBOUNCE_MS),
+          );
         } catch (err) {
           logger.error(
             { err, chatId, msgId },
             'DeltaChat: failed to process IncomingMsg',
+          );
+        }
+      },
+    );
+
+    // Listen for message edits
+    emitter.on(
+      'MsgsChanged',
+      async ({ chatId, msgId }: { chatId: number; msgId: number }) => {
+        // msgId = 0 means "some message in this chat changed" — too vague to act on
+        if (!msgId || !this.processedMsgIds.has(msgId)) return;
+
+        try {
+          const dc = this.dc!;
+          const aid = this.accountId!;
+          const msg = await dc.rpc.getMessage(aid, msgId);
+
+          if (msg.isInfo || msg.isSetupmessage || msg.fromId === 1) return;
+
+          const jid = jidForChat(chatId);
+          const groups = this.opts.registeredGroups();
+          if (!(jid in groups)) return;
+
+          const contact = await dc.rpc.getContact(aid, msg.fromId);
+          const sender = contact.address ?? String(msg.fromId);
+          const senderName = contact.displayName ?? sender;
+
+          const content = this.buildContent(msg, msgId, groups, jid);
+          if (content === null) return;
+
+          logger.debug({ jid, msgId }, 'DeltaChat: message edited');
+
+          this.opts.onMessage(jid, {
+            id: `edit-${msgId}`,
+            chat_jid: jid,
+            sender,
+            sender_name: senderName,
+            content: `[Message edited]\n${content}`,
+            timestamp: new Date().toISOString(),
+          });
+        } catch (err) {
+          logger.error(
+            { err, chatId, msgId },
+            'DeltaChat: failed to process MsgsChanged',
           );
         }
       },
@@ -398,6 +506,20 @@ export class DeltaChatChannel implements Channel {
         }
       },
     );
+
+    // Connectivity monitoring
+    emitter.on('ConnectivityChanged', () => {
+      logger.info('DeltaChat: connectivity changed');
+    });
+    emitter.on('ImapConnected', () => {
+      logger.info('DeltaChat: IMAP connected');
+    });
+    emitter.on('ImapInboxIdle', () => {
+      logger.info('DeltaChat: IMAP inbox idle (ready for instant delivery)');
+    });
+    emitter.on('SmtpConnected', () => {
+      logger.info('DeltaChat: SMTP connected');
+    });
 
     this._connected = true;
     logger.info('DeltaChat channel connected');

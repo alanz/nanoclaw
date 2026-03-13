@@ -754,6 +754,161 @@ describe('DeltaChatChannel', () => {
     });
   });
 
+  describe('quoted replies', () => {
+    it('prepends WithMessage quote context to content', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({
+          text: 'expand on that',
+          quote: {
+            kind: 'WithMessage',
+            text: 'The sky is blue',
+            authorDisplayName: 'Andy',
+            messageId: 99,
+          },
+        }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          content: '[Replying to (Andy): "The sky is blue"]\nexpand on that',
+        }),
+      );
+    });
+
+    it('prepends WithMessage quote without author name when missing', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({
+          text: 'yes exactly',
+          quote: { kind: 'WithMessage', text: 'Some text', messageId: 88 },
+        }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          content: '[Replying to: "Some text"]\nyes exactly',
+        }),
+      );
+    });
+
+    it('prepends JustText quote context to content', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({
+          text: 'agreed',
+          quote: { kind: 'JustText', text: 'Earlier text' },
+        }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          content: '[Quoting: "Earlier text"]\nagreed',
+        }),
+      );
+    });
+
+    it('sends message with no quote prefix when quote is null', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(
+        makeMsg({ text: 'plain message', quote: null }),
+      );
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ content: 'plain message' }),
+      );
+    });
+  });
+
+  describe('IncomingReaction', () => {
+    function emitIncomingReaction(
+      chatId = CHAT_ID,
+      contactId = 5,
+      msgId = MSG_ID,
+      reaction = '👍',
+    ) {
+      emitterRef.current.emit('IncomingReaction', {
+        chatId,
+        contactId,
+        msgId,
+        reaction,
+      });
+    }
+
+    it('routes reaction from registered chat to onMessage', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingReaction();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          content: '[Reaction: 👍]',
+          sender: 'alice@example.com',
+          sender_name: 'Alice',
+        }),
+      );
+    });
+
+    it('ignores reaction from unregistered chat', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: false });
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingReaction();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('ignores empty reaction string', async () => {
+      const { opts } = await buildConnectedChannel({ registered: true });
+
+      emitIncomingReaction(CHAT_ID, 5, MSG_ID, '');
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('uses message id with contact id as unique event id', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingReaction(CHAT_ID, 7, 200, '❤️');
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({ id: 'reaction-200-7' }),
+      );
+    });
+  });
+
   describe('sendFile', () => {
     it('sends a file with caption via DC RPC', async () => {
       const { channel, dc } = await buildConnectedChannel({ registered: true });

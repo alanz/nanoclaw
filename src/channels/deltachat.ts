@@ -272,12 +272,33 @@ export class DeltaChatChannel implements Channel {
             );
           }
 
+          // Prepend quoted reply context if present
+          let quotePrefix = '';
+          if (msg.quote) {
+            const q = msg.quote as
+              | {
+                  kind: 'WithMessage';
+                  text: string;
+                  authorDisplayName?: string;
+                  messageId?: number;
+                }
+              | { kind: 'JustText'; text: string };
+            if (q.kind === 'WithMessage' && q.text) {
+              const author = q.authorDisplayName
+                ? ` (${q.authorDisplayName})`
+                : '';
+              quotePrefix = `[Replying to${author}: "${q.text}"]\n`;
+            } else if (q.kind === 'JustText' && q.text) {
+              quotePrefix = `[Quoting: "${q.text}"]\n`;
+            }
+          }
+
           // Build content: text or media placeholder
           let content: string;
           const viewType = msg.viewType ?? 'Unknown';
           if (viewType === 'Text' || viewType === 'Unknown') {
-            if (!text) return; // truly empty message
-            content = text;
+            if (!text && !quotePrefix) return; // truly empty message
+            content = quotePrefix + text;
           } else {
             // If the message has an attachment file on disk, copy it into
             // the group's IPC attachments directory so the container agent
@@ -301,12 +322,14 @@ export class DeltaChatChannel implements Channel {
                 );
               }
             }
-            content = mediaPlaceholder(
-              viewType,
-              msg.fileName ?? null,
-              text,
-              containerPath,
-            );
+            content =
+              quotePrefix +
+              mediaPlaceholder(
+                viewType,
+                msg.fileName ?? null,
+                text,
+                containerPath,
+              );
           }
 
           this.opts.onMessage(jid, {
@@ -321,6 +344,56 @@ export class DeltaChatChannel implements Channel {
           logger.error(
             { err, chatId, msgId },
             'DeltaChat: failed to process IncomingMsg',
+          );
+        }
+      },
+    );
+
+    // Listen for reactions to the bot's own messages
+    emitter.on(
+      'IncomingReaction',
+      async ({
+        chatId,
+        contactId,
+        msgId,
+        reaction,
+      }: {
+        chatId: number;
+        contactId: number;
+        msgId: number;
+        reaction: string;
+      }) => {
+        if (!reaction) return;
+
+        try {
+          const dc = this.dc!;
+          const aid = this.accountId!;
+
+          const jid = jidForChat(chatId);
+          const groups = this.opts.registeredGroups();
+          if (!(jid in groups)) return;
+
+          const contact = await dc.rpc.getContact(aid, contactId);
+          const sender = contact.address ?? String(contactId);
+          const senderName = contact.displayName ?? sender;
+
+          logger.debug(
+            { jid, sender, reaction, msgId },
+            'DeltaChat: incoming reaction',
+          );
+
+          this.opts.onMessage(jid, {
+            id: `reaction-${msgId}-${contactId}`,
+            chat_jid: jid,
+            sender,
+            sender_name: senderName,
+            content: `[Reaction: ${reaction}]`,
+            timestamp: new Date().toISOString(),
+          });
+        } catch (err) {
+          logger.error(
+            { err, chatId, contactId, msgId, reaction },
+            'DeltaChat: failed to process IncomingReaction',
           );
         }
       },

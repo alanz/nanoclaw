@@ -43,6 +43,8 @@ main{flex:1;overflow:auto;padding:24px}
 .section{display:none}.section.active{display:block}
 h2{font-size:17px;font-weight:600;margin-bottom:16px;color:#f0f6fc}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:12px}
+.group-card{cursor:pointer;transition:border-color .15s}
+.group-card:hover{border-color:#58a6ff}
 .badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
 .bg{background:#1f4a2b;color:#3fb950}.by{background:#3d2e0a;color:#d29922}.br{background:#3d1010;color:#f85149}.bb{background:#0d2744;color:#58a6ff}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -50,9 +52,7 @@ th{text-align:left;padding:8px 12px;color:#8b949e;font-weight:600;border-bottom:
 td{padding:8px 12px;border-bottom:1px solid #21262d;vertical-align:top}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#1c2128}
-.chat-list a{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:6px;color:#e6edf3;text-decoration:none;cursor:pointer;margin-bottom:2px}
-.chat-list a:hover{background:#21262d}
-.msgs{max-height:58vh;overflow-y:auto;border:1px solid #30363d;border-radius:8px;padding:12px;background:#161b22;margin-bottom:12px}
+.msgs{max-height:calc(100vh - 280px);overflow-y:auto;border:1px solid #30363d;border-radius:8px;padding:12px;background:#161b22;margin-bottom:12px}
 .msg{padding:6px 0;border-bottom:1px solid #21262d}
 .msg:last-child{border-bottom:none}
 .msg-meta{font-size:11px;color:#8b949e;margin-bottom:3px}
@@ -63,7 +63,7 @@ tr:hover td{background:#1c2128}
 .send-row input:focus{border-color:#58a6ff}
 .send-row button{background:#238636;border:none;border-radius:6px;padding:8px 16px;color:#fff;font-size:14px;cursor:pointer}
 .send-row button:hover{background:#2ea043}
-.back{color:#8b949e;font-size:13px;cursor:pointer;margin-bottom:10px;display:inline-block}
+.back{color:#8b949e;font-size:13px;cursor:pointer;margin-bottom:16px;display:inline-block}
 .back:hover{color:#e6edf3}
 .empty{color:#8b949e;font-style:italic;text-align:center;padding:32px}
 .log-row{cursor:pointer}.log-body{display:none;padding:8px 12px;background:#0d1117}
@@ -89,51 +89,66 @@ pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;f
 .md-body th,.md-body td{border:1px solid #30363d;padding:6px 12px}
 .md-body th{background:#21262d}
 .md-body hr{border:none;border-top:1px solid #30363d;margin:16px 0}
+.subnav{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid #30363d;padding-bottom:0}
+.subnav a{padding:7px 14px;font-size:13px;color:#8b949e;cursor:pointer;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px;user-select:none}
+.subnav a:hover{color:#e6edf3}
+.subnav a.active{color:#e6edf3;border-bottom-color:#58a6ff}
 </style>
 </head>
 <body>
 <nav>
   <h1>NanoClaw</h1>
   <a id="nav-groups" href="#groups">Groups</a>
-  <a id="nav-chats" href="#chats">Chats</a>
-  <a id="nav-tasks" href="#tasks">Tasks</a>
-  <a id="nav-files" href="#files">Files</a>
   <a id="nav-system" href="#system">System</a>
 </nav>
 <main>
+  <!-- Groups: list + detail -->
   <div id="section-groups" class="section">
-    <h2>Registered Groups</h2>
-    <div id="groups-body">Loading...</div>
-  </div>
 
-  <div id="section-chats" class="section">
-    <div id="chats-list">
-      <h2>Chats</h2>
-      <div id="chats-body">Loading...</div>
+    <!-- Group list -->
+    <div id="groups-list">
+      <h2>Groups</h2>
+      <div id="groups-body">Loading...</div>
     </div>
-    <div id="chat-view" style="display:none">
-      <a id="back-btn" class="back" href="#">&#8592; Back</a>
-      <h2 id="chat-title"></h2>
-      <div id="msgs-container" class="msgs"></div>
-      <div id="send-area"></div>
-    </div>
-  </div>
 
-  <div id="section-tasks" class="section">
-    <h2>Scheduled Tasks</h2>
-    <div id="tasks-body">Loading...</div>
-  </div>
+    <!-- Group detail -->
+    <div id="group-detail" style="display:none">
+      <a id="group-back" class="back">&#8592; Groups</a>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <h2 id="group-detail-name" style="margin-bottom:0"></h2>
+        <span id="group-detail-badges"></span>
+      </div>
+      <div class="subnav" id="group-subnav">
+        <a data-tab="chat">Chat</a>
+        <a data-tab="tasks">Tasks</a>
+        <a data-tab="files">Files</a>
+      </div>
 
-  <div id="section-files" class="section">
-    <h2>Files</h2>
-    <div style="display:flex;gap:16px;height:calc(100vh - 100px)">
-      <div id="file-tree" style="width:260px;flex-shrink:0;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px"></div>
-      <div id="file-view" style="flex:1;overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px">
-        <div class="empty">Select a file to view its contents</div>
+      <!-- Chat tab -->
+      <div id="group-tab-chat">
+        <div id="group-msgs" class="msgs"></div>
+        <div id="group-send-area"></div>
+      </div>
+
+      <!-- Tasks tab -->
+      <div id="group-tab-tasks" style="display:none">
+        <div id="group-tasks-body">Loading...</div>
+      </div>
+
+      <!-- Files tab -->
+      <div id="group-tab-files" style="display:none">
+        <div style="display:flex;gap:16px;height:calc(100vh - 220px)">
+          <div id="group-file-tree" style="width:260px;flex-shrink:0;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px"></div>
+          <div id="group-file-view" style="flex:1;overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px">
+            <div class="empty">Select a file to view its contents</div>
+          </div>
+        </div>
       </div>
     </div>
+
   </div>
 
+  <!-- System -->
   <div id="section-system" class="section">
     <h2>Sessions</h2>
     <div id="sessions-body">Loading...</div>
@@ -146,7 +161,8 @@ pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;f
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-  var currentJid = null;
+  var currentGroup = null;   // group object from /api/groups
+  var currentTab = 'chat';
   var pollTimer = null;
 
   function esc(s) {
@@ -176,6 +192,8 @@ document.addEventListener('DOMContentLoaded', function() {
     try { return new Date(ts).toLocaleTimeString(); } catch(e) { return ts; }
   }
 
+  // ── Top-level nav ──────────────────────────────────────────────────────────
+
   function show(name) {
     document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
     document.querySelectorAll('nav a').forEach(function(a) { a.classList.remove('active'); });
@@ -184,51 +202,26 @@ document.addEventListener('DOMContentLoaded', function() {
     if (sec) sec.classList.add('active');
     if (nav) nav.classList.add('active');
     clearInterval(pollTimer); pollTimer = null;
-    if (name === 'groups') loadGroups();
-    if (name === 'chats') { showChatList(); loadChats(); }
-    if (name === 'tasks') loadTasks();
-    if (name === 'files') loadFiles();
+    if (name === 'groups') showGroupList();
     if (name === 'system') loadSystem();
   }
 
-  // Nav links
   document.querySelectorAll('nav a').forEach(function(a) {
     a.addEventListener('click', function(e) {
       e.preventDefault();
-      var href = a.getAttribute('href') || '#groups';
-      show(href.replace('#',''));
+      show((a.getAttribute('href') || '#groups').replace('#',''));
     });
   });
 
-  // Back button
-  var backBtn = document.getElementById('back-btn');
-  if (backBtn) backBtn.addEventListener('click', function(e) {
-    e.preventDefault();
-    showChatList();
-  });
+  // ── Group list ─────────────────────────────────────────────────────────────
 
-  // Send area — delegated (button click + Enter key)
-  document.getElementById('send-area').addEventListener('click', function(e) {
-    if (e.target.tagName === 'BUTTON') sendMsg();
-  });
-  document.getElementById('send-area').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') sendMsg();
-  });
-
-  // Chat list — event delegation
-  document.getElementById('chats-body').addEventListener('click', function(e) {
-    var link = e.target.closest('[data-jid]');
-    if (link) {
-      e.preventDefault();
-      openChat(link.dataset.jid, link.dataset.name, link.dataset.registered === 'true');
-    }
-  });
-
-  // Tasks — event delegation
-  document.getElementById('tasks-body').addEventListener('click', function(e) {
-    var row = e.target.closest('[data-task-id]');
-    if (row) toggleLogs(row.dataset.taskId);
-  });
+  function showGroupList() {
+    clearInterval(pollTimer); pollTimer = null;
+    currentGroup = null;
+    document.getElementById('groups-list').style.display = '';
+    document.getElementById('group-detail').style.display = 'none';
+    loadGroups();
+  }
 
   async function loadGroups() {
     var el = document.getElementById('groups-body');
@@ -236,57 +229,94 @@ document.addEventListener('DOMContentLoaded', function() {
       var data = await fetch('/api/groups').then(function(r) { return r.json(); });
       if (!data.length) { el.innerHTML = '<div class="empty">No registered groups</div>'; return; }
       el.innerHTML = data.map(function(g) {
-        return '<div class="card">'
+        return '<div class="card group-card" data-jid="'+esc(g.jid)+'">'
           +'<div style="display:flex;justify-content:space-between;align-items:center">'
           +'<strong>'+esc(g.name)+'</strong>'
           +'<span>'+(g.isMain ? '<span class="badge bb">main</span> ' : '')+'<span class="badge bg">'+esc(g.channel)+'</span></span>'
           +'</div>'
-          +'<div class="dim" style="margin-top:6px">Folder: '+esc(g.folder)+' &nbsp;|&nbsp; Trigger: <code>'+esc(g.trigger)+'</code> &nbsp;|&nbsp; Added: '+fmtDate(g.added_at)+'</div>'
+          +'<div class="dim" style="margin-top:6px">'+esc(g.folder)+(g.trigger ? ' &nbsp;&middot;&nbsp; trigger: <code>'+esc(g.trigger)+'</code>' : '')+' &nbsp;&middot;&nbsp; added '+fmtDate(g.added_at)+'</div>'
           +'</div>';
       }).join('');
+      // store data for lookup on click
+      el._groups = data;
     } catch(e) { el.innerHTML = '<div class="empty">Error loading groups</div>'; }
   }
 
-  async function loadChats() {
-    var el = document.getElementById('chats-body');
-    try {
-      var data = await fetch('/api/chats').then(function(r) { return r.json(); });
-      if (!data.length) { el.innerHTML = '<div class="empty">No chats</div>'; return; }
-      el.innerHTML = '<div class="chat-list">' + data.map(function(c) {
-        return '<a href="#" data-jid="'+esc(c.jid)+'" data-name="'+esc(c.name)+'" data-registered="'+c.isRegistered+'">'
-          +'<span>'+esc(c.name)+(c.isRegistered ? ' <span class="badge bg">active</span>' : '')+'</span>'
-          +'<span class="dim">'+(c.channel||'')+(c.last_message_time ? ' &middot; '+fmtDate(c.last_message_time) : '')+'</span>'
-          +'</a>';
-      }).join('') + '</div>';
-    } catch(e) { el.innerHTML = '<div class="empty">Error loading chats</div>'; }
+  document.getElementById('groups-body').addEventListener('click', function(e) {
+    var card = e.target.closest('[data-jid]');
+    if (!card) return;
+    var jid = card.dataset.jid;
+    var groups = document.getElementById('groups-body')._groups || [];
+    var g = groups.find(function(x) { return x.jid === jid; });
+    if (g) openGroup(g);
+  });
+
+  // ── Group detail ───────────────────────────────────────────────────────────
+
+  document.getElementById('group-back').addEventListener('click', showGroupList);
+
+  document.getElementById('group-subnav').addEventListener('click', function(e) {
+    var a = e.target.closest('[data-tab]');
+    if (a) switchTab(a.dataset.tab);
+  });
+
+  document.getElementById('group-send-area').addEventListener('click', function(e) {
+    if (e.target.tagName === 'BUTTON') sendMsg();
+  });
+  document.getElementById('group-send-area').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') sendMsg();
+  });
+
+  document.getElementById('group-tasks-body').addEventListener('click', function(e) {
+    var row = e.target.closest('[data-task-id]');
+    if (row) toggleLogs(row.dataset.taskId);
+  });
+
+  function openGroup(g) {
+    currentGroup = g;
+    document.getElementById('groups-list').style.display = 'none';
+    document.getElementById('group-detail').style.display = '';
+    document.getElementById('group-detail-name').textContent = g.name;
+    document.getElementById('group-detail-badges').innerHTML =
+      (g.isMain ? '<span class="badge bb">main</span> ' : '')
+      + '<span class="badge bg">'+esc(g.channel)+'</span>';
+    switchTab('chat');
   }
 
-  function showChatList() {
-    currentJid = null;
+  function switchTab(tab) {
     clearInterval(pollTimer); pollTimer = null;
-    document.getElementById('chats-list').style.display = '';
-    document.getElementById('chat-view').style.display = 'none';
+    currentTab = tab;
+    document.querySelectorAll('#group-subnav [data-tab]').forEach(function(a) {
+      a.classList.toggle('active', a.dataset.tab === tab);
+    });
+    document.getElementById('group-tab-chat').style.display  = tab === 'chat'  ? '' : 'none';
+    document.getElementById('group-tab-tasks').style.display = tab === 'tasks' ? '' : 'none';
+    document.getElementById('group-tab-files').style.display = tab === 'files' ? '' : 'none';
+    if (tab === 'chat')  loadGroupChat();
+    if (tab === 'tasks') loadGroupTasks();
+    if (tab === 'files') loadGroupFiles();
   }
 
-  async function openChat(jid, name, isRegistered) {
-    currentJid = jid;
-    document.getElementById('chats-list').style.display = 'none';
-    document.getElementById('chat-view').style.display = '';
-    document.getElementById('chat-title').textContent = name;
-    document.getElementById('send-area').innerHTML = isRegistered
-      ? '<div class="send-row"><input id="msg-input" type="text" placeholder="Message (will be sent via the group channel)..."><button type="button">Send</button></div>'
-      : '<div class="dim" style="margin-top:4px">Read-only &mdash; group is not registered</div>';
-    await loadMsgs(jid);
+  // ── Chat tab ───────────────────────────────────────────────────────────────
+
+  async function loadGroupChat() {
+    var g = currentGroup;
+    var sendArea = document.getElementById('group-send-area');
+    sendArea.innerHTML = g.requiresTrigger === false || g.isMain
+      ? '<div class="send-row"><input id="msg-input" type="text" placeholder="Message\u2026"><button type="button">Send</button></div>'
+      : '<div class="send-row"><input id="msg-input" type="text" placeholder="Message (trigger will be prepended)\u2026"><button type="button">Send</button></div>';
+    await loadMsgs();
     clearInterval(pollTimer);
-    pollTimer = setInterval(function() { loadMsgs(jid); }, 3000);
+    pollTimer = setInterval(loadMsgs, 3000);
   }
 
-  async function loadMsgs(jid) {
-    var el = document.getElementById('msgs-container');
+  async function loadMsgs() {
+    if (!currentGroup || currentTab !== 'chat') return;
+    var el = document.getElementById('group-msgs');
     if (!el) return;
     try {
-      var data = await fetch('/api/messages?jid='+encodeURIComponent(jid)+'&limit=150').then(function(r) { return r.json(); });
-      if (!data.length) { el.innerHTML = '<div class="empty">No messages</div>'; return; }
+      var data = await fetch('/api/messages?jid='+encodeURIComponent(currentGroup.jid)+'&limit=150').then(function(r) { return r.json(); });
+      if (!data.length) { el.innerHTML = '<div class="empty">No messages yet</div>'; return; }
       var atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 60;
       el.innerHTML = data.map(function(m) {
         var cls = m.is_bot_message ? 'bot' : (m.is_from_me ? 'me' : '');
@@ -299,34 +329,38 @@ document.addEventListener('DOMContentLoaded', function() {
 
   async function sendMsg() {
     var input = document.getElementById('msg-input');
-    if (!input) return;
+    if (!input || !currentGroup) return;
     var text = (input.value || '').trim();
-    if (!text || !currentJid) return;
+    if (!text) return;
     input.value = '';
     try {
-      await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({jid:currentJid, message:text})});
-      await loadMsgs(currentJid);
+      await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({jid:currentGroup.jid, message:text})});
+      await loadMsgs();
     } catch(e) {}
   }
 
-  async function loadTasks() {
-    var el = document.getElementById('tasks-body');
+  // ── Tasks tab ──────────────────────────────────────────────────────────────
+
+  async function loadGroupTasks() {
+    if (!currentGroup) return;
+    var el = document.getElementById('group-tasks-body');
+    el.innerHTML = 'Loading\u2026';
     try {
-      var data = await fetch('/api/tasks').then(function(r) { return r.json(); });
-      if (!data.length) { el.innerHTML = '<div class="empty">No scheduled tasks</div>'; return; }
-      el.innerHTML = '<div class="card"><table><thead><tr><th>Group</th><th>Schedule</th><th>Status</th><th>Next Run</th><th>Last Run</th><th>Prompt</th><th></th></tr></thead><tbody>'
+      var all = await fetch('/api/tasks').then(function(r) { return r.json(); });
+      var data = all.filter(function(t) { return t.group_folder === currentGroup.folder; });
+      if (!data.length) { el.innerHTML = '<div class="empty">No scheduled tasks for this group</div>'; return; }
+      el.innerHTML = '<div class="card"><table><thead><tr><th>Schedule</th><th>Status</th><th>Next Run</th><th>Last Run</th><th>Prompt</th><th></th></tr></thead><tbody>'
         + data.map(function(t) {
           var sc = t.status==='active' ? 'bg' : t.status==='paused' ? 'by' : 'br';
           return '<tr class="log-row" data-task-id="'+esc(t.id)+'">'
-            +'<td>'+esc(t.group_folder)+'</td>'
             +'<td class="dim">'+esc(t.schedule_type)+': '+esc(t.schedule_value)+'</td>'
             +'<td><span class="badge '+sc+'">'+esc(t.status)+'</span></td>'
             +'<td class="dim">'+(t.next_run ? fmtDate(t.next_run) : '&mdash;')+'</td>'
             +'<td class="dim">'+(t.last_run ? fmtDate(t.last_run) : '&mdash;')+'</td>'
-            +'<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(t.prompt)+'">'+esc(t.prompt)+'</td>'
+            +'<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(t.prompt)+'">'+esc(t.prompt)+'</td>'
             +'<td class="dim">&#9660;</td>'
             +'</tr>'
-            +'<tr id="logs-'+esc(t.id)+'"><td colspan="7" class="log-body"><div id="logs-inner-'+esc(t.id)+'" class="dim">Loading...</div></td></tr>';
+            +'<tr id="logs-'+esc(t.id)+'"><td colspan="6" class="log-body"><div id="logs-inner-'+esc(t.id)+'" class="dim">Loading\u2026</div></td></tr>';
         }).join('')
         + '</tbody></table></div>';
     } catch(e) { el.innerHTML = '<div class="empty">Error loading tasks</div>'; }
@@ -354,57 +388,58 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
-  async function loadFiles() {
-    var tree = document.getElementById('file-tree');
-    tree.innerHTML = '<div class="dim">Loading...</div>';
+  // ── Files tab ──────────────────────────────────────────────────────────────
+
+  async function loadGroupFiles() {
+    if (!currentGroup) return;
+    var tree = document.getElementById('group-file-tree');
+    var view = document.getElementById('group-file-view');
+    tree.innerHTML = '<div class="dim">Loading\u2026</div>';
+    view.innerHTML = '<div class="empty">Select a file to view its contents</div>';
     try {
       var data = await fetch('/api/files').then(function(r) { return r.json(); });
+      var groupFiles = data.find(function(gf) { return gf.name === currentGroup.folder; });
       tree.innerHTML = '';
-      data.forEach(function(group) {
-        var groupEl = document.createElement('div');
-        groupEl.innerHTML = '<div class="ftree-dir">&#128193; '+esc(group.name)+'</div>';
-        var children = document.createElement('div');
-        children.className = 'ftree-children';
-
-        function renderEntries(entries, container) {
-          entries.forEach(function(entry) {
-            if (entry.isDir) {
-              var dirEl = document.createElement('div');
-              dirEl.innerHTML = '<div class="ftree-dir" style="font-size:12px;font-weight:400">&#128193; '+esc(entry.name)+'</div>';
-              var sub = document.createElement('div');
-              sub.className = 'ftree-children';
-              sub.style.display = 'none';
-              dirEl.querySelector('.ftree-dir').addEventListener('click', function() {
-                sub.style.display = sub.style.display === 'none' ? '' : 'none';
-              });
-              renderEntries(entry.children, sub);
-              dirEl.appendChild(sub);
-              container.appendChild(dirEl);
-            } else {
-              var fileEl = document.createElement('div');
-              fileEl.className = 'ftree-file';
-              fileEl.textContent = entry.name;
-              fileEl.dataset.path = entry.path;
-              fileEl.addEventListener('click', function() {
-                document.querySelectorAll('.ftree-file.active').forEach(function(el) { el.classList.remove('active'); });
-                fileEl.classList.add('active');
-                openFile(entry.path, entry.name);
-              });
-              container.appendChild(fileEl);
-            }
-          });
-        }
-
-        renderEntries(group.entries, children);
-        groupEl.appendChild(children);
-        tree.appendChild(groupEl);
-      });
+      if (!groupFiles || !groupFiles.entries.length) {
+        tree.innerHTML = '<div class="empty">No files</div>';
+        return;
+      }
+      renderFileTree(groupFiles.entries, tree);
     } catch(e) { tree.innerHTML = '<div class="empty">Error loading files</div>'; }
   }
 
+  function renderFileTree(entries, container) {
+    entries.forEach(function(entry) {
+      if (entry.isDir) {
+        var dirEl = document.createElement('div');
+        dirEl.innerHTML = '<div class="ftree-dir" style="font-size:12px;font-weight:400">&#128193; '+esc(entry.name)+'</div>';
+        var sub = document.createElement('div');
+        sub.className = 'ftree-children';
+        sub.style.display = 'none';
+        dirEl.querySelector('.ftree-dir').addEventListener('click', function() {
+          sub.style.display = sub.style.display === 'none' ? '' : 'none';
+        });
+        renderFileTree(entry.children, sub);
+        dirEl.appendChild(sub);
+        container.appendChild(dirEl);
+      } else {
+        var fileEl = document.createElement('div');
+        fileEl.className = 'ftree-file';
+        fileEl.textContent = entry.name;
+        fileEl.dataset.path = entry.path;
+        fileEl.addEventListener('click', function() {
+          document.querySelectorAll('.ftree-file.active').forEach(function(el) { el.classList.remove('active'); });
+          fileEl.classList.add('active');
+          openFile(entry.path, entry.name);
+        });
+        container.appendChild(fileEl);
+      }
+    });
+  }
+
   async function openFile(filePath, name) {
-    var view = document.getElementById('file-view');
-    view.innerHTML = '<div class="dim">Loading...</div>';
+    var view = document.getElementById('group-file-view');
+    view.innerHTML = '<div class="dim">Loading\u2026</div>';
     try {
       var r = await fetch('/api/file?path='+encodeURIComponent(filePath));
       if (!r.ok) { view.innerHTML = '<div class="empty">Could not read file</div>'; return; }
@@ -437,6 +472,8 @@ document.addEventListener('DOMContentLoaded', function() {
     } catch(e) { view.innerHTML = '<div class="empty">Error reading file</div>'; }
   }
 
+  // ── System ─────────────────────────────────────────────────────────────────
+
   async function loadSystem() {
     var sel = document.getElementById('sessions-body');
     var rsel = document.getElementById('routerstate-body');
@@ -465,7 +502,7 @@ document.addEventListener('DOMContentLoaded', function() {
     } catch(e) { rsel.innerHTML = '<div class="empty">Error loading router state</div>'; }
   }
 
-  // Start on groups view
+  // ── Boot ───────────────────────────────────────────────────────────────────
   show('groups');
 });
 </script>

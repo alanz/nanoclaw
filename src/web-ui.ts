@@ -575,7 +575,11 @@ function safeReadFile(relPath: string): string | null {
   }
 }
 
-export function startWebUi(port: number, host = '127.0.0.1'): Server {
+export function startWebUi(
+  port: number,
+  host = '127.0.0.1',
+  opts: { sendMessage?: (jid: string, text: string) => Promise<void> } = {},
+): Server {
   const server = createServer(async (req, res) => {
     const baseUrl = `http://${req.headers.host || host}`;
     let url: URL;
@@ -759,6 +763,14 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         });
 
         logger.debug({ jid, msgId }, 'Web UI injected message');
+
+        // Echo the user message to the native channel so the other side sees it
+        if (opts.sendMessage) {
+          opts.sendMessage(jid, `[web] ${message}`).catch((err: unknown) => {
+            logger.warn({ err, jid }, 'Failed to echo web message to channel');
+          });
+        }
+
         sendJson(res, { ok: true, id: msgId, timestamp });
         return;
       }

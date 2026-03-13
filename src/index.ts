@@ -46,7 +46,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatMessages, formatOutbound, routeOutbound } from './router.js';
 import {
   isSenderAllowed,
   isTriggerAllowed,
@@ -564,7 +564,9 @@ async function main(): Promise<void> {
   );
 
   // Start web dashboard (localhost only — exposed via tailscale serve on port 8443)
-  const webUiServer = startWebUi(WEB_UI_PORT);
+  const webUiServer = startWebUi(WEB_UI_PORT, undefined, {
+    sendMessage: (jid, text) => routeOutbound(channels, jid, text),
+  });
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {

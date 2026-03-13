@@ -8,6 +8,7 @@ on:
 
 jobs:
   update-tokens:
+    if: false  # disabled: requires GitHub App secrets and repo-tokens composite action not available in personal install
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v1

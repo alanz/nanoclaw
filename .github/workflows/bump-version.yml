@@ -7,6 +7,7 @@ on:
 
 jobs:
   bump-version:
+    if: false  # disabled: requires GitHub App secrets not available in personal install
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v1

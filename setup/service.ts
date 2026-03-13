@@ -133,6 +133,8 @@ function setupLaunchd(
     // launchctl list failed
   }
 
+  setupBackupLaunchd(projectRoot, homeDir);
+
   emitStatus('SETUP_SERVICE', {
     SERVICE_TYPE: 'launchd',
     NODE_PATH: nodePath,
@@ -142,6 +144,51 @@ function setupLaunchd(
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
+}
+
+function setupBackupLaunchd(projectRoot: string, homeDir: string): void {
+  const backupPlistPath = path.join(
+    homeDir,
+    'Library',
+    'LaunchAgents',
+    'com.nanoclaw.backup.plist',
+  );
+
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${projectRoot}/scripts/backup-db.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${projectRoot}/logs/backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>${projectRoot}/logs/backup.error.log</string>
+</dict>
+</plist>`;
+
+  fs.writeFileSync(backupPlistPath, plist);
+  logger.info({ backupPlistPath }, 'Wrote backup launchd plist');
+
+  try {
+    execSync(`launchctl unload ${JSON.stringify(backupPlistPath)} 2>/dev/null || true`, { stdio: 'ignore' });
+  } catch { /* ignore */ }
+
+  try {
+    execSync(`launchctl load ${JSON.stringify(backupPlistPath)}`, { stdio: 'ignore' });
+    logger.info('Backup launchd agent loaded');
+  } catch {
+    logger.warn('launchctl load for backup failed');
+  }
 }
 
 function setupLinux(
@@ -293,6 +340,8 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     // Not active
   }
 
+  setupBackupSystemd(projectRoot, homeDir, runningAsRoot, systemctlPrefix);
+
   emitStatus('SETUP_SERVICE', {
     SERVICE_TYPE: runningAsRoot ? 'systemd-system' : 'systemd-user',
     NODE_PATH: nodePath,
@@ -303,6 +352,52 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
+}
+
+function setupBackupSystemd(
+  projectRoot: string,
+  homeDir: string,
+  runningAsRoot: boolean,
+  systemctlPrefix: string,
+): void {
+  const unitDir = runningAsRoot
+    ? '/etc/systemd/system'
+    : path.join(homeDir, '.config', 'systemd', 'user');
+
+  const serviceUnit = `[Unit]
+Description=NanoClaw database backup
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${projectRoot}/scripts/backup-db.sh
+StandardOutput=append:${projectRoot}/logs/backup.log
+StandardError=append:${projectRoot}/logs/backup.error.log
+`;
+
+  const timerUnit = `[Unit]
+Description=NanoClaw database backup (hourly)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=${runningAsRoot ? 'multi-user.target' : 'timers.target'}
+`;
+
+  fs.writeFileSync(path.join(unitDir, 'nanoclaw-backup.service'), serviceUnit);
+  fs.writeFileSync(path.join(unitDir, 'nanoclaw-backup.timer'), timerUnit);
+  logger.info({ unitDir }, 'Wrote backup systemd units');
+
+  try {
+    execSync(`${systemctlPrefix} daemon-reload`, { stdio: 'ignore' });
+    execSync(`${systemctlPrefix} enable --now nanoclaw-backup.timer`, { stdio: 'ignore' });
+    logger.info('Backup systemd timer enabled');
+  } catch {
+    logger.warn('Failed to enable backup systemd timer');
+  }
 }
 
 function setupNohupFallback(

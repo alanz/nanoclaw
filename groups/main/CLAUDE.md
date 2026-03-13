@@ -71,11 +71,11 @@ Main has read-only access to the project and read-write access to its group fold
 | Container Path | Host Path | Access |
 |----------------|-----------|--------|
 | `/workspace/project` | Project root (`~/nanoclaw/`) | read-only |
-| `/workspace/group` | `~/nanoclaw-workspaces/main/` | read-write |
+| `/workspace/group` | `~/nanoclaw/groups/main/` | read-write |
 
 Key paths inside the container:
 - `/workspace/ipc/available_groups.json` - available groups
-- SQLite DB is on the host at `~/nanoclaw-state/messages.db` (not mounted into container)
+- SQLite DB is on the host at `~/nanoclaw/store/messages.db` (not mounted into container)
 
 ---
 
@@ -152,10 +152,10 @@ When scheduling tasks for other groups, use the `target_group_jid` parameter wit
 
 ## Setup Notes
 
-- Container runtime: Colima (headless Docker, runs as brew service)
+- Container runtime: Native Mac containers (Apple Virtualization framework)
 - Channel: DeltaChat — bot address `z19wef0zr@nine.testrun.org`
-- Workspaces: `~/nanoclaw-workspaces/` (under version control)
-- State/DBs: `~/nanoclaw-state/` (for Borg backup)
+- Workspaces: `~/nanoclaw/groups/` (inside project, under version control)
+- State/DBs: `~/nanoclaw/store/` (default; configurable via STORE_DIR env)
 - NanoClaw source: `~/nanoclaw/`
 
 ## TODO
@@ -163,5 +163,5 @@ When scheduling tasks for other groups, use the `target_group_jid` parameter wit
 - [ ] Configure additional directory mounts — see example config in the repo (mount-allowlist)
 
 - [x] Add a web console (read-only log viewer to start, full dashboard longer term — registered groups, message history, service status; SQLite DBs have everything needed)
-- [ ] Set up Borg backup of `~/nanoclaw-state/` (messages.db, nanoclaw.db, deltachat/) to BorgBase offsite
+- [ ] Set up Borg backup of `~/nanoclaw/store/` (messages.db, nanoclaw.db, deltachat/) to BorgBase offsite
 - [ ] Add a way to reset the agent session (e.g. IPC command or message trigger like "reset session") — currently requires manual DB edit: `DELETE FROM router_state WHERE key LIKE 'session%'`. Should write a summary to CLAUDE.md before clearing so nothing important is lost.

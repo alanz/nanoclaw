@@ -1167,7 +1167,7 @@ describe('DeltaChatChannel', () => {
       const callsBefore = (
         logger.info as ReturnType<typeof vi.fn>
       ).mock.calls.filter(
-        (c: any[]) => typeof c[1] === 'string' && c[1].includes('connectivity'),
+        (c: any[]) => typeof c[0] === 'string' && c[0].includes('connectivity'),
       ).length;
       expect(callsBefore).toBe(0);
 
@@ -1177,11 +1177,10 @@ describe('DeltaChatChannel', () => {
       const connectivityCalls = (
         logger.info as ReturnType<typeof vi.fn>
       ).mock.calls.filter(
-        (c: any[]) => typeof c[1] === 'string' && c[1].includes('connectivity'),
+        (c: any[]) => typeof c[0] === 'string' && c[0].includes('connectivity'),
       );
       expect(connectivityCalls).toHaveLength(1);
-      expect(connectivityCalls[0][0]).toMatchObject({ events: 4 });
-      expect(connectivityCalls[0][1]).toBe(
+      expect(connectivityCalls[0][0]).toBe(
         'DeltaChat: connectivity changed (connected)',
       );
 
@@ -1207,9 +1206,9 @@ describe('DeltaChatChannel', () => {
         await vi.runAllTimersAsync();
         const call = (logger.info as ReturnType<typeof vi.fn>).mock.calls.find(
           (c: any[]) =>
-            typeof c[1] === 'string' && c[1].includes('connectivity'),
+            typeof c[0] === 'string' && c[0].includes('connectivity'),
         );
-        expect(call![1]).toBe(`DeltaChat: connectivity changed (${label})`);
+        expect(call![0]).toBe(`DeltaChat: connectivity changed (${label})`);
       }
 
       vi.useRealTimers();

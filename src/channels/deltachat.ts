@@ -515,7 +515,6 @@ export class DeltaChatChannel implements Channel {
     const CONNECTIVITY_DEBOUNCE_MS = 500;
 
     const logConnectivity = async () => {
-      const count = connectivityCount;
       connectivityCount = 0;
       try {
         const level = await this.dc!.rpc.getConnectivity(this.accountId!);
@@ -524,12 +523,9 @@ export class DeltaChatChannel implements Channel {
         else if (level >= 3000) label = 'working';
         else if (level >= 2000) label = 'connecting';
         else label = 'not connected';
-        logger.info(
-          { events: count },
-          `DeltaChat: connectivity changed (${label})`,
-        );
+        logger.info(`DeltaChat: connectivity changed (${label})`);
       } catch {
-        logger.info({ events: count }, 'DeltaChat: connectivity changed');
+        logger.info('DeltaChat: connectivity changed');
       }
     };
 

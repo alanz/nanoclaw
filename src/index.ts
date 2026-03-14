@@ -429,8 +429,6 @@ async function startMessageLoop(): Promise<void> {
       );
 
       if (messages.length > 0) {
-        logger.info({ count: messages.length }, 'New messages');
-
         // Advance the "seen" cursor for all messages immediately
         lastTimestamp = newTimestamp;
         saveState();
@@ -449,6 +447,12 @@ async function startMessageLoop(): Promise<void> {
         for (const [chatJid, groupMessages] of messagesByGroup) {
           const group = registeredGroups[chatJid];
           if (!group) continue;
+
+          for (const msg of groupMessages) {
+            logger.info(
+              `New message from ${chatJid} (${group.name}): [${msg.sender_name}] ${msg.content.slice(0, 80)}`,
+            );
+          }
 
           const channel = findChannel(channels, chatJid);
           if (!channel) {

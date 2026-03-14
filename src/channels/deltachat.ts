@@ -525,8 +525,8 @@ export class DeltaChatChannel implements Channel {
         else if (level >= 2000) label = 'connecting';
         else label = 'not connected';
         logger.info(
-          { connectivity: level, label, events: count },
-          'DeltaChat: connectivity changed',
+          { events: count },
+          `DeltaChat: connectivity changed (${label})`,
         );
       } catch {
         logger.info({ events: count }, 'DeltaChat: connectivity changed');

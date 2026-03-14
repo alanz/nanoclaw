@@ -1180,10 +1180,10 @@ describe('DeltaChatChannel', () => {
         (c: any[]) => typeof c[1] === 'string' && c[1].includes('connectivity'),
       );
       expect(connectivityCalls).toHaveLength(1);
-      expect(connectivityCalls[0][0]).toMatchObject({
-        events: 4,
-        label: 'connected',
-      });
+      expect(connectivityCalls[0][0]).toMatchObject({ events: 4 });
+      expect(connectivityCalls[0][1]).toBe(
+        'DeltaChat: connectivity changed (connected)',
+      );
 
       vi.useRealTimers();
     });
@@ -1209,7 +1209,7 @@ describe('DeltaChatChannel', () => {
           (c: any[]) =>
             typeof c[1] === 'string' && c[1].includes('connectivity'),
         );
-        expect(call![0]).toMatchObject({ label });
+        expect(call![1]).toBe(`DeltaChat: connectivity changed (${label})`);
       }
 
       vi.useRealTimers();

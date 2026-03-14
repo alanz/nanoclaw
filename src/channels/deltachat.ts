@@ -355,8 +355,20 @@ export class DeltaChatChannel implements Channel {
           // /chatid works in any chat (registered or not)
           if (text.trim() === '/chatid') {
             const groups = this.opts.registeredGroups();
-            const isRegistered = jid in groups;
-            const status = isRegistered ? 'registered' : 'not registered';
+            const group = groups[jid];
+            let status: string;
+            if (!group) {
+              status = 'not registered';
+            } else {
+              const requiresTrigger = group.requiresTrigger !== false;
+              const trusted = group.trustedGroup === true;
+              const parts = ['registered'];
+              parts.push(
+                requiresTrigger ? 'trigger required' : 'no trigger required',
+              );
+              if (trusted) parts.push('trusted');
+              status = parts.join(', ');
+            }
             await this.sendMessage(jid, `Chat ID: ${jid} (${status})`);
             return;
           }

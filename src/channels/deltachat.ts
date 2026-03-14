@@ -509,9 +509,37 @@ export class DeltaChatChannel implements Channel {
       },
     );
 
-    // Connectivity monitoring
+    // Connectivity monitoring — debounce bursts, then log with status label
+    let connectivityDebounce: ReturnType<typeof setTimeout> | null = null;
+    let connectivityCount = 0;
+    const CONNECTIVITY_DEBOUNCE_MS = 500;
+
+    const logConnectivity = async () => {
+      const count = connectivityCount;
+      connectivityCount = 0;
+      try {
+        const level = await this.dc!.rpc.getConnectivity(this.accountId!);
+        let label: string;
+        if (level >= 4000) label = 'connected';
+        else if (level >= 3000) label = 'working';
+        else if (level >= 2000) label = 'connecting';
+        else label = 'not connected';
+        logger.info(
+          { connectivity: level, label, events: count },
+          'DeltaChat: connectivity changed',
+        );
+      } catch {
+        logger.info({ events: count }, 'DeltaChat: connectivity changed');
+      }
+    };
+
     emitter.on('ConnectivityChanged', () => {
-      logger.info('DeltaChat: connectivity changed');
+      connectivityCount++;
+      if (connectivityDebounce) clearTimeout(connectivityDebounce);
+      connectivityDebounce = setTimeout(
+        logConnectivity,
+        CONNECTIVITY_DEBOUNCE_MS,
+      );
     });
     emitter.on('ImapConnected', () => {
       logger.info('DeltaChat: IMAP connected');

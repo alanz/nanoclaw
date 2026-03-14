@@ -1151,13 +1151,68 @@ describe('DeltaChatChannel', () => {
   });
 
   describe('connectivity events', () => {
-    it('logs ConnectivityChanged', async () => {
+    it('debounces burst of ConnectivityChanged and logs once with label', async () => {
+      vi.useFakeTimers();
       const { logger } = await import('../logger.js');
-      await buildConnectedChannel();
+      const { dc } = await buildConnectedChannel();
+      dc.rpc.getConnectivity = vi.fn().mockResolvedValue(4000);
+
+      // Emit a burst of 4 events
       emitterRef.current.emit('ConnectivityChanged');
-      expect(logger.info).toHaveBeenCalledWith(
-        'DeltaChat: connectivity changed',
+      emitterRef.current.emit('ConnectivityChanged');
+      emitterRef.current.emit('ConnectivityChanged');
+      emitterRef.current.emit('ConnectivityChanged');
+
+      // Nothing logged yet — debounce window still open
+      const callsBefore = (
+        logger.info as ReturnType<typeof vi.fn>
+      ).mock.calls.filter(
+        (c: any[]) => typeof c[1] === 'string' && c[1].includes('connectivity'),
+      ).length;
+      expect(callsBefore).toBe(0);
+
+      // Advance past debounce
+      await vi.runAllTimersAsync();
+
+      const connectivityCalls = (
+        logger.info as ReturnType<typeof vi.fn>
+      ).mock.calls.filter(
+        (c: any[]) => typeof c[1] === 'string' && c[1].includes('connectivity'),
       );
+      expect(connectivityCalls).toHaveLength(1);
+      expect(connectivityCalls[0][0]).toMatchObject({
+        events: 4,
+        label: 'connected',
+      });
+
+      vi.useRealTimers();
+    });
+
+    it('labels connectivity levels correctly', async () => {
+      vi.useFakeTimers();
+      const { logger } = await import('../logger.js');
+      const { dc } = await buildConnectedChannel();
+
+      const cases = [
+        { level: 1000, label: 'not connected' },
+        { level: 2000, label: 'connecting' },
+        { level: 3000, label: 'working' },
+        { level: 4000, label: 'connected' },
+      ];
+
+      for (const { level, label } of cases) {
+        (logger.info as ReturnType<typeof vi.fn>).mockClear();
+        dc.rpc.getConnectivity = vi.fn().mockResolvedValue(level);
+        emitterRef.current.emit('ConnectivityChanged');
+        await vi.runAllTimersAsync();
+        const call = (logger.info as ReturnType<typeof vi.fn>).mock.calls.find(
+          (c: any[]) =>
+            typeof c[1] === 'string' && c[1].includes('connectivity'),
+        );
+        expect(call![0]).toMatchObject({ label });
+      }
+
+      vi.useRealTimers();
     });
 
     it('logs ImapConnected', async () => {

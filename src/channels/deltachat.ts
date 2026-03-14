@@ -527,7 +527,7 @@ export class DeltaChatChannel implements Channel {
     logger.info('DeltaChat channel connected');
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(jid: string, text: string, sender?: string): Promise<void> {
     const chatId = chatIdFromJid(jid);
     if (chatId === null || !this.dc || this.accountId === null) return;
     await this.dc.rpc.sendMsg(this.accountId, chatId, {
@@ -537,7 +537,7 @@ export class DeltaChatChannel implements Channel {
       file: null,
       filename: null,
       location: null,
-      overrideSenderName: null,
+      overrideSenderName: sender ?? null,
       quotedMessageId: null,
       quotedText: null,
     });
@@ -547,6 +547,7 @@ export class DeltaChatChannel implements Channel {
     jid: string,
     filePath: string,
     caption?: string,
+    sender?: string,
   ): Promise<void> {
     const chatId = chatIdFromJid(jid);
     if (chatId === null || !this.dc || this.accountId === null) return;
@@ -557,7 +558,7 @@ export class DeltaChatChannel implements Channel {
       file: filePath,
       filename: null,
       location: null,
-      overrideSenderName: null,
+      overrideSenderName: sender ?? null,
       quotedMessageId: null,
       quotedText: null,
     });

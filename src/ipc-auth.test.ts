@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -379,6 +379,52 @@ describe('refresh_groups authorization', () => {
       deps,
     );
     // If we got here without error, the auth gate worked
+  });
+});
+
+// --- IPC sender forwarding ---
+
+describe('IPC message sender forwarding', () => {
+  it('forwards sender from IPC payload to sendMessage', async () => {
+    const sendMessage = vi
+      .fn<(jid: string, text: string, sender?: string) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const localDeps = { ...deps, sendMessage };
+
+    // Simulate what startIpcWatcher does for an authorized message with sender
+    const data = { chatJid: 'other@g.us', text: 'hello', sender: 'Researcher' };
+    const targetGroup = groups[data.chatJid];
+    const isMain = false;
+    const sourceGroup = 'other-group';
+    if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+      await localDeps.sendMessage(data.chatJid, data.text, data.sender);
+    }
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      'other@g.us',
+      'hello',
+      'Researcher',
+    );
+  });
+
+  it('forwards undefined sender when sender is absent from IPC payload', async () => {
+    const sendMessage = vi
+      .fn<(jid: string, text: string, sender?: string) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const localDeps = { ...deps, sendMessage };
+
+    const data: { chatJid: string; text: string; sender?: string } = {
+      chatJid: 'other@g.us',
+      text: 'hello',
+    };
+    const targetGroup = groups[data.chatJid];
+    const isMain = false;
+    const sourceGroup = 'other-group';
+    if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+      await localDeps.sendMessage(data.chatJid, data.text, data.sender);
+    }
+
+    expect(sendMessage).toHaveBeenCalledWith('other@g.us', 'hello', undefined);
   });
 });
 

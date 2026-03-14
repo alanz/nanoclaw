@@ -11,8 +11,13 @@ import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
-  sendFile: (jid: string, filePath: string, caption?: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
+  sendFile: (
+    jid: string,
+    filePath: string,
+    caption?: string,
+    sender?: string,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -81,7 +86,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  await deps.sendMessage(data.chatJid, data.text, data.sender);
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
@@ -116,7 +121,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       'IPC file path escapes IPC directory, blocked',
                     );
                   } else {
-                    await deps.sendFile(data.chatJid, hostPath, data.caption);
+                    await deps.sendFile(
+                      data.chatJid,
+                      hostPath,
+                      data.caption,
+                      data.sender,
+                    );
                     logger.info(
                       { chatJid: data.chatJid, sourceGroup },
                       'IPC file sent',

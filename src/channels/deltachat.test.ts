@@ -1222,5 +1222,78 @@ describe('DeltaChatChannel', () => {
       // No error thrown, dc.rpc.sendMsg not called (dc is null)
       expect(dcRef.current?.rpc.sendMsg).not.toHaveBeenCalled();
     });
+
+    it('sets overrideSenderName when sender is provided', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendFile(
+        JID,
+        '/host/path/image.png',
+        'caption',
+        'Researcher',
+      );
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ overrideSenderName: 'Researcher' }),
+      );
+    });
+
+    it('sets overrideSenderName to null when sender is omitted', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendFile(JID, '/host/path/image.png');
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ overrideSenderName: null }),
+      );
+    });
+  });
+
+  describe('sendMessage', () => {
+    it('sends a text message via DC RPC', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendMessage(JID, 'Hello world');
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: 'Hello world' }),
+      );
+    });
+
+    it('sets overrideSenderName when sender is provided', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendMessage(JID, 'Hello from Researcher', 'Researcher');
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ overrideSenderName: 'Researcher' }),
+      );
+    });
+
+    it('sets overrideSenderName to null when sender is omitted', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendMessage(JID, 'Normal message');
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ overrideSenderName: null }),
+      );
+    });
+
+    it('does nothing when not connected', async () => {
+      const channel = new DeltaChatChannel(makeOpts());
+      await channel.sendMessage(JID, 'No connection');
+      expect(dcRef.current?.rpc.sendMsg).not.toHaveBeenCalled();
+    });
   });
 });

@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { _initTestDatabase, getAllChats, storeChatMetadata } from './db.js';
 import { getAvailableGroups, _setRegisteredGroups } from './index.js';
+import { routeOutbound } from './router.js';
+import type { Channel } from './types.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -166,5 +168,49 @@ describe('getAvailableGroups', () => {
   it('returns empty array when no chats exist', () => {
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(0);
+  });
+});
+
+// --- routeOutbound sender forwarding ---
+
+describe('routeOutbound', () => {
+  function makeChannel(
+    jid: string,
+  ): Channel & { sendMessage: ReturnType<typeof vi.fn> } {
+    return {
+      name: 'test',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      isConnected: () => true,
+      ownsJid: (j) => j === jid,
+      connect: async () => {},
+      disconnect: async () => {},
+    };
+  }
+
+  it('forwards sender to channel.sendMessage', async () => {
+    const channel = makeChannel('dc:1');
+    await routeOutbound([channel], 'dc:1', 'Hello', 'Researcher');
+    expect(channel.sendMessage).toHaveBeenCalledWith(
+      'dc:1',
+      'Hello',
+      'Researcher',
+    );
+  });
+
+  it('forwards undefined sender when omitted', async () => {
+    const channel = makeChannel('dc:1');
+    await routeOutbound([channel], 'dc:1', 'Hello');
+    expect(channel.sendMessage).toHaveBeenCalledWith(
+      'dc:1',
+      'Hello',
+      undefined,
+    );
+  });
+
+  it('throws when no channel owns the JID', () => {
+    const channel = makeChannel('dc:999');
+    expect(() => routeOutbound([channel], 'dc:1', 'Hello')).toThrow(
+      'No channel for JID: dc:1',
+    );
   });
 });

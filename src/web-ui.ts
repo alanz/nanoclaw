@@ -232,7 +232,7 @@ document.addEventListener('DOMContentLoaded', function() {
         return '<div class="card group-card" data-jid="'+esc(g.jid)+'">'
           +'<div style="display:flex;justify-content:space-between;align-items:center">'
           +'<strong>'+esc(g.name)+'</strong>'
-          +'<span>'+(g.isMain ? '<span class="badge bb">main</span> ' : '')+'<span class="badge bg">'+esc(g.channel)+'</span></span>'
+          +'<span>'+(g.isMain ? '<span class="badge bb">main</span> ' : '')+(g.trustedGroup ? '<span class="badge bb">trusted</span> ' : '')+(!g.isMain && !g.trustedGroup && g.requiresTrigger !== false ? '<span class="badge">trigger required</span> ' : '')+'<span class="badge bg">'+esc(g.channel)+'</span></span>'
           +'</div>'
           +'<div class="dim" style="margin-top:6px">'+esc(g.folder)+(g.trigger ? ' &nbsp;&middot;&nbsp; trigger: <code>'+esc(g.trigger)+'</code>' : '')+' &nbsp;&middot;&nbsp; added '+fmtDate(g.added_at)+'</div>'
           +'</div>';
@@ -302,7 +302,7 @@ document.addEventListener('DOMContentLoaded', function() {
   async function loadGroupChat() {
     var g = currentGroup;
     var sendArea = document.getElementById('group-send-area');
-    sendArea.innerHTML = g.requiresTrigger === false || g.isMain
+    sendArea.innerHTML = g.isMain || g.trustedGroup || g.requiresTrigger === false
       ? '<div class="send-row"><input id="msg-input" type="text" placeholder="Message\u2026"><button type="button">Send</button></div>'
       : '<div class="send-row"><input id="msg-input" type="text" placeholder="Message (trigger will be prepended)\u2026"><button type="button">Send</button></div>';
     await loadMsgs();
@@ -650,6 +650,7 @@ export function startWebUi(
           added_at: g.added_at,
           isMain: g.isMain ?? false,
           requiresTrigger: g.requiresTrigger ?? true,
+          trustedGroup: g.trustedGroup ?? false,
           channel: guessChannel(jid),
         }));
         sendJson(res, result);
@@ -781,7 +782,10 @@ export function startWebUi(
         }
 
         // Prepend trigger if the group requires one
-        const needsTrigger = !group.isMain && group.requiresTrigger !== false;
+        const needsTrigger =
+          !group.isMain &&
+          !group.trustedGroup &&
+          group.requiresTrigger !== false;
         const content = needsTrigger
           ? `@${ASSISTANT_NAME} ${message}`
           : message;

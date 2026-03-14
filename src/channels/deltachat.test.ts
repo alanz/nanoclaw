@@ -383,7 +383,9 @@ describe('DeltaChatChannel', () => {
       expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
         ACCOUNT_ID,
         CHAT_ID,
-        expect.objectContaining({ text: `Chat ID: ${JID} (registered)` }),
+        expect.objectContaining({
+          text: `Chat ID: ${JID} (registered, trigger required)`,
+        }),
       );
     });
 

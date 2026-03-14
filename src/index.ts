@@ -170,6 +170,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.isMain === true;
   const isTrustedGroup = group.trustedGroup === true;
+  const requiresTrigger =
+    !isMainGroup && !isTrustedGroup && group.requiresTrigger !== false;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
@@ -202,7 +204,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       formatMessages,
       canSenderInteract: (msg) => {
         const hasTrigger = TRIGGER_PATTERN.test(msg.content.trim());
-        const reqTrigger = !isMainGroup && group.requiresTrigger !== false;
+        const reqTrigger = requiresTrigger;
         return (
           isMainGroup ||
           !reqTrigger ||
@@ -217,7 +219,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // --- End session command interception ---
 
   // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  if (requiresTrigger) {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
@@ -462,6 +464,8 @@ async function startMessageLoop(): Promise<void> {
 
           const isMainGroup = group.isMain === true;
           const isTrustedGroup = group.trustedGroup === true;
+          const requiresTrigger =
+            !isMainGroup && !isTrustedGroup && group.requiresTrigger !== false;
 
           // --- /esc interrupt interception (message loop) ---
           // /esc <context> interrupts the running agent and injects new context.
@@ -533,7 +537,7 @@ async function startMessageLoop(): Promise<void> {
           }
           // --- End session command interception ---
 
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const needsTrigger = requiresTrigger;
 
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as

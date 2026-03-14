@@ -137,7 +137,9 @@ export class DeltaChatChannel implements Channel {
   /** Debounce state: accumulate rapid messages per JID before routing. */
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private debounceEntries = new Map<string, DebounceEntry>();
-  /** Message IDs delivered to the agent, kept for edit tracking. */
+  /** Deduplicates IncomingMsg events; also checked by MsgsChanged to block double-delivery of edits. */
+  private seenMsgIds = new Set<number>();
+  /** Message IDs seen via IncomingMsg, kept for edit detection in MsgsChanged (1-hour window). */
   private processedMsgIds = new Set<number>();
 
   constructor(private readonly opts: DeltaChatChannelOpts) {}
@@ -215,12 +217,6 @@ export class DeltaChatChannel implements Channel {
     const content = entry.parts.join('\n');
     const lastMsgId = entry.msgIds[entry.msgIds.length - 1];
 
-    // Track all delivered msgIds for edit detection
-    for (const id of entry.msgIds) {
-      this.processedMsgIds.add(id);
-      setTimeout(() => this.processedMsgIds.delete(id), EDIT_TRACK_TTL_MS);
-    }
-
     this.opts.onMessage(jid, {
       id: String(lastMsgId),
       chat_jid: jid,
@@ -296,14 +292,16 @@ export class DeltaChatChannel implements Channel {
 
     // Listen for incoming messages
     const emitter = this.dc.getContextEvents(account.id);
-    const seenMsgIds = new Set<number>();
 
     emitter.on(
       'IncomingMsg',
       async ({ chatId, msgId }: { chatId: number; msgId: number }) => {
-        if (seenMsgIds.has(msgId)) return;
-        seenMsgIds.add(msgId);
-        setTimeout(() => seenMsgIds.delete(msgId), 60_000);
+        if (this.seenMsgIds.has(msgId)) return;
+        this.seenMsgIds.add(msgId);
+        setTimeout(() => this.seenMsgIds.delete(msgId), 60_000);
+        // Track immediately for edit detection in MsgsChanged (1-hour window)
+        this.processedMsgIds.add(msgId);
+        setTimeout(() => this.processedMsgIds.delete(msgId), EDIT_TRACK_TTL_MS);
 
         try {
           const dc = this.dc!;
@@ -437,6 +435,10 @@ export class DeltaChatChannel implements Channel {
 
           const content = this.buildContent(msg, msgId, groups, jid);
           if (content === null) return;
+
+          // Block IncomingMsg from double-delivering the same edit
+          this.seenMsgIds.add(msgId);
+          setTimeout(() => this.seenMsgIds.delete(msgId), 60_000);
 
           logger.debug({ jid, msgId }, 'DeltaChat: message edited');
 

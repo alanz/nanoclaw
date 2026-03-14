@@ -169,6 +169,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const isMainGroup = group.isMain === true;
+  const isTrustedGroup = group.trustedGroup === true;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
@@ -183,6 +184,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const cmdResult = await handleSessionCommand({
     missedMessages,
     isMainGroup,
+    isTrustedGroup,
     groupName: group.name,
     triggerPattern: TRIGGER_PATTERN,
     timezone: TIMEZONE,
@@ -455,6 +457,7 @@ async function startMessageLoop(): Promise<void> {
           }
 
           const isMainGroup = group.isMain === true;
+          const isTrustedGroup = group.trustedGroup === true;
 
           // --- /esc interrupt interception (message loop) ---
           // /esc <context> interrupts the running agent and injects new context.
@@ -467,7 +470,11 @@ async function startMessageLoop(): Promise<void> {
           });
           if (escMsg) {
             if (
-              isSessionCommandAllowed(isMainGroup, escMsg.is_from_me === true)
+              isSessionCommandAllowed(
+                isMainGroup,
+                escMsg.is_from_me === true,
+                isTrustedGroup,
+              )
             ) {
               const stripped = escMsg.content
                 .trim()
@@ -509,6 +516,7 @@ async function startMessageLoop(): Promise<void> {
               isSessionCommandAllowed(
                 isMainGroup,
                 loopCmdMsg.is_from_me === true,
+                isTrustedGroup,
               )
             ) {
               queue.closeStdin(chatJid);
@@ -685,6 +693,22 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    onTrustedGroupViolation: (jid: string, memberCount: number) => {
+      const group = registeredGroups[jid];
+      if (!group) return;
+      const updated = { ...group, trustedGroup: undefined };
+      setRegisteredGroup(jid, updated);
+      registeredGroups[jid] = updated;
+      logger.warn(
+        { jid, memberCount },
+        'Trusted group had members added — trusted status revoked',
+      );
+      const channel = findChannel(channels, jid);
+      channel?.sendMessage(
+        jid,
+        `⚠️ This group now has ${memberCount} members. Trusted status (session commands) has been revoked. Remove extra members and re-enable via the MCP tool if needed.`,
+      );
+    },
   };
 
   // Create and connect all registered channels.

@@ -17,13 +17,14 @@ export function extractSessionCommand(
 
 /**
  * Check if a session command sender is authorized.
- * Allowed: main group (any sender), or trusted/admin sender (is_from_me) in any group.
+ * Allowed: main group (any sender), trusted group (any sender), or is_from_me sender in any group.
  */
 export function isSessionCommandAllowed(
   isMainGroup: boolean,
   isFromMe: boolean,
+  isTrustedGroup: boolean = false,
 ): boolean {
-  return isMainGroup || isFromMe;
+  return isMainGroup || isTrustedGroup || isFromMe;
 }
 
 /** Minimal agent result interface — matches the subset of ContainerOutput used here. */
@@ -62,6 +63,7 @@ function resultToText(result: string | object | null | undefined): string {
 export async function handleSessionCommand(opts: {
   missedMessages: NewMessage[];
   isMainGroup: boolean;
+  isTrustedGroup?: boolean;
   groupName: string;
   triggerPattern: RegExp;
   timezone: string;
@@ -70,6 +72,7 @@ export async function handleSessionCommand(opts: {
   const {
     missedMessages,
     isMainGroup,
+    isTrustedGroup = false,
     groupName,
     triggerPattern,
     timezone,
@@ -85,7 +88,13 @@ export async function handleSessionCommand(opts: {
 
   if (!command || !cmdMsg) return { handled: false };
 
-  if (!isSessionCommandAllowed(isMainGroup, cmdMsg.is_from_me === true)) {
+  if (
+    !isSessionCommandAllowed(
+      isMainGroup,
+      cmdMsg.is_from_me === true,
+      isTrustedGroup,
+    )
+  ) {
     // DENIED: send denial if the sender would normally be allowed to interact,
     // then silently consume the command by advancing the cursor past it.
     // Trade-off: other messages in the same batch are also consumed (cursor is

@@ -125,6 +125,8 @@ export interface DeltaChatChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /** Called when a trusted group gains extra members — revokes trust and notifies. */
+  onTrustedGroupViolation: (jid: string, memberCount: number) => void;
 }
 
 export class DeltaChatChannel implements Channel {
@@ -509,6 +511,33 @@ export class DeltaChatChannel implements Channel {
       },
     );
 
+    // Revoke trusted_group status if members are added to a trusted group
+    emitter.on('ChatModified', async ({ chatId }: { chatId: number }) => {
+      const jid = jidForChat(chatId);
+      const groups = this.opts.registeredGroups();
+      const group = groups[jid];
+      if (!group?.trustedGroup) return;
+
+      try {
+        const dc = this.dc!;
+        const aid = this.accountId!;
+        const members = await dc.rpc.getChatContacts(aid, chatId);
+        // Expected: [DC_CONTACT_ID_SELF, owner] = 2 members
+        if (members.length > 2) {
+          logger.warn(
+            { jid, memberCount: members.length },
+            'DeltaChat: trusted group gained members — revoking trusted status',
+          );
+          this.opts.onTrustedGroupViolation(jid, members.length);
+        }
+      } catch (err) {
+        logger.error(
+          { err, chatId },
+          'DeltaChat: failed to check members after ChatModified',
+        );
+      }
+    });
+
     // Connectivity monitoring — debounce bursts, then log with status label
     let connectivityDebounce: ReturnType<typeof setTimeout> | null = null;
     let connectivityCount = 0;
@@ -646,5 +675,6 @@ registerChannel('deltachat', (opts) => {
     onMessage: opts.onMessage,
     onChatMetadata: opts.onChatMetadata,
     registeredGroups: opts.registeredGroups,
+    onTrustedGroupViolation: opts.onTrustedGroupViolation,
   });
 });

@@ -111,6 +111,7 @@ function makeOpts(
     dataDir: '/tmp/dc-test',
     onMessage: vi.fn(),
     onChatMetadata: vi.fn(),
+    onTrustedGroupViolation: vi.fn(),
     registeredGroups: vi.fn(
       () =>
         (registered ? { [JID]: registeredGroup } : {}) as Record<

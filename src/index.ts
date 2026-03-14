@@ -3,6 +3,7 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
+  CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
@@ -23,8 +24,10 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
-  cleanupOrphans,
   ensureContainerRuntimeRunning,
+  isContainerRunning,
+  killContainer,
+  listOrphanedContainers,
   PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
@@ -590,16 +593,45 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
-}
-
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  ensureContainerRuntimeRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();
+
+  // Recover orphaned containers from the previous process.
+  // Instead of killing them immediately (which tears down Apple Container VMs
+  // and fires macOS SCNetworkReachability events that freeze Tailscale SSH
+  // sessions), we signal each orphan to wind down gracefully via _close and
+  // hold its group slot in the queue until it exits naturally. Force-kill only
+  // fires as a fallback if the container outlives its remaining timeout budget.
+  const orphans = listOrphanedContainers();
+  for (const orphan of orphans) {
+    // Match container to a registered group by safe name
+    const matchedEntry = Object.entries(registeredGroups).find(
+      ([, g]) => g.folder.replace(/[^a-zA-Z0-9-]/g, '-') === orphan.safeName,
+    );
+    const elapsed = Date.now() - orphan.startedMs;
+    const remaining = CONTAINER_TIMEOUT - elapsed;
+    if (matchedEntry && remaining > 0) {
+      const [jid, group] = matchedEntry;
+      queue.adoptOrphan(
+        jid,
+        orphan.name,
+        group.folder,
+        remaining,
+        isContainerRunning,
+        killContainer,
+      );
+    } else {
+      // No matching group or already past timeout — kill immediately
+      logger.info(
+        { name: orphan.name, matched: !!matchedEntry, elapsed },
+        'Stopping orphaned container (unmatched or timed out)',
+      );
+      killContainer(orphan.name);
+    }
+  }
 
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(

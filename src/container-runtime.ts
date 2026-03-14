@@ -147,8 +147,58 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
-/** Kill orphaned NanoClaw containers from previous runs. */
-export function cleanupOrphans(): void {
+// Apple Container's startedDate is seconds since Jan 1, 2001 (Core Foundation epoch).
+// Unix epoch is Jan 1, 1970. Offset: 978307200 seconds.
+const CF_TO_UNIX_OFFSET_S = 978307200;
+
+export interface OrphanedContainer {
+  /** Full container name, e.g. nanoclaw-main-1773496586126 */
+  name: string;
+  /** Group folder safe name (special chars replaced with -), for matching to registered groups */
+  safeName: string;
+  /** Unix milliseconds when the container started */
+  startedMs: number;
+}
+
+/** List running NanoClaw containers left over from a previous process. */
+export function listOrphanedContainers(): OrphanedContainer[] {
+  try {
+    const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    });
+    const containers: {
+      status: string;
+      startedDate?: number;
+      configuration: { id: string };
+    }[] = JSON.parse(output || '[]');
+
+    return containers
+      .filter(
+        (c) =>
+          c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'),
+      )
+      .map((c) => {
+        const name = c.configuration.id;
+        // Container name format: nanoclaw-{safeName}-{13-digit-timestamp}
+        const withoutPrefix = name.slice('nanoclaw-'.length);
+        const tsMatch = withoutPrefix.match(/-(\d{13})$/);
+        const safeName = tsMatch
+          ? withoutPrefix.slice(0, -tsMatch[0].length)
+          : withoutPrefix;
+        const startedMs =
+          c.startedDate != null
+            ? (c.startedDate + CF_TO_UNIX_OFFSET_S) * 1000
+            : Date.now();
+        return { name, safeName, startedMs };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/** Check if a named container is still running. */
+export function isContainerRunning(name: string): boolean {
   try {
     const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -156,26 +206,19 @@ export function cleanupOrphans(): void {
     });
     const containers: { status: string; configuration: { id: string } }[] =
       JSON.parse(output || '[]');
-    const orphans = containers
-      .filter(
-        (c) =>
-          c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'),
-      )
-      .map((c) => c.configuration.id);
-    for (const name of orphans) {
-      try {
-        execSync(stopContainer(name), { stdio: 'pipe' });
-      } catch {
-        /* already stopped */
-      }
-    }
-    if (orphans.length > 0) {
-      logger.info(
-        { count: orphans.length, names: orphans },
-        'Stopped orphaned containers',
-      );
-    }
-  } catch (err) {
-    logger.warn({ err }, 'Failed to clean up orphaned containers');
+    return containers.some(
+      (c) => c.status === 'running' && c.configuration.id === name,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Kill a container by name. No-op if it has already stopped. */
+export function killContainer(name: string): void {
+  try {
+    execSync(stopContainer(name), { stdio: 'pipe' });
+  } catch {
+    /* already stopped */
   }
 }

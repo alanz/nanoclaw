@@ -369,6 +369,83 @@ export class GroupQueue {
     }
   }
 
+  /**
+   * Adopt an orphaned container from a previous NanoClaw process.
+   *
+   * Marks the group as active (blocking new containers from starting) and
+   * signals the orphan to wind down gracefully via the _close sentinel.
+   * Polls until the container exits, then releases the group slot.
+   * Falls back to a force-kill after remainingMs if it hasn't exited.
+   *
+   * This avoids calling `container stop` at startup, which tears down the VM
+   * and fires a macOS SCNetworkReachability event that causes Tailscale to
+   * re-establish its WireGuard session (~30–60s SSH freeze on every restart).
+   */
+  adoptOrphan(
+    groupJid: string,
+    containerName: string,
+    groupFolder: string,
+    remainingMs: number,
+    isRunning: (name: string) => boolean,
+    forceKill: (name: string) => void,
+  ): void {
+    const state = this.getGroup(groupJid);
+    if (state.active) return; // already active, nothing to adopt
+
+    state.active = true;
+    // Do not increment activeCount — the orphan doesn't hold a concurrency slot
+    // against other groups; it only blocks its own group from starting a new container.
+
+    // Signal the orphan to wind down gracefully
+    const inputDir = path.join(DATA_DIR, 'ipc', groupFolder, 'input');
+    try {
+      fs.mkdirSync(inputDir, { recursive: true });
+      fs.writeFileSync(path.join(inputDir, '_close'), '');
+    } catch {
+      /* ignore — orphan may already have exited */
+    }
+
+    logger.info(
+      { groupJid, containerName, remainingMs },
+      'Adopting orphaned container — waiting for natural exit',
+    );
+
+    const POLL_MS = 5_000;
+    const deadline = Date.now() + remainingMs;
+
+    const release = () => {
+      state.active = false;
+      this.drainGroup(groupJid);
+    };
+
+    const poll = () => {
+      if (this.shuttingDown) return;
+
+      if (!isRunning(containerName)) {
+        logger.info(
+          { groupJid, containerName },
+          'Orphaned container exited — releasing group slot',
+        );
+        release();
+        return;
+      }
+
+      if (Date.now() >= deadline) {
+        logger.warn(
+          { groupJid, containerName },
+          'Orphaned container exceeded timeout — force stopping',
+        );
+        forceKill(containerName);
+        release();
+        return;
+      }
+
+      setTimeout(poll, POLL_MS);
+    };
+
+    setTimeout(poll, POLL_MS);
+  }
+
   async shutdown(_gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
 

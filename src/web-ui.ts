@@ -57,7 +57,7 @@ tr:hover td{background:#1c2128}
 .msg:last-child{border-bottom:none}
 .msg-meta{font-size:11px;color:#8b949e;margin-bottom:3px}
 .msg-body{font-size:13px;white-space:pre-wrap;word-break:break-word}
-.msg.bot .msg-body{color:#79c0ff}.msg.me .msg-body{color:#56d364}
+.msg.bot .msg-body{color:#79c0ff}.msg.me .msg-body{color:#56d364}.msg-sender{font-size:12px;font-weight:600;color:#c8922a;margin-bottom:2px}
 .send-row{display:flex;gap:8px}
 .send-row input{flex:1;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#e6edf3;font-size:14px;outline:none}
 .send-row input:focus{border-color:#58a6ff}
@@ -321,7 +321,8 @@ document.addEventListener('DOMContentLoaded', function() {
       el.innerHTML = data.map(function(m) {
         var cls = m.is_bot_message ? 'bot' : (m.is_from_me ? 'me' : '');
         var who = m.is_bot_message ? 'Bot' : esc(m.sender_name || m.sender);
-        return '<div class="msg '+cls+'"><div class="msg-meta">'+who+' &middot; '+fmtTime(m.timestamp)+'</div><div class="msg-body">'+esc(m.content)+'</div></div>';
+        var senderHdr = (m.is_bot_message && m.sender_name && m.sender_name !== 'Bot') ? '<div class="msg-sender">~'+esc(m.sender_name)+'</div>' : '';
+        return '<div class="msg '+cls+'"><div class="msg-meta">'+who+' &middot; '+fmtTime(m.timestamp)+'</div>'+senderHdr+'<div class="msg-body">'+esc(m.content)+'</div></div>';
       }).join('');
       if (atBottom) el.scrollTop = el.scrollHeight;
     } catch(e) {}

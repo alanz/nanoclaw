@@ -738,10 +738,20 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text, sender) => {
+    sendMessage: async (jid, text, sender) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text, sender);
+      await channel.sendMessage(jid, text, sender);
+      storeMessage({
+        id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        chat_jid: jid,
+        sender: sender ?? ASSISTANT_NAME,
+        sender_name: sender ?? ASSISTANT_NAME,
+        content: text,
+        timestamp: new Date().toISOString(),
+        is_from_me: true,
+        is_bot_message: true,
+      });
     },
     sendFile: (jid, filePath, caption, _sender) => {
       const channel = findChannel(channels, jid);

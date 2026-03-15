@@ -65,6 +65,11 @@ beforeEach(() => {
       if (group) groups[jid] = { ...group, trustedGroup: trusted || undefined };
     },
     syncGroups: async () => {},
+    startRemoteControl: async () => ({
+      ok: false as const,
+      error: 'not implemented in tests',
+    }),
+    stopRemoteControl: async () => {},
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
   };

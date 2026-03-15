@@ -10,6 +10,8 @@ import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
+type RemoteEnvResult = { ok: true; url: string } | { ok: false; error: string };
+
 export interface IpcDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
   sendFile: (
@@ -22,6 +24,8 @@ export interface IpcDeps {
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   setGroupTrusted: (jid: string, trusted: boolean) => void;
   syncGroups: (force: boolean) => Promise<void>;
+  startRemoteControl: (chatJid: string) => Promise<RemoteEnvResult>;
+  stopRemoteControl: (chatJid: string) => Promise<void>;
   getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
     groupFolder: string,
@@ -526,6 +530,42 @@ export async function processTaskIpc(
           { data },
           'Invalid set_group_trusted request - missing fields',
         );
+      }
+      break;
+
+    case 'remote_control':
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized remote_control attempt blocked',
+        );
+        break;
+      }
+      if (data.chatJid) {
+        const result: RemoteEnvResult = await deps.startRemoteControl(
+          data.chatJid,
+        );
+        const text = result.ok
+          ? `Remote control ready: ${result.url}`
+          : `Remote control failed: ${result.error}`;
+        await deps.sendMessage(data.chatJid, text);
+        logger.info(
+          { chatJid: data.chatJid, ok: result.ok },
+          'remote_control handled',
+        );
+      }
+      break;
+
+    case 'remote_control_stop':
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized remote_control_stop attempt blocked',
+        );
+        break;
+      }
+      if (data.chatJid) {
+        await deps.stopRemoteControl(data.chatJid);
       }
       break;
 

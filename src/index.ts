@@ -865,6 +865,16 @@ async function main(): Promise<void> {
           .map((ch) => ch.syncGroups!(force)),
       );
     },
+    startRemoteControl: (chatJid) =>
+      startRemoteControl('ipc', chatJid, process.cwd()),
+    stopRemoteControl: async (chatJid) => {
+      const result = stopRemoteControl();
+      const text = result.ok
+        ? 'Remote control session ended.'
+        : `Remote control: ${result.error}`;
+      const channel = findChannel(channels, chatJid);
+      await channel?.sendMessage(chatJid, text);
+    },
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),

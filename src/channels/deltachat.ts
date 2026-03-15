@@ -345,9 +345,25 @@ export class DeltaChatChannel implements Channel {
 
           // /help works in any chat (registered or not)
           if (text.trim() === '/help') {
+            const helpGroups = this.opts.registeredGroups();
+            const helpGroup = helpGroups[jid];
+            const isMain = helpGroup?.isMain === true;
+            const lines = [
+              '/ping — check if Andy is online',
+              "/chatid — show this chat's ID and registration status",
+              '/esc [context] — interrupt the running agent and inject new context',
+              '/compact — compact the conversation to free up context',
+            ];
+            if (isMain) {
+              lines.push(
+                '/remote-control — start a remote Claude Code session (mobile/laptop)',
+              );
+              lines.push('/remote-control-end — stop the remote session');
+            }
+            lines.push('/help — show this message');
             await this.sendMessage(
               jid,
-              "Available commands:\n/ping — check if Andy is online\n/chatid — show this chat's ID and registration status\n/esc [context] — interrupt the running agent and inject new context\n/compact — compact the conversation to free up context\n/help — show this message",
+              'Available commands:\n' + lines.join('\n'),
             );
             return;
           }

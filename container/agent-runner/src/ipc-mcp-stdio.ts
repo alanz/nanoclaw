@@ -412,6 +412,48 @@ A trusted group behaves like a 1:1 DM: no trigger word is required and session c
   },
 );
 
+server.tool(
+  'start_remote_control',
+  `Start a Claude Code remote session accessible from any device (mobile, laptop, etc.).
+The host will reply in chat with a claude.ai URL that opens a shared browser-based Claude Code session on the host machine.
+Main group only. If a session is already running, returns the existing URL.`,
+  {},
+  async () => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can start a remote control session.' }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, { type: 'remote_control', chatJid, timestamp: new Date().toISOString() });
+
+    return {
+      content: [{ type: 'text' as const, text: 'Remote control requested. The URL will be sent to this chat when ready (up to 30 seconds).' }],
+    };
+  },
+);
+
+server.tool(
+  'stop_remote_control',
+  'Stop the active Claude Code remote control session. Main group only.',
+  {},
+  async () => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can stop a remote control session.' }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, { type: 'remote_control_stop', chatJid, timestamp: new Date().toISOString() });
+
+    return {
+      content: [{ type: 'text' as const, text: 'Remote control stop requested.' }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

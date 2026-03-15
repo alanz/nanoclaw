@@ -34,6 +34,21 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+## Available CLI Tools
+
+Beyond standard bash builtins, these are available in your sandbox:
+
+- `curl` — HTTP requests
+- `jq` — JSON parsing and transformation (`curl … | jq '.field'`)
+- `python3` — scripting, XML parsing, data processing
+- `sqlite3` — query SQLite databases
+- `imagemagick` — image conversion and manipulation (`convert`, `identify`)
+- `rg` (ripgrep) — fast text search across files
+- `zip` / `unzip` — archive handling
+- `git` — version control
+- `node` / `npm` — JavaScript runtime
+- `agent-browser` — full browser automation (see below)
+
 ## Your Workspace
 
 Files you create are saved in `/workspace/group/`. Use this for notes, research, or anything that should persist.

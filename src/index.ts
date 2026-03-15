@@ -21,6 +21,7 @@ import {
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
+  writeRssFeedsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
@@ -33,6 +34,7 @@ import {
 import {
   getAllChats,
   getAllRegisteredGroups,
+  getAllRssFeeds,
   getAllSessions,
   getAllTasks,
   getMessagesSince,
@@ -71,6 +73,7 @@ import {
   handleSessionCommand,
   isSessionCommandAllowed,
 } from './session-commands.js';
+import { startRssMonitorLoop } from './rss-monitor.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -367,6 +370,10 @@ async function runAgent(
     availableGroups,
     new Set(Object.keys(registeredGroups)),
   );
+
+  // Write RSS feeds snapshot for the container to read via list_rss_feeds
+  const rssFeeds = getAllRssFeeds();
+  writeRssFeedsSnapshot(group.folder, isMain, rssFeeds);
 
   // Wrap onOutput to track session ID from streamed results.
   // Only persist newSessionId on success — error outputs can carry the old
@@ -815,6 +822,34 @@ async function main(): Promise<void> {
         await channel.sendMessage(jid, text);
         storeMessage({
           id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          chat_jid: jid,
+          sender: ASSISTANT_NAME,
+          sender_name: ASSISTANT_NAME,
+          content: text,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          is_bot_message: true,
+        });
+      }
+    },
+  });
+  startRssMonitorLoop({
+    registeredGroups: () => registeredGroups,
+    getSessions: () => sessions,
+    queue,
+    onProcess: (groupJid, proc, containerName, groupFolder) =>
+      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    sendMessage: async (jid, rawText) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'No channel owns JID, cannot send RSS message');
+        return;
+      }
+      const text = formatOutbound(rawText);
+      if (text) {
+        await channel.sendMessage(jid, text);
+        storeMessage({
+          id: `rss-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           chat_jid: jid,
           sender: ASSISTANT_NAME,
           sender_name: ASSISTANT_NAME,

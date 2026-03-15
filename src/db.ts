@@ -8,6 +8,7 @@ import { logger } from './logger.js';
 import {
   NewMessage,
   RegisteredGroup,
+  RssFeed,
   ScheduledTask,
   TaskRunLog,
 } from './types.js';
@@ -64,6 +65,21 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
+
+    CREATE TABLE IF NOT EXISTS rss_feeds (
+      id TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      url TEXT NOT NULL,
+      title TEXT,
+      schedule_type TEXT NOT NULL DEFAULT 'interval',
+      schedule_value TEXT NOT NULL,
+      next_check TEXT,
+      seen_guids TEXT NOT NULL DEFAULT '[]',
+      interest TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rss_next_check ON rss_feeds(next_check);
 
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
@@ -687,6 +703,77 @@ export function getTaskRunLogs(
        FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC LIMIT ?`,
     )
     .all(taskId, limit) as Array<TaskRunLog & { id: number }>;
+}
+
+// --- RSS feed accessors ---
+
+export function createRssFeed(feed: RssFeed): void {
+  db.prepare(
+    `INSERT INTO rss_feeds (id, group_folder, chat_jid, url, title, schedule_type, schedule_value, next_check, seen_guids, interest, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    feed.id,
+    feed.group_folder,
+    feed.chat_jid,
+    feed.url,
+    feed.title,
+    feed.schedule_type,
+    feed.schedule_value,
+    feed.next_check,
+    feed.seen_guids,
+    feed.interest,
+    feed.created_at,
+  );
+}
+
+export function getRssFeedById(id: string): RssFeed | undefined {
+  return db.prepare('SELECT * FROM rss_feeds WHERE id = ?').get(id) as
+    | RssFeed
+    | undefined;
+}
+
+export function getAllRssFeeds(): RssFeed[] {
+  return db
+    .prepare('SELECT * FROM rss_feeds ORDER BY created_at DESC')
+    .all() as RssFeed[];
+}
+
+export function getRssFeedsForGroup(groupFolder: string): RssFeed[] {
+  return db
+    .prepare(
+      'SELECT * FROM rss_feeds WHERE group_folder = ? ORDER BY created_at DESC',
+    )
+    .all(groupFolder) as RssFeed[];
+}
+
+export function getDueRssFeeds(): RssFeed[] {
+  const now = new Date().toISOString();
+  return db
+    .prepare(
+      `SELECT * FROM rss_feeds WHERE next_check IS NOT NULL AND next_check <= ? ORDER BY next_check`,
+    )
+    .all(now) as RssFeed[];
+}
+
+export function updateRssFeedAfterCheck(
+  id: string,
+  seenGuids: string,
+  nextCheck: string,
+  title?: string,
+): void {
+  if (title !== undefined) {
+    db.prepare(
+      `UPDATE rss_feeds SET seen_guids = ?, next_check = ?, title = ? WHERE id = ?`,
+    ).run(seenGuids, nextCheck, title, id);
+  } else {
+    db.prepare(
+      `UPDATE rss_feeds SET seen_guids = ?, next_check = ? WHERE id = ?`,
+    ).run(seenGuids, nextCheck, id);
+  }
+}
+
+export function deleteRssFeed(id: string): void {
+  db.prepare('DELETE FROM rss_feeds WHERE id = ?').run(id);
 }
 
 // --- JSON migration ---

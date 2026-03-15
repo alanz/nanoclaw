@@ -5,7 +5,14 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createRssFeed,
+  createTask,
+  deleteRssFeed,
+  deleteTask,
+  getTaskById,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -224,6 +231,12 @@ export async function processTaskIpc(
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
     trusted?: boolean;
+    // For subscribe_rss / unsubscribe_rss
+    feedId?: string;
+    feedUrl?: string;
+    feedScheduleType?: 'interval' | 'cron';
+    feedScheduleValue?: string;
+    feedInterest?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -567,6 +580,101 @@ export async function processTaskIpc(
       if (data.chatJid) {
         await deps.stopRemoteControl(data.chatJid);
       }
+      break;
+
+    case 'subscribe_rss': {
+      if (
+        !data.feedId ||
+        !data.feedUrl ||
+        !data.feedScheduleType ||
+        !data.feedScheduleValue ||
+        !data.targetJid
+      ) {
+        logger.warn({ data }, 'Invalid subscribe_rss request — missing fields');
+        break;
+      }
+
+      const targetJid = data.targetJid;
+      const targetGroupEntry = registeredGroups[targetJid];
+      if (!targetGroupEntry) {
+        logger.warn(
+          { targetJid },
+          'subscribe_rss: target group not registered',
+        );
+        break;
+      }
+
+      const targetFolder = targetGroupEntry.folder;
+      if (!isMain && targetFolder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, targetFolder },
+          'Unauthorized subscribe_rss attempt blocked',
+        );
+        break;
+      }
+
+      // Compute first next_check
+      let nextCheck: string;
+      if (data.feedScheduleType === 'cron') {
+        try {
+          const interval = CronExpressionParser.parse(data.feedScheduleValue, {
+            tz: TIMEZONE,
+          });
+          nextCheck =
+            interval.next().toISOString() ??
+            new Date(Date.now() + 86400000).toISOString();
+        } catch {
+          logger.warn(
+            { value: data.feedScheduleValue },
+            'subscribe_rss: invalid cron',
+          );
+          break;
+        }
+      } else {
+        const ms = parseInt(data.feedScheduleValue, 10);
+        if (isNaN(ms) || ms <= 0) {
+          logger.warn(
+            { value: data.feedScheduleValue },
+            'subscribe_rss: invalid interval',
+          );
+          break;
+        }
+        nextCheck = new Date(Date.now() + ms).toISOString();
+      }
+
+      createRssFeed({
+        id: data.feedId,
+        group_folder: targetFolder,
+        chat_jid: targetJid,
+        url: data.feedUrl,
+        title: null,
+        schedule_type: data.feedScheduleType,
+        schedule_value: data.feedScheduleValue,
+        next_check: nextCheck,
+        seen_guids: '[]',
+        interest: data.feedInterest ?? null,
+        created_at: new Date().toISOString(),
+      });
+      logger.info(
+        { feedId: data.feedId, url: data.feedUrl, targetFolder },
+        'RSS feed subscribed via IPC',
+      );
+      break;
+    }
+
+    case 'unsubscribe_rss':
+      if (!data.feedId) {
+        logger.warn(
+          { data },
+          'Invalid unsubscribe_rss request — missing feedId',
+        );
+        break;
+      }
+      deleteRssFeed(data.feedId);
+      logger.info(
+        { feedId: data.feedId, sourceGroup },
+        'RSS feed unsubscribed via IPC',
+      );
       break;
 
     default:

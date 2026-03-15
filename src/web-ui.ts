@@ -13,6 +13,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllRouterStateRows,
+  getAllRssFeeds,
   getAllSessions,
   getAllTasks,
   getChatMessages,
@@ -99,6 +100,7 @@ pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;f
 <nav>
   <h1>NanoClaw</h1>
   <a id="nav-groups" href="#groups">Groups</a>
+  <a id="nav-feeds" href="#feeds">Feeds</a>
   <a id="nav-system" href="#system">System</a>
 </nav>
 <main>
@@ -146,6 +148,12 @@ pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;f
       </div>
     </div>
 
+  </div>
+
+  <!-- Feeds -->
+  <div id="section-feeds" class="section">
+    <h2>RSS Feeds</h2>
+    <div id="feeds-body">Loading...</div>
   </div>
 
   <!-- System -->
@@ -203,6 +211,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (nav) nav.classList.add('active');
     clearInterval(pollTimer); pollTimer = null;
     if (name === 'groups') showGroupList();
+    if (name === 'feeds') loadFeeds();
     if (name === 'system') loadSystem();
   }
 
@@ -503,6 +512,33 @@ document.addEventListener('DOMContentLoaded', function() {
     } catch(e) { rsel.innerHTML = '<div class="empty">Error loading router state</div>'; }
   }
 
+  // ── Feeds ──────────────────────────────────────────────────────────────────
+
+  async function loadFeeds() {
+    var el = document.getElementById('feeds-body');
+    el.innerHTML = 'Loading\u2026';
+    try {
+      var data = await fetch('/api/rss-feeds').then(function(r) { return r.json(); });
+      if (!data.length) { el.innerHTML = '<div class="empty">No RSS feed subscriptions</div>'; return; }
+      el.innerHTML = '<div class="card"><table><thead><tr><th>Feed</th><th>Group</th><th>Schedule</th><th>Interests</th><th>Next Check</th></tr></thead><tbody>'
+        + data.map(function(f) {
+          var label = esc(f.title || f.url);
+          var url = esc(f.url);
+          var schedStr = f.schedule_type === 'interval'
+            ? (parseInt(f.schedule_value) >= 3600000 ? Math.round(parseInt(f.schedule_value)/3600000)+'h' : Math.round(parseInt(f.schedule_value)/60000)+'m')
+            : esc(f.schedule_value);
+          return '<tr>'
+            +'<td><a href="'+url+'" target="_blank" style="color:#58a6ff;text-decoration:none">'+label+'</a><div class="dim" style="font-size:11px;margin-top:2px">'+url+'</div></td>'
+            +'<td class="dim">'+esc(f.group_folder)+'</td>'
+            +'<td class="dim">'+esc(f.schedule_type)+': '+schedStr+'</td>'
+            +'<td class="dim" style="max-width:200px">'+esc(f.interest || '\u2014')+'</td>'
+            +'<td class="dim">'+(f.next_check ? fmtDate(f.next_check) : '\u2014')+'</td>'
+            +'</tr>';
+        }).join('')
+        + '</tbody></table></div>';
+    } catch(e) { el.innerHTML = '<div class="empty">Error loading feeds</div>'; }
+  }
+
   // ── Boot ───────────────────────────────────────────────────────────────────
   show('groups');
 });
@@ -693,6 +729,12 @@ export function startWebUi(
       // GET /api/tasks
       if (req.method === 'GET' && pathname === '/api/tasks') {
         sendJson(res, getAllTasks());
+        return;
+      }
+
+      // GET /api/rss-feeds
+      if (req.method === 'GET' && pathname === '/api/rss-feeds') {
+        sendJson(res, getAllRssFeeds());
         return;
       }
 

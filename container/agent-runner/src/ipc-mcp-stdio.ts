@@ -454,6 +454,115 @@ server.tool(
   },
 );
 
+server.tool(
+  'subscribe_rss',
+  `Subscribe to an RSS or Atom feed. The host will fetch the feed on the given schedule, compare new items to the user's interests, and notify if anything matches.
+
+SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
+• interval: Milliseconds between checks (e.g., "86400000" for once per day, "3600000" for hourly)
+• cron: Standard cron expression (e.g., "0 9 * * *" for daily at 9am)
+
+INTEREST: Describe what the user cares about. Be specific. This is injected into the judgment prompt on every check. Example: "Rust, WebAssembly, distributed systems, database internals".
+If no interest is provided, all new items are summarized and sent.`,
+  {
+    url: z.string().describe('RSS or Atom feed URL'),
+    schedule_type: z.enum(['interval', 'cron']).default('interval'),
+    schedule_value: z.string().default('86400000').describe('interval: ms (e.g. "86400000" = 1 day) | cron: expression (e.g. "0 9 * * *")'),
+    interest: z.string().optional().describe('What the user is interested in — used to filter items by relevance'),
+    target_group_jid: z.string().optional().describe('(Main group only) JID of the group to subscribe for. Defaults to current group.'),
+  },
+  async (args) => {
+    if (args.schedule_type === 'cron') {
+      try {
+        CronExpressionParser.parse(args.schedule_value);
+      } catch {
+        return {
+          content: [{ type: 'text' as const, text: `Invalid cron: "${args.schedule_value}". Use format like "0 9 * * *" (daily 9am).` }],
+          isError: true,
+        };
+      }
+    } else {
+      const ms = parseInt(args.schedule_value, 10);
+      if (isNaN(ms) || ms <= 0) {
+        return {
+          content: [{ type: 'text' as const, text: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds.` }],
+          isError: true,
+        };
+      }
+    }
+
+    const targetJid = isMain && args.target_group_jid ? args.target_group_jid : chatJid;
+    const feedId = `rss-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const data = {
+      type: 'subscribe_rss',
+      feedId,
+      feedUrl: args.url,
+      feedScheduleType: args.schedule_type,
+      feedScheduleValue: args.schedule_value,
+      feedInterest: args.interest,
+      targetJid,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `RSS feed subscribed (${feedId}): ${args.url} — checks every ${args.schedule_type === 'cron' ? args.schedule_value : Math.round(parseInt(args.schedule_value) / 3600000) + 'h'}.` }],
+    };
+  },
+);
+
+server.tool(
+  'unsubscribe_rss',
+  'Remove an RSS feed subscription.',
+  {
+    feed_id: z.string().describe('The feed ID to unsubscribe (from list_rss_feeds)'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'unsubscribe_rss',
+      feedId: args.feed_id,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `RSS feed ${args.feed_id} unsubscribed.` }] };
+  },
+);
+
+server.tool(
+  'list_rss_feeds',
+  "List active RSS feed subscriptions. From main: shows all feeds. From other groups: shows only that group's feeds.",
+  {},
+  async () => {
+    const feedsFile = path.join(IPC_DIR, 'rss_feeds.json');
+    try {
+      if (!fs.existsSync(feedsFile)) {
+        return { content: [{ type: 'text' as const, text: 'No RSS feed subscriptions found.' }] };
+      }
+      const feeds = JSON.parse(fs.readFileSync(feedsFile, 'utf-8')) as Array<{
+        id: string; url: string; title: string | null; schedule_type: string;
+        schedule_value: string; next_check: string | null; interest: string | null; group_folder: string;
+      }>;
+      if (!feeds.length) {
+        return { content: [{ type: 'text' as const, text: 'No RSS feed subscriptions found.' }] };
+      }
+      const formatted = feeds
+        .map((f) =>
+          `- [${f.id}] ${f.title || f.url} (${f.schedule_type}: ${f.schedule_value})` +
+          (f.interest ? ` — interests: ${f.interest}` : '') +
+          (f.next_check ? ` — next: ${f.next_check}` : ''),
+        )
+        .join('\n');
+      return { content: [{ type: 'text' as const, text: `RSS feeds:\n${formatted}` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Error reading feeds: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

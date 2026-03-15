@@ -69,6 +69,20 @@ export interface ScheduledTask {
   created_at: string;
 }
 
+export interface RssFeed {
+  id: string;
+  group_folder: string;
+  chat_jid: string;
+  url: string;
+  title: string | null;
+  schedule_type: 'interval' | 'cron';
+  schedule_value: string;
+  next_check: string | null;
+  seen_guids: string; // JSON array, capped at 500
+  interest: string | null;
+  created_at: string;
+}
+
 export interface TaskRunLog {
   task_id: string;
   run_at: string;

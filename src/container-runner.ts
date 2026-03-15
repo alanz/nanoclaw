@@ -669,6 +669,32 @@ export function writeTasksSnapshot(
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
+export function writeRssFeedsSnapshot(
+  groupFolder: string,
+  isMain: boolean,
+  feeds: Array<{
+    id: string;
+    group_folder: string;
+    chat_jid: string;
+    url: string;
+    title: string | null;
+    schedule_type: string;
+    schedule_value: string;
+    next_check: string | null;
+    interest: string | null;
+  }>,
+): void {
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+
+  const filtered = isMain
+    ? feeds
+    : feeds.filter((f) => f.group_folder === groupFolder);
+
+  const feedsFile = path.join(groupIpcDir, 'rss_feeds.json');
+  fs.writeFileSync(feedsFile, JSON.stringify(filtered, null, 2));
+}
+
 export interface AvailableGroup {
   jid: string;
   name: string;

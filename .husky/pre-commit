@@ -1,2 +1,5 @@
+STAGED=$(git diff --name-only --cached)
 npm run format:fix
-git add -u
+if [ -n "$STAGED" ]; then
+  echo "$STAGED" | xargs git add
+fi

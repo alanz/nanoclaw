@@ -24,7 +24,12 @@ import {
 // --- Helpers ---
 
 function createMockProcess(pid = 12345) {
-  return { pid, unref: vi.fn(), kill: vi.fn() };
+  return {
+    pid,
+    unref: vi.fn(),
+    kill: vi.fn(),
+    stdin: { write: vi.fn(), end: vi.fn() },
+  };
 }
 
 describe('remote-control', () => {
@@ -109,7 +114,7 @@ describe('remote-control', () => {
       const spawnCall = spawnMock.mock.calls[0];
       const options = spawnCall[2];
       // stdio should use file descriptors (numbers), not 'pipe'
-      expect(options.stdio[0]).toBe('ignore');
+      expect(options.stdio[0]).toBe('pipe');
       expect(typeof options.stdio[1]).toBe('number');
       expect(typeof options.stdio[2]).toBe('number');
     });

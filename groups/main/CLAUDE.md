@@ -163,5 +163,5 @@ When scheduling tasks for other groups, use the `target_group_jid` parameter wit
 - [ ] Configure additional directory mounts — see example config in the repo (mount-allowlist)
 
 - [x] Add a web console (read-only log viewer to start, full dashboard longer term — registered groups, message history, service status; SQLite DBs have everything needed)
-- [ ] Set up Borg backup of `~/nanoclaw/store/` (messages.db, nanoclaw.db, deltachat/) to BorgBase offsite
+- [x] Set up Borg backup to BorgBase offsite — hourly via `scripts/backup-db.sh`: SQLite dump + `groups/` rsync to `~/nanoclaw-backups/`, then `borg create` to `ssh://o5eh77xl@o5eh77xl.repo.borgbase.com/./repo`. Requires `BORG_PASSPHRASE` in `.env` and SSH key `~/.ssh/borgbase_nanoclaw` registered on BorgBase with append-only access.
 - [ ] Add a way to reset the agent session (e.g. IPC command or message trigger like "reset session") — currently requires manual DB edit: `DELETE FROM router_state WHERE key LIKE 'session%'`. Should write a summary to CLAUDE.md before clearing so nothing important is lost.

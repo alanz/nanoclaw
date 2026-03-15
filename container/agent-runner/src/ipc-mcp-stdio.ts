@@ -380,6 +380,38 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'set_group_trusted',
+  `Grant or revoke trusted status for a registered group. Main group only.
+
+A trusted group behaves like a 1:1 DM: no trigger word is required and session commands (/compact, /esc) are allowed from any sender. Use this for private groups that only contain the bot and its owner.`,
+  {
+    jid: z.string().describe('The chat JID of the group to update'),
+    trusted: z.boolean().describe('True to grant trusted status, false to revoke it'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can set group trust.' }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'set_group_trusted',
+      jid: args.jid,
+      trusted: args.trusted,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Group ${args.jid} trusted status set to ${args.trusted}.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

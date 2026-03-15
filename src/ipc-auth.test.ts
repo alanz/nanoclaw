@@ -60,6 +60,10 @@ beforeEach(() => {
       setRegisteredGroup(jid, group);
       // Mock the fs.mkdirSync that registerGroup does
     },
+    setGroupTrusted: (jid, trusted) => {
+      const group = groups[jid];
+      if (group) groups[jid] = { ...group, trustedGroup: trusted || undefined };
+    },
     syncGroups: async () => {},
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},

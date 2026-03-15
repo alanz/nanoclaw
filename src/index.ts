@@ -794,6 +794,13 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
+    setGroupTrusted: (jid: string, trusted: boolean) => {
+      const group = registeredGroups[jid];
+      if (!group) return;
+      const updated = { ...group, trustedGroup: trusted || undefined };
+      setRegisteredGroup(jid, updated);
+      registeredGroups[jid] = updated;
+    },
     syncGroups: async (force: boolean) => {
       await Promise.all(
         channels

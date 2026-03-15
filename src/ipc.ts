@@ -20,6 +20,7 @@ export interface IpcDeps {
   ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
+  setGroupTrusted: (jid: string, trusted: boolean) => void;
   syncGroups: (force: boolean) => Promise<void>;
   getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
@@ -211,13 +212,14 @@ export async function processTaskIpc(
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
-    // For register_group
+    // For register_group / set_group_trusted
     jid?: string;
     name?: string;
     folder?: string;
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    trusted?: boolean;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -492,6 +494,37 @@ export async function processTaskIpc(
         logger.warn(
           { data },
           'Invalid register_group request - missing required fields',
+        );
+      }
+      break;
+
+    case 'set_group_trusted':
+      // Only main group can change trust status
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized set_group_trusted attempt blocked',
+        );
+        break;
+      }
+      if (data.jid && typeof data.trusted === 'boolean') {
+        const targetGroup = registeredGroups[data.jid];
+        if (!targetGroup) {
+          logger.warn(
+            { jid: data.jid },
+            'set_group_trusted: group not registered',
+          );
+          break;
+        }
+        deps.setGroupTrusted(data.jid, data.trusted);
+        logger.info(
+          { jid: data.jid, trusted: data.trusted },
+          'Group trusted status updated via IPC',
+        );
+      } else {
+        logger.warn(
+          { data },
+          'Invalid set_group_trusted request - missing fields',
         );
       }
       break;

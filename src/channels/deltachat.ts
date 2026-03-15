@@ -360,8 +360,9 @@ export class DeltaChatChannel implements Channel {
             if (!group) {
               status = 'not registered';
             } else {
-              const requiresTrigger = group.requiresTrigger !== false;
               const trusted = group.trustedGroup === true;
+              const requiresTrigger =
+                !group.isMain && !trusted && group.requiresTrigger !== false;
               const parts = ['registered'];
               parts.push(
                 requiresTrigger ? 'trigger required' : 'no trigger required',

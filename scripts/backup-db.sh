@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# Ensure Homebrew binaries (sqlite3, rsync, borg) are available when run via launchd
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Load BORG_PASSPHRASE and other config from .env

@@ -120,6 +120,12 @@ export async function startRemoteControl(
     return { ok: false, error: `Failed to start: ${err.message}` };
   }
 
+  // Auto-accept the "Enable Remote Control?" prompt
+  if (proc.stdin) {
+    proc.stdin.write('y\n');
+    proc.stdin.end();
+  }
+
   // Close FDs in the parent — the child inherited copies
   fs.closeSync(stdoutFd);
   fs.closeSync(stderrFd);

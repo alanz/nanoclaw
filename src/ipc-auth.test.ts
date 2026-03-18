@@ -72,6 +72,7 @@ beforeEach(() => {
     stopRemoteControl: async () => {},
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
+    onTasksChanged: () => {},
   };
 });
 

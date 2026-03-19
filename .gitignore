@@ -9,13 +9,10 @@ store/
 data/
 logs/
 
-# Groups - only track base structure and specific CLAUDE.md files
+# Groups - only track global template CLAUDE.md
 groups/*
-!groups/main/
 !groups/global/
-groups/main/*
 groups/global/*
-!groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
 
 # Secrets

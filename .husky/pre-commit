@@ -1,5 +1,9 @@
 STAGED=$(git diff --name-only --cached)
 npm run format:fix
 if [ -n "$STAGED" ]; then
-  echo "$STAGED" | xargs git add
+  echo "$STAGED" | while IFS= read -r f; do
+    if [ -f "$f" ] && ! git check-ignore -q "$f" 2>/dev/null; then
+      git add "$f"
+    fi
+  done
 fi

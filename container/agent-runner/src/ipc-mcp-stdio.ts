@@ -563,6 +563,95 @@ server.tool(
   },
 );
 
+server.tool(
+  'query_transcript',
+  `Query the message history for this group. Returns messages with their timestamp, sender, direction (inbound = from user, outbound = sent by bot), and content.
+
+TIME WINDOW: Use ISO 8601 timestamps for from/to (e.g. "2026-03-19T00:00:00.000Z"). Both are optional.
+
+PAGINATION: The response includes has_more (boolean) and next_cursor. If has_more is true, pass next_cursor as after_cursor in the next call to retrieve the following page.`,
+  {
+    from: z
+      .string()
+      .optional()
+      .describe(
+        'Start of time window (ISO 8601, inclusive). Omit to start from the beginning of history.',
+      ),
+    to: z
+      .string()
+      .optional()
+      .describe(
+        'End of time window (ISO 8601, inclusive). Omit to include messages up to now.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .default(50)
+      .describe('Maximum messages to return (1–200, default 50).'),
+    after_cursor: z
+      .string()
+      .optional()
+      .describe(
+        'Pagination cursor from a previous response (the next_cursor field). Returns the next page.',
+      ),
+  },
+  async (args) => {
+    const requestId = `tr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'query_transcript',
+      requestId,
+      chatJid,
+      from: args.from,
+      to: args.to,
+      limit: args.limit ?? 50,
+      afterCursor: args.after_cursor,
+      timestamp: new Date().toISOString(),
+    });
+
+    const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+    const responseFile = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + 15000;
+
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      if (fs.existsSync(responseFile)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+          fs.unlinkSync(responseFile);
+          return {
+            content: [
+              { type: 'text' as const, text: JSON.stringify(result, null, 2) },
+            ],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Error reading transcript response: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: 'Transcript query timed out. The host may be busy — try again.',
+        },
+      ],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

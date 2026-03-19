@@ -11,6 +11,7 @@ import {
   deleteRssFeed,
   deleteTask,
   getTaskById,
+  queryTranscript,
   updateTask,
 } from './db.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
@@ -238,6 +239,12 @@ export async function processTaskIpc(
     feedScheduleType?: 'interval' | 'cron';
     feedScheduleValue?: string;
     feedInterest?: string;
+    // For query_transcript
+    requestId?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    afterCursor?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -682,6 +689,48 @@ export async function processTaskIpc(
         'RSS feed unsubscribed via IPC',
       );
       break;
+
+    case 'query_transcript': {
+      if (!data.requestId || !data.chatJid) {
+        logger.warn(
+          { data },
+          'Invalid query_transcript request — missing requestId or chatJid',
+        );
+        break;
+      }
+      const targetJid = data.chatJid;
+      const targetGroup = registeredGroups[targetJid];
+      if (!isMain && (!targetGroup || targetGroup.folder !== sourceGroup)) {
+        logger.warn(
+          { sourceGroup, targetJid },
+          'Unauthorized query_transcript attempt blocked',
+        );
+        break;
+      }
+      const result = queryTranscript({
+        chatJid: targetJid,
+        from: data.from,
+        to: data.to,
+        limit: typeof data.limit === 'number' ? data.limit : 50,
+        afterCursor: data.afterCursor,
+      });
+      const responseDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(responseDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(responseDir, `${data.requestId}.json`),
+        JSON.stringify(result),
+      );
+      logger.info(
+        {
+          requestId: data.requestId,
+          chatJid: targetJid,
+          count: result.messages.length,
+          has_more: result.has_more,
+        },
+        'Transcript query fulfilled',
+      );
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

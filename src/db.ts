@@ -669,6 +669,89 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
   return result;
 }
 
+export interface TranscriptMessage {
+  id: string;
+  timestamp: string;
+  direction: 'inbound' | 'outbound';
+  sender: string;
+  content: string;
+}
+
+export interface TranscriptResult {
+  messages: TranscriptMessage[];
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+export function queryTranscript({
+  chatJid,
+  from,
+  to,
+  limit = 50,
+  afterCursor,
+}: {
+  chatJid: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  afterCursor?: string;
+}): TranscriptResult {
+  const effectiveLimit = Math.min(Math.max(1, limit), 200);
+
+  const conditions: string[] = ['chat_jid = ?'];
+  const params: (string | number)[] = [chatJid];
+
+  if (from) {
+    conditions.push('timestamp >= ?');
+    params.push(from);
+  }
+  if (to) {
+    conditions.push('timestamp <= ?');
+    params.push(to);
+  }
+  if (afterCursor) {
+    const cursorRowid = parseInt(afterCursor, 10);
+    if (!isNaN(cursorRowid)) {
+      conditions.push('rowid > ?');
+      params.push(cursorRowid);
+    }
+  }
+
+  params.push(effectiveLimit + 1);
+
+  const rows = db
+    .prepare(
+      `SELECT rowid, id, timestamp, is_from_me, sender_name, content
+       FROM messages
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY rowid ASC
+       LIMIT ?`,
+    )
+    .all(...params) as Array<{
+    rowid: number;
+    id: string;
+    timestamp: string;
+    is_from_me: number;
+    sender_name: string;
+    content: string;
+  }>;
+
+  const has_more = rows.length > effectiveLimit;
+  const slice = rows.slice(0, effectiveLimit);
+
+  const messages: TranscriptMessage[] = slice.map((row) => ({
+    id: row.id,
+    timestamp: row.timestamp,
+    direction: row.is_from_me ? 'outbound' : 'inbound',
+    sender: row.sender_name || '',
+    content: row.content,
+  }));
+
+  const next_cursor = has_more ? String(slice[slice.length - 1].rowid) : null;
+
+  return { messages, has_more, next_cursor };
+}
+
 export function getChatMessages(
   chatJid: string,
   limit: number = 200,

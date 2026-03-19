@@ -9,6 +9,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  queryTranscript,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -446,6 +447,154 @@ describe('message query LIMIT', () => {
       50,
     );
     expect(messages).toHaveLength(10);
+  });
+});
+
+// --- queryTranscript ---
+
+describe('queryTranscript', () => {
+  const JID = 'chat@g.us';
+  const OTHER_JID = 'other@g.us';
+
+  beforeEach(() => {
+    storeChatMetadata(JID, '2026-01-01T09:59:00.000Z');
+    storeChatMetadata(OTHER_JID, '2026-01-01T09:59:00.000Z');
+    store({
+      id: 'm1',
+      chat_jid: JID,
+      sender: 's1',
+      sender_name: 'Alice',
+      content: 'Hello',
+      timestamp: '2026-01-01T10:00:00.000Z',
+      is_from_me: false,
+    });
+    store({
+      id: 'm2',
+      chat_jid: JID,
+      sender: 'bot',
+      sender_name: 'Bot',
+      content: 'Hi there',
+      timestamp: '2026-01-01T10:01:00.000Z',
+      is_from_me: true,
+    });
+    store({
+      id: 'm3',
+      chat_jid: JID,
+      sender: 's1',
+      sender_name: 'Alice',
+      content: 'How are you?',
+      timestamp: '2026-01-01T10:02:00.000Z',
+      is_from_me: false,
+    });
+    store({
+      id: 'm4',
+      chat_jid: JID,
+      sender: 'bot',
+      sender_name: 'Bot',
+      content: 'Great thanks!',
+      timestamp: '2026-01-01T10:03:00.000Z',
+      is_from_me: true,
+    });
+    store({
+      id: 'o1',
+      chat_jid: OTHER_JID,
+      sender: 'x',
+      sender_name: 'X',
+      content: 'Other chat',
+      timestamp: '2026-01-01T10:00:00.000Z',
+      is_from_me: false,
+    });
+  });
+
+  it('returns all messages for the given chatJid', () => {
+    const result = queryTranscript({ chatJid: JID });
+    expect(result.messages).toHaveLength(4);
+    expect(result.has_more).toBe(false);
+    expect(result.next_cursor).toBeNull();
+  });
+
+  it('does not return messages from other chats', () => {
+    const result = queryTranscript({ chatJid: JID });
+    expect(result.messages.every((m) => m.id !== 'o1')).toBe(true);
+  });
+
+  it('sets direction correctly', () => {
+    const result = queryTranscript({ chatJid: JID });
+    const [m1, m2, m3, m4] = result.messages;
+    expect(m1.direction).toBe('inbound');
+    expect(m2.direction).toBe('outbound');
+    expect(m3.direction).toBe('inbound');
+    expect(m4.direction).toBe('outbound');
+  });
+
+  it('includes sender and content', () => {
+    const result = queryTranscript({ chatJid: JID });
+    expect(result.messages[0].sender).toBe('Alice');
+    expect(result.messages[0].content).toBe('Hello');
+  });
+
+  it('filters by from timestamp (inclusive)', () => {
+    const result = queryTranscript({
+      chatJid: JID,
+      from: '2026-01-01T10:02:00.000Z',
+    });
+    expect(result.messages).toHaveLength(2);
+    expect(result.messages[0].id).toBe('m3');
+  });
+
+  it('filters by to timestamp (inclusive)', () => {
+    const result = queryTranscript({
+      chatJid: JID,
+      to: '2026-01-01T10:01:00.000Z',
+    });
+    expect(result.messages).toHaveLength(2);
+    expect(result.messages[1].id).toBe('m2');
+  });
+
+  it('filters by from+to range', () => {
+    const result = queryTranscript({
+      chatJid: JID,
+      from: '2026-01-01T10:01:00.000Z',
+      to: '2026-01-01T10:02:00.000Z',
+    });
+    expect(result.messages).toHaveLength(2);
+    expect(result.messages.map((m) => m.id)).toEqual(['m2', 'm3']);
+  });
+
+  it('respects limit and sets has_more and next_cursor', () => {
+    const result = queryTranscript({ chatJid: JID, limit: 2 });
+    expect(result.messages).toHaveLength(2);
+    expect(result.has_more).toBe(true);
+    expect(result.next_cursor).not.toBeNull();
+  });
+
+  it('paginates correctly using after_cursor', () => {
+    const page1 = queryTranscript({ chatJid: JID, limit: 2 });
+    expect(page1.messages).toHaveLength(2);
+    expect(page1.has_more).toBe(true);
+
+    const page2 = queryTranscript({
+      chatJid: JID,
+      limit: 2,
+      afterCursor: page1.next_cursor!,
+    });
+    expect(page2.messages).toHaveLength(2);
+    expect(page2.has_more).toBe(false);
+    expect(page2.next_cursor).toBeNull();
+
+    const allIds = [...page1.messages, ...page2.messages].map((m) => m.id);
+    expect(allIds).toEqual(['m1', 'm2', 'm3', 'm4']);
+  });
+
+  it('returns empty messages for unknown chatJid', () => {
+    const result = queryTranscript({ chatJid: 'unknown@g.us' });
+    expect(result.messages).toHaveLength(0);
+    expect(result.has_more).toBe(false);
+  });
+
+  it('clamps limit to 200 max', () => {
+    const result = queryTranscript({ chatJid: JID, limit: 9999 });
+    expect(result.messages).toHaveLength(4); // only 4 messages exist
   });
 });
 

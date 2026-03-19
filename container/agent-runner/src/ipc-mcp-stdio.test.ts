@@ -68,4 +68,16 @@ describe('buildDashboardUrl', () => {
       `${BASE}#groups/telegram_work/files/plan.md`,
     );
   });
+
+  it('strips /workspace/group/ prefix (group/ maps to the group folder on host)', () => {
+    expect(buildDashboardUrl(BASE, 'deltachat_nanoclaw-group', '/workspace/group/conversations/2026-03-14-conversation.md')).toBe(
+      `${BASE}#groups/deltachat_nanoclaw-group/files/conversations/2026-03-14-conversation.md`,
+    );
+  });
+
+  it('does not strip group/ when it is not a workspace-relative path', () => {
+    expect(buildDashboardUrl(BASE, FOLDER, 'group-notes/todo.md')).toBe(
+      `${BASE}#groups/${FOLDER}/files/group-notes/todo.md`,
+    );
+  });
 });

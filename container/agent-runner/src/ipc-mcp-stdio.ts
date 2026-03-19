@@ -669,6 +669,8 @@ export function buildDashboardUrl(
     if (rel.startsWith('/workspace/')) rel = rel.slice('/workspace/'.length);
     else if (rel.startsWith('workspace/')) rel = rel.slice('workspace/'.length);
     rel = rel.replace(/^\/+/, '');
+    // /workspace/group/ maps to the group folder on the host — strip it
+    if (rel.startsWith('group/')) rel = rel.slice('group/'.length);
     hash = `groups/${groupFolder}/files/${rel}`;
   } else {
     hash =

@@ -1,4 +1,6 @@
 import { ChildProcess } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 import { XMLParser } from 'fast-xml-parser';
 import { CronExpressionParser } from 'cron-parser';
@@ -13,6 +15,7 @@ import {
   getDueRssFeeds,
   updateRssFeedAfterCheck,
 } from './db.js';
+import { resolveGroupFolderPath } from './group-folder.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, RssFeed } from './types.js';
@@ -324,6 +327,14 @@ async function checkFeed(feed: RssFeed, deps: RssMonitorDeps): Promise<void> {
       async (streamedOutput) => {
         if (streamedOutput.result) {
           await deps.sendMessage(feed.chat_jid, streamedOutput.result);
+          const digestPath = path.join(
+            resolveGroupFolderPath(feed.group_folder),
+            'rss-digest.md',
+          );
+          const entry =
+            `\n\n## ${new Date().toISOString()} — ${feed.title || feed.url}\n\n` +
+            streamedOutput.result;
+          fs.appendFileSync(digestPath, entry);
           if (!closeTimer) {
             closeTimer = setTimeout(() => {
               deps.queue.closeStdin(feed.chat_jid);

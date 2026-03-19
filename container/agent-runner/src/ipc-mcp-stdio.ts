@@ -683,12 +683,10 @@ server.tool(
   'get_file_url',
   `Get a shareable dashboard URL for a file in your workspace, or for a group view (chat, tasks, files tab).
 
-The URL points to the NanoClaw web dashboard. You can share it with the user so they can open it directly.
+The URL points to the NanoClaw web dashboard and can be shared directly with the user.
 
 FILE URL: Pass a workspace file path (e.g. "/workspace/CLAUDE.md" or "notes/todo.md"). The dashboard will open that file in the Files tab.
-GROUP VIEWS: Omit file_path and set view to "chat", "tasks", or "files" for the respective tab.
-
-Returns null for webUiBaseUrl if the host has not configured WEB_UI_BASE_URL.`,
+GROUP VIEWS: Omit file_path and set view to "chat", "tasks", or "files" for the respective tab.`,
   {
     file_path: z
       .string()
@@ -720,7 +718,7 @@ Returns null for webUiBaseUrl if the host has not configured WEB_UI_BASE_URL.`,
         content: [
           {
             type: 'text' as const,
-            text: 'Web UI base URL is not configured on the host. Ask the user to set WEB_UI_BASE_URL in their environment.',
+            text: 'Web UI base URL is not configured. The dashboard URL cannot be generated.',
           },
         ],
       };

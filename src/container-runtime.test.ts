@@ -46,7 +46,7 @@ describe('readonlyMountArgs', () => {
 describe('stopContainer', () => {
   it('returns stop command using CONTAINER_RUNTIME_BIN', () => {
     expect(stopContainer('nanoclaw-test-123')).toBe(
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-test-123`,
+      `${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-test-123`,
     );
   });
 });

@@ -72,6 +72,10 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   10,
 );
 export const WEB_UI_PORT = parseInt(process.env.WEB_UI_PORT || '3002', 10);
+// Public-facing base URL for the web UI (e.g. a Tailscale Serve URL).
+// Used so agents can generate shareable deep links into the dashboard.
+export const WEB_UI_BASE_URL: string | null =
+  process.env.WEB_UI_BASE_URL?.replace(/\/$/, '') ?? null;
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '300000', 10); // 5min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(

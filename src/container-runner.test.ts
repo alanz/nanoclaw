@@ -208,3 +208,51 @@ describe('container-runner timeout behavior', () => {
     expect(result.newSessionId).toBe('session-456');
   });
 });
+
+import { writeNanoclawMetadata } from './container-runner.js';
+import fs from 'fs';
+import path from 'path';
+
+describe('writeNanoclawMetadata', () => {
+  beforeEach(() => {
+    vi.mocked(fs.mkdirSync).mockClear();
+    vi.mocked(fs.writeFileSync).mockClear();
+  });
+
+  it('writes nanoclaw_meta.json with the provided base URL', () => {
+    writeNanoclawMetadata('main', 'https://nanoclaw.example.ts.net');
+
+    expect(fs.mkdirSync).toHaveBeenCalled();
+    const [filePath, content] = vi.mocked(fs.writeFileSync).mock.calls[0] as [
+      string,
+      string,
+    ];
+    expect(filePath).toMatch(/nanoclaw_meta\.json$/);
+    expect(JSON.parse(content)).toEqual({
+      webUiBaseUrl: 'https://nanoclaw.example.ts.net',
+    });
+  });
+
+  it('writes nanoclaw_meta.json with null when base URL is not set', () => {
+    writeNanoclawMetadata('main', null);
+
+    const [filePath, content] = vi.mocked(fs.writeFileSync).mock.calls[0] as [
+      string,
+      string,
+    ];
+    expect(filePath).toMatch(/nanoclaw_meta\.json$/);
+    expect(JSON.parse(content)).toEqual({ webUiBaseUrl: null });
+  });
+
+  it('writes into the correct group IPC directory', () => {
+    writeNanoclawMetadata('telegram_work', 'https://example.com');
+
+    const [filePath] = vi.mocked(fs.writeFileSync).mock.calls[0] as [
+      string,
+      string,
+    ];
+    expect(filePath).toContain(
+      path.join('ipc', 'telegram_work', 'nanoclaw_meta.json'),
+    );
+  });
+});

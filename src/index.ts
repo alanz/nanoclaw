@@ -9,6 +9,7 @@ import {
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
+  WEB_UI_BASE_URL,
   WEB_UI_PORT,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
@@ -21,6 +22,7 @@ import {
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
+  writeNanoclawMetadata,
   writeRssFeedsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -374,6 +376,9 @@ async function runAgent(
   // Write RSS feeds snapshot for the container to read via list_rss_feeds
   const rssFeeds = getAllRssFeeds();
   writeRssFeedsSnapshot(group.folder, isMain, rssFeeds);
+
+  // Write host metadata (web UI base URL etc.) for the container to read
+  writeNanoclawMetadata(group.folder, WEB_UI_BASE_URL);
 
   // Wrap onOutput to track session ID from streamed results.
   // Only persist newSessionId on success — error outputs can carry the old

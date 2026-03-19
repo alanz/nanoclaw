@@ -742,3 +742,19 @@ export function writeGroupsSnapshot(
     ),
   );
 }
+
+/**
+ * Write NanoClaw host metadata for the container to read.
+ * Gives agents enough context to construct dashboard deep links.
+ */
+export function writeNanoclawMetadata(
+  groupFolder: string,
+  webUiBaseUrl: string | null,
+): void {
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(groupIpcDir, 'nanoclaw_meta.json'),
+    JSON.stringify({ webUiBaseUrl }, null, 2),
+  );
+}

@@ -652,6 +652,83 @@ PAGINATION: The response includes has_more (boolean) and next_cursor. If has_mor
   },
 );
 
+/**
+ * Pure function for building a dashboard URL — exported for testing.
+ * Returns null if webUiBaseUrl is not set.
+ */
+export function buildDashboardUrl(
+  webUiBaseUrl: string | null,
+  groupFolder: string,
+  filePath?: string,
+  view: 'chat' | 'tasks' | 'files' = 'files',
+): string | null {
+  if (!webUiBaseUrl) return null;
+  let hash: string;
+  if (filePath) {
+    let rel = filePath;
+    if (rel.startsWith('/workspace/')) rel = rel.slice('/workspace/'.length);
+    else if (rel.startsWith('workspace/')) rel = rel.slice('workspace/'.length);
+    rel = rel.replace(/^\/+/, '');
+    hash = `groups/${groupFolder}/files/${rel}`;
+  } else {
+    hash =
+      view === 'chat'
+        ? `groups/${groupFolder}`
+        : `groups/${groupFolder}/${view}`;
+  }
+  return `${webUiBaseUrl}#${hash}`;
+}
+
+server.tool(
+  'get_file_url',
+  `Get a shareable dashboard URL for a file in your workspace, or for a group view (chat, tasks, files tab).
+
+The URL points to the NanoClaw web dashboard. You can share it with the user so they can open it directly.
+
+FILE URL: Pass a workspace file path (e.g. "/workspace/CLAUDE.md" or "notes/todo.md"). The dashboard will open that file in the Files tab.
+GROUP VIEWS: Omit file_path and set view to "chat", "tasks", or "files" for the respective tab.
+
+Returns null for webUiBaseUrl if the host has not configured WEB_UI_BASE_URL.`,
+  {
+    file_path: z
+      .string()
+      .optional()
+      .describe(
+        'Path to the workspace file. Can be absolute (/workspace/...) or relative to /workspace/. Omit for group-level views.',
+      ),
+    view: z
+      .enum(['chat', 'tasks', 'files'])
+      .optional()
+      .default('files')
+      .describe('Which tab to open when no file_path is given (default: files).'),
+  },
+  async (args) => {
+    const metaFile = path.join(IPC_DIR, 'nanoclaw_meta.json');
+    let webUiBaseUrl: string | null = null;
+    try {
+      if (fs.existsSync(metaFile)) {
+        const meta = JSON.parse(fs.readFileSync(metaFile, 'utf-8'));
+        webUiBaseUrl = meta.webUiBaseUrl ?? null;
+      }
+    } catch {
+      // file unreadable — leave webUiBaseUrl null
+    }
+
+    const url = buildDashboardUrl(webUiBaseUrl, groupFolder, args.file_path, args.view ?? 'files');
+    if (!url) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Web UI base URL is not configured on the host. Ask the user to set WEB_UI_BASE_URL in their environment.',
+          },
+        ],
+      };
+    }
+    return { content: [{ type: 'text' as const, text: url }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

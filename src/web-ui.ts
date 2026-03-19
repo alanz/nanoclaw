@@ -172,6 +172,7 @@ document.addEventListener('DOMContentLoaded', function() {
   var currentGroup = null;   // group object from /api/groups
   var currentTab = 'chat';
   var pollTimer = null;
+  var skipHashUpdate = false;
 
   function esc(s) {
     if (s == null) return '';
@@ -200,17 +201,81 @@ document.addEventListener('DOMContentLoaded', function() {
     try { return new Date(ts).toLocaleTimeString(); } catch(e) { return ts; }
   }
 
+  // ── URL routing ─────────────────────────────────────────────────────────────
+  // URL scheme:
+  //   #groups                        → group list
+  //   #groups/{folder}               → group chat tab (default)
+  //   #groups/{folder}/tasks         → group tasks tab
+  //   #groups/{folder}/files         → group files tab, no file selected
+  //   #groups/{folder}/files/{path}  → group files tab, file open
+  //                                    ({path} is relative within the group folder)
+  //   #feeds                         → feeds
+  //   #system                        → system
+
+  function pushHash(hash) {
+    if (!skipHashUpdate) history.pushState(null, '', '#' + hash);
+  }
+
+  function parseHash(hash) {
+    hash = (hash || '').replace(/^#/, '') || 'groups';
+    var parts = hash.split('/');
+    var section = parts[0] || 'groups';
+    if (section === 'feeds') return { section: 'feeds' };
+    if (section === 'system') return { section: 'system' };
+    var folder = parts[1] || null;
+    if (!folder) return { section: 'groups', folder: null };
+    var tab = parts[2] || 'chat';
+    var filePath = (tab === 'files' && parts.length > 3) ? parts.slice(3).join('/') : null;
+    return { section: 'groups', folder: folder, tab: tab, filePath: filePath };
+  }
+
+  async function restoreFromHash() {
+    var state = parseHash(location.hash);
+    skipHashUpdate = true;
+    try {
+      if (state.section === 'feeds') {
+        activateSection('feeds'); clearInterval(pollTimer); pollTimer = null; loadFeeds(); return;
+      }
+      if (state.section === 'system') {
+        activateSection('system'); clearInterval(pollTimer); pollTimer = null; loadSystem(); return;
+      }
+      activateSection('groups');
+      clearInterval(pollTimer); pollTimer = null;
+      if (!state.folder) { showGroupListInternal(); return; }
+      var data = await fetch('/api/groups').then(function(r) { return r.json(); });
+      var g = data.find(function(x) { return x.folder === state.folder; });
+      if (!g) { showGroupListInternal(); return; }
+      currentGroup = g;
+      document.getElementById('groups-list').style.display = 'none';
+      document.getElementById('group-detail').style.display = '';
+      document.getElementById('group-detail-name').textContent = g.name;
+      document.getElementById('group-detail-badges').innerHTML =
+        (g.isMain ? '<span class="badge bb">main</span> ' : '')
+        + '<span class="badge bg">'+esc(g.channel)+'</span>';
+      switchTab(state.tab || 'chat', state.filePath);
+    } finally {
+      skipHashUpdate = false;
+    }
+  }
+
+  window.addEventListener('popstate', restoreFromHash);
+
   // ── Top-level nav ──────────────────────────────────────────────────────────
 
-  function show(name) {
+  function activateSection(name) {
     document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
     document.querySelectorAll('nav a').forEach(function(a) { a.classList.remove('active'); });
     var sec = document.getElementById('section-'+name);
     var nav = document.getElementById('nav-'+name);
     if (sec) sec.classList.add('active');
     if (nav) nav.classList.add('active');
+  }
+
+  function show(name) {
+    pushHash(name);
+    activateSection(name);
     clearInterval(pollTimer); pollTimer = null;
-    if (name === 'groups') showGroupList();
+    if (name === 'groups') showGroupListInternal();
     if (name === 'feeds') loadFeeds();
     if (name === 'system') loadSystem();
   }
@@ -224,12 +289,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── Group list ─────────────────────────────────────────────────────────────
 
-  function showGroupList() {
+  // No hash push — caller is responsible for setting the hash.
+  function showGroupListInternal() {
     clearInterval(pollTimer); pollTimer = null;
     currentGroup = null;
     document.getElementById('groups-list').style.display = '';
     document.getElementById('group-detail').style.display = 'none';
     loadGroups();
+  }
+
+  function showGroupList() {
+    pushHash('groups');
+    showGroupListInternal();
   }
 
   async function loadGroups() {
@@ -292,7 +363,7 @@ document.addEventListener('DOMContentLoaded', function() {
     switchTab('chat');
   }
 
-  function switchTab(tab) {
+  function switchTab(tab, autoFilePath) {
     clearInterval(pollTimer); pollTimer = null;
     currentTab = tab;
     document.querySelectorAll('#group-subnav [data-tab]').forEach(function(a) {
@@ -301,9 +372,15 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('group-tab-chat').style.display  = tab === 'chat'  ? '' : 'none';
     document.getElementById('group-tab-tasks').style.display = tab === 'tasks' ? '' : 'none';
     document.getElementById('group-tab-files').style.display = tab === 'files' ? '' : 'none';
+    if (currentGroup) {
+      var base = 'groups/' + currentGroup.folder;
+      if (tab === 'chat') pushHash(base);
+      else if (tab === 'files' && autoFilePath) pushHash(base + '/files/' + autoFilePath);
+      else pushHash(base + '/' + tab);
+    }
     if (tab === 'chat')  loadGroupChat();
     if (tab === 'tasks') loadGroupTasks();
-    if (tab === 'files') loadGroupFiles();
+    if (tab === 'files') loadGroupFiles(autoFilePath);
   }
 
   // ── Chat tab ───────────────────────────────────────────────────────────────
@@ -400,7 +477,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── Files tab ──────────────────────────────────────────────────────────────
 
-  async function loadGroupFiles() {
+  async function loadGroupFiles(autoFilePath) {
     if (!currentGroup) return;
     var tree = document.getElementById('group-file-tree');
     var view = document.getElementById('group-file-view');
@@ -415,6 +492,16 @@ document.addEventListener('DOMContentLoaded', function() {
         return;
       }
       renderFileTree(groupFiles.entries, tree);
+      if (autoFilePath) {
+        var fullPath = currentGroup.folder + '/' + autoFilePath;
+        var fileName = autoFilePath.split('/').pop();
+        // Expand all directories so the target file is reachable
+        tree.querySelectorAll('.ftree-children').forEach(function(el) { el.style.display = ''; });
+        tree.querySelectorAll('.ftree-file').forEach(function(el) {
+          if (el.dataset.path === fullPath) el.classList.add('active');
+        });
+        openFile(fullPath, fileName);
+      }
     } catch(e) { tree.innerHTML = '<div class="empty">Error loading files</div>'; }
   }
 
@@ -440,6 +527,11 @@ document.addEventListener('DOMContentLoaded', function() {
         fileEl.addEventListener('click', function() {
           document.querySelectorAll('.ftree-file.active').forEach(function(el) { el.classList.remove('active'); });
           fileEl.classList.add('active');
+          if (currentGroup) {
+            var folder = currentGroup.folder;
+            var relPath = entry.path.startsWith(folder + '/') ? entry.path.slice(folder.length + 1) : entry.path;
+            pushHash('groups/' + folder + '/files/' + relPath);
+          }
           openFile(entry.path, entry.name);
         });
         container.appendChild(fileEl);
@@ -540,7 +632,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // ── Boot ───────────────────────────────────────────────────────────────────
-  show('groups');
+  restoreFromHash();
 });
 </script>
 </body>

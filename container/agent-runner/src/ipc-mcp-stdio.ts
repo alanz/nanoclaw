@@ -729,6 +729,64 @@ GROUP VIEWS: Omit file_path and set view to "chat", "tasks", or "files" for the 
   },
 );
 
+const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
+
+if (BRAVE_API_KEY) {
+  server.tool(
+    'brave_web_search',
+    'Search the web using Brave Search API. Use for current events, factual lookups, news, and general web research.',
+    {
+      query: z.string().describe('Search query (max 400 chars)'),
+      count: z.number().int().min(1).max(20).default(10).describe('Number of results (1-20, default 10)'),
+      country: z.string().optional().describe('Country code to localise results (e.g. "us", "gb")'),
+      freshness: z.string().optional().describe('Filter by age: "pd" past day, "pw" past week, "pm" past month, "py" past year, or date range "YYYY-MM-DDtoYYYY-MM-DD"'),
+    },
+    async (args) => {
+      const url = new URL('https://api.search.brave.com/res/v1/web/search');
+      url.searchParams.set('q', args.query);
+      url.searchParams.set('count', String(args.count ?? 10));
+      if (args.country) url.searchParams.set('country', args.country);
+      if (args.freshness) url.searchParams.set('freshness', args.freshness);
+
+      try {
+        const res = await fetch(url.toString(), {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            'X-Subscription-Token': BRAVE_API_KEY,
+          },
+          signal: AbortSignal.timeout(30_000),
+        });
+
+        if (!res.ok) {
+          const detail = await res.text().catch(() => '');
+          return {
+            content: [{ type: 'text' as const, text: `Brave Search error (${res.status}): ${detail || res.statusText}` }],
+            isError: true,
+          };
+        }
+
+        const data = await res.json() as { web?: { results?: Array<{ title?: string; url?: string; description?: string; age?: string }> } };
+        const results = data.web?.results ?? [];
+        const formatted = results
+          .map((r, i) =>
+            `${i + 1}. **${r.title ?? ''}**\n   ${r.url ?? ''}\n   ${r.description ?? ''}${r.age ? ` (${r.age})` : ''}`,
+          )
+          .join('\n\n');
+
+        return {
+          content: [{ type: 'text' as const, text: formatted || 'No results found.' }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Search failed: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

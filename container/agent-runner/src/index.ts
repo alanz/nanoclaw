@@ -427,8 +427,7 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*',
-        'mcp__brave__*'
+        'mcp__nanoclaw__*'
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -442,15 +441,9 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            ...(process.env.BRAVE_API_KEY ? { BRAVE_API_KEY: process.env.BRAVE_API_KEY } : {}),
           },
         },
-        ...( process.env.BRAVE_API_KEY ? {
-          brave: {
-            command: 'node',
-            args: [path.join(__dirname, 'node_modules', '@modelcontextprotocol', 'server-brave-search', 'dist', 'index.js')],
-            env: { BRAVE_API_KEY: process.env.BRAVE_API_KEY },
-          },
-        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],

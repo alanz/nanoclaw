@@ -26,8 +26,11 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+
+const envSecrets = readEnvFile(['BRAVE_API_KEY']);
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -233,8 +236,8 @@ function buildContainerArgs(
   }
 
   // Pass Brave Search API key if configured
-  if (process.env.BRAVE_API_KEY) {
-    args.push('-e', `BRAVE_API_KEY=${process.env.BRAVE_API_KEY}`);
+  if (envSecrets.BRAVE_API_KEY) {
+    args.push('-e', `BRAVE_API_KEY=${envSecrets.BRAVE_API_KEY}`);
   }
 
   // Runtime-specific args for host gateway resolution

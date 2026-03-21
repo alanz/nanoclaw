@@ -232,6 +232,11 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
+  // Pass Brave Search API key if configured
+  if (process.env.BRAVE_API_KEY) {
+    args.push('-e', `BRAVE_API_KEY=${process.env.BRAVE_API_KEY}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 

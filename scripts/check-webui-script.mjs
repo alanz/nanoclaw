@@ -11,7 +11,7 @@ import path from 'path';
 
 const src = fs.readFileSync('dist/web-ui.js', 'utf-8');
 const htmlStart = src.indexOf('const DASHBOARD_HTML = `') + 'const DASHBOARD_HTML = `'.length;
-const htmlEnd = src.indexOf('\n`;', htmlStart);
+const htmlEnd = src.indexOf('`;', htmlStart);
 if (htmlStart <= 0 || htmlEnd <= 0) {
   console.error('check-webui-script: could not locate DASHBOARD_HTML in dist/web-ui.js');
   process.exit(1);

@@ -787,6 +787,135 @@ if (BRAVE_API_KEY) {
   );
 }
 
+// ── search_zotero ─────────────────────────────────────────────────────────────
+
+const ZOTERO_MD_DIR = '/workspace/group/zotero-md';
+
+if (fs.existsSync(ZOTERO_MD_DIR)) {
+  interface ZoteroEntry {
+    file: string;
+    meta: Record<string, string>;
+    body: string;
+    score: number;
+  }
+
+  function parseZoteroFrontMatter(text: string): { meta: Record<string, string>; body: string } | null {
+    if (!text.startsWith('---')) return null;
+    const nl = text.indexOf('\n');
+    if (nl < 0) return null;
+    const end = text.indexOf('\n---', nl + 1);
+    if (end < 0) return null;
+    const fmText = text.slice(nl + 1, end);
+    const bodyStart = end + 4 + (text[end + 4] === '\n' ? 1 : 0);
+    const meta: Record<string, string> = {};
+    for (const line of fmText.split('\n')) {
+      const colon = line.indexOf(': ');
+      if (colon > 0) meta[line.slice(0, colon).trim()] = line.slice(colon + 2).trim();
+    }
+    return { meta, body: text.slice(bodyStart) };
+  }
+
+  function scoreEntry(terms: string[], meta: Record<string, string>, body: string): number {
+    const title   = (meta.title   || '').toLowerCase();
+    const authors = (meta.authors || '').toLowerCase();
+    const tags    = (meta.tags    || '').toLowerCase();
+    const bodyLow = body.toLowerCase();
+
+    let score = 0;
+    for (const term of terms) {
+      if (title.includes(term))   score += 3;
+      if (authors.includes(term)) score += 2;
+      if (tags.includes(term))    score += 2;
+      if (bodyLow.includes(term)) score += 1;
+    }
+    return score;
+  }
+
+  server.tool(
+    'search_zotero',
+    `Search your Zotero library of papers. Returns matching papers with metadata and abstract snippets.
+
+Searches across: title, authors, abstract, and tags. All query terms must match at least somewhere for a result to appear.
+
+Useful for: finding papers on a topic, checking if a paper is in the library, exploring what's been read on a subject.`,
+    {
+      query: z.string().describe('Search terms (e.g. "abstract interpretation staging")'),
+      limit: z.number().int().min(1).max(50).default(10).describe('Max results (default 10)'),
+      year_from: z.number().int().optional().describe('Only papers published from this year'),
+      year_to: z.number().int().optional().describe('Only papers published up to this year'),
+      tag: z.string().optional().describe('Only papers with this tag'),
+      has_abstract: z.boolean().optional().describe('true = only papers with an abstract, false = only without'),
+    },
+    async (args) => {
+      const terms = args.query.toLowerCase().split(/\s+/).filter(Boolean);
+
+      let files: string[];
+      try {
+        files = fs.readdirSync(ZOTERO_MD_DIR).filter((f) => f.endsWith('.md'));
+      } catch {
+        return { content: [{ type: 'text' as const, text: 'Zotero library directory not found.' }] };
+      }
+
+      const results: ZoteroEntry[] = [];
+
+      for (const file of files) {
+        const text = fs.readFileSync(path.join(ZOTERO_MD_DIR, file), 'utf-8');
+        const parsed = parseZoteroFrontMatter(text);
+        if (!parsed) continue;
+        const { meta, body } = parsed;
+
+        // Year filters
+        const year = meta.year ? parseInt(meta.year, 10) : null;
+        if (args.year_from !== undefined && (year === null || year < args.year_from)) continue;
+        if (args.year_to   !== undefined && (year === null || year > args.year_to))   continue;
+
+        // Tag filter
+        if (args.tag) {
+          const tags = (meta.tags || '').toLowerCase();
+          if (!tags.includes(args.tag.toLowerCase())) continue;
+        }
+
+        // Abstract filter
+        const bodyLines = body.split('\n').filter((l) => l.trim());
+        const abstractPresent = bodyLines.length > 2;
+        if (args.has_abstract === true  && !abstractPresent) continue;
+        if (args.has_abstract === false &&  abstractPresent) continue;
+
+        const score = scoreEntry(terms, meta, body);
+        if (score === 0) continue;  // must match at least one term somewhere
+
+        results.push({ file, meta, body, score });
+      }
+
+      results.sort((a, b) => b.score - a.score);
+      const top = results.slice(0, args.limit ?? 10);
+
+      if (top.length === 0) {
+        return { content: [{ type: 'text' as const, text: `No results for "${args.query}".` }] };
+      }
+
+      const formatted = top.map((r, i) => {
+        const m = r.meta;
+        const year = m.year ? ` (${m.year})` : '';
+        const authors = m.authors ? `\n   Authors: ${m.authors}` : '';
+        const doi = m.doi ? `\n   DOI: ${m.doi}` : '';
+        const tags = m.tags ? `\n   Tags: ${m.tags}` : '';
+        // Extract abstract snippet from body (skip title + authors lines)
+        const bodyLines = r.body.split('\n').filter((l) => l.trim());
+        const snippet = bodyLines.length > 2
+          ? bodyLines.slice(2).join(' ').slice(0, 200).trim() + (bodyLines.slice(2).join(' ').length > 200 ? '…' : '')
+          : '';
+        const abstractLine = snippet ? `\n   Abstract: ${snippet}` : '';
+        return `${i + 1}. **${m.title || r.file}**${year}${authors}${doi}${tags}${abstractLine}`;
+      }).join('\n\n');
+
+      return {
+        content: [{ type: 'text' as const, text: `Found ${results.length} result${results.length === 1 ? '' : 's'} (showing ${top.length}):\n\n${formatted}` }],
+      };
+    },
+  );
+}
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

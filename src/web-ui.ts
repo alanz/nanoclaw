@@ -75,6 +75,16 @@ pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;f
 .ftree-file{padding:3px 6px 3px 18px;font-size:12px;color:#8b949e;cursor:pointer;border-radius:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ftree-file:hover,.ftree-file.active{background:#21262d;color:#e6edf3}
 .ftree-children{margin-left:8px}
+.file-maximize-btn{position:absolute;top:8px;right:8px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#8b949e;font-size:14px;width:26px;height:26px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:10;line-height:1}
+.file-maximize-btn:hover{background:#30363d;color:#e6edf3}
+body.file-maximized nav{display:none}
+body.file-maximized #group-back{display:none}
+body.file-maximized #group-detail-name,body.file-maximized #group-detail-badges{display:none}
+body.file-maximized .subnav{display:none}
+body.file-maximized #group-file-tree{display:none}
+body.file-maximized #group-tab-files>div{height:100vh;padding:0}
+body.file-maximized main{padding:0}
+body.file-maximized #group-file-view{border-radius:0;height:100vh}
 .md-body{font-size:14px;line-height:1.6;color:#e6edf3}
 .md-body h1,.md-body h2,.md-body h3{color:#79c0ff;margin:16px 0 8px;border-bottom:1px solid #30363d;padding-bottom:4px}
 .md-body h1{font-size:20px}.md-body h2{font-size:17px}.md-body h3{font-size:15px}
@@ -141,8 +151,9 @@ pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;f
       <div id="group-tab-files" style="display:none">
         <div style="display:flex;gap:16px;height:calc(100vh - 220px)">
           <div id="group-file-tree" style="width:260px;flex-shrink:0;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px"></div>
-          <div id="group-file-view" style="flex:1;overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px">
-            <div class="empty">Select a file to view its contents</div>
+          <div id="group-file-view" style="flex:1;overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;position:relative">
+            <button class="file-maximize-btn" id="file-maximize-btn" title="Maximise file view">&#x26F6;</button>
+            <div id="group-file-content"><div class="empty">Select a file to view its contents</div></div>
           </div>
         </div>
       </div>
@@ -372,6 +383,11 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('group-tab-chat').style.display  = tab === 'chat'  ? '' : 'none';
     document.getElementById('group-tab-tasks').style.display = tab === 'tasks' ? '' : 'none';
     document.getElementById('group-tab-files').style.display = tab === 'files' ? '' : 'none';
+    if (tab !== 'files' && document.body.classList.contains('file-maximized')) {
+      document.body.classList.remove('file-maximized');
+      var btn = document.getElementById('file-maximize-btn');
+      if (btn) { btn.innerHTML = '&#x26F6;'; btn.title = 'Maximise file view'; }
+    }
     if (currentGroup) {
       var base = 'groups/' + currentGroup.folder;
       if (tab === 'chat') pushHash(base);
@@ -477,10 +493,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── Files tab ──────────────────────────────────────────────────────────────
 
+  document.getElementById('file-maximize-btn').addEventListener('click', function() {
+    var maximised = document.body.classList.toggle('file-maximized');
+    this.innerHTML = maximised ? '&#x2715;' : '&#x26F6;';
+    this.title = maximised ? 'Restore file view' : 'Maximise file view';
+  });
+
   async function loadGroupFiles(autoFilePath) {
     if (!currentGroup) return;
     var tree = document.getElementById('group-file-tree');
-    var view = document.getElementById('group-file-view');
+    var view = document.getElementById('group-file-content');
     tree.innerHTML = '<div class="dim">Loading\u2026</div>';
     view.innerHTML = '<div class="empty">Select a file to view its contents</div>';
     try {
@@ -540,7 +562,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   async function openFile(filePath, name) {
-    var view = document.getElementById('group-file-view');
+    var view = document.getElementById('group-file-content');
     view.innerHTML = '<div class="dim">Loading\u2026</div>';
     try {
       var r = await fetch('/api/file?path='+encodeURIComponent(filePath));

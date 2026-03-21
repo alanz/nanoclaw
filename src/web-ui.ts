@@ -102,6 +102,10 @@ body.file-maximized #group-file-view{border-radius:0;height:100vh}
 .md-body th,.md-body td{border:1px solid #30363d;padding:6px 12px}
 .md-body th{background:#21262d}
 .md-body hr{border:none;border-top:1px solid #30363d;margin:16px 0}
+.fm-card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;align-items:baseline}
+.fm-key{color:#8b949e;white-space:nowrap;user-select:none}
+.fm-val{color:#e6edf3;word-break:break-word}
+.fm-tag{display:inline-block;background:#21262d;border:1px solid #30363d;border-radius:10px;padding:1px 8px;font-size:11px;color:#8b949e;margin:1px 2px 1px 0}
 .subnav{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid #30363d;padding-bottom:0}
 .subnav a{padding:7px 14px;font-size:13px;color:#8b949e;cursor:pointer;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px;user-select:none}
 .subnav a:hover{color:#e6edf3}
@@ -599,6 +603,67 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
+  function parseFrontMatter(text) {
+    if (!text.startsWith('---')) return null;
+    var nl = text.indexOf('\\n');
+    if (nl < 3) return null;
+    var end = text.indexOf('\\n---', nl + 1);
+    if (end === -1) return null;
+    var fmText = text.slice(nl + 1, end);
+    var bodyStart = end + 4;
+    if (text[bodyStart] === '\\r') bodyStart++;
+    if (text[bodyStart] === '\\n') bodyStart++;
+    var meta = {};
+    fmText.split('\\n').forEach(function(line) {
+      line = line.replace(/\\r$/, '');
+      var colon = line.indexOf(': ');
+      if (colon > 0) meta[line.slice(0, colon).trim()] = line.slice(colon + 2).trim();
+    });
+    return { meta: meta, body: text.slice(bodyStart) };
+  }
+
+  function renderFrontMatter(meta) {
+    var el = document.createElement('div');
+    el.className = 'fm-card';
+    var SKIP = { title: 1 }; // already shown as # heading in body
+    Object.keys(meta).forEach(function(key) {
+      if (SKIP[key]) return;
+      var val = meta[key];
+      var keyEl = document.createElement('div');
+      keyEl.className = 'fm-key';
+      keyEl.textContent = key;
+      var valEl = document.createElement('div');
+      valEl.className = 'fm-val';
+      if (key === 'tags') {
+        val.split(',').forEach(function(t) {
+          var tag = document.createElement('span');
+          tag.className = 'fm-tag';
+          tag.textContent = t.trim();
+          valEl.appendChild(tag);
+        });
+      } else if (key === 'doi') {
+        var a = document.createElement('a');
+        a.href = val.startsWith('http') ? val : 'https://doi.org/' + val;
+        a.target = '_blank';
+        a.className = 'fm-val';
+        a.textContent = val;
+        valEl.appendChild(a);
+      } else if (key === 'url' && val.startsWith('http')) {
+        var a = document.createElement('a');
+        a.href = val;
+        a.target = '_blank';
+        a.className = 'fm-val';
+        a.textContent = val;
+        valEl.appendChild(a);
+      } else {
+        valEl.textContent = val;
+      }
+      el.appendChild(keyEl);
+      el.appendChild(valEl);
+    });
+    return el;
+  }
+
   async function openFile(filePath, name) {
     var view = document.getElementById('group-file-content');
     view.innerHTML = '<div class="dim">Loading\u2026</div>';
@@ -609,9 +674,13 @@ document.addEventListener('DOMContentLoaded', function() {
       var header = '<div class="dim" style="margin-bottom:12px">'+esc(filePath)+'</div>';
       var ext = name.split('.').pop();
       if (ext === 'md' && window.marked) {
+        var fm = parseFrontMatter(text);
         var mdDiv = document.createElement('div');
         mdDiv.className = 'md-body';
-        mdDiv.innerHTML = window.marked.parse(text);
+        if (fm && Object.keys(fm.meta).length > 0) mdDiv.appendChild(renderFrontMatter(fm.meta));
+        var bodyEl = document.createElement('div');
+        bodyEl.innerHTML = window.marked.parse(fm ? fm.body : text);
+        mdDiv.appendChild(bodyEl);
         view.innerHTML = header;
         view.appendChild(mdDiv);
         if (window.hljs) mdDiv.querySelectorAll('pre code').forEach(function(el) { hljs.highlightElement(el); });

@@ -13,6 +13,7 @@ import {
   ZOTERO_POLL_INTERVAL,
 } from './config.js';
 import { runContainerAgent } from './container-runner.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
@@ -111,6 +112,61 @@ export function buildZoteroSyncPrompt(
   );
 }
 
+/**
+ * Cheap pre-check: ask Zotero if the library version has advanced since
+ * lastVersion. Returns true if there are new/modified items (or if the check
+ * can't be performed — fail open so a full sync still runs).
+ * Exported for testing.
+ */
+export async function hasNewZoteroItems(lastVersion: number): Promise<boolean> {
+  const env = readEnvFile(['ZOTERO_API_KEY', 'ZOTERO_USER_ID']);
+  const apiKey = env.ZOTERO_API_KEY;
+  const userId = env.ZOTERO_USER_ID;
+
+  if (!apiKey || !userId) {
+    logger.debug(
+      'Zotero credentials not available for pre-check, assuming new items',
+    );
+    return true;
+  }
+
+  const url =
+    `https://api.zotero.org/users/${userId}/items` +
+    `?since=${lastVersion}&format=versions&limit=1`;
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'Zotero-API-Key': apiKey,
+        'Zotero-API-Version': '3',
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!res.ok) {
+      logger.warn(
+        { status: res.status },
+        'Zotero version pre-check failed, assuming new items',
+      );
+      return true;
+    }
+
+    const serverVersion = parseInt(
+      res.headers.get('Last-Modified-Version') ?? '0',
+      10,
+    );
+    const hasNew = serverVersion > lastVersion;
+    logger.debug(
+      { lastVersion, serverVersion, hasNew },
+      'Zotero version pre-check',
+    );
+    return hasNew;
+  } catch (err) {
+    logger.warn({ err }, 'Zotero version pre-check error, assuming new items');
+    return true;
+  }
+}
+
 export interface ZoteroMonitorDeps {
   registeredGroups: () => Record<string, RegisteredGroup>;
   queue: GroupQueue;
@@ -135,6 +191,16 @@ async function runZoteroSync(deps: ZoteroMonitorDeps): Promise<void> {
 
   // Persist next_check immediately to prevent duplicate runs on restart
   writeState(groupFolder, { ...state, nextCheck });
+
+  // Cheap pre-check: skip container spawn if library hasn't changed
+  const newItems = await hasNewZoteroItems(state.lastVersion);
+  if (!newItems) {
+    logger.debug(
+      { lastVersion: state.lastVersion },
+      'Zotero pre-check: no new items, skipping sync',
+    );
+    return;
+  }
 
   const groups = deps.registeredGroups();
   const group = Object.values(groups).find((g) => g.folder === groupFolder);

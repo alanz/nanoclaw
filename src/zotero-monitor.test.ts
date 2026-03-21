@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 import {
   buildZoteroSyncPrompt,
   computeNextZoteroCheck,
+  hasNewZoteroItems,
   ZoteroState,
   _resetZoteroMonitorLoopForTests,
 } from './zotero-monitor.js';
@@ -65,6 +66,54 @@ describe('computeNextZoteroCheck', () => {
     const state = makeState({ nextCheck: null });
     const next = computeNextZoteroCheck(state);
     expect(new Date(next).getTime()).toBeGreaterThan(Date.now());
+  });
+});
+
+// ── hasNewZoteroItems ─────────────────────────────────────────────────────────
+
+describe('hasNewZoteroItems', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns true when server version is higher than lastVersion', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      headers: {
+        get: (h: string) => (h === 'Last-Modified-Version' ? '3250' : null),
+      },
+    }));
+    const result = await hasNewZoteroItems(3239);
+    expect(result).toBe(true);
+  });
+
+  it('returns false when server version equals lastVersion', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      headers: {
+        get: (h: string) => (h === 'Last-Modified-Version' ? '3239' : null),
+      },
+    }));
+    const result = await hasNewZoteroItems(3239);
+    expect(result).toBe(false);
+  });
+
+  it('returns true (fail open) when the API call fails', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('network error');
+    });
+    const result = await hasNewZoteroItems(3239);
+    expect(result).toBe(true);
+  });
+
+  it('returns true (fail open) when the API returns a non-OK status', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      status: 403,
+      headers: { get: () => null },
+    }));
+    const result = await hasNewZoteroItems(3239);
+    expect(result).toBe(true);
   });
 });
 

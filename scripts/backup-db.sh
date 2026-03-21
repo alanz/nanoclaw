@@ -33,6 +33,18 @@ GROUPS_DEST="$DEST_DIR/groups/"
 rsync -a --delete "$GROUPS_SRC" "$GROUPS_DEST"
 echo "Groups backup complete: $GROUPS_DEST"
 
+# Save list of .env variable names (no values) for reconstruction reference
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+  grep -v '^\s*#' "$PROJECT_ROOT/.env" | grep '=' | cut -d= -f1 > "$DEST_DIR/env-vars.txt"
+  echo "Env var list saved: $DEST_DIR/env-vars.txt"
+fi
+
+# Back up ~/.config/nanoclaw (mount allowlist, etc.)
+CONFIG_SRC="$HOME/.config/nanoclaw/"
+CONFIG_DEST="$DEST_DIR/config-nanoclaw/"
+rsync -a --delete "$CONFIG_SRC" "$CONFIG_DEST"
+echo "Config backup complete: $CONFIG_DEST"
+
 # Ship local backup dir to BorgBase via borg
 BORG_REPO="ssh://o5eh77xl@o5eh77xl.repo.borgbase.com/./repo"
 export BORG_PASSPHRASE

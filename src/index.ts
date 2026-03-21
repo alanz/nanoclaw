@@ -76,6 +76,7 @@ import {
   isSessionCommandAllowed,
 } from './session-commands.js';
 import { startRssMonitorLoop } from './rss-monitor.js';
+import { startZoteroMonitorLoop } from './zotero-monitor.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -855,6 +856,33 @@ async function main(): Promise<void> {
         await channel.sendMessage(jid, text);
         storeMessage({
           id: `rss-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          chat_jid: jid,
+          sender: ASSISTANT_NAME,
+          sender_name: ASSISTANT_NAME,
+          content: text,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          is_bot_message: true,
+        });
+      }
+    },
+  });
+  startZoteroMonitorLoop({
+    registeredGroups: () => registeredGroups,
+    queue,
+    onProcess: (groupJid, proc, containerName, groupFolder) =>
+      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    sendMessage: async (jid, rawText) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'No channel owns JID, cannot send Zotero message');
+        return;
+      }
+      const text = formatOutbound(rawText);
+      if (text) {
+        await channel.sendMessage(jid, text);
+        storeMessage({
+          id: `zotero-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           chat_jid: jid,
           sender: ASSISTANT_NAME,
           sender_name: ASSISTANT_NAME,

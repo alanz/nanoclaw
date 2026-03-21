@@ -12,6 +12,9 @@ const envConfig = readEnvFile([
   'GROUPS_DIR',
   'STORE_DIR',
   'WEB_UI_BASE_URL',
+  'ZOTERO_GROUP_FOLDER',
+  'ZOTERO_CHAT_JID',
+  'ZOTERO_OUTPUT_DIR',
 ]);
 
 export const ASSISTANT_NAME =
@@ -21,6 +24,18 @@ export const ASSISTANT_HAS_OWN_NUMBER =
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
+export const ZOTERO_POLL_INTERVAL = 3_600_000; // 1 hour
+
+// Zotero integration — opt-in by setting these in .env
+export const ZOTERO_GROUP_FOLDER: string | null =
+  process.env.ZOTERO_GROUP_FOLDER || envConfig.ZOTERO_GROUP_FOLDER || null;
+export const ZOTERO_CHAT_JID: string | null =
+  process.env.ZOTERO_CHAT_JID || envConfig.ZOTERO_CHAT_JID || null;
+// Container path for markdown output (default: inside group folder)
+export const ZOTERO_OUTPUT_DIR: string =
+  process.env.ZOTERO_OUTPUT_DIR ||
+  envConfig.ZOTERO_OUTPUT_DIR ||
+  '/workspace/group/zotero-md';
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();

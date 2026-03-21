@@ -30,7 +30,11 @@ import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
-const envSecrets = readEnvFile(['BRAVE_API_KEY']);
+const envSecrets = readEnvFile([
+  'BRAVE_API_KEY',
+  'ZOTERO_API_KEY',
+  'ZOTERO_USER_ID',
+]);
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -195,6 +199,20 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Copy container tools into per-group location so all containers can access them
+  // at /workspace/tools (e.g. zotero-sync.mjs)
+  const toolsSrc = path.join(projectRoot, 'container', 'tools');
+  const groupToolsDir = path.join(DATA_DIR, 'sessions', group.folder, 'tools');
+  if (fs.existsSync(toolsSrc)) {
+    fs.mkdirSync(groupToolsDir, { recursive: true });
+    fs.cpSync(toolsSrc, groupToolsDir, { recursive: true, force: true });
+    mounts.push({
+      hostPath: groupToolsDir,
+      containerPath: '/workspace/tools',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -238,6 +256,14 @@ function buildContainerArgs(
   // Pass Brave Search API key if configured
   if (envSecrets.BRAVE_API_KEY) {
     args.push('-e', `BRAVE_API_KEY=${envSecrets.BRAVE_API_KEY}`);
+  }
+
+  // Pass Zotero credentials if configured
+  if (envSecrets.ZOTERO_API_KEY) {
+    args.push('-e', `ZOTERO_API_KEY=${envSecrets.ZOTERO_API_KEY}`);
+  }
+  if (envSecrets.ZOTERO_USER_ID) {
+    args.push('-e', `ZOTERO_USER_ID=${envSecrets.ZOTERO_USER_ID}`);
   }
 
   // Runtime-specific args for host gateway resolution

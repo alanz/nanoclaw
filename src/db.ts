@@ -859,6 +859,80 @@ export function deleteRssFeed(id: string): void {
   db.prepare('DELETE FROM rss_feeds WHERE id = ?').run(id);
 }
 
+// --- Database explorer ---
+
+export function getDbTables(): Array<{ name: string; count: number }> {
+  const tables = db
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`,
+    )
+    .all() as Array<{ name: string }>;
+  return tables.map(({ name }) => {
+    const row = db.prepare(`SELECT COUNT(*) as count FROM "${name}"`).get() as {
+      count: number;
+    };
+    return { name, count: row.count };
+  });
+}
+
+export function getDbTableData(
+  tableName: string,
+  limit: number,
+  offset: number,
+  search?: string,
+): { columns: string[]; rows: Record<string, unknown>[]; total: number } {
+  const valid = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`)
+    .get(tableName) as { name: string } | undefined;
+  if (!valid) return { columns: [], rows: [], total: 0 };
+
+  const cols = db.prepare(`PRAGMA table_info("${tableName}")`).all() as Array<{
+    name: string;
+    type: string;
+  }>;
+  const columns = cols.map((c) => c.name);
+
+  const trimmedSearch = search?.trim();
+  if (trimmedSearch) {
+    const textCols = cols.filter(
+      (c) =>
+        !['INTEGER', 'REAL', 'NUMERIC', 'BOOLEAN'].includes(
+          c.type.toUpperCase(),
+        ),
+    );
+    if (textCols.length > 0) {
+      const like = `%${trimmedSearch}%`;
+      const whereClause = textCols
+        .map((c) => `"${c.name}" LIKE ?`)
+        .join(' OR ');
+      const bindParams: unknown[] = textCols.map(() => like);
+      const total = (
+        db
+          .prepare(
+            `SELECT COUNT(*) as count FROM "${tableName}" WHERE ${whereClause}`,
+          )
+          .get(bindParams) as { count: number }
+      ).count;
+      const rows = db
+        .prepare(
+          `SELECT * FROM "${tableName}" WHERE ${whereClause} LIMIT ? OFFSET ?`,
+        )
+        .all([...bindParams, limit, offset]) as Record<string, unknown>[];
+      return { columns, rows, total };
+    }
+  }
+
+  const total = (
+    db.prepare(`SELECT COUNT(*) as count FROM "${tableName}"`).get() as {
+      count: number;
+    }
+  ).count;
+  const rows = db
+    .prepare(`SELECT * FROM "${tableName}" LIMIT ? OFFSET ?`)
+    .all(limit, offset) as Record<string, unknown>[];
+  return { columns, rows, total };
+}
+
 // --- JSON migration ---
 
 function migrateJsonState(): void {

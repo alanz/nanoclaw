@@ -17,6 +17,8 @@ import {
   getAllSessions,
   getAllTasks,
   getChatMessages,
+  getDbTableData,
+  getDbTables,
   getTaskRunLogs,
   storeMessage,
 } from './db.js';
@@ -104,6 +106,11 @@ body.file-maximized #group-file-view{border-radius:0;height:100vh}
 .subnav a{padding:7px 14px;font-size:13px;color:#8b949e;cursor:pointer;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px;user-select:none}
 .subnav a:hover{color:#e6edf3}
 .subnav a.active{color:#e6edf3;border-bottom-color:#58a6ff}
+#db-search:focus{border-color:#58a6ff;outline:none}
+.db-table-item{padding:5px 8px;font-size:12px;color:#8b949e;cursor:pointer;border-radius:4px;display:flex;justify-content:space-between;align-items:center;user-select:none}
+.db-table-item:hover,.db-table-item.active{background:#21262d;color:#e6edf3}
+.db-null{color:#484f58;font-style:italic}
+button:disabled{opacity:.4;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -112,6 +119,7 @@ body.file-maximized #group-file-view{border-radius:0;height:100vh}
   <a id="nav-groups" href="#groups">Groups</a>
   <a id="nav-feeds" href="#feeds">Feeds</a>
   <a id="nav-system" href="#system">System</a>
+  <a id="nav-database" href="#database">Database</a>
 </nav>
 <main>
   <!-- Groups: list + detail -->
@@ -174,6 +182,31 @@ body.file-maximized #group-file-view{border-radius:0;height:100vh}
     <h2 style="margin-top:24px">Router State</h2>
     <div id="routerstate-body">Loading...</div>
   </div>
+
+  <!-- Database Explorer -->
+  <div id="section-database" class="section">
+    <h2>Database Explorer</h2>
+    <div style="display:flex;gap:16px;height:calc(100vh - 120px)">
+      <div id="db-table-list" style="width:190px;flex-shrink:0;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px">
+        <div class="dim" style="font-size:11px;padding:4px 6px;margin-bottom:4px;font-weight:600;letter-spacing:.4px;text-transform:uppercase">Tables</div>
+      </div>
+      <div style="flex:1;overflow:hidden;display:flex;flex-direction:column;gap:10px">
+        <div id="db-table-header" style="display:none">
+          <div style="display:flex;align-items:center;gap:12px">
+            <strong id="db-table-name" style="font-size:14px;color:#f0f6fc"></strong>
+            <span id="db-table-count" class="dim" style="font-size:12px"></span>
+            <input id="db-search" type="text" placeholder="Search\u2026" style="margin-left:auto;width:220px;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#e6edf3;font-size:13px">
+          </div>
+        </div>
+        <div id="db-table-body" style="flex:1;overflow:auto"></div>
+        <div id="db-pagination" style="display:none;align-items:center;gap:10px;padding-bottom:4px">
+          <button id="db-prev" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:5px 12px;color:#e6edf3;font-size:13px;cursor:pointer">&#8592; Prev</button>
+          <span id="db-page-info" class="dim" style="font-size:12px"></span>
+          <button id="db-next" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:5px 12px;color:#e6edf3;font-size:13px;cursor:pointer">Next &#8594;</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
@@ -233,6 +266,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var section = parts[0] || 'groups';
     if (section === 'feeds') return { section: 'feeds' };
     if (section === 'system') return { section: 'system' };
+    if (section === 'database') return { section: 'database' };
     var folder = parts[1] || null;
     if (!folder) return { section: 'groups', folder: null };
     var tab = parts[2] || 'chat';
@@ -249,6 +283,9 @@ document.addEventListener('DOMContentLoaded', function() {
       }
       if (state.section === 'system') {
         activateSection('system'); clearInterval(pollTimer); pollTimer = null; loadSystem(); return;
+      }
+      if (state.section === 'database') {
+        activateSection('database'); clearInterval(pollTimer); pollTimer = null; loadDbTables(); return;
       }
       activateSection('groups');
       clearInterval(pollTimer); pollTimer = null;
@@ -289,6 +326,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (name === 'groups') showGroupListInternal();
     if (name === 'feeds') loadFeeds();
     if (name === 'system') loadSystem();
+    if (name === 'database') loadDbTables();
   }
 
   document.querySelectorAll('nav a').forEach(function(a) {
@@ -653,6 +691,107 @@ document.addEventListener('DOMContentLoaded', function() {
     } catch(e) { el.innerHTML = '<div class="empty">Error loading feeds</div>'; }
   }
 
+  // ── Database Explorer ──────────────────────────────────────────────────────
+
+  var dbCurrentTable = null;
+  var dbOffset = 0;
+  var dbLimit = 50;
+  var dbTotal = 0;
+  var dbSearchTimer = null;
+
+  async function loadDbTables() {
+    var el = document.getElementById('db-table-list');
+    // Keep the heading, clear everything else
+    el.innerHTML = '<div class="dim" style="font-size:11px;padding:4px 6px;margin-bottom:4px;font-weight:600;letter-spacing:.4px;text-transform:uppercase">Tables</div>';
+    try {
+      var data = await fetch('/api/db/tables').then(function(r) { return r.json(); });
+      if (!data.length) {
+        el.innerHTML += '<div class="empty">No tables</div>';
+        return;
+      }
+      data.forEach(function(t) {
+        var item = document.createElement('div');
+        item.className = 'db-table-item';
+        item.dataset.table = t.name;
+        item.innerHTML = '<span>'+esc(t.name)+'</span><span class="dim" style="font-size:11px">'+t.count+'</span>';
+        item.addEventListener('click', function() {
+          document.querySelectorAll('.db-table-item').forEach(function(x) { x.classList.remove('active'); });
+          item.classList.add('active');
+          dbCurrentTable = t.name;
+          dbOffset = 0;
+          document.getElementById('db-search').value = '';
+          loadDbTable();
+        });
+        el.appendChild(item);
+      });
+    } catch(e) {
+      el.innerHTML += '<div class="empty">Error loading tables</div>';
+    }
+  }
+
+  async function loadDbTable() {
+    if (!dbCurrentTable) return;
+    var body = document.getElementById('db-table-body');
+    var header = document.getElementById('db-table-header');
+    var pagination = document.getElementById('db-pagination');
+    var search = document.getElementById('db-search').value.trim();
+    body.innerHTML = '<div class="dim" style="padding:16px">Loading\u2026</div>';
+    header.style.display = '';
+    document.getElementById('db-table-name').textContent = dbCurrentTable;
+    try {
+      var reqUrl = '/api/db/table?name='+encodeURIComponent(dbCurrentTable)+'&limit='+dbLimit+'&offset='+dbOffset;
+      if (search) reqUrl += '&search='+encodeURIComponent(search);
+      var data = await fetch(reqUrl).then(function(r) { return r.json(); });
+      dbTotal = data.total;
+      document.getElementById('db-table-count').textContent = data.total + ' row'+(data.total===1?'':'s')+(search?' (filtered)':'');
+      if (!data.columns.length) {
+        body.innerHTML = '<div class="empty">No columns found</div>';
+        pagination.style.display = 'none';
+        return;
+      }
+      var html = '<div class="card" style="padding:0;overflow:auto"><table>'
+        +'<thead><tr>'+data.columns.map(function(c) { return '<th>'+esc(c)+'</th>'; }).join('')+'</tr></thead>'
+        +'<tbody>';
+      if (!data.rows.length) {
+        html += '<tr><td colspan="'+data.columns.length+'" style="text-align:center;color:#8b949e;font-style:italic;padding:24px">No rows</td></tr>';
+      } else {
+        html += data.rows.map(function(row) {
+          return '<tr>'+data.columns.map(function(c) {
+            var v = row[c];
+            if (v == null) return '<td><span class="db-null">NULL</span></td>';
+            var s = String(v);
+            if (s.length > 120) {
+              return '<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(s)+'">'+esc(s.slice(0,120))+'\u2026</td>';
+            }
+            return '<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s)+'</td>';
+          }).join('')+'</tr>';
+        }).join('');
+      }
+      html += '</tbody></table></div>';
+      body.innerHTML = html;
+      var totalPages = Math.ceil(dbTotal / dbLimit) || 1;
+      var currentPage = Math.floor(dbOffset / dbLimit) + 1;
+      document.getElementById('db-page-info').textContent = 'Page '+currentPage+' of '+totalPages;
+      document.getElementById('db-prev').disabled = dbOffset === 0;
+      document.getElementById('db-next').disabled = dbOffset + dbLimit >= dbTotal;
+      pagination.style.display = 'flex';
+    } catch(e) {
+      body.innerHTML = '<div class="empty">Error loading table data</div>';
+      pagination.style.display = 'none';
+    }
+  }
+
+  document.getElementById('db-prev').addEventListener('click', function() {
+    if (dbOffset > 0) { dbOffset = Math.max(0, dbOffset - dbLimit); loadDbTable(); }
+  });
+  document.getElementById('db-next').addEventListener('click', function() {
+    if (dbOffset + dbLimit < dbTotal) { dbOffset += dbLimit; loadDbTable(); }
+  });
+  document.getElementById('db-search').addEventListener('input', function() {
+    clearTimeout(dbSearchTimer);
+    dbSearchTimer = setTimeout(function() { dbOffset = 0; loadDbTable(); }, 350);
+  });
+
   // ── Boot ───────────────────────────────────────────────────────────────────
   restoreFromHash();
 });
@@ -907,6 +1046,32 @@ export function startWebUi(
           return;
         }
         sendJson(res, getTaskRunLogs(taskId, 50));
+        return;
+      }
+
+      // GET /api/db/tables
+      if (req.method === 'GET' && pathname === '/api/db/tables') {
+        sendJson(res, getDbTables());
+        return;
+      }
+
+      // GET /api/db/table?name=&limit=&offset=&search=
+      if (req.method === 'GET' && pathname === '/api/db/table') {
+        const name = url.searchParams.get('name');
+        if (!name) {
+          sendJson(res, { error: 'name required' }, 400);
+          return;
+        }
+        const limit = Math.min(
+          parseInt(url.searchParams.get('limit') || '50', 10) || 50,
+          200,
+        );
+        const offset = Math.max(
+          parseInt(url.searchParams.get('offset') || '0', 10) || 0,
+          0,
+        );
+        const search = url.searchParams.get('search') || undefined;
+        sendJson(res, getDbTableData(name, limit, offset, search));
         return;
       }
 

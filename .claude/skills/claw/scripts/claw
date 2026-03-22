@@ -46,9 +46,9 @@ def _find_nanoclaw_dir() -> Path:
     """
     if env := os.environ.get("NANOCLAW_DIR"):
         return Path(env).expanduser()
-    # If this script lives inside the NanoClaw tree (e.g. scripts/claw), walk up
+    # Walk up from the script location to find the NanoClaw root
     here = Path(__file__).resolve()
-    for parent in [here.parent, here.parent.parent]:
+    for parent in here.parents:
         if (parent / "store" / "messages.db").exists() or (parent / ".env").exists():
             return parent
     return Path.home() / "src" / "nanoclaw"
@@ -56,6 +56,7 @@ def _find_nanoclaw_dir() -> Path:
 NANOCLAW_DIR = _find_nanoclaw_dir()
 DB_PATH      = NANOCLAW_DIR / "store" / "messages.db"
 ENV_FILE     = NANOCLAW_DIR / ".env"
+GROUPS_DIR   = NANOCLAW_DIR / "groups"
 IMAGE        = "nanoclaw-agent:latest"
 
 SECRET_KEYS = [
@@ -219,6 +220,93 @@ def run_container(runtime: str, image: str, payload: dict, timeout: int = 300) -
         sys.exit(proc.returncode)
 
 
+# ── Memory status ────────────────────────────────────────────────────────────
+
+def _fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n //= 1024
+    return f"{n:.1f} TB"
+
+
+def _fmt_ts(ms: int | None) -> str:
+    if not ms:
+        return "—"
+    import datetime
+    return datetime.datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
+
+
+def get_memory_status(groups: list[dict], filter_folder: str | None) -> None:
+    """Print memory index stats for each group that has an embeddings.db."""
+    import json as _json
+
+    rows = []
+    for g in groups:
+        if filter_folder and g["folder"].lower() != filter_folder.lower():
+            continue
+        db_path = GROUPS_DIR / g["folder"] / "embeddings.db"
+        if not db_path.exists():
+            continue
+
+        db_size = db_path.stat().st_size
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            max_mtime = conn.execute("SELECT MAX(mtime) FROM files").fetchone()[0]
+
+            # Source breakdown
+            sources = conn.execute(
+                "SELECT source, COUNT(*) FROM files GROUP BY source ORDER BY source"
+            ).fetchall()
+
+            # Model from meta
+            meta_row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'memory_index_meta_v1'"
+            ).fetchone()
+            model = "—"
+            if meta_row:
+                try:
+                    meta = _json.loads(meta_row[0])
+                    model = meta.get("model", "—")
+                    # Strip provider prefix for display (e.g. "models/text-embedding-004")
+                    model = model.split("/")[-1]
+                except Exception:
+                    pass
+
+            conn.close()
+        except Exception as e:
+            rows.append((g["name"], g["folder"], "error", str(e), "", "", ""))
+            continue
+
+        source_str = ", ".join(f"{s}:{c}" for s, c in sources) if sources else "—"
+        rows.append((
+            g["name"],
+            g["folder"],
+            str(file_count),
+            str(chunk_count),
+            model,
+            _fmt_ts(max_mtime),
+            _fmt_size(db_size),
+            source_str,
+        ))
+
+    if not rows:
+        print("No memory indexes found." + (f" (no embeddings.db in groups/)" if not filter_folder else ""))
+        return
+
+    # Header
+    print(f"{'GROUP':<25} {'FILES':>6} {'CHUNKS':>7}  {'MODEL':<26} {'LAST INDEXED':<18} {'DB SIZE':>8}  SOURCES")
+    print("-" * 105)
+    for r in rows:
+        if len(r) == 4:  # error row
+            print(f"{r[0]:<25}  {'ERROR':<40}  {r[2]}")
+        else:
+            name, folder, files, chunks, model, last, size, sources = r
+            print(f"{name:<25} {files:>6} {chunks:>7}  {model:<26} {last:<18} {size:>8}  {sources}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -236,6 +324,7 @@ def main():
                         help="Container runtime (default: auto-detect)")
     parser.add_argument("--image", default=IMAGE, help=f"Container image (default: {IMAGE})")
     parser.add_argument("--list-groups", action="store_true", help="List registered groups and exit")
+    parser.add_argument("--memory-status", action="store_true", help="Show memory index stats for all groups and exit")
     parser.add_argument("--raw", action="store_true", help="Print raw JSON output")
     parser.add_argument("--timeout", type=int, default=300, metavar="SECS",
                         help="Max seconds to wait for a response (default: 300)")
@@ -254,6 +343,16 @@ def main():
         for g in groups:
             main_tag = " [main]" if g["is_main"] else ""
             print(f"{g['name']:<35} {g['folder']:<30} {g['jid']}{main_tag}")
+        return
+
+    if args.memory_status:
+        filter_folder = None
+        if args.group:
+            g = find_group(groups, args.group)
+            if g is None:
+                sys.exit(f"error: group '{args.group}' not found.")
+            filter_folder = g["folder"]
+        get_memory_status(groups, filter_folder)
         return
 
     # Resolve prompt: --pipe reads stdin, optionally prepended with positional arg

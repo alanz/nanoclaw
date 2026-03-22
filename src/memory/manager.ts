@@ -123,6 +123,7 @@ export class MemoryIndexManager {
   private syncLock: Promise<void> = Promise.resolve();
   private vecAvailable = false;
   private closed = false;
+  private periodicSyncTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly workspaceDir: string,
@@ -748,8 +749,22 @@ export class MemoryIndexManager {
     return { files, total };
   }
 
+  startPeriodicSync(intervalMs: number): void {
+    if (this.periodicSyncTimer) clearInterval(this.periodicSyncTimer);
+    this.periodicSyncTimer = setInterval(() => {
+      if (!this.closed) {
+        this.dirty = true;
+        void this.sync();
+      }
+    }, intervalMs);
+  }
+
   async close(): Promise<void> {
     this.closed = true;
+    if (this.periodicSyncTimer) {
+      clearInterval(this.periodicSyncTimer);
+      this.periodicSyncTimer = null;
+    }
     if (this.watcher) {
       await this.watcher.close();
       this.watcher = null;
@@ -795,8 +810,9 @@ export async function getOrCreateMemoryManager(
   try {
     await mgr.init();
     managers.set(folder, mgr);
-    // Kick off initial sync in background
+    // Kick off initial sync in background, then sync daily to catch any gaps
     void mgr.sync();
+    mgr.startPeriodicSync(24 * 60 * 60 * 1000);
     return mgr;
   } catch (err) {
     logger.error({ err, folder }, 'Failed to initialize memory index manager');

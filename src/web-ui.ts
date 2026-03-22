@@ -115,7 +115,7 @@ body.task-result-maximized #group-task-result{border-radius:0;height:100vh}
 .md-body pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;overflow-x:auto;margin:8px 0;max-height:none}
 .md-body pre code{background:none;padding:0}
 .md-body blockquote{border-left:3px solid #30363d;margin:8px 0;padding:4px 12px;color:#8b949e}
-.md-body a{color:#58a6ff}
+.md-body a{color:#58a6ff}.md-body a.link-internal{color:#7ee787}.md-body a.link-external{color:#58a6ff}
 .md-body table{border-collapse:collapse;width:100%;margin:8px 0}
 .md-body th,.md-body td{border:1px solid #30363d;padding:6px 12px}
 .md-body th{background:#21262d}
@@ -830,7 +830,14 @@ document.addEventListener('DOMContentLoaded', function() {
         mdDiv.className = 'md-body';
         if (fm && Object.keys(fm.meta).length > 0) mdDiv.appendChild(renderFrontMatter(fm.meta));
         var bodyEl = document.createElement('div');
-        bodyEl.innerHTML = window.marked.parse(fm ? fm.body : text);
+        var parsedDiv = document.createElement('div');
+        parsedDiv.innerHTML = window.marked.parse(fm ? fm.body : text);
+        parsedDiv.querySelectorAll('a').forEach(function(a) {
+          var href = a.getAttribute('href') || '';
+          var isInternal = href.charAt(0) === '#' || (href.indexOf(location.origin) === 0 && href.indexOf('#groups/') !== -1);
+          a.classList.add(isInternal ? 'link-internal' : 'link-external');
+        });
+        bodyEl.innerHTML = parsedDiv.innerHTML;
         mdDiv.appendChild(bodyEl);
         view.innerHTML = header;
         view.appendChild(mdDiv);

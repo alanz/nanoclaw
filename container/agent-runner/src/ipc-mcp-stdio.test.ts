@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildDashboardUrl } from './ipc-mcp-stdio.js';
+import { buildDashboardUrl, parseDashboardUrl } from './ipc-mcp-stdio.js';
 
 describe('buildDashboardUrl', () => {
   const BASE = 'https://nanoclaw.example.ts.net';
@@ -79,5 +79,73 @@ describe('buildDashboardUrl', () => {
     expect(buildDashboardUrl(BASE, FOLDER, 'group-notes/todo.md')).toBe(
       `${BASE}#groups/${FOLDER}/files/group-notes/todo.md`,
     );
+  });
+});
+
+describe('parseDashboardUrl', () => {
+  const BASE = 'https://nanoclaw.example.ts.net';
+  const FOLDER = 'main';
+
+  it('returns null for a non-dashboard URL', () => {
+    expect(parseDashboardUrl('https://example.com/something')).toBeNull();
+  });
+
+  it('returns null for an invalid URL', () => {
+    expect(parseDashboardUrl('not-a-url')).toBeNull();
+  });
+
+  it('parses a file URL back to a workspace path', () => {
+    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/files/CLAUDE.md`)).toEqual({
+      groupFolder: FOLDER,
+      filePath: '/workspace/CLAUDE.md',
+      view: 'files',
+    });
+  });
+
+  it('parses a nested file URL', () => {
+    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/files/subdir/deep/file.json`)).toEqual({
+      groupFolder: FOLDER,
+      filePath: '/workspace/subdir/deep/file.json',
+      view: 'files',
+    });
+  });
+
+  it('parses a files tab URL (no file selected)', () => {
+    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/files`)).toEqual({
+      groupFolder: FOLDER,
+      filePath: null,
+      view: 'files',
+    });
+  });
+
+  it('parses a tasks tab URL', () => {
+    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/tasks`)).toEqual({
+      groupFolder: FOLDER,
+      filePath: null,
+      view: 'tasks',
+    });
+  });
+
+  it('parses a chat view URL', () => {
+    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}`)).toEqual({
+      groupFolder: FOLDER,
+      filePath: null,
+      view: 'chat',
+    });
+  });
+
+  it('parses a different group folder', () => {
+    expect(parseDashboardUrl(`${BASE}#groups/telegram_work/files/plan.md`)).toEqual({
+      groupFolder: 'telegram_work',
+      filePath: '/workspace/plan.md',
+      view: 'files',
+    });
+  });
+
+  it('is the inverse of buildDashboardUrl for file paths', () => {
+    const url = buildDashboardUrl(BASE, FOLDER, '/workspace/notes/todo.md')!;
+    const result = parseDashboardUrl(url);
+    expect(result?.filePath).toBe('/workspace/notes/todo.md');
+    expect(result?.groupFolder).toBe(FOLDER);
   });
 });

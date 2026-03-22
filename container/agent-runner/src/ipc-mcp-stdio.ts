@@ -847,6 +847,79 @@ export function buildDashboardUrl(
   return `${webUiBaseUrl}#${hash}`;
 }
 
+/**
+ * Pure function — inverse of buildDashboardUrl.
+ * Parses a dashboard URL back to its components.
+ * Returns null if the URL is not a recognisable dashboard URL.
+ */
+export function parseDashboardUrl(url: string): {
+  groupFolder: string;
+  filePath: string | null;
+  view: 'chat' | 'tasks' | 'files';
+} | null {
+  let hash: string;
+  try {
+    const parsed = new URL(url);
+    hash = parsed.hash.replace(/^#/, '');
+  } catch {
+    return null;
+  }
+  // hash forms:
+  //   groups/{folder}/files/{rel}  → file
+  //   groups/{folder}/files        → files tab
+  //   groups/{folder}/tasks        → tasks tab
+  //   groups/{folder}              → chat tab
+  const fileMatch = hash.match(/^groups\/([^/]+)\/files\/(.+)$/);
+  if (fileMatch) {
+    return { groupFolder: fileMatch[1], filePath: `/workspace/${fileMatch[2]}`, view: 'files' };
+  }
+  const tabMatch = hash.match(/^groups\/([^/]+)\/(files|tasks)$/);
+  if (tabMatch) {
+    return { groupFolder: tabMatch[1], filePath: null, view: tabMatch[2] as 'files' | 'tasks' };
+  }
+  const chatMatch = hash.match(/^groups\/([^/]+)$/);
+  if (chatMatch) {
+    return { groupFolder: chatMatch[1], filePath: null, view: 'chat' };
+  }
+  return null;
+}
+
+server.tool(
+  'get_file_path',
+  `Convert a NanoClaw dashboard URL back to its workspace file path.
+
+Use this when you have a dashboard URL (e.g. shared by the user or found in an index) and need to read or write the underlying file.
+
+Returns the absolute workspace path (e.g. "/workspace/notes/todo.md") for file URLs, or a description of the view (chat/tasks/files tab) for group-level URLs.`,
+  {
+    url: z.string().describe('A NanoClaw dashboard URL (the value returned by get_file_url).'),
+  },
+  async (args) => {
+    const result = parseDashboardUrl(args.url);
+    if (!result) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Not a recognisable NanoClaw dashboard URL: ${args.url}`,
+          },
+        ],
+      };
+    }
+    if (result.filePath) {
+      return { content: [{ type: 'text' as const, text: result.filePath }] };
+    }
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Group: ${result.groupFolder}, view: ${result.view} (no specific file)`,
+        },
+      ],
+    };
+  },
+);
+
 server.tool(
   'get_file_url',
   `Get a shareable dashboard URL for a file in your workspace, or for a group view (chat, tasks, files tab).

@@ -15,6 +15,15 @@ const envConfig = readEnvFile([
   'ZOTERO_GROUP_FOLDER',
   'ZOTERO_CHAT_JID',
   'ZOTERO_OUTPUT_DIR',
+  'MEMORY_SEARCH_ENABLED',
+  'MEMORY_SEARCH_GEMINI_API_KEY',
+  'MEMORY_SEARCH_MODEL',
+  'MEMORY_SEARCH_OUTPUT_DIMS',
+  'MEMORY_SEARCH_EXTRA_PATHS',
+  'MEMORY_SEARCH_MAX_RESULTS',
+  'MEMORY_SEARCH_MIN_SCORE',
+  'MEMORY_SEARCH_RPM_LIMIT',
+  'MEMORY_SEARCH_RPD_SESSION_BUDGET',
 ]);
 
 export const ASSISTANT_NAME =
@@ -115,3 +124,63 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// --- Memory search ---
+export const MEMORY_SEARCH_ENABLED =
+  (process.env.MEMORY_SEARCH_ENABLED ||
+    envConfig.MEMORY_SEARCH_ENABLED ||
+    'false') === 'true';
+
+// API key is read only via readEnvFile (never from process.env) to avoid leaking into containers.
+// Callers in src/memory/ should import MEMORY_SEARCH_GEMINI_API_KEY from here.
+export const MEMORY_SEARCH_GEMINI_API_KEY: string | null =
+  envConfig.MEMORY_SEARCH_GEMINI_API_KEY?.trim() || null;
+
+export const MEMORY_SEARCH_MODEL: string =
+  process.env.MEMORY_SEARCH_MODEL ||
+  envConfig.MEMORY_SEARCH_MODEL ||
+  'gemini-embedding-001';
+
+export const MEMORY_SEARCH_OUTPUT_DIMS: number = parseInt(
+  process.env.MEMORY_SEARCH_OUTPUT_DIMS ||
+    envConfig.MEMORY_SEARCH_OUTPUT_DIMS ||
+    '3072',
+  10,
+);
+
+/** Comma-separated absolute paths to extra directories to index. */
+export const MEMORY_SEARCH_EXTRA_PATHS: string[] = (
+  process.env.MEMORY_SEARCH_EXTRA_PATHS ||
+  envConfig.MEMORY_SEARCH_EXTRA_PATHS ||
+  ''
+)
+  .split(',')
+  .map((p) => p.trim().replace(/^~/, HOME_DIR))
+  .filter(Boolean);
+
+export const MEMORY_SEARCH_MAX_RESULTS: number = parseInt(
+  process.env.MEMORY_SEARCH_MAX_RESULTS ||
+    envConfig.MEMORY_SEARCH_MAX_RESULTS ||
+    '6',
+  10,
+);
+
+export const MEMORY_SEARCH_MIN_SCORE: number = parseFloat(
+  process.env.MEMORY_SEARCH_MIN_SCORE ||
+    envConfig.MEMORY_SEARCH_MIN_SCORE ||
+    '0.35',
+);
+
+export const MEMORY_SEARCH_RPM_LIMIT: number = parseInt(
+  process.env.MEMORY_SEARCH_RPM_LIMIT ||
+    envConfig.MEMORY_SEARCH_RPM_LIMIT ||
+    '70',
+  10,
+);
+
+export const MEMORY_SEARCH_RPD_SESSION_BUDGET: number = parseInt(
+  process.env.MEMORY_SEARCH_RPD_SESSION_BUDGET ||
+    envConfig.MEMORY_SEARCH_RPD_SESSION_BUDGET ||
+    '900',
+  10,
+);

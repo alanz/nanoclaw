@@ -24,11 +24,13 @@
     "@deltachat/jsonrpc-client": "^1.160.0",
     "@deltachat/stdio-rpc-server": "^1.160.0",
     "better-sqlite3": "^11.8.1",
+    "chokidar": "^5.0.0",
     "cron-parser": "^5.5.0",
     "fast-xml-parser": "^5.5.5",
     "grammy": "^1.39.3",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
+    "sqlite-vec": "^0.1.7-alpha.2",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
   },

@@ -87,6 +87,14 @@ body.file-maximized #group-file-tree{display:none}
 body.file-maximized #group-tab-files>div{height:100vh;padding:0}
 body.file-maximized main{padding:0}
 body.file-maximized #group-file-view{border-radius:0;height:100vh}
+body.task-maximized nav{display:none}
+body.task-maximized #group-back{display:none}
+body.task-maximized #group-detail-name,body.task-maximized #group-detail-badges{display:none}
+body.task-maximized .subnav{display:none}
+body.task-maximized #group-tasks-body{display:none}
+body.task-maximized #group-tasks-split{height:100vh}
+body.task-maximized main{padding:0}
+body.task-maximized #group-task-detail{border-radius:0;height:100vh}
 .md-body{font-size:14px;line-height:1.6;color:#e6edf3}
 .md-body h1,.md-body h2,.md-body h3{color:#79c0ff;margin:16px 0 8px;border-bottom:1px solid #30363d;padding-bottom:4px}
 .md-body h1{font-size:20px}.md-body h2{font-size:17px}.md-body h3{font-size:15px}
@@ -156,7 +164,13 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
       <!-- Tasks tab -->
       <div id="group-tab-tasks" style="display:none">
-        <div id="group-tasks-body">Loading...</div>
+        <div id="group-tasks-split" style="display:flex;gap:16px;height:calc(100vh - 220px)">
+          <div id="group-tasks-body" style="flex:1;overflow-y:auto;min-width:0">Loading...</div>
+          <div id="group-task-detail" style="flex:1;overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;position:relative;display:none">
+            <button class="file-maximize-btn" id="task-maximize-btn" title="Maximise task view">&#x26F6;</button>
+            <div id="group-task-detail-content"><div class="empty">Click a task schedule to view details</div></div>
+          </div>
+        </div>
       </div>
 
       <!-- Files tab -->
@@ -221,6 +235,7 @@ document.addEventListener('DOMContentLoaded', function() {
   var currentTab = 'chat';
   var pollTimer = null;
   var skipHashUpdate = false;
+  var groupTasksData = {};   // task id → task object
 
   function esc(s) {
     if (s == null) return '';
@@ -402,7 +417,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
   document.getElementById('group-tasks-body').addEventListener('click', function(e) {
     var row = e.target.closest('[data-task-id]');
-    if (row) toggleLogs(row.dataset.taskId);
+    if (!row) return;
+    if (e.target.closest('[data-schedule-click]')) {
+      openTaskDetail(groupTasksData[row.dataset.taskId]);
+    } else {
+      toggleLogs(row.dataset.taskId);
+    }
   });
 
   function openGroup(g) {
@@ -429,6 +449,11 @@ document.addEventListener('DOMContentLoaded', function() {
       document.body.classList.remove('file-maximized');
       var btn = document.getElementById('file-maximize-btn');
       if (btn) { btn.innerHTML = '&#x26F6;'; btn.title = 'Maximise file view'; }
+    }
+    if (tab !== 'tasks' && document.body.classList.contains('task-maximized')) {
+      document.body.classList.remove('task-maximized');
+      var tbtn = document.getElementById('task-maximize-btn');
+      if (tbtn) { tbtn.innerHTML = '&#x26F6;'; tbtn.title = 'Maximise task view'; }
     }
     if (currentGroup) {
       var base = 'groups/' + currentGroup.folder;
@@ -494,11 +519,13 @@ document.addEventListener('DOMContentLoaded', function() {
       var all = await fetch('/api/tasks').then(function(r) { return r.json(); });
       var data = all.filter(function(t) { return t.group_folder === currentGroup.folder; });
       if (!data.length) { el.innerHTML = '<div class="empty">No scheduled tasks for this group</div>'; return; }
+      groupTasksData = {};
+      data.forEach(function(t) { groupTasksData[t.id] = t; });
       el.innerHTML = '<div class="card"><table><thead><tr><th>Schedule</th><th>Status</th><th>Next Run</th><th>Last Run</th><th>Prompt</th><th></th></tr></thead><tbody>'
         + data.map(function(t) {
           var sc = t.status==='active' ? 'bg' : t.status==='paused' ? 'by' : 'br';
           return '<tr class="log-row" data-task-id="'+esc(t.id)+'">'
-            +'<td class="dim">'+esc(t.schedule_type)+': '+esc(t.schedule_value)+'</td>'
+            +'<td class="dim" data-schedule-click="1" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">'+esc(t.schedule_type)+': '+esc(t.schedule_value)+'</td>'
             +'<td><span class="badge '+sc+'">'+esc(t.status)+'</span></td>'
             +'<td class="dim">'+(t.next_run ? fmtDate(t.next_run) : '&mdash;')+'</td>'
             +'<td class="dim">'+(t.last_run ? fmtDate(t.last_run) : '&mdash;')+'</td>'
@@ -532,6 +559,30 @@ document.addEventListener('DOMContentLoaded', function() {
       } catch(e) { inner.textContent = 'Error loading logs.'; }
     }
   }
+
+  function openTaskDetail(task) {
+    if (!task) return;
+    var panel = document.getElementById('group-task-detail');
+    var content = document.getElementById('group-task-detail-content');
+    panel.style.display = '';
+    var sc = task.status==='active' ? 'bg' : task.status==='paused' ? 'by' : 'br';
+    var html = '<div class="dim" style="margin-bottom:12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Task Detail</div>'
+      +'<div class="fm-card">'
+      +'<div class="fm-key">Schedule</div><div class="fm-val">'+esc(task.schedule_type)+': '+esc(task.schedule_value)+'</div>'
+      +'<div class="fm-key">Status</div><div class="fm-val"><span class="badge '+sc+'">'+esc(task.status)+'</span></div>'
+      +(task.next_run ? '<div class="fm-key">Next Run</div><div class="fm-val">'+fmtDate(task.next_run)+'</div>' : '')
+      +(task.last_run ? '<div class="fm-key">Last Run</div><div class="fm-val">'+fmtDate(task.last_run)+'</div>' : '')
+      +'</div>'
+      +'<div class="dim" style="margin-bottom:8px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Prompt</div>'
+      +'<pre style="max-height:none;font-size:13px">'+esc(task.prompt)+'</pre>';
+    content.innerHTML = html;
+  }
+
+  document.getElementById('task-maximize-btn').addEventListener('click', function() {
+    var maximised = document.body.classList.toggle('task-maximized');
+    this.innerHTML = maximised ? '&#x2715;' : '&#x26F6;';
+    this.title = maximised ? 'Restore task view' : 'Maximise task view';
+  });
 
   // ── Files tab ──────────────────────────────────────────────────────────────
 

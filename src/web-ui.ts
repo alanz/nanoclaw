@@ -70,6 +70,7 @@ tr:hover td{background:#1c2128}
 .back:hover{color:#e6edf3}
 .empty{color:#8b949e;font-style:italic;text-align:center;padding:32px}
 .log-row{cursor:pointer}.log-body{display:none;padding:8px 12px;background:#0d1117}
+.log-row.task-selected td{background:#0d2744 !important;border-top:1px solid #1f6feb;border-bottom:1px solid #1f6feb}
 pre{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:200px}
 .dim{color:#8b949e;font-size:12px}
 .ftree-dir{padding:4px 6px;font-size:13px;font-weight:600;color:#8b949e;cursor:pointer;user-select:none;border-radius:4px}
@@ -95,6 +96,15 @@ body.task-maximized #group-tasks-body{display:none}
 body.task-maximized #group-tasks-split{height:100vh}
 body.task-maximized main{padding:0}
 body.task-maximized #group-task-detail{border-radius:0;height:100vh}
+body.task-result-maximized nav{display:none}
+body.task-result-maximized #group-back{display:none}
+body.task-result-maximized #group-detail-name,body.task-result-maximized #group-detail-badges{display:none}
+body.task-result-maximized .subnav{display:none}
+body.task-result-maximized #group-tasks-body{display:none}
+body.task-result-maximized #group-task-detail{display:none}
+body.task-result-maximized #group-tasks-split{height:100vh}
+body.task-result-maximized main{padding:0}
+body.task-result-maximized #group-task-result{border-radius:0;height:100vh}
 .md-body{font-size:14px;line-height:1.6;color:#e6edf3}
 .md-body h1,.md-body h2,.md-body h3{color:#79c0ff;margin:16px 0 8px;border-bottom:1px solid #30363d;padding-bottom:4px}
 .md-body h1{font-size:20px}.md-body h2{font-size:17px}.md-body h3{font-size:15px}
@@ -170,6 +180,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
             <button class="file-maximize-btn" id="task-maximize-btn" title="Maximise task view">&#x26F6;</button>
             <div id="group-task-detail-content"><div class="empty">Click a task schedule to view details</div></div>
           </div>
+          <div id="group-task-result" style="flex:1;overflow:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;position:relative;display:none">
+            <button class="file-maximize-btn" id="task-result-maximize-btn" title="Maximise result view">&#x26F6;</button>
+            <div id="group-task-result-content"></div>
+          </div>
         </div>
       </div>
 
@@ -236,6 +250,7 @@ document.addEventListener('DOMContentLoaded', function() {
   var pollTimer = null;
   var skipHashUpdate = false;
   var groupTasksData = {};   // task id → task object
+  var taskDetailLogs = [];   // run logs for currently open task detail
 
   function esc(s) {
     if (s == null) return '';
@@ -325,7 +340,23 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
-  window.addEventListener('popstate', restoreFromHash);
+  window.addEventListener('popstate', function() {
+    // If a pane is maximised, back button de-maximises instead of navigating.
+    var maximizeMap = [
+      { cls: 'task-result-maximized', btn: 'task-result-maximize-btn', label: 'Maximise result view' },
+      { cls: 'task-maximized',        btn: 'task-maximize-btn',        label: 'Maximise task view'   },
+      { cls: 'file-maximized',        btn: 'file-maximize-btn',        label: 'Maximise file view'   },
+    ];
+    for (var i = 0; i < maximizeMap.length; i++) {
+      if (document.body.classList.contains(maximizeMap[i].cls)) {
+        document.body.classList.remove(maximizeMap[i].cls);
+        var b = document.getElementById(maximizeMap[i].btn);
+        if (b) { b.innerHTML = '&#x26F6;'; b.title = maximizeMap[i].label; }
+        return;
+      }
+    }
+    restoreFromHash();
+  });
 
   // ── Top-level nav ──────────────────────────────────────────────────────────
 
@@ -419,6 +450,8 @@ document.addEventListener('DOMContentLoaded', function() {
     var row = e.target.closest('[data-task-id]');
     if (!row) return;
     if (e.target.closest('[data-schedule-click]')) {
+      document.querySelectorAll('.log-row.task-selected').forEach(function(r) { r.classList.remove('task-selected'); });
+      row.classList.add('task-selected');
       openTaskDetail(groupTasksData[row.dataset.taskId]);
     } else {
       toggleLogs(row.dataset.taskId);
@@ -454,6 +487,11 @@ document.addEventListener('DOMContentLoaded', function() {
       document.body.classList.remove('task-maximized');
       var tbtn = document.getElementById('task-maximize-btn');
       if (tbtn) { tbtn.innerHTML = '&#x26F6;'; tbtn.title = 'Maximise task view'; }
+    }
+    if (tab !== 'tasks' && document.body.classList.contains('task-result-maximized')) {
+      document.body.classList.remove('task-result-maximized');
+      var trbtn = document.getElementById('task-result-maximize-btn');
+      if (trbtn) { trbtn.innerHTML = '&#x26F6;'; trbtn.title = 'Maximise result view'; }
     }
     if (currentGroup) {
       var base = 'groups/' + currentGroup.folder;
@@ -560,13 +598,15 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
-  function openTaskDetail(task) {
+  async function openTaskDetail(task) {
     if (!task) return;
     var panel = document.getElementById('group-task-detail');
     var content = document.getElementById('group-task-detail-content');
     panel.style.display = '';
+    document.getElementById('group-task-result').style.display = 'none';
+    taskDetailLogs = [];
     var sc = task.status==='active' ? 'bg' : task.status==='paused' ? 'by' : 'br';
-    var html = '<div class="dim" style="margin-bottom:12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Task Detail</div>'
+    content.innerHTML = '<div class="dim" style="margin-bottom:12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Task Detail</div>'
       +'<div class="fm-card">'
       +'<div class="fm-key">Schedule</div><div class="fm-val">'+esc(task.schedule_type)+': '+esc(task.schedule_value)+'</div>'
       +'<div class="fm-key">Status</div><div class="fm-val"><span class="badge '+sc+'">'+esc(task.status)+'</span></div>'
@@ -574,14 +614,73 @@ document.addEventListener('DOMContentLoaded', function() {
       +(task.last_run ? '<div class="fm-key">Last Run</div><div class="fm-val">'+fmtDate(task.last_run)+'</div>' : '')
       +'</div>'
       +'<div class="dim" style="margin-bottom:8px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Prompt</div>'
-      +'<pre style="max-height:none;font-size:13px">'+esc(task.prompt)+'</pre>';
-    content.innerHTML = html;
+      +'<pre style="max-height:180px;font-size:13px">'+esc(task.prompt)+'</pre>'
+      +'<div class="dim" style="margin:16px 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Run Logs</div>'
+      +'<div id="task-detail-logs"><div class="dim">Loading\u2026</div></div>';
+    try {
+      var logs = await fetch('/api/task-logs?task_id='+encodeURIComponent(task.id)).then(function(r) { return r.json(); });
+      taskDetailLogs = logs;
+      var logsEl = document.getElementById('task-detail-logs');
+      if (!logsEl) return;
+      if (!logs.length) { logsEl.innerHTML = '<div class="dim" style="font-style:italic">No run logs yet.</div>'; return; }
+      logsEl.innerHTML = logs.map(function(l) {
+        var lsc = l.status === 'success' ? 'bg' : 'br';
+        var hasResult = l.result || l.error;
+        return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #21262d">'
+          +'<span class="badge '+lsc+'">'+esc(l.status)+'</span>'
+          +'<span class="dim">'+fmtDate(l.run_at)+' &middot; '+l.duration_ms+'ms</span>'
+          +(hasResult
+            ? '<button data-log-id="'+esc(l.id)+'" style="margin-left:auto;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#8b949e;font-size:11px;padding:2px 8px;cursor:pointer">View result</button>'
+            : '<span class="dim" style="margin-left:auto;font-size:11px;font-style:italic">no result</span>')
+          +'</div>';
+      }).join('');
+    } catch(e) {
+      var logsEl = document.getElementById('task-detail-logs');
+      if (logsEl) logsEl.innerHTML = '<div class="dim">Error loading logs.</div>';
+    }
+  }
+
+  document.getElementById('group-task-detail').addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-log-id]');
+    if (!btn) return;
+    var logId = parseInt(btn.dataset.logId, 10);
+    var log = taskDetailLogs.find(function(l) { return l.id === logId; });
+    if (log) openTaskResult(log);
+  });
+
+  function openTaskResult(log) {
+    var panel = document.getElementById('group-task-result');
+    var content = document.getElementById('group-task-result-content');
+    panel.style.display = '';
+    var lsc = log.status === 'success' ? 'bg' : 'br';
+    content.innerHTML = '<div class="dim" style="margin-bottom:12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Run Result</div>'
+      +'<div class="fm-card">'
+      +'<div class="fm-key">Status</div><div class="fm-val"><span class="badge '+lsc+'">'+esc(log.status)+'</span></div>'
+      +'<div class="fm-key">Run At</div><div class="fm-val">'+fmtDate(log.run_at)+'</div>'
+      +'<div class="fm-key">Duration</div><div class="fm-val">'+log.duration_ms+'ms</div>'
+      +'</div>'
+      +(log.result
+        ? '<div class="dim" style="margin-bottom:8px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Result</div>'
+          +'<pre style="max-height:none;font-size:13px">'+esc(log.result)+'</pre>'
+        : '')
+      +(log.error
+        ? '<div class="dim" style="margin-bottom:8px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Error</div>'
+          +'<pre style="max-height:none;font-size:13px;color:#f85149">'+esc(log.error)+'</pre>'
+        : '');
   }
 
   document.getElementById('task-maximize-btn').addEventListener('click', function() {
     var maximised = document.body.classList.toggle('task-maximized');
     this.innerHTML = maximised ? '&#x2715;' : '&#x26F6;';
     this.title = maximised ? 'Restore task view' : 'Maximise task view';
+    if (maximised) history.pushState(null, '', location.href);
+  });
+
+  document.getElementById('task-result-maximize-btn').addEventListener('click', function() {
+    var maximised = document.body.classList.toggle('task-result-maximized');
+    this.innerHTML = maximised ? '&#x2715;' : '&#x26F6;';
+    this.title = maximised ? 'Restore result view' : 'Maximise result view';
+    if (maximised) history.pushState(null, '', location.href);
   });
 
   // ── Files tab ──────────────────────────────────────────────────────────────
@@ -590,6 +689,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var maximised = document.body.classList.toggle('file-maximized');
     this.innerHTML = maximised ? '&#x2715;' : '&#x26F6;';
     this.title = maximised ? 'Restore file view' : 'Maximise file view';
+    if (maximised) history.pushState(null, '', location.href);
   });
 
   async function loadGroupFiles(autoFilePath) {

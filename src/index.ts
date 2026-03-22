@@ -6,7 +6,6 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
-  MEMORY_SEARCH_ENABLED,
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
@@ -79,11 +78,7 @@ import { startRssMonitorLoop } from './rss-monitor.js';
 import { startZoteroMonitorLoop } from './zotero-monitor.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
-import {
-  closeAllMemoryManagers,
-  formatMemoryContext,
-  getOrCreateMemoryManager,
-} from './memory/manager.js';
+import { closeAllMemoryManagers } from './memory/manager.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -399,26 +394,11 @@ async function runAgent(
       }
     : undefined;
 
-  let enrichedPrompt = prompt;
-  if (MEMORY_SEARCH_ENABLED) {
-    try {
-      const mgr = await getOrCreateMemoryManager(group.folder);
-      if (mgr) {
-        const results = await mgr.search(prompt);
-        if (results.length > 0) {
-          enrichedPrompt = `${formatMemoryContext(results)}\n\n${prompt}`;
-        }
-      }
-    } catch (err) {
-      logger.warn({ err }, 'Memory search failed, continuing without context');
-    }
-  }
-
   try {
     const output = await runContainerAgent(
       group,
       {
-        prompt: enrichedPrompt,
+        prompt,
         sessionId,
         groupFolder: group.folder,
         chatJid,

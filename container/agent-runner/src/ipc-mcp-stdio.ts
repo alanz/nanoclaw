@@ -652,6 +652,172 @@ PAGINATION: The response includes has_more (boolean) and next_cursor. If has_mor
   },
 );
 
+server.tool(
+  'memory_search',
+  `Search your personal knowledge base (org notes, workspace memory files, research documents). Use when the user references something you may have notes on, or when background context would improve your answer. Also use when creating a new A-MEM note to find related notes for the links field.
+
+Returns ranked results with path, line range, score, and snippet. Use memory_get to fetch the full content of a result.
+
+Params:
+- query: What to search for (required)
+- limit: Max results, default 6, max 20
+- path_prefix: Filter to a subtree, e.g. "memory/notes/" or "memory/reports/"
+- source: Filter by source — "memory" (workspace files), "org" (org-mode), "zotero"
+- min_score: Min relevance 0–1, default 0.35
+- include_content: Also return full file text + parsed frontmatter (enforces limit ≤ 10)`,
+  {
+    query: z.string().describe('What to search for'),
+    limit: z.number().optional().describe('Max results (default 6, max 20)'),
+    path_prefix: z.string().optional().describe('Filter to path subtree, e.g. "memory/notes/"'),
+    source: z.string().optional().describe('Filter by source: "memory", "org", or "zotero"'),
+    min_score: z.number().optional().describe('Min relevance score 0–1 (default 0.35)'),
+    include_content: z.boolean().optional().describe('Also return full file text and frontmatter'),
+  },
+  async (args) => {
+    const requestId = `ms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'memory_search',
+      requestId,
+      groupFolder,
+      query: args.query,
+      limit: args.limit,
+      path_prefix: args.path_prefix,
+      source: args.source,
+      min_score: args.min_score,
+      include_content: args.include_content,
+      timestamp: new Date().toISOString(),
+    });
+
+    const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+    const responseFile = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + 15000;
+
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      if (fs.existsSync(responseFile)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+          fs.unlinkSync(responseFile);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (err) {
+          return {
+            content: [{ type: 'text' as const, text: `Error reading memory_search response: ${err instanceof Error ? err.message : String(err)}` }],
+            isError: true,
+          };
+        }
+      }
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'memory_search timed out. The host may be busy — try again.' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
+  'memory_get',
+  `Read the full content of a specific file from your knowledge base. Use the path from memory_search results. For A-MEM note-taking: use to read existing notes' links field before updating them.
+
+Returns the full file text, size, indexed status, and optionally parsed YAML frontmatter (id, keywords, tags, links fields).`,
+  {
+    path: z.string().describe('Relative file path (from memory_search result, or relative to /workspace/group/)'),
+    parse_frontmatter: z.boolean().optional().describe('Parse YAML front matter (default true)'),
+  },
+  async (args) => {
+    const requestId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'memory_get',
+      requestId,
+      groupFolder,
+      path: args.path,
+      parse_frontmatter: args.parse_frontmatter,
+      timestamp: new Date().toISOString(),
+    });
+
+    const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+    const responseFile = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + 15000;
+
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      if (fs.existsSync(responseFile)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+          fs.unlinkSync(responseFile);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (err) {
+          return {
+            content: [{ type: 'text' as const, text: `Error reading memory_get response: ${err instanceof Error ? err.message : String(err)}` }],
+            isError: true,
+          };
+        }
+      }
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'memory_get timed out. The host may be busy — try again.' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
+  'memory_list',
+  `List indexed files in your knowledge base matching a path prefix. Use for A-MEM consolidation: find recent notes without links, audit the memory/notes/ directory. No semantic query — just file metadata.
+
+Returns file paths, modification times, sizes, and optionally parsed frontmatter.`,
+  {
+    path_prefix: z.string().optional().describe('Filter to path subtree, e.g. "memory/notes/"'),
+    source: z.string().optional().describe('Filter by source: "memory", "org", or "zotero"'),
+    limit: z.number().optional().describe('Max files to return (default 50, max 200; max 50 when parse_frontmatter=true)'),
+    order_by: z.enum(['mtime', 'path', 'size']).optional().describe('Sort order (default mtime descending)'),
+    parse_frontmatter: z.boolean().optional().describe('Parse YAML frontmatter for each file (expensive — enforces limit ≤ 50)'),
+  },
+  async (args) => {
+    const requestId = `ml-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'memory_list',
+      requestId,
+      groupFolder,
+      path_prefix: args.path_prefix,
+      source: args.source,
+      limit: args.limit,
+      order_by: args.order_by,
+      parse_frontmatter: args.parse_frontmatter,
+      timestamp: new Date().toISOString(),
+    });
+
+    const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+    const responseFile = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + 15000;
+
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      if (fs.existsSync(responseFile)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+          fs.unlinkSync(responseFile);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (err) {
+          return {
+            content: [{ type: 'text' as const, text: `Error reading memory_list response: ${err instanceof Error ? err.message : String(err)}` }],
+            isError: true,
+          };
+        }
+      }
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'memory_list timed out. The host may be busy — try again.' }],
+      isError: true,
+    };
+  },
+);
+
 /**
  * Pure function for building a dashboard URL — exported for testing.
  * Returns null if webUiBaseUrl is not set.

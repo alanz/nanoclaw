@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import Database from 'better-sqlite3';
@@ -36,6 +37,46 @@ import { mergeHybridResults } from './hybrid.js';
 import { searchVector, searchKeyword } from './search.js';
 import { TokenBucketRateLimiter } from './rate-limiter.js';
 
+/** Strip /workspace/group/ prefix from agent-provided paths to get workspace-relative path. */
+function normaliseInputPath(p: string, _workspaceDir: string): string {
+  const containerPrefix = '/workspace/group/';
+  return p.startsWith(containerPrefix) ? p.slice(containerPrefix.length) : p;
+}
+
+/** Parse YAML front matter from a markdown/org file. Returns undefined if none found. */
+export function parseFrontmatterYaml(
+  content: string,
+): Record<string, unknown> | undefined {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+  if (!match || !match[1]) return undefined;
+  const yaml = match[1];
+  const result: Record<string, unknown> = {};
+  for (const line of yaml.split('\n')) {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx < 0) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const raw = line.slice(colonIdx + 1).trim();
+    if (!key) continue;
+    // Parse arrays like [a, b, c]
+    if (raw.startsWith('[') && raw.endsWith(']')) {
+      result[key] = raw
+        .slice(1, -1)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } else if (raw === 'null' || raw === '') {
+      result[key] = null;
+    } else if (raw === 'true') {
+      result[key] = true;
+    } else if (raw === 'false') {
+      result[key] = false;
+    } else {
+      result[key] = raw;
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 const VECTOR_TABLE = 'chunks_vec';
 const FTS_TABLE = 'chunks_fts';
 const CACHE_TABLE = 'embedding_cache';
@@ -61,6 +102,16 @@ export type MemorySearchResult = {
   endLine: number;
   score: number;
   snippet: string;
+  content?: string;
+  frontmatter?: Record<string, unknown>;
+};
+
+export type MemoryFileEntry = {
+  path: string;
+  mtime: number;
+  size: number;
+  indexed: boolean;
+  frontmatter?: Record<string, unknown>;
 };
 
 export class MemoryIndexManager {
@@ -457,10 +508,33 @@ export class MemoryIndexManager {
     }
   }
 
+  /** Total number of indexed chunks. */
+  totalIndexed(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM chunks').get() as {
+      n: number;
+    };
+    return row.n;
+  }
+
   /** Search the index for chunks relevant to the query. */
-  async search(query: string): Promise<MemorySearchResult[]> {
+  async search(
+    query: string,
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      pathPrefix?: string;
+      source?: string;
+      includeContent?: boolean;
+    },
+  ): Promise<MemorySearchResult[]> {
     if (!query.trim()) return [];
     if (this.closed) return [];
+
+    const maxResults = opts?.maxResults ?? this.maxResults;
+    const minScore = opts?.minScore ?? this.minScore;
+    const pathPrefix = opts?.pathPrefix;
+    const source = opts?.source;
+    const includeContent = opts?.includeContent ?? false;
 
     // Trigger background sync if dirty; search on current DB state immediately.
     // Sync is non-destructive for unchanged files (only updates changed ones),
@@ -479,7 +553,7 @@ export class MemoryIndexManager {
       );
     }
 
-    const candidates = this.maxResults * CANDIDATES_MULTIPLIER;
+    const candidates = maxResults * CANDIDATES_MULTIPLIER;
 
     const vectorResults =
       queryVec.length > 0
@@ -508,16 +582,170 @@ export class MemoryIndexManager {
       textWeight: TEXT_WEIGHT,
     });
 
-    return merged
-      .filter((r) => r.score >= this.minScore)
-      .slice(0, this.maxResults)
-      .map((r) => ({
-        path: r.path,
-        startLine: r.startLine,
-        endLine: r.endLine,
-        score: r.score,
-        snippet: r.snippet,
-      }));
+    const limited = Math.min(maxResults, includeContent ? 10 : maxResults);
+    const filtered = merged
+      .filter((r) => r.score >= minScore)
+      .filter((r) => !pathPrefix || r.path.startsWith(pathPrefix))
+      .filter((r) => !source || r.source === source)
+      .slice(0, limited);
+
+    const results: MemorySearchResult[] = await Promise.all(
+      filtered.map(async (r) => {
+        const result: MemorySearchResult = {
+          path: r.path,
+          startLine: r.startLine,
+          endLine: r.endLine,
+          score: r.score,
+          snippet: r.snippet,
+        };
+        if (includeContent) {
+          try {
+            const fileData = await this.getFileContent(r.path, {
+              parseFrontmatter: true,
+            });
+            result.content = fileData.content;
+            result.frontmatter = fileData.frontmatter;
+          } catch {}
+        }
+        return result;
+      }),
+    );
+
+    return results;
+  }
+
+  /** Read full content of a file in the index. */
+  async getFileContent(
+    relPath: string,
+    opts?: { parseFrontmatter?: boolean },
+  ): Promise<{
+    path: string;
+    content: string;
+    size: number;
+    frontmatter?: Record<string, unknown>;
+    indexed: boolean;
+    lastIndexed?: number;
+  }> {
+    const normalised = normaliseInputPath(relPath, this.workspaceDir);
+    const parseFrontmatter = opts?.parseFrontmatter ?? true;
+
+    // Resolve the file: try workspace-relative first, then extra paths
+    const candidates = [
+      path.resolve(this.workspaceDir, normalised),
+      ...this.extraPaths.map((ep) => path.resolve(ep, normalised)),
+    ];
+
+    let absPath: string | null = null;
+    for (const candidate of candidates) {
+      try {
+        await fs.access(candidate);
+        absPath = candidate;
+        break;
+      } catch {}
+    }
+
+    if (!absPath) {
+      throw new Error(`File not found: ${normalised}`);
+    }
+
+    const content = await fs.readFile(absPath, 'utf-8');
+    const stat = await fs.stat(absPath);
+
+    const fileRow = this.db
+      .prepare('SELECT mtime FROM files WHERE path = ?')
+      .get(normalised) as { mtime: number } | undefined;
+
+    const result: {
+      path: string;
+      content: string;
+      size: number;
+      frontmatter?: Record<string, unknown>;
+      indexed: boolean;
+      lastIndexed?: number;
+    } = {
+      path: normalised,
+      content,
+      size: stat.size,
+      indexed: !!fileRow,
+      lastIndexed: fileRow?.mtime,
+    };
+
+    if (parseFrontmatter) {
+      result.frontmatter = parseFrontmatterYaml(content);
+    }
+
+    return result;
+  }
+
+  /** List indexed files matching filters. */
+  listFiles(opts?: {
+    pathPrefix?: string;
+    source?: string;
+    limit?: number;
+    orderBy?: 'mtime' | 'path' | 'size';
+    parseFrontmatter?: boolean;
+  }): { files: MemoryFileEntry[]; total: number } {
+    const limit = Math.min(
+      opts?.limit ?? 50,
+      opts?.parseFrontmatter ? 50 : 200,
+    );
+    const orderBy = opts?.orderBy ?? 'mtime';
+    const orderCol =
+      orderBy === 'mtime' ? 'mtime' : orderBy === 'size' ? 'size' : 'path';
+    const orderDir = orderBy === 'path' ? 'ASC' : 'DESC';
+
+    let query = 'SELECT path, mtime, size FROM files';
+    const params: (string | number)[] = [];
+    const conditions: string[] = [];
+
+    if (opts?.pathPrefix) {
+      conditions.push('path LIKE ?');
+      params.push(`${opts.pathPrefix}%`);
+    }
+    if (opts?.source) {
+      conditions.push('source = ?');
+      params.push(opts.source);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    const total = (
+      this.db
+        .prepare(
+          query.replace('SELECT path, mtime, size', 'SELECT COUNT(*) AS n'),
+        )
+        .get(...params) as { n: number }
+    ).n;
+
+    query += ` ORDER BY ${orderCol} ${orderDir} LIMIT ?`;
+    params.push(limit);
+
+    const rows = this.db.prepare(query).all(...params) as Array<{
+      path: string;
+      mtime: number;
+      size: number;
+    }>;
+
+    const files: MemoryFileEntry[] = rows.map((row) => {
+      const entry: MemoryFileEntry = {
+        path: row.path,
+        mtime: row.mtime,
+        size: row.size,
+        indexed: true,
+      };
+      if (opts?.parseFrontmatter) {
+        try {
+          const absPath = path.resolve(this.workspaceDir, row.path);
+          const content = readFileSync(absPath, 'utf-8');
+          entry.frontmatter = parseFrontmatterYaml(content);
+        } catch {}
+      }
+      return entry;
+    });
+
+    return { files, total };
   }
 
   async close(): Promise<void> {

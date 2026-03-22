@@ -3,7 +3,13 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  DATA_DIR,
+  IPC_POLL_INTERVAL,
+  MEMORY_SEARCH_ENABLED,
+  TIMEZONE,
+} from './config.js';
+import { getOrCreateMemoryManager } from './memory/manager.js';
 import { AvailableGroup } from './container-runner.js';
 import {
   createRssFeed,
@@ -245,6 +251,15 @@ export async function processTaskIpc(
     to?: string;
     limit?: number;
     afterCursor?: string;
+    // For memory_search / memory_get / memory_list
+    query?: string;
+    path?: string;
+    min_score?: number;
+    include_content?: boolean;
+    path_prefix?: string;
+    source?: string;
+    order_by?: string;
+    parse_frontmatter?: boolean;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -728,6 +743,148 @@ export async function processTaskIpc(
           has_more: result.has_more,
         },
         'Transcript query fulfilled',
+      );
+      break;
+    }
+
+    case 'memory_search': {
+      if (!data.requestId || !data.query) {
+        logger.warn(
+          { data },
+          'Invalid memory_search request — missing requestId or query',
+        );
+        break;
+      }
+      const group = Object.values(registeredGroups).find(
+        (g) => g.folder === sourceGroup,
+      );
+      let memSearchResponse: unknown;
+      if (!MEMORY_SEARCH_ENABLED || !group) {
+        memSearchResponse = { error: 'Memory search not available' };
+      } else {
+        try {
+          const mgr = await getOrCreateMemoryManager(group.folder);
+          if (!mgr) {
+            memSearchResponse = { error: 'Memory search not available' };
+          } else {
+            const results = await mgr.search(data.query, {
+              maxResults:
+                typeof data.limit === 'number' ? data.limit : undefined,
+              minScore:
+                typeof data.min_score === 'number' ? data.min_score : undefined,
+              pathPrefix: data.path_prefix,
+              source: data.source,
+              includeContent: data.include_content,
+            });
+            const total = mgr.totalIndexed();
+            memSearchResponse = {
+              results,
+              total_indexed: total,
+              query_used: data.query,
+            };
+          }
+        } catch (err) {
+          logger.warn({ err }, 'memory_search IPC handler error');
+          memSearchResponse = { error: String(err) };
+        }
+      }
+      const memSearchDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(memSearchDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(memSearchDir, `${data.requestId}.json`),
+        JSON.stringify(memSearchResponse),
+      );
+      logger.info(
+        { requestId: data.requestId, sourceGroup },
+        'memory_search fulfilled',
+      );
+      break;
+    }
+
+    case 'memory_get': {
+      if (!data.requestId || !data.path) {
+        logger.warn(
+          { data },
+          'Invalid memory_get request — missing requestId or path',
+        );
+        break;
+      }
+      const group = Object.values(registeredGroups).find(
+        (g) => g.folder === sourceGroup,
+      );
+      let memGetResponse: unknown;
+      if (!MEMORY_SEARCH_ENABLED || !group) {
+        memGetResponse = { error: 'Memory not available' };
+      } else {
+        try {
+          const mgr = await getOrCreateMemoryManager(group.folder);
+          if (!mgr) {
+            memGetResponse = { error: 'Memory not available' };
+          } else {
+            memGetResponse = await mgr.getFileContent(data.path, {
+              parseFrontmatter: data.parse_frontmatter !== false,
+            });
+          }
+        } catch (err) {
+          logger.warn({ err }, 'memory_get IPC handler error');
+          memGetResponse = { error: String(err) };
+        }
+      }
+      const memGetDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(memGetDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(memGetDir, `${data.requestId}.json`),
+        JSON.stringify(memGetResponse),
+      );
+      logger.info(
+        { requestId: data.requestId, sourceGroup },
+        'memory_get fulfilled',
+      );
+      break;
+    }
+
+    case 'memory_list': {
+      if (!data.requestId) {
+        logger.warn(
+          { data },
+          'Invalid memory_list request — missing requestId',
+        );
+        break;
+      }
+      const group = Object.values(registeredGroups).find(
+        (g) => g.folder === sourceGroup,
+      );
+      let memListResponse: unknown;
+      if (!MEMORY_SEARCH_ENABLED || !group) {
+        memListResponse = { error: 'Memory not available' };
+      } else {
+        try {
+          const mgr = await getOrCreateMemoryManager(group.folder);
+          if (!mgr) {
+            memListResponse = { error: 'Memory not available' };
+          } else {
+            memListResponse = mgr.listFiles({
+              pathPrefix: data.path_prefix,
+              source: data.source,
+              limit: typeof data.limit === 'number' ? data.limit : undefined,
+              orderBy: data.order_by as 'mtime' | 'path' | 'size' | undefined,
+              parseFrontmatter: data.parse_frontmatter,
+            });
+          }
+        } catch (err) {
+          logger.warn({ err }, 'memory_list IPC handler error');
+          memListResponse = { error: String(err) };
+        }
+      }
+      const memListDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(memListDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(memListDir, `${data.requestId}.json`),
+        JSON.stringify(memListResponse),
+      );
+      logger.info(
+        { requestId: data.requestId, sourceGroup },
+        'memory_list fulfilled',
       );
       break;
     }

@@ -133,6 +133,16 @@ body.task-result-maximized #group-task-result{border-radius:0;height:100vh}
 .db-table-item:hover,.db-table-item.active{background:#21262d;color:#e6edf3}
 .db-null{color:#484f58;font-style:italic}
 button:disabled{opacity:.4;cursor:not-allowed}
+#mobile-nav{display:none;position:fixed;bottom:0;left:0;right:0;background:#161b22;border-top:1px solid #30363d;z-index:100;height:60px}
+#mobile-nav a{flex:1;display:flex;align-items:center;justify-content:center;padding:10px 4px;color:#8b949e;text-decoration:none;font-size:12px;cursor:pointer;user-select:none}
+#mobile-nav a:hover,#mobile-nav a.active{color:#e6edf3;background:#21262d}
+@media(max-width:640px){
+  nav{display:none}
+  #mobile-nav{display:flex}
+  main{padding:16px;padding-bottom:76px}
+  .msgs{max-height:calc(100vh - 360px)}
+  body{overflow:auto}
+}
 </style>
 </head>
 <body>
@@ -363,10 +373,13 @@ document.addEventListener('DOMContentLoaded', function() {
   function activateSection(name) {
     document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
     document.querySelectorAll('nav a').forEach(function(a) { a.classList.remove('active'); });
+    document.querySelectorAll('#mobile-nav a').forEach(function(a) { a.classList.remove('active'); });
     var sec = document.getElementById('section-'+name);
     var nav = document.getElementById('nav-'+name);
+    var mnav = document.getElementById('mnav-'+name);
     if (sec) sec.classList.add('active');
     if (nav) nav.classList.add('active');
+    if (mnav) mnav.classList.add('active');
   }
 
   function show(name) {
@@ -379,7 +392,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (name === 'database') loadDbTables();
   }
 
-  document.querySelectorAll('nav a').forEach(function(a) {
+  document.querySelectorAll('nav a, #mobile-nav a').forEach(function(a) {
     a.addEventListener('click', function(e) {
       e.preventDefault();
       show((a.getAttribute('href') || '#groups').replace('#',''));
@@ -1023,6 +1036,12 @@ document.addEventListener('DOMContentLoaded', function() {
   restoreFromHash();
 });
 </script>
+<div id="mobile-nav">
+  <a id="mnav-groups" href="#groups">Groups</a>
+  <a id="mnav-feeds" href="#feeds">Feeds</a>
+  <a id="mnav-system" href="#system">System</a>
+  <a id="mnav-database" href="#database">Database</a>
+</div>
 </body>
 </html>`;
 

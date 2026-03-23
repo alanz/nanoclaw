@@ -142,6 +142,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
   main{padding:16px;padding-bottom:76px}
   .msgs{max-height:calc(100vh - 360px)}
   body{overflow:auto}
+  #group-tab-files>div{flex-direction:column!important;height:calc(100vh - 280px)!important}
+  #group-file-tree{width:100%!important;height:35%!important;flex-shrink:unset!important}
+  #group-file-view{height:65%!important}
 }
 </style>
 </head>

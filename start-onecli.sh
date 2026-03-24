@@ -47,6 +47,16 @@ sys.exit(0 if cs else 1)
 " 2>/dev/null
 }
 
+is_existing() {
+  "$RUNTIME" ls --all --format json 2>/dev/null | python3 -c "
+import sys, json
+name = '$1'
+cs = [c for c in json.load(sys.stdin)
+      if c.get('configuration', {}).get('id') == name]
+sys.exit(0 if cs else 1)
+" 2>/dev/null
+}
+
 cmd="${1:-start}"
 
 case "$cmd" in
@@ -107,6 +117,9 @@ NEXTAUTH_SECRET=$(grep '^NEXTAUTH_SECRET=' "$ONECLI_ENV" | sed 's/^NEXTAUTH_SECR
 # container VM disk is persistent as long as the container is not removed)
 if is_running "$PG_CONTAINER"; then
   echo "postgres already running"
+elif is_existing "$PG_CONTAINER"; then
+  echo "Starting postgres (resuming stopped container)..."
+  "$RUNTIME" start "$PG_CONTAINER"
 else
   echo "Starting postgres..."
   "$RUNTIME" run -d \
@@ -138,10 +151,16 @@ for i in $(seq 1 30); do
   fi
 done
 
-# Start OneCLI app, pointing at postgres via its bridge IP
+# Start OneCLI app, pointing at postgres via its bridge IP.
+# Always recreate (never resume) — DATABASE_URL contains the postgres bridge IP
+# which changes on each boot, so a resumed container would point at a stale IP.
 if is_running "$APP_CONTAINER"; then
   echo "onecli-app already running"
 else
+  if is_existing "$APP_CONTAINER"; then
+    echo "Removing stale onecli-app container (DATABASE_URL must be refreshed)..."
+    "$RUNTIME" rm "$APP_CONTAINER"
+  fi
   echo "Starting OneCLI app (connecting to postgres at $POSTGRES_IP)..."
   "$RUNTIME" run -d \
     --name "$APP_CONTAINER" \

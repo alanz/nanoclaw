@@ -13,9 +13,9 @@ APP_CONTAINER="onecli-app"
 DATA_DIR="${HOME}/.local/share/onecli"
 ONECLI_ENV="${DATA_DIR}/onecli.env"
 ENV_FILE="$(dirname "$0")/.env"
-RELAY_PID_FILE="${DATA_DIR}/relay.pid"
 # Local relay port: Node.js (NanoClaw) can't reach 192.168.64.x bridge IPs
 # directly due to a libuv/macOS interaction. socat relays localhost → container.
+# The relay is managed by com.nanoclaw.socat launchd agent (KeepAlive=true).
 RELAY_PORT=10264
 
 usage() {
@@ -64,10 +64,7 @@ case "$cmd" in
     echo "Stopping OneCLI..."
     "$RUNTIME" stop "$APP_CONTAINER" 2>/dev/null && echo "  stopped $APP_CONTAINER" || true
     "$RUNTIME" stop "$PG_CONTAINER"  2>/dev/null && echo "  stopped $PG_CONTAINER"  || true
-    if [ -f "$RELAY_PID_FILE" ]; then
-      kill "$(cat "$RELAY_PID_FILE")" 2>/dev/null && echo "  stopped socat relay" || true
-      rm -f "$RELAY_PID_FILE"
-    fi
+    launchctl stop com.nanoclaw.socat 2>/dev/null && echo "  stopped socat relay" || true
     tailscale serve --https=8444 off 2>/dev/null && echo "  removed Tailscale Serve :8444" || true
     exit 0
     ;;
@@ -190,16 +187,12 @@ for i in $(seq 1 60); do
   fi
 done
 
-# Start socat relay: NanoClaw's Node.js process can't reach 192.168.64.x bridge
-# IPs directly (libuv/macOS bridge network issue). socat relays localhost → container.
-if [ -f "$RELAY_PID_FILE" ]; then
-  kill "$(cat "$RELAY_PID_FILE")" 2>/dev/null || true
-  rm -f "$RELAY_PID_FILE"
-fi
-socat TCP-LISTEN:${RELAY_PORT},bind=127.0.0.1,fork,reuseaddr \
-  TCP:${ONECLI_IP}:10254 &
-echo $! > "$RELAY_PID_FILE"
-echo "socat relay started: 127.0.0.1:${RELAY_PORT} → ${ONECLI_IP}:10254 (pid $(cat "$RELAY_PID_FILE"))"
+# (Re)start socat relay via launchd — Node.js can't reach 192.168.64.x directly.
+# socat-relay.sh reads ONECLI_GATEWAY_HOST from .env (written above).
+# Using launchd (KeepAlive=true) keeps socat alive after this script exits.
+launchctl kickstart -k gui/"$(id -u)"/com.nanoclaw.socat 2>/dev/null || \
+  launchctl start com.nanoclaw.socat 2>/dev/null || true
+echo "socat relay started: 127.0.0.1:${RELAY_PORT} → ${ONECLI_IP}:10254"
 
 # Update ONECLI_URL (relay for Node.js) and ONECLI_GATEWAY_HOST (real container IP
 # for injecting into agent containers, which CAN reach the bridge network directly).

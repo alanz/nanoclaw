@@ -1,18 +1,19 @@
 import fs from 'fs';
 import path from 'path';
 
+import { OneCLI } from '@onecli-sh/sdk';
+
 import {
   ASSISTANT_NAME,
   CONTAINER_TIMEOUT,
-  CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
+  ONECLI_URL,
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
   WEB_UI_BASE_URL,
   WEB_UI_PORT,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -31,7 +32,6 @@ import {
   isContainerRunning,
   killContainer,
   listOrphanedContainers,
-  PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -94,6 +94,8 @@ let messageLoopRunning = false;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
+const onecli = new OneCLI({ url: ONECLI_URL });
+
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
   const agentTs = getRouterState('last_agent_timestamp');
@@ -133,6 +135,23 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
+
+  // Create a corresponding OneCLI agent (best-effort, non-blocking)
+  const identifier = group.folder.toLowerCase().replace(/_/g, '-');
+  onecli.createAgent({ name: group.name, identifier }).then(
+    (agent) => {
+      logger.info(
+        { jid, agentId: agent.id, identifier },
+        'OneCLI agent created',
+      );
+    },
+    (err) => {
+      logger.debug(
+        { jid, identifier, err: String(err) },
+        'OneCLI agent creation skipped',
+      );
+    },
+  );
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -669,12 +688,6 @@ async function main(): Promise<void> {
 
   restoreRemoteControl();
 
-  // Start credential proxy (containers route API calls through this)
-  const proxyServer = await startCredentialProxy(
-    CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
-  );
-
   // Start web dashboard (localhost only — exposed via tailscale serve on port 8443)
   const webUiServer = startWebUi(WEB_UI_PORT, undefined, {
     sendMessage: (jid, text) => routeOutbound(channels, jid, text),
@@ -683,7 +696,6 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
-    proxyServer.close();
     webUiServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();

@@ -21,6 +21,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@onecli-sh/sdk": "^0.1.6",
     "@deltachat/jsonrpc-client": "^1.160.0",
     "@deltachat/stdio-rpc-server": "^1.160.0",
     "better-sqlite3": "^11.8.1",

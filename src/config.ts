@@ -4,11 +4,10 @@ import path from 'path';
 import { readEnvFile } from './env.js';
 
 // Read config values from .env (falls back to process.env).
-// Secrets (API keys, tokens) are NOT read here — they are loaded only
-// by the credential proxy (credential-proxy.ts), never exposed to containers.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'ONECLI_URL',
   'GROUPS_DIR',
   'STORE_DIR',
   'WEB_UI_BASE_URL',
@@ -92,10 +91,8 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
-export const CREDENTIAL_PROXY_PORT = parseInt(
-  process.env.CREDENTIAL_PROXY_PORT || '3001',
-  10,
-);
+export const ONECLI_URL =
+  process.env.ONECLI_URL || envConfig.ONECLI_URL || 'http://localhost:10254';
 export const WEB_UI_PORT = parseInt(process.env.WEB_UI_PORT || '3002', 10);
 // Public-facing base URL for the web UI (e.g. a Tailscale Serve URL).
 // Used so agents can generate shareable deep links into the dashboard.

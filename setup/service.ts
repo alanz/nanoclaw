@@ -101,7 +101,7 @@ function setupLaunchd(
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
         <string>${homeDir}</string>
     </dict>
@@ -134,6 +134,7 @@ function setupLaunchd(
   }
 
   setupBackupLaunchd(projectRoot, homeDir);
+  setupOneCLILaunchd(projectRoot, homeDir);
 
   emitStatus('SETUP_SERVICE', {
     SERVICE_TYPE: 'launchd',
@@ -144,6 +145,61 @@ function setupLaunchd(
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
+}
+
+function setupOneCLILaunchd(projectRoot: string, homeDir: string): void {
+  const plistPath = path.join(
+    homeDir,
+    'Library',
+    'LaunchAgents',
+    'com.nanoclaw.onecli.plist',
+  );
+
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.onecli</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${projectRoot}/start-onecli.sh</string>
+        <string>start</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${projectRoot}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <key>HOME</key>
+        <string>${homeDir}</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${projectRoot}/logs/onecli.log</string>
+    <key>StandardErrorPath</key>
+    <string>${projectRoot}/logs/onecli.error.log</string>
+</dict>
+</plist>`;
+
+  fs.writeFileSync(plistPath, plist);
+  logger.info({ plistPath }, 'Wrote OneCLI launchd plist');
+
+  try {
+    execSync(`launchctl unload ${JSON.stringify(plistPath)} 2>/dev/null || true`, { stdio: 'ignore' });
+  } catch { /* ignore */ }
+
+  try {
+    execSync(`launchctl load ${JSON.stringify(plistPath)}`, { stdio: 'ignore' });
+    logger.info('OneCLI launchd agent loaded');
+  } catch {
+    logger.warn('launchctl load for OneCLI failed');
+  }
 }
 
 function setupBackupLaunchd(projectRoot: string, homeDir: string): void {

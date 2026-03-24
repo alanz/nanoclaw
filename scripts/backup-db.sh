@@ -57,6 +57,25 @@ CONFIG_DEST="$DEST_DIR/config-nanoclaw/"
 rsync -a --delete "$CONFIG_SRC" "$CONFIG_DEST"
 echo "Config backup complete: $CONFIG_DEST"
 
+# Back up ~/.claude (settings, memory, plans, tasks, todos, plugins, credentials)
+# Excludes ephemeral/regeneratable dirs to keep the archive small
+CLAUDE_SRC="$HOME/.claude/"
+CLAUDE_DEST="$DEST_DIR/claude/"
+rsync -a --delete \
+  --exclude="cache/" \
+  --exclude="debug/" \
+  --exclude="file-history/" \
+  --exclude="paste-cache/" \
+  --exclude="session-env/" \
+  --exclude="shell-snapshots/" \
+  --exclude="sessions/" \
+  --exclude="backups/" \
+  --exclude="history.jsonl" \
+  --exclude="mcp-needs-auth-cache.json" \
+  --exclude="stats-cache.json" \
+  "$CLAUDE_SRC" "$CLAUDE_DEST"
+echo "Claude backup complete: $CLAUDE_DEST"
+
 # Ship local backup dir to BorgBase via borg
 BORG_REPO="ssh://o5eh77xl@o5eh77xl.repo.borgbase.com/./repo"
 export BORG_PASSPHRASE

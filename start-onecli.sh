@@ -163,7 +163,7 @@ else
     --name "$APP_CONTAINER" \
     -e "DATABASE_URL=postgresql://onecli:onecli@${POSTGRES_IP}:5432/onecli" \
     -e "SECRET_ENCRYPTION_KEY=${SECRET_ENCRYPTION_KEY}" \
-    -e "NEXTAUTH_SECRET=${NEXTAUTH_SECRET}" \
+    -e "AUTH_MODE=local" \
     ghcr.io/onecli/onecli:latest
 fi
 

@@ -241,10 +241,16 @@ async function buildContainerArgs(
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false, // Nanoclaw already handles host gateway
-    agent: agentIdentifier,
-  });
+  // Try agent-specific config first; fall back to default if agent not found (404).
+  const onecliApplied =
+    (await onecli.applyContainerConfig(args, {
+      addHostMapping: false, // Nanoclaw already handles host gateway
+      agent: agentIdentifier,
+    })) ||
+    (agentIdentifier !== undefined &&
+      (await onecli.applyContainerConfig(args, {
+        addHostMapping: false,
+      })));
   if (onecliApplied) {
     // Apple Container fixups: the SDK generates args assuming Docker semantics.
     if (CONTAINER_RUNTIME_BIN === 'container') {

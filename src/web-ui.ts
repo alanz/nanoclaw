@@ -147,7 +147,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
   #group-file-view{height:65%!important}
 }
 /* ── Graph tab ── */
-#graph-container{width:100%;height:calc(100vh - 340px);min-height:400px;background:#0d1117;border:1px solid #30363d;border-radius:8px}
+#graph-container{width:100%;height:calc(100vh - 340px);min-height:400px;background:#0d1117;border:1px solid #30363d;border-radius:8px;position:relative}
 #graph-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
 #graph-search{flex:1;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:7px 12px;color:#e6edf3;font-size:13px;outline:none}
 #graph-search:focus{border-color:#58a6ff}
@@ -155,7 +155,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 #graph-legend{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .graph-legend-item{display:flex;align-items:center;gap:4px;font-size:11px;color:#8b949e}
 .graph-legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
-#graph-node-panel{display:none;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin-top:10px}
+#graph-node-panel{display:none;position:absolute;bottom:12px;right:12px;width:320px;background:rgba(22,27,34,0.95);border:1px solid #30363d;border-radius:8px;padding:14px;z-index:10;backdrop-filter:blur(8px)}
 #graph-node-panel h3{font-size:13px;font-weight:600;color:#f0f6fc;margin:0 0 10px;word-break:break-all}
 </style>
 </head>
@@ -230,10 +230,12 @@ button:disabled{opacity:.4;cursor:not-allowed}
           <span id="graph-status"></span>
         </div>
         <div id="graph-legend"></div>
-        <div id="graph-container"></div>
-        <div id="graph-node-panel">
-          <h3 id="graph-node-id"></h3>
-          <div class="fm-card" id="graph-node-meta"></div>
+        <div id="graph-wrap" style="position:relative">
+          <div id="graph-container"></div>
+          <div id="graph-node-panel">
+            <h3 id="graph-node-id"></h3>
+            <div class="fm-card" id="graph-node-meta"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -1095,7 +1097,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     graphCy.on('unselect', 'node', function() {
       clearHighlight();
-      document.getElementById('graph-node-panel').style.display = 'none';
     });
 
     graphCy.on('tap', 'node', function(evt) {
@@ -1109,7 +1110,7 @@ document.addEventListener('DOMContentLoaded', function() {
         +(tagsHtml ? '<div class="fm-key">Tags</div><div class="fm-val">'+tagsHtml+'</div>' : '')
         +(kwHtml   ? '<div class="fm-key">Keywords</div><div class="fm-val">'+kwHtml+'</div>' : '')
         +'<div class="fm-key">File</div><div class="fm-val"><a href="#" id="graph-open-link" style="color:#58a6ff;font-size:11px">Open in Files tab \u2192</a></div>';
-      panel.style.display = '';
+      panel.style.display = 'block';
       document.getElementById('graph-open-link').onclick = function(e) {
         e.preventDefault();
         if (d.path) {

@@ -146,6 +146,17 @@ button:disabled{opacity:.4;cursor:not-allowed}
   #group-file-tree{width:100%!important;height:35%!important;flex-shrink:unset!important}
   #group-file-view{height:65%!important}
 }
+/* ── Graph tab ── */
+#graph-container{width:100%;height:calc(100vh - 340px);min-height:400px;background:#0d1117;border:1px solid #30363d;border-radius:8px}
+#graph-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+#graph-search{flex:1;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:7px 12px;color:#e6edf3;font-size:13px;outline:none}
+#graph-search:focus{border-color:#58a6ff}
+#graph-status{font-size:12px;color:#8b949e;white-space:nowrap}
+#graph-legend{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.graph-legend-item{display:flex;align-items:center;gap:4px;font-size:11px;color:#8b949e}
+.graph-legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+#graph-node-panel{display:none;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin-top:10px}
+#graph-node-panel h3{font-size:13px;font-weight:600;color:#f0f6fc;margin:0 0 10px;word-break:break-all}
 </style>
 </head>
 <body>
@@ -177,6 +188,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
         <a data-tab="chat">Chat</a>
         <a data-tab="tasks">Tasks</a>
         <a data-tab="files">Files</a>
+        <a data-tab="notes">Graph</a>
       </div>
 
       <!-- Chat tab -->
@@ -208,6 +220,20 @@ button:disabled{opacity:.4;cursor:not-allowed}
             <button class="file-maximize-btn" id="file-maximize-btn" title="Maximise file view">&#x26F6;</button>
             <div id="group-file-content"><div class="empty">Select a file to view its contents</div></div>
           </div>
+        </div>
+      </div>
+
+      <!-- Graph tab -->
+      <div id="group-tab-notes" style="display:none">
+        <div id="graph-toolbar">
+          <input id="graph-search" type="text" placeholder="Filter by keyword or tag&#x2026;">
+          <span id="graph-status"></span>
+        </div>
+        <div id="graph-legend"></div>
+        <div id="graph-container"></div>
+        <div id="graph-node-panel">
+          <h3 id="graph-node-id"></h3>
+          <div class="fm-card" id="graph-node-meta"></div>
         </div>
       </div>
     </div>
@@ -256,6 +282,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
   var currentGroup = null;   // group object from /api/groups
@@ -494,6 +522,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('group-tab-chat').style.display  = tab === 'chat'  ? '' : 'none';
     document.getElementById('group-tab-tasks').style.display = tab === 'tasks' ? '' : 'none';
     document.getElementById('group-tab-files').style.display = tab === 'files' ? '' : 'none';
+    document.getElementById('group-tab-notes').style.display = tab === 'notes' ? '' : 'none';
     if (tab !== 'files' && document.body.classList.contains('file-maximized')) {
       document.body.classList.remove('file-maximized');
       var btn = document.getElementById('file-maximize-btn');
@@ -518,6 +547,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (tab === 'chat')  loadGroupChat();
     if (tab === 'tasks') loadGroupTasks();
     if (tab === 'files') loadGroupFiles(autoFilePath);
+    if (tab === 'notes') loadGroupGraph();
   }
 
   // ── Chat tab ───────────────────────────────────────────────────────────────
@@ -877,6 +907,186 @@ document.addEventListener('DOMContentLoaded', function() {
     } catch(e) { view.innerHTML = '<div class="empty">Error reading file</div>'; }
   }
 
+  // ── Graph tab ──────────────────────────────────────────────────────────────
+
+  var GRAPH_COLORS = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#ff7b72','#79c0ff','#56d364','#e3b341','#db61a2'];
+  var graphTagMap = {};
+  var graphColorIdx = 0;
+  var graphCy = null;
+  var graphData = null;
+
+  function tagColor(tag) {
+    if (!tag) return '#484f58';
+    if (!graphTagMap[tag]) { graphTagMap[tag] = GRAPH_COLORS[graphColorIdx++ % GRAPH_COLORS.length]; }
+    return graphTagMap[tag];
+  }
+
+  async function loadGroupGraph() {
+    if (!currentGroup) return;
+    graphTagMap = {}; graphColorIdx = 0;
+    var status = document.getElementById('graph-status');
+    var legend = document.getElementById('graph-legend');
+    var panel = document.getElementById('graph-node-panel');
+    status.textContent = 'Loading\u2026';
+    legend.innerHTML = '';
+    panel.style.display = 'none';
+    if (graphSim) { graphSim.stop(); graphSim = null; }
+    if (graphCy) { graphCy.destroy(); graphCy = null; }
+    document.getElementById('graph-container').innerHTML = '';
+    try {
+      var data = await fetch('/api/notes-graph?group=' + encodeURIComponent(currentGroup.folder)).then(function(r){ return r.json(); });
+      graphData = data;
+      if (!data.nodes.length) { status.textContent = 'No notes found.'; return; }
+      renderGraph(data.nodes, data.edges, null);
+    } catch(e) { status.textContent = 'Error loading graph.'; }
+  }
+
+  var graphSim = null; // d3 force simulation
+
+  function renderGraph(nodes, edges, highlightIds) {
+    if (graphCy) { graphCy.destroy(); graphCy = null; }
+    if (graphSim) { graphSim.stop(); graphSim = null; }
+    var container = document.getElementById('graph-container');
+    var legend = document.getElementById('graph-legend');
+    var status = document.getElementById('graph-status');
+    container.innerHTML = '';
+
+    // Build id→index map for d3 links
+    var idMap = {};
+    nodes.forEach(function(n, i) { idMap[n.id] = i; });
+
+    // d3 simulation nodes — seed with random positions
+    var simNodes = nodes.map(function(n) {
+      var firstTag = n.tags && n.tags.length ? n.tags[0] : null;
+      return { id: n.id, label: n.label, tags: n.tags, keywords: n.keywords, created: n.created, path: n.path, color: tagColor(firstTag), x: Math.random() * 800 - 400, y: Math.random() * 600 - 300 };
+    });
+    var simLinks = [];
+    edges.forEach(function(e) {
+      if (idMap[e.source] !== undefined && idMap[e.target] !== undefined) {
+        simLinks.push({ source: idMap[e.source], target: idMap[e.target] });
+      }
+    });
+
+    // Build cytoscape elements with initial positions
+    var elements = [];
+    simNodes.forEach(function(n) {
+      var faded = highlightIds && highlightIds.size > 0 && !highlightIds.has(n.id);
+      elements.push({ group:'nodes', data:{ id:n.id, label:n.label, tags:n.tags, keywords:n.keywords, created:n.created, path:n.path, color:n.color }, classes: faded ? 'faded' : '', position:{ x:n.x, y:n.y } });
+    });
+    edges.forEach(function(e, i) {
+      elements.push({ group:'edges', data:{ id:'e'+i, source:e.source, target:e.target } });
+    });
+
+    // Legend
+    legend.innerHTML = '';
+    Object.keys(graphTagMap).forEach(function(tag) {
+      var item = document.createElement('div');
+      item.className = 'graph-legend-item';
+      item.innerHTML = '<div class="graph-legend-dot" style="background:'+graphTagMap[tag]+'"></div>'+esc(tag);
+      legend.appendChild(item);
+    });
+
+    // Create cytoscape with preset layout (positions set by d3)
+    graphCy = cytoscape({
+      container: container,
+      elements: elements,
+      style: [
+        { selector:'node', style:{ shape:'ellipse', width:18, height:18, 'background-color':'data(color)', 'border-width':1, 'border-color':'rgba(255,255,255,0.15)', 'text-opacity':0, label:'data(label)', color:'#e6edf3', 'font-size':11, 'text-valign':'bottom', 'text-halign':'center', 'text-margin-y':4, 'text-wrap':'wrap', 'text-max-width':120 } },
+        { selector:'node.faded', style:{ opacity:0.12 } },
+        { selector:'node.hovered', style:{ 'text-opacity':1, width:22, height:22, 'border-color':'#8b949e', 'border-width':2 } },
+        { selector:'node:selected', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#f0f6fc', width:24, height:24 } },
+        { selector:'edge', style:{ width:0.5, 'line-color':'#484f58', 'curve-style':'bezier', opacity:0.35 } },
+      ],
+      maxZoom: 1.5,
+      minZoom: 0.1,
+      layout: { name: 'preset' },
+    });
+    graphCy.resize();
+
+    // ── d3-force simulation ──
+    graphSim = d3.forceSimulation(simNodes)
+      .alphaDecay(0.005)         // very slow cooling — long settling time
+      .velocityDecay(0.3)        // friction: 0=none, 1=max (0.3 = smooth glide)
+      .force('link', d3.forceLink(simLinks).distance(120).strength(0.15))
+      .force('charge', d3.forceManyBody().strength(-200))
+      .force('center', d3.forceCenter(0, 0).strength(0.05))
+      .force('collide', d3.forceCollide(14))
+      .on('tick', function() {
+        // Push d3 positions into cytoscape
+        simNodes.forEach(function(sn) {
+          var cyNode = graphCy.getElementById(sn.id);
+          if (cyNode.length && !cyNode.grabbed()) {
+            cyNode.position({ x: sn.x, y: sn.y });
+          }
+        });
+      });
+
+    // One-shot fit after initial spread
+    setTimeout(function() { if (graphCy) graphCy.fit(undefined, 30); }, 800);
+
+    // Drag: lock node in d3 while dragging, reheat simulation
+    graphCy.on('grab', 'node', function(evt) {
+      var sn = simNodes[idMap[evt.target.id()]];
+      if (sn) { sn.fx = sn.x; sn.fy = sn.y; }
+      graphSim.alphaTarget(0.3).restart();
+    });
+    graphCy.on('drag', 'node', function(evt) {
+      var pos = evt.target.position();
+      var sn = simNodes[idMap[evt.target.id()]];
+      if (sn) { sn.fx = pos.x; sn.fy = pos.y; }
+    });
+    graphCy.on('free', 'node', function(evt) {
+      var sn = simNodes[idMap[evt.target.id()]];
+      if (sn) { sn.fx = null; sn.fy = null; }
+      graphSim.alphaTarget(0);
+    });
+
+    status.textContent = nodes.length + ' notes, ' + edges.length + ' links';
+
+    graphCy.on('tap', 'node', function(evt) {
+      var d = evt.target.data();
+      var panel = document.getElementById('graph-node-panel');
+      document.getElementById('graph-node-id').textContent = d.id;
+      var tagsHtml = (d.tags||[]).map(function(t){ return '<span class="fm-tag" style="background:'+tagColor(t)+';color:#0d1117;border-color:transparent">'+esc(t)+'</span>'; }).join(' ');
+      var kwHtml = (d.keywords||[]).map(function(k){ return '<span class="fm-tag">'+esc(k)+'</span>'; }).join(' ');
+      document.getElementById('graph-node-meta').innerHTML =
+        '<div class="fm-key">Created</div><div class="fm-val">'+esc(d.created)+'</div>'
+        +(tagsHtml ? '<div class="fm-key">Tags</div><div class="fm-val">'+tagsHtml+'</div>' : '')
+        +(kwHtml   ? '<div class="fm-key">Keywords</div><div class="fm-val">'+kwHtml+'</div>' : '')
+        +'<div class="fm-key">File</div><div class="fm-val"><a href="#" id="graph-open-link" style="color:#58a6ff;font-size:11px">Open in Files tab \u2192</a></div>';
+      panel.style.display = '';
+      document.getElementById('graph-open-link').onclick = function(e) {
+        e.preventDefault();
+        if (d.path) {
+          var rel = currentGroup && d.path.startsWith(currentGroup.folder+'/') ? d.path.slice(currentGroup.folder.length+1) : d.path;
+          switchTab('files', rel);
+        }
+      };
+    });
+
+    graphCy.on('mouseover', 'node', function(evt) {
+      evt.target.addClass('hovered');
+    });
+    graphCy.on('mouseout', 'node', function(evt) {
+      evt.target.removeClass('hovered');
+    });
+
+    graphCy.on('tap', function(evt) {
+      if (evt.target === graphCy) document.getElementById('graph-node-panel').style.display = 'none';
+    });
+  }
+
+  document.getElementById('graph-search').addEventListener('input', function() {
+    if (!graphData) return;
+    var q = this.value.trim().toLowerCase();
+    if (!q) { renderGraph(graphData.nodes, graphData.edges, null); return; }
+    var hits = new Set();
+    graphData.nodes.forEach(function(n) {
+      if ([n.id, n.label].concat(n.tags||[]).concat(n.keywords||[]).some(function(t){ return t && t.toLowerCase().indexOf(q)!==-1; })) hits.add(n.id);
+    });
+    renderGraph(graphData.nodes, graphData.edges, hits);
+  });
+
   // ── System ─────────────────────────────────────────────────────────────────
 
   async function loadSystem() {
@@ -1151,6 +1361,42 @@ function safeReadFile(relPath: string): string | null {
   }
 }
 
+function parseNoteFrontmatter(text: string): {
+  id: string;
+  created: string;
+  keywords: string[];
+  tags: string[];
+  links: string[];
+} | null {
+  if (!text.startsWith('---')) return null;
+  const nl = text.indexOf('\n');
+  const end = text.indexOf('\n---', nl + 1);
+  if (nl < 0 || end < 0) return null;
+  const fmText = text.slice(nl + 1, end);
+  const fields: Record<string, string> = {};
+  for (const line of fmText.split('\n')) {
+    const c = line.indexOf(': ');
+    if (c > 0) fields[line.slice(0, c).trim()] = line.slice(c + 2).trim();
+  }
+  const parseList = (raw: string | undefined): string[] => {
+    if (!raw) return [];
+    const m = raw.match(/^\[(.+)\]$/);
+    if (!m) return [];
+    return m[1]
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  };
+  if (!fields['id']) return null;
+  return {
+    id: fields['id'],
+    created: fields['created'] ?? '',
+    keywords: parseList(fields['keywords']),
+    tags: parseList(fields['tags']),
+    links: parseList(fields['links']),
+  };
+}
+
 export function startWebUi(
   port: number,
   host = '127.0.0.1',
@@ -1264,6 +1510,79 @@ export function startWebUi(
           'Cache-Control': 'no-store',
         });
         res.end(content);
+        return;
+      }
+
+      // GET /api/notes-graph?group={folder}
+      if (req.method === 'GET' && pathname === '/api/notes-graph') {
+        const folder = url.searchParams.get('group');
+        if (!folder) {
+          sendJson(res, { error: 'group required' }, 400);
+          return;
+        }
+        const notesDir = path.resolve(GROUPS_DIR, folder, 'memory', 'notes');
+        if (!notesDir.startsWith(path.resolve(GROUPS_DIR) + path.sep)) {
+          sendJson(res, { error: 'invalid group' }, 400);
+          return;
+        }
+        let noteFiles: string[];
+        try {
+          noteFiles = fs.readdirSync(notesDir).filter((f) => f.endsWith('.md'));
+        } catch {
+          sendJson(res, { nodes: [], edges: [] });
+          return;
+        }
+        type NoteNode = {
+          id: string;
+          label: string;
+          tags: string[];
+          keywords: string[];
+          created: string;
+          path: string;
+        };
+        const nodes: NoteNode[] = [];
+        const nodeIds = new Set<string>();
+        const fmMap = new Map<
+          string,
+          ReturnType<typeof parseNoteFrontmatter>
+        >();
+        for (const file of noteFiles) {
+          const abs = path.join(notesDir, file);
+          let text: string;
+          try {
+            text = fs.readFileSync(abs, 'utf-8');
+          } catch {
+            continue;
+          }
+          const fm = parseNoteFrontmatter(text);
+          if (!fm) continue;
+          fmMap.set(file, fm);
+          nodes.push({
+            id: fm.id,
+            label: fm.id
+              .replace(/^MEM-\d{4}-\d{2}-\d{2}-/, '')
+              .replace(/-/g, ' '),
+            tags: fm.tags,
+            keywords: fm.keywords,
+            created: fm.created,
+            path: folder + '/memory/notes/' + file,
+          });
+          nodeIds.add(fm.id);
+        }
+        const edges: Array<{ source: string; target: string }> = [];
+        const seen = new Set<string>();
+        for (const fm of fmMap.values()) {
+          if (!fm) continue;
+          for (const tgt of fm.links) {
+            if (!nodeIds.has(fm.id) || !nodeIds.has(tgt)) continue;
+            const key = [fm.id, tgt].sort().join('||');
+            if (!seen.has(key)) {
+              seen.add(key);
+              edges.push({ source: fm.id, target: tgt });
+            }
+          }
+        }
+        sendJson(res, { nodes, edges });
         return;
       }
 

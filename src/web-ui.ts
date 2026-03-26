@@ -955,10 +955,32 @@ document.addEventListener('DOMContentLoaded', function() {
     var idMap = {};
     nodes.forEach(function(n, i) { idMap[n.id] = i; });
 
+    // Count global tag frequency across all notes
+    var tagFreq = {};
+    nodes.forEach(function(n) {
+      (n.tags || []).forEach(function(t) { tagFreq[t] = (tagFreq[t] || 0) + 1; });
+    });
+
+    // Sort tags by global frequency descending; pick 2nd most common for colour
+    // (most common tag dominates too many nodes — 2nd gives better spread)
+    var tagsByFreq = Object.keys(tagFreq).sort(function(a, b) { return tagFreq[b] - tagFreq[a]; });
+    var mostCommonTag = tagsByFreq[0] || null;
+
+    function dominantTag(tags) {
+      if (!tags || !tags.length) return null;
+      // If node has a tag other than the single most common, prefer that
+      var best = null, bestCount = -1;
+      for (var i = 0; i < tags.length; i++) {
+        var c = tagFreq[tags[i]] || 0;
+        if (tags[i] !== mostCommonTag && c > bestCount) { best = tags[i]; bestCount = c; }
+      }
+      // Fall back to most common if it's the only tag
+      return best || tags[0];
+    }
+
     // d3 simulation nodes — seed with random positions
     var simNodes = nodes.map(function(n) {
-      var firstTag = n.tags && n.tags.length ? n.tags[0] : null;
-      return { id: n.id, label: n.label, tags: n.tags, keywords: n.keywords, created: n.created, path: n.path, color: tagColor(firstTag), x: Math.random() * 800 - 400, y: Math.random() * 600 - 300 };
+      return { id: n.id, label: n.label, tags: n.tags, keywords: n.keywords, created: n.created, path: n.path, color: tagColor(dominantTag(n.tags)), x: Math.random() * 800 - 400, y: Math.random() * 600 - 300 };
     });
     var simLinks = [];
     edges.forEach(function(e) {
@@ -995,7 +1017,11 @@ document.addEventListener('DOMContentLoaded', function() {
         { selector:'node.faded', style:{ opacity:0.12 } },
         { selector:'node.hovered', style:{ 'text-opacity':1, width:22, height:22, 'border-color':'#8b949e', 'border-width':2 } },
         { selector:'node:selected', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#f0f6fc', width:24, height:24 } },
+        { selector:'node.dimmed', style:{ opacity:0.12 } },
+        { selector:'node.neighbor', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#58a6ff', width:22, height:22 } },
         { selector:'edge', style:{ width:0.5, 'line-color':'#484f58', 'curve-style':'bezier', opacity:0.35 } },
+        { selector:'edge.dimmed', style:{ opacity:0.06 } },
+        { selector:'edge.highlighted', style:{ width:2, 'line-color':'#58a6ff', opacity:0.8 } },
       ],
       maxZoom: 1.5,
       minZoom: 0.1,
@@ -1043,6 +1069,32 @@ document.addEventListener('DOMContentLoaded', function() {
 
     status.textContent = nodes.length + ' notes, ' + edges.length + ' links';
 
+    function highlightSubgraph(node) {
+      // Clear previous highlights
+      graphCy.elements().removeClass('dimmed neighbor highlighted');
+      // Get connected edges and neighbour nodes
+      var connEdges = node.connectedEdges();
+      var neighbors = node.neighborhood().nodes();
+      // Dim everything
+      graphCy.elements().addClass('dimmed');
+      // Un-dim the selected node, its neighbours, and connecting edges
+      node.removeClass('dimmed');
+      neighbors.removeClass('dimmed').addClass('neighbor');
+      connEdges.removeClass('dimmed').addClass('highlighted');
+    }
+
+    function clearHighlight() {
+      graphCy.elements().removeClass('dimmed neighbor highlighted');
+    }
+
+    graphCy.on('select', 'node', function(evt) {
+      highlightSubgraph(evt.target);
+    });
+    graphCy.on('unselect', 'node', function() {
+      clearHighlight();
+      document.getElementById('graph-node-panel').style.display = 'none';
+    });
+
     graphCy.on('tap', 'node', function(evt) {
       var d = evt.target.data();
       var panel = document.getElementById('graph-node-panel');
@@ -1072,7 +1124,10 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     graphCy.on('tap', function(evt) {
-      if (evt.target === graphCy) document.getElementById('graph-node-panel').style.display = 'none';
+      if (evt.target === graphCy) {
+        clearHighlight();
+        document.getElementById('graph-node-panel').style.display = 'none';
+      }
     });
   }
 

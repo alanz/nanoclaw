@@ -11,6 +11,5 @@ import './deltachat.js';
 // slack
 
 // telegram
-import './telegram.js';
 
 // whatsapp

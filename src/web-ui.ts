@@ -1022,6 +1022,8 @@ document.addEventListener('DOMContentLoaded', function() {
         { selector:'edge', style:{ width:0.5, 'line-color':'#484f58', 'curve-style':'bezier', opacity:0.35 } },
         { selector:'edge.dimmed', style:{ opacity:0.06 } },
         { selector:'edge.highlighted', style:{ width:2, 'line-color':'#58a6ff', opacity:0.8 } },
+        { selector:'node.hover-neighbor', style:{ 'text-opacity':1, 'border-color':'rgba(88,166,255,0.5)', 'border-width':2 } },
+        { selector:'edge.hover-highlighted', style:{ width:1.5, 'line-color':'rgba(88,166,255,0.5)', opacity:0.6 } },
       ],
       maxZoom: 1.5,
       minZoom: 0.1,
@@ -1118,9 +1120,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
     graphCy.on('mouseover', 'node', function(evt) {
       evt.target.addClass('hovered');
+      evt.target.connectedEdges().addClass('hover-highlighted');
+      evt.target.neighborhood().nodes().addClass('hover-neighbor');
     });
     graphCy.on('mouseout', 'node', function(evt) {
       evt.target.removeClass('hovered');
+      evt.target.connectedEdges().removeClass('hover-highlighted');
+      evt.target.neighborhood().nodes().removeClass('hover-neighbor');
     });
 
     graphCy.on('tap', function(evt) {

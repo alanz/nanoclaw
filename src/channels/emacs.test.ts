@@ -48,6 +48,7 @@ function createTestOpts(overrides?: Partial<ChannelOpts>): ChannelOpts {
   return {
     onMessage: vi.fn(),
     onChatMetadata: vi.fn(),
+    onTrustedGroupViolation: vi.fn(),
     registeredGroups: vi.fn(() => ({
       'main:jid': {
         name: 'main',

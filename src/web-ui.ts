@@ -870,7 +870,9 @@ document.addEventListener('DOMContentLoaded', function() {
       var r = await fetch('/api/file?path='+encodeURIComponent(filePath));
       if (!r.ok) { view.innerHTML = '<div class="empty">Could not read file</div>'; return; }
       var text = await r.text();
-      var header = '<div class="dim" style="margin-bottom:12px">'+esc(filePath)+'</div>';
+      var isNote = filePath.indexOf('/memory/notes/MEM-') !== -1;
+      var graphBtn = isNote ? ' <a href="#" class="graph-file-btn" data-path="'+esc(filePath)+'" style="color:#58a6ff;font-size:11px;margin-left:8px;text-decoration:none">\u29BF Show in Graph</a>' : '';
+      var header = '<div class="dim" style="margin-bottom:12px">'+esc(filePath)+graphBtn+'</div>';
       var ext = name.split('.').pop();
       if (ext === 'md' && window.marked) {
         var fm = parseFrontMatter(text);
@@ -909,6 +911,22 @@ document.addEventListener('DOMContentLoaded', function() {
     } catch(e) { view.innerHTML = '<div class="empty">Error reading file</div>'; }
   }
 
+  // "Show in Graph" button handler (delegated)
+  document.getElementById('group-file-content').addEventListener('click', function(e) {
+    var btn = e.target.closest('.graph-file-btn');
+    if (!btn) return;
+    e.preventDefault();
+    var filePath = btn.dataset.path;
+    // Extract the MEM-...-slug ID from the file path
+    var match = filePath.match(/(MEM-[^/]+)\.md$/);
+    if (!match || !currentGroup) return;
+    var noteId = match[1];
+    // Switch to Graph tab, then select the node after graph loads
+    pendingGraphSelect = noteId;
+    switchTab('notes');
+  });
+  var pendingGraphSelect = null;
+
   // ── Graph tab ──────────────────────────────────────────────────────────────
 
   var GRAPH_COLORS = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#ff7b72','#79c0ff','#56d364','#e3b341','#db61a2'];
@@ -940,6 +958,18 @@ document.addEventListener('DOMContentLoaded', function() {
       graphData = data;
       if (!data.nodes.length) { status.textContent = 'No notes found.'; return; }
       renderGraph(data.nodes, data.edges, null);
+      // If navigating from Files tab, select the target node
+      if (pendingGraphSelect && graphCy) {
+        var targetId = pendingGraphSelect;
+        pendingGraphSelect = null;
+        setTimeout(function() {
+          var node = graphCy.getElementById(targetId);
+          if (node.length) {
+            node.select();
+            graphCy.animate({ center: { eles: node }, duration: 400 });
+          }
+        }, 900);
+      }
     } catch(e) { status.textContent = 'Error loading graph.'; }
   }
 

@@ -28,7 +28,7 @@ find "$DEST_DIR" -name "messages-*.db" -mtime +7 -delete
 echo "Backup complete: $DEST"
 
 # Back up embeddings.db via SQLite API (safe against WAL races, 1.2 GB file)
-EMBEDDINGS_SRC="$PROJECT_ROOT/groups/main/embeddings.db"
+EMBEDDINGS_SRC="$PROJECT_ROOT/store/main/embeddings.db"
 EMBEDDINGS_DEST="$DEST_DIR/embeddings.db"
 if [[ -f "$EMBEDDINGS_SRC" ]]; then
   sqlite3 "$EMBEDDINGS_SRC" ".backup '$EMBEDDINGS_DEST'"
@@ -39,10 +39,9 @@ else
 fi
 
 # Back up groups/ (plain files — rsync mirror is sufficient)
-# embeddings.db is excluded — handled above via SQLite .backup
 GROUPS_SRC="$PROJECT_ROOT/groups/"
 GROUPS_DEST="$DEST_DIR/groups/"
-rsync -a --delete --exclude="embeddings.db" --exclude="embeddings.db-shm" --exclude="embeddings.db-wal" "$GROUPS_SRC" "$GROUPS_DEST"
+rsync -a --delete "$GROUPS_SRC" "$GROUPS_DEST"
 echo "Groups backup complete: $GROUPS_DEST"
 
 # Save list of .env variable names (no values) for reconstruction reference

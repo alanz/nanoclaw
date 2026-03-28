@@ -8,6 +8,7 @@ import chokidar, { type FSWatcher } from 'chokidar';
 
 import {
   GROUPS_DIR,
+  STORE_DIR,
   MEMORY_SEARCH_ENABLED,
   MEMORY_SEARCH_EXTRA_PATHS,
   MEMORY_SEARCH_GEMINI_API_KEY,
@@ -793,7 +794,9 @@ export async function getOrCreateMemoryManager(
   if (existing) return existing;
 
   const workspaceDir = path.join(GROUPS_DIR, folder);
-  const dbPath = path.join(workspaceDir, 'embeddings.db');
+  const dbDir = path.join(STORE_DIR, folder);
+  await fs.mkdir(dbDir, { recursive: true });
+  const dbPath = path.join(dbDir, 'embeddings.db');
 
   const mgr = new MemoryIndexManager(
     workspaceDir,

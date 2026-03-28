@@ -14,13 +14,13 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { GROUPS_DIR } from '../src/config.js';
+import { GROUPS_DIR, STORE_DIR } from '../src/config.js';
 import { ensureMemoryIndexSchema } from '../src/memory/schema.js';
 import { loadSqliteVecExtension } from '../src/memory/sqlite-vec.js';
 
 const HOME_DIR = process.env.HOME ?? '/Users/alanz';
 const SOURCE_DB = path.join(HOME_DIR, '.openclaw', 'memory', 'main.sqlite');
-const TARGET_DB = path.join(GROUPS_DIR, 'main', 'embeddings.db');
+const TARGET_DB = path.join(STORE_DIR, 'main', 'embeddings.db');
 const TARGET_WORKSPACE = path.join(GROUPS_DIR, 'main');
 
 const PATH_FILTER = '../../Sync/org/%';

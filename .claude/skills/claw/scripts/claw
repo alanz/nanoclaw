@@ -57,6 +57,7 @@ NANOCLAW_DIR = _find_nanoclaw_dir()
 DB_PATH      = NANOCLAW_DIR / "store" / "messages.db"
 ENV_FILE     = NANOCLAW_DIR / ".env"
 GROUPS_DIR   = NANOCLAW_DIR / "groups"
+STORE_DIR    = NANOCLAW_DIR / "store"
 IMAGE        = "nanoclaw-agent:latest"
 
 SECRET_KEYS = [
@@ -296,7 +297,7 @@ def get_memory_status(groups: list[dict], filter_folder: str | None) -> None:
     for g in groups:
         if filter_folder and g["folder"].lower() != filter_folder.lower():
             continue
-        db_path = GROUPS_DIR / g["folder"] / "embeddings.db"
+        db_path = STORE_DIR / g["folder"] / "embeddings.db"
         if not db_path.exists():
             continue
 

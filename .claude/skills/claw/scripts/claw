@@ -156,7 +156,11 @@ def build_mounts(folder: str, is_main: bool) -> list[tuple[str, str, bool]]:
 
 def run_container(runtime: str, image: str, payload: dict,
                   folder: str | None = None, is_main: bool = False,
-                  timeout: int = 300) -> None:
+                  timeout: int = 300,
+                  secrets: dict | None = None) -> None:
+    host_uid = os.getuid()
+    host_gid = os.getgid()
+
     cmd = [runtime, "run", "-i", "--rm"]
     if folder:
         for host, container, readonly in build_mounts(folder, is_main):
@@ -164,6 +168,23 @@ def run_container(runtime: str, image: str, payload: dict,
                 cmd += ["--mount", f"type=bind,source={host},target={container},readonly"]
             else:
                 cmd += ["-v", f"{host}:{container}"]
+
+    # Mirror container-runner.ts: main containers start as root then drop via
+    # setpriv (so the entrypoint can mount --bind); non-main containers run
+    # directly as the host user. Claude Code 2.1.81+ refuses
+    # --allow-dangerously-skip-permissions when running as root.
+    if is_main:
+        cmd += ["-e", f"RUN_UID={host_uid}", "-e", f"RUN_GID={host_gid}"]
+    else:
+        cmd += ["--user", f"{host_uid}:{host_gid}"]
+    # Set HOME so Claude Code finds its config at /home/node/.claude
+    cmd += ["-e", "HOME=/home/node"]
+
+    # Pass secrets as env vars so the agent-runner's process.env picks them up
+    # (the agent-runner passes process.env to the SDK which inherits to Claude Code)
+    for key, val in (secrets or {}).items():
+        cmd += ["-e", f"{key}={val}"]
+
     cmd.append(image)
     dbg(f"cmd: {' '.join(cmd)}")
 
@@ -467,7 +488,7 @@ def main():
     print(f"[{group_name or jid}] running via {runtime}...", file=sys.stderr)
     run_container(runtime, args.image, payload,
                   folder=group_folder, is_main=is_main,
-                  timeout=args.timeout)
+                  timeout=args.timeout, secrets=secrets)
 
 
 if __name__ == "__main__":

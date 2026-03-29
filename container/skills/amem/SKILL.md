@@ -29,6 +29,15 @@ keywords: [term1, term2, term3]
 tags: [tag1, tag2]
 links: [MEM-other-id]
 supersedes: null
+sources:
+  - type: file          # file | url | conversation
+    path: memory/reports/YYYY-MM-DD-{slug}.md
+    mtime: YYYY-MM-DDTHH:MM:SSZ
+  # - type: url
+  #   url: https://example.com/article
+  #   last_fetched: YYYY-MM-DDTHH:MM:SSZ
+  # - type: conversation
+  #   date: YYYY-MM-DD
 ---
 
 Body text. Preserve reasoning verbatim.
@@ -44,6 +53,7 @@ Body text. Preserve reasoning verbatim.
 - `tags` — broad categories for graph filtering in the dashboard
 - `links` — bare note IDs only (no URLs); the graph is built from these
 - `supersedes` — ID of the note this one replaces, or `null`
+- `sources` — always populate with the origin of the note material. For `type: file`, record `mtime` at creation time so a future sweep can detect when source material has changed. For `type: url`, record `last_fetched`. For `type: conversation`, record the `date`.
 
 ## Reference URLs
 
@@ -60,6 +70,10 @@ get_file_url({ file_path: "/workspace/group/memory/notes/MEM-2026-01-01-foo.md" 
 
 To reverse a dashboard URL back to a local path: `get_file_path({ url })` returns the absolute container path (e.g. `/workspace/group/memory/notes/foo.md`). For `memory_get`, strip the `/workspace/group/` prefix to get the relative path.
 
+## Reporting notes to the user
+
+When reporting a newly created note to the user, always include the web UI link to it. Use `get_file_url` to generate the link.
+
 ## Quality conventions
 
 **Original sources** — every note must link to its source in `## References`. Never omit it.
@@ -67,13 +81,14 @@ To reverse a dashboard URL back to a local path: `get_file_path({ url })` return
 **Falsification conditions** — every prescriptive or empirical claim needs a specific condition that would falsify or supersede it. Without this, consolidation silently expands claims.
 
 > Instead of: "retrieval precision degrades with scale"
-> Write: "retrieval precision degrades with scale *unless* the index is partitioned by recency and topic — in which case it holds up to ~10k notes (see [source])"
+> Write: "retrieval precision degrades with scale _unless_ the index is partitioned by recency and topic — in which case it holds up to ~10k notes (see [source])"
 
 **Verbatim rationale** — preserve reasoning verbatim, not summarised. "Timing attacks are possible if requests arrive out of order" carries its own justification; "Don't do X" loses it. The verbatim form survives context compression; the summarised form does not.
 
 ## Superseding notes
 
 When a note is no longer accurate, create a replacement note with:
+
 - `supersedes: MEM-old-id`
 
 Then update the old note's `supersedes` field to `null → MEM-new-id` and add a comment at the top of the old note body:

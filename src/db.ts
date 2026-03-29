@@ -179,6 +179,13 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Add total_tokens column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(`ALTER TABLE task_run_logs ADD COLUMN total_tokens INTEGER`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -552,8 +559,8 @@ export function updateTaskAfterRun(
 export function logTaskRun(log: TaskRunLog): void {
   db.prepare(
     `
-    INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error, total_tokens)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     log.task_id,
@@ -562,6 +569,7 @@ export function logTaskRun(log: TaskRunLog): void {
     log.status,
     log.result,
     log.error,
+    log.total_tokens ?? null,
   );
 }
 
@@ -833,7 +841,7 @@ export function getTaskRunLogs(
 ): Array<TaskRunLog & { id: number }> {
   return db
     .prepare(
-      `SELECT id, task_id, run_at, duration_ms, status, result, error
+      `SELECT id, task_id, run_at, duration_ms, status, result, error, total_tokens
        FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC LIMIT ?`,
     )
     .all(taskId, limit) as Array<TaskRunLog & { id: number }>;

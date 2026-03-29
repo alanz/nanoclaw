@@ -92,6 +92,7 @@ export interface TaskRunLog {
   status: 'success' | 'error';
   result: string | null;
   error: string | null;
+  total_tokens?: number;
 }
 
 // --- Channel abstraction ---

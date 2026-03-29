@@ -10,6 +10,8 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  getTaskRunLogs,
+  logTaskRun,
   queryTranscript,
   setRegisteredGroup,
   storeChatMetadata,
@@ -752,6 +754,84 @@ describe('queryTranscript', () => {
     });
     const result = queryTranscript({ chatJid: JID, includeBotMessages: true });
     expect(result.messages.map((m) => m.id)).toContain('bot2');
+  });
+});
+
+// --- logTaskRun / getTaskRunLogs ---
+
+describe('logTaskRun', () => {
+  beforeEach(() => {
+    createTask({
+      id: 'run-task',
+      group_folder: 'main',
+      chat_jid: 'dc:10',
+      prompt: 'test',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('persists total_tokens when provided', () => {
+    logTaskRun({
+      task_id: 'run-task',
+      run_at: '2026-01-01T00:00:01.000Z',
+      duration_ms: 1500,
+      status: 'success',
+      result: 'done',
+      error: null,
+      total_tokens: 4200,
+    });
+
+    const logs = getTaskRunLogs('run-task');
+    expect(logs).toHaveLength(1);
+    expect(logs[0].total_tokens).toBe(4200);
+  });
+
+  it('stores null when total_tokens is omitted (backward compat)', () => {
+    logTaskRun({
+      task_id: 'run-task',
+      run_at: '2026-01-01T00:00:01.000Z',
+      duration_ms: 800,
+      status: 'error',
+      result: null,
+      error: 'container exited with code 1',
+    });
+
+    const logs = getTaskRunLogs('run-task');
+    expect(logs).toHaveLength(1);
+    // SQLite returns null for missing column; cast to check falsy
+    expect(logs[0].total_tokens ?? null).toBeNull();
+  });
+
+  it('returns runs newest-first', () => {
+    logTaskRun({
+      task_id: 'run-task',
+      run_at: '2026-01-01T00:00:01.000Z',
+      duration_ms: 100,
+      status: 'success',
+      result: 'first',
+      error: null,
+      total_tokens: 100,
+    });
+    logTaskRun({
+      task_id: 'run-task',
+      run_at: '2026-01-01T00:00:02.000Z',
+      duration_ms: 200,
+      status: 'success',
+      result: 'second',
+      error: null,
+      total_tokens: 200,
+    });
+
+    const logs = getTaskRunLogs('run-task');
+    expect(logs).toHaveLength(2);
+    expect(logs[0].result).toBe('second');
+    expect(logs[0].total_tokens).toBe(200);
+    expect(logs[1].total_tokens).toBe(100);
   });
 });
 

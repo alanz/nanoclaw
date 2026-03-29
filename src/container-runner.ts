@@ -50,6 +50,7 @@ export interface ContainerInput {
   assistantName?: string;
   script?: string;
   dispatchDepth?: number;
+  evalSkipSkills?: string[];
 }
 
 export interface ContainerOutput {
@@ -57,6 +58,8 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  totalTokens?: number;
+  durationMs?: number;
 }
 
 interface VolumeMount {
@@ -333,6 +336,14 @@ export async function runContainerAgent(
     '-e',
     `NANOCLAW_DISPATCH_DEPTH=${input.dispatchDepth ?? 0}`,
   );
+  if (input.evalSkipSkills && input.evalSkipSkills.length > 0) {
+    containerArgs.splice(
+      containerArgs.length - 1,
+      0,
+      '-e',
+      `EVAL_SKIP_SKILLS=${input.evalSkipSkills.join(',')}`,
+    );
+  }
 
   logger.debug(
     {
@@ -660,6 +671,7 @@ export async function runContainerAgent(
         }
 
         const output: ContainerOutput = JSON.parse(jsonLine);
+        output.durationMs = duration;
 
         logger.info(
           {

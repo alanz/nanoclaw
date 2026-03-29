@@ -149,6 +149,7 @@ async function runTask(
 
   let result: string | null = null;
   let error: string | null = null;
+  let totalTokens: number | undefined;
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
@@ -186,6 +187,9 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        if (streamedOutput.totalTokens != null) {
+          totalTokens = streamedOutput.totalTokens;
+        }
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
@@ -230,6 +234,7 @@ async function runTask(
     status: error ? 'error' : 'success',
     result,
     error,
+    total_tokens: totalTokens,
   });
 
   const nextRun = computeNextRun(task);

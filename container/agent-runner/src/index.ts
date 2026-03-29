@@ -29,6 +29,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  evalSkipSkills?: string[];
 }
 
 interface ContainerOutput {
@@ -36,6 +37,7 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  totalTokens?: number;
 }
 
 interface SessionEntry {
@@ -387,6 +389,8 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -473,11 +477,17 @@ async function runQuery(
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
+      const usageMsg = message as { usage?: { input_tokens?: number; output_tokens?: number } };
+      if (usageMsg.usage) {
+        totalInputTokens  += usageMsg.usage.input_tokens  ?? 0;
+        totalOutputTokens += usageMsg.usage.output_tokens ?? 0;
+      }
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
       writeOutput({
         status: 'success',
         result: textResult || null,
-        newSessionId
+        newSessionId,
+        totalTokens: totalInputTokens + totalOutputTokens || undefined,
       });
     }
   }
@@ -551,6 +561,20 @@ async function main(): Promise<void> {
       error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
     });
     process.exit(1);
+  }
+
+  // Phase 2 eval isolation: remove named skills so the baseline run is clean.
+  // Containers are ephemeral (--rm), so this only affects this run.
+  const evalSkipSkills = process.env.EVAL_SKIP_SKILLS;
+  if (evalSkipSkills) {
+    const skillsDir = path.join(process.env.HOME!, '.claude', 'skills');
+    for (const skillName of evalSkipSkills.split(',')) {
+      const skillPath = path.join(skillsDir, skillName.trim());
+      if (fs.existsSync(skillPath)) {
+        fs.rmSync(skillPath, { recursive: true });
+        log(`[eval] Removed skill '${skillName}' for baseline run`);
+      }
+    }
   }
 
   // Credentials are injected by the host's credential proxy via ANTHROPIC_BASE_URL.

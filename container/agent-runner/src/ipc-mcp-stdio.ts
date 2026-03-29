@@ -19,6 +19,10 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+const dispatchDepth = parseInt(process.env.NANOCLAW_DISPATCH_DEPTH || '0', 10);
+
+// One-call guard: sub-groups may only call deliver_result once per container run
+let deliverResultUsed = false;
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -191,12 +195,54 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       targetJid,
       createdBy: groupFolder,
       timestamp: new Date().toISOString(),
+      dispatchDepth: dispatchDepth + 1,
     };
 
     writeIpcFile(TASKS_DIR, data);
 
     return {
       content: [{ type: 'text' as const, text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}` }],
+    };
+  },
+);
+
+server.tool(
+  'deliver_result',
+  `Deliver a result or completion notification to the main group agent. Use when you have finished a delegated task and the main agent needs to act on the output.
+
+Only callable from sub-groups (not the main group). Limited to one call per container run to prevent flooding. The host enforces a maximum dispatch depth to break potential loops between orchestrator and sub-agents.
+
+The text payload should be a concise summary of what was completed — a file path, a one-paragraph summary, or a structured status message. The main agent will be triggered as if it received an inbound message from you.`,
+  {
+    text: z.string().describe('Result summary or completion notice to deliver to the main agent'),
+  },
+  async (args) => {
+    if (isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'deliver_result is only available to sub-groups.' }],
+        isError: true,
+      };
+    }
+
+    if (deliverResultUsed) {
+      return {
+        content: [{ type: 'text' as const, text: 'deliver_result has already been called once in this container run.' }],
+        isError: true,
+      };
+    }
+
+    deliverResultUsed = true;
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'deliver_result',
+      text: args.text,
+      dispatchDepth,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: 'Result delivered to main agent.' }],
     };
   },
 );
@@ -571,6 +617,8 @@ server.tool(
   'query_transcript',
   `Query the message history for this group. Returns messages with their timestamp, sender, direction (inbound = from user, outbound = sent by bot), and content.
 
+By default only inbound (user-sent) messages are returned. Pass include_bot_messages=true to also include outbound bot replies — useful when the main group wants to read what a sub-group agent sent back.
+
 TIME WINDOW: Use ISO 8601 timestamps for from/to (e.g. "2026-03-19T00:00:00.000Z"). Both are optional.
 
 PAGINATION: The response includes has_more (boolean) and next_cursor. If has_more is true, pass next_cursor as after_cursor in the next call to retrieve the following page.`,
@@ -600,6 +648,12 @@ PAGINATION: The response includes has_more (boolean) and next_cursor. If has_mor
       .describe(
         'Pagination cursor from a previous response (the next_cursor field). Returns the next page.',
       ),
+    include_bot_messages: z
+      .boolean()
+      .optional()
+      .describe(
+        'Include bot-sent (outbound) messages in results. Default false. Pass true to see both sides of the conversation, e.g. when reading a sub-group transcript from the main group.',
+      ),
   },
   async (args) => {
     const requestId = `tr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -612,6 +666,7 @@ PAGINATION: The response includes has_more (boolean) and next_cursor. If has_mor
       to: args.to,
       limit: args.limit ?? 50,
       afterCursor: args.after_cursor,
+      includeBotMessages: args.include_bot_messages ?? false,
       timestamp: new Date().toISOString(),
     });
 

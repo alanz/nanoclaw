@@ -181,6 +181,7 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        dispatchDepth: task.dispatch_depth ?? 0,
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

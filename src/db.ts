@@ -150,6 +150,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add dispatch_depth column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN dispatch_depth INTEGER DEFAULT 0`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -417,8 +426,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, dispatch_depth)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -432,6 +441,7 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.dispatch_depth ?? 0,
   );
 }
 
@@ -724,18 +734,24 @@ export function queryTranscript({
   to,
   limit = 50,
   afterCursor,
+  includeBotMessages = false,
 }: {
   chatJid: string;
   from?: string;
   to?: string;
   limit?: number;
   afterCursor?: string;
+  /** Include bot-sent messages (is_bot_message=1) in results. Default false. */
+  includeBotMessages?: boolean;
 }): TranscriptResult {
   const effectiveLimit = Math.min(Math.max(1, limit), 200);
 
   const conditions: string[] = ['chat_jid = ?'];
   const params: (string | number)[] = [chatJid];
 
+  if (!includeBotMessages) {
+    conditions.push('is_bot_message = 0');
+  }
   if (from) {
     conditions.push('timestamp >= ?');
     params.push(from);

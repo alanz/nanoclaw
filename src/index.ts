@@ -95,6 +95,9 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+// Depth to assign the next container run for a given JID, set when a
+// deliver_result injection arrives from a sub-group.
+const pendingDispatchDepth: Record<string, number> = {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -442,6 +445,9 @@ async function runAgent(
       }
     : undefined;
 
+  const dispatchDepth = pendingDispatchDepth[chatJid] ?? 0;
+  delete pendingDispatchDepth[chatJid];
+
   try {
     const output = await runContainerAgent(
       group,
@@ -452,6 +458,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        dispatchDepth,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -1021,6 +1028,9 @@ async function main(): Promise<void> {
       for (const group of Object.values(registeredGroups)) {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
+    },
+    setPendingDispatchDepth: (jid, depth) => {
+      pendingDispatchDepth[jid] = depth;
     },
   });
   queue.setProcessMessagesFn(processGroupMessages);

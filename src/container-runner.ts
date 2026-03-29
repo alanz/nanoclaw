@@ -49,6 +49,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  dispatchDepth?: number;
 }
 
 export interface ContainerOutput {
@@ -320,6 +321,12 @@ export async function runContainerAgent(
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, input.isMain);
+  containerArgs.splice(
+    containerArgs.length - 1,
+    0,
+    '-e',
+    `NANOCLAW_DISPATCH_DEPTH=${input.dispatchDepth ?? 0}`,
+  );
 
   logger.debug(
     {

@@ -73,6 +73,7 @@ beforeEach(() => {
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
+    setPendingDispatchDepth: () => {},
   };
 });
 

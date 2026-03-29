@@ -6,6 +6,7 @@ import { CronExpressionParser } from 'cron-parser';
 import {
   DATA_DIR,
   IPC_POLL_INTERVAL,
+  MAX_DISPATCH_DEPTH,
   MEMORY_SEARCH_ENABLED,
   TIMEZONE,
 } from './config.js';
@@ -18,6 +19,7 @@ import {
   deleteTask,
   getTaskById,
   queryTranscript,
+  storeMessage,
   updateTask,
 } from './db.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
@@ -48,6 +50,7 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  setPendingDispatchDepth: (jid: string, depth: number) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -246,12 +249,16 @@ export async function processTaskIpc(
     feedScheduleType?: 'interval' | 'cron';
     feedScheduleValue?: string;
     feedInterest?: string;
+    // For deliver_result / schedule_task depth tracking
+    dispatchDepth?: number;
+    text?: string;
     // For query_transcript
     requestId?: string;
     from?: string;
     to?: string;
     limit?: number;
     afterCursor?: string;
+    includeBotMessages?: boolean;
     // For memory_search / memory_get / memory_list
     query?: string;
     path?: string;
@@ -356,6 +363,7 @@ export async function processTaskIpc(
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),
+          dispatch_depth: data.dispatchDepth ?? 0,
         });
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
@@ -735,6 +743,7 @@ export async function processTaskIpc(
         to: data.to,
         limit: typeof data.limit === 'number' ? data.limit : 50,
         afterCursor: data.afterCursor,
+        includeBotMessages: data.includeBotMessages === true,
       });
       const responseDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
       fs.mkdirSync(responseDir, { recursive: true });
@@ -892,6 +901,63 @@ export async function processTaskIpc(
       logger.info(
         { requestId: data.requestId, sourceGroup },
         'memory_list fulfilled',
+      );
+      break;
+    }
+
+    case 'deliver_result': {
+      // Only sub-groups may deliver results — main cannot inject into itself
+      if (isMain) {
+        logger.warn(
+          { sourceGroup },
+          'deliver_result blocked: main group cannot use this',
+        );
+        break;
+      }
+
+      if (!data.text) {
+        logger.warn({ data }, 'deliver_result: missing text');
+        break;
+      }
+
+      const depth = data.dispatchDepth ?? 0;
+      if (depth >= MAX_DISPATCH_DEPTH) {
+        logger.warn(
+          { sourceGroup, depth, MAX_DISPATCH_DEPTH },
+          'deliver_result blocked: max dispatch depth reached',
+        );
+        break;
+      }
+
+      // Find the main group JID — only main groups receive injected deliveries
+      const mainEntry = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      );
+      if (!mainEntry) {
+        logger.warn(
+          { sourceGroup },
+          'deliver_result: no main group registered',
+        );
+        break;
+      }
+      const [mainJid] = mainEntry;
+
+      storeMessage({
+        id: `delivery-${sourceGroup}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        chat_jid: mainJid,
+        sender: `system:${sourceGroup}`,
+        sender_name: sourceGroup,
+        content: data.text,
+        timestamp: new Date().toISOString(),
+        is_from_me: false,
+        is_bot_message: false,
+      });
+
+      deps.setPendingDispatchDepth(mainJid, depth + 1);
+
+      logger.info(
+        { sourceGroup, mainJid, depth },
+        'deliver_result injected into main group',
       );
       break;
     }

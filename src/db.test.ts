@@ -478,6 +478,45 @@ describe('task CRUD', () => {
     deleteTask('task-3');
     expect(getTaskById('task-3')).toBeUndefined();
   });
+
+  it('stores and retrieves dispatch_depth', () => {
+    createTask({
+      id: 'task-depth',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'delegated task',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+      dispatch_depth: 2,
+    });
+
+    const task = getTaskById('task-depth');
+    expect(task).toBeDefined();
+    expect(task!.dispatch_depth).toBe(2);
+  });
+
+  it('defaults dispatch_depth to 0 when not provided', () => {
+    createTask({
+      id: 'task-no-depth',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'normal task',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const task = getTaskById('task-no-depth');
+    expect(task).toBeDefined();
+    expect(task!.dispatch_depth ?? 0).toBe(0);
+  });
 });
 
 // --- LIMIT behavior ---
@@ -683,6 +722,36 @@ describe('queryTranscript', () => {
   it('clamps limit to 200 max', () => {
     const result = queryTranscript({ chatJid: JID, limit: 9999 });
     expect(result.messages).toHaveLength(4); // only 4 messages exist
+  });
+
+  it('excludes bot messages (is_bot_message=1) by default', () => {
+    storeMessage({
+      id: 'bot1',
+      chat_jid: JID,
+      sender: 'bot',
+      sender_name: 'Bot',
+      content: 'A bot reply',
+      timestamp: '2026-01-01T10:04:00.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+    });
+    const result = queryTranscript({ chatJid: JID });
+    expect(result.messages.map((m) => m.id)).not.toContain('bot1');
+  });
+
+  it('includes bot messages when includeBotMessages=true', () => {
+    storeMessage({
+      id: 'bot2',
+      chat_jid: JID,
+      sender: 'bot',
+      sender_name: 'Bot',
+      content: 'Another bot reply',
+      timestamp: '2026-01-01T10:05:00.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+    });
+    const result = queryTranscript({ chatJid: JID, includeBotMessages: true });
+    expect(result.messages.map((m) => m.id)).toContain('bot2');
   });
 });
 

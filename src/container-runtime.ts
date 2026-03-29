@@ -198,6 +198,55 @@ export function listOrphanedContainers(): OrphanedContainer[] {
   }
 }
 
+export interface ManagedContainer {
+  /** Full container name */
+  name: string;
+  /** 'nanoclaw' for NanoClaw-spawned containers, 'claw' for CLI-invoked containers */
+  kind: 'nanoclaw' | 'claw';
+  /** Unix milliseconds when the container started */
+  startedMs: number;
+}
+
+/**
+ * List all running containers spawned by NanoClaw or the claw CLI.
+ * Used by the web UI to surface orphans (containers not tracked by the queue).
+ */
+export function listAllManagedContainers(): ManagedContainer[] {
+  try {
+    const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    });
+    const containers: {
+      status: string;
+      startedDate?: number;
+      configuration: { id: string };
+    }[] = JSON.parse(output || '[]');
+
+    return containers
+      .filter((c) => {
+        const id = c.configuration.id;
+        return (
+          c.status === 'running' &&
+          (id.startsWith('nanoclaw-') || id.startsWith('claw-'))
+        );
+      })
+      .map((c) => {
+        const name = c.configuration.id;
+        const kind: ManagedContainer['kind'] = name.startsWith('claw-')
+          ? 'claw'
+          : 'nanoclaw';
+        const startedMs =
+          c.startedDate != null
+            ? (c.startedDate + CF_TO_UNIX_OFFSET_S) * 1000
+            : Date.now();
+        return { name, kind, startedMs };
+      });
+  } catch {
+    return [];
+  }
+}
+
 /** Check if a named container is still running. */
 export function isContainerRunning(name: string): boolean {
   try {

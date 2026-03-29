@@ -94,6 +94,10 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
+export const CREDENTIAL_PROXY_PORT = parseInt(
+  process.env.CREDENTIAL_PROXY_PORT || '3001',
+  10,
+);
 export const ONECLI_URL =
   process.env.ONECLI_URL || envConfig.ONECLI_URL || 'http://localhost:10254';
 // Real container IP for the OneCLI gateway (port 10255).

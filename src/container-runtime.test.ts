@@ -47,7 +47,7 @@ describe('stopContainer', () => {
   it('calls docker stop for valid container names', () => {
     stopContainer('nanoclaw-test-123');
     expect(mockExecSync).toHaveBeenCalledWith(
-      `${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-test-123`,
+      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-test-123`,
       { stdio: 'pipe' },
     );
   });

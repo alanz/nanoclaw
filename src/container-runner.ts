@@ -10,6 +10,7 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
+  CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
@@ -20,6 +21,7 @@ import {
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
   readonlyMountArgs,
@@ -324,11 +326,6 @@ async function buildContainerArgs(
       }
     }
     logger.info({ containerName }, 'OneCLI gateway config applied');
-  } else {
-    logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
-    );
   }
 
   // Pass Brave Search API key if configured

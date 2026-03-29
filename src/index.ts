@@ -269,7 +269,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     isMainGroup,
     isTrustedGroup,
     groupName: group.name,
-    triggerPattern: TRIGGER_PATTERN,
+    triggerPattern: getTriggerPattern(group.trigger),
     timezone: TIMEZONE,
     deps: {
       sendMessage: (text) => channel.sendMessage(chatJid, text),
@@ -603,7 +603,11 @@ async function startMessageLoop(): Promise<void> {
           // --- Session command interception (message loop) ---
           // Scan ALL messages in the batch for a session command.
           const loopCmdMsg = groupMessages.find(
-            (m) => extractSessionCommand(m.content, TRIGGER_PATTERN) !== null,
+            (m) =>
+              extractSessionCommand(
+                m.content,
+                getTriggerPattern(group.trigger),
+              ) !== null,
           );
 
           if (loopCmdMsg) {

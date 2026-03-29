@@ -11,7 +11,12 @@ import {
   TIMEZONE,
 } from './config.js';
 import { getOrCreateMemoryManager } from './memory/manager.js';
-import { AvailableGroup } from './container-runner.js';
+import {
+  AvailableGroup,
+  runContainerAgent,
+  ContainerInput,
+} from './container-runner.js';
+import { snapshotGroup, gradeAssertions } from './eval-utils.js';
 import {
   createRssFeed,
   createTask,
@@ -252,6 +257,12 @@ export async function processTaskIpc(
     // For deliver_result / schedule_task depth tracking
     dispatchDepth?: number;
     text?: string;
+    // For run_eval
+    skillName?: string;
+    caseId?: string;
+    withSkill?: boolean;
+    assertions?: string[];
+    timeoutMs?: number;
     // For query_transcript
     requestId?: string;
     from?: string;
@@ -959,6 +970,102 @@ export async function processTaskIpc(
         { sourceGroup, mainJid, depth },
         'deliver_result injected into main group',
       );
+      break;
+    }
+
+    case 'run_eval': {
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'run_eval blocked: not main group');
+        break;
+      }
+      if (
+        !data.requestId ||
+        !data.skillName ||
+        data.prompt === undefined ||
+        data.withSkill === undefined
+      ) {
+        logger.warn(
+          { data },
+          'Invalid run_eval request — missing required fields',
+        );
+        break;
+      }
+      const responsesDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(responsesDir, { recursive: true });
+      const responsePath = path.join(responsesDir, `${data.requestId}.json`);
+
+      const mainGroup = Object.values(registeredGroups).find((g) => g.isMain);
+      if (!mainGroup) {
+        logger.warn({ sourceGroup }, 'run_eval: main group not found');
+        fs.writeFileSync(
+          responsePath,
+          JSON.stringify({
+            status: 'error',
+            caseId: data.caseId,
+            error: 'Main group not found',
+          }),
+        );
+        break;
+      }
+
+      // Fire and forget — container runs can take minutes; don't block the IPC polling loop
+      void (async () => {
+        const { evalGroup, cleanup } = snapshotGroup(mainGroup);
+        try {
+          const input: ContainerInput = {
+            prompt: data.prompt!,
+            groupFolder: evalGroup.folder,
+            chatJid: 'eval-internal',
+            isMain: false,
+            evalSkipSkills: data.withSkill ? [] : [data.skillName!],
+          };
+
+          const start = Date.now();
+          const output = await runContainerAgent(evalGroup, input, () => {});
+          const durationMs = Date.now() - start;
+
+          const assertionResults = await gradeAssertions(
+            output.result ?? output.error ?? '',
+            '', // no output file collection in the IPC path
+            data.assertions ?? [],
+          );
+
+          fs.writeFileSync(
+            responsePath,
+            JSON.stringify(
+              {
+                status: 'success',
+                caseId: data.caseId,
+                withSkill: data.withSkill,
+                passed: assertionResults.every((r) => r.passed === true),
+                assertionResults,
+                output: output.result,
+                durationMs,
+                totalTokens: output.totalTokens ?? null,
+              },
+              null,
+              2,
+            ),
+          );
+
+          logger.info(
+            { requestId: data.requestId, sourceGroup, durationMs },
+            'run_eval completed',
+          );
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          fs.writeFileSync(
+            responsePath,
+            JSON.stringify({ status: 'error', caseId: data.caseId, error }),
+          );
+          logger.error(
+            { requestId: data.requestId, sourceGroup, err },
+            'run_eval failed',
+          );
+        } finally {
+          cleanup();
+        }
+      })();
       break;
     }
 

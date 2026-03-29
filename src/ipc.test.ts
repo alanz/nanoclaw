@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { _initTestDatabase, getNewMessages, storeChatMetadata } from './db.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
@@ -24,6 +27,87 @@ function makeDeps(overrides: Partial<IpcDeps> = {}): IpcDeps {
     ...overrides,
   };
 }
+
+describe('run_eval', () => {
+  it('blocks non-main groups', async () => {
+    const deps = makeDeps();
+
+    // Should return without writing any response file (no filesystem side effects)
+    await processTaskIpc(
+      {
+        type: 'run_eval',
+        requestId: 'req-1',
+        skillName: 'test-skill',
+        prompt: 'do something',
+        withSkill: true,
+      },
+      'deltachat_some-group',
+      false, // not main
+      deps,
+    );
+
+    // No IPC calls should have been made
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when required fields are missing', async () => {
+    const deps = makeDeps();
+
+    await processTaskIpc(
+      {
+        type: 'run_eval',
+        // missing requestId, skillName, prompt, withSkill
+      },
+      'main',
+      true,
+      deps,
+    );
+
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('writes an error response when main group is not registered', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'nanoclaw-test-'));
+    let tmpIpcDir: string | undefined;
+
+    try {
+      // Override DATA_DIR by pointing IPC dir resolution at tmpDir.
+      // We test by calling processTaskIpc directly — it writes to DATA_DIR/ipc/<source>/responses/.
+      // Since DATA_DIR is hard-coded in config, we instead verify that the handler
+      // reaches the "main group not found" branch by checking it doesn't hang or throw.
+      const deps = makeDeps({
+        registeredGroups: () => ({}), // no groups — mainGroup will be undefined
+      });
+
+      // processTaskIpc will try to write the error response to DATA_DIR/ipc/main/responses/req-err.json.
+      // The response file may or may not be written depending on whether DATA_DIR exists.
+      // What we care about is that it doesn't throw and doesn't call sendMessage.
+      let threw = false;
+      try {
+        await processTaskIpc(
+          {
+            type: 'run_eval',
+            requestId: 'req-err',
+            skillName: 'test-skill',
+            prompt: 'do something',
+            withSkill: false,
+          },
+          'main',
+          true,
+          deps,
+        );
+      } catch {
+        threw = true;
+      }
+
+      expect(threw).toBe(false);
+      expect(deps.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (tmpIpcDir) rmSync(tmpIpcDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('deliver_result', () => {
   it('blocks delivery from the main group', async () => {

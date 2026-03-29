@@ -10,16 +10,13 @@
  * Output format is compatible with skill-creator's grader/comparator agents.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { ChildProcess } from 'child_process';
 import {
   copyFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -28,11 +25,10 @@ import { parseArgs } from 'node:util';
 
 import { runContainerAgent, ContainerInput } from '../src/container-runner.js';
 import { getAllRegisteredGroups } from '../src/db.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from '../src/group-folder.js';
+import { snapshotGroup, gradeAssertions } from '../src/eval-utils.js';
 import { RegisteredGroup } from '../src/types.js';
 
 const SKILLS_DIR = join(process.cwd(), 'container', 'skills');
-const anthropic = new Anthropic();
 
 // --- Helpers ---
 
@@ -56,45 +52,6 @@ function stddev(arr: number[]): number {
   if (arr.length < 2) return 0;
   const m = mean(arr)!;
   return Math.sqrt(arr.reduce((sum, x) => sum + (x - m) ** 2, 0) / arr.length);
-}
-
-// --- Group snapshot ---
-
-// Creates a temp copy of the target group folder under GROUPS_DIR so that
-// runContainerAgent mounts the snapshot, not the real folder. Temp folder name
-// must satisfy isValidGroupFolder(): ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$
-//
-// NOTE: if the group folder contains large directories (e.g. zotero-md/ with
-// 675+ files), the cpSync can be slow and disk-heavy. Consider excluding bulk
-// read-only data directories that the skill under test doesn't need.
-function snapshotGroup(targetGroup: RegisteredGroup): {
-  evalGroup: RegisteredGroup;
-  snapDir: string;
-  cleanup: () => void;
-} {
-  // Include a random suffix to avoid collisions if two evals run concurrently
-  const tempFolder = `eval-tmp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const realDir = resolveGroupFolderPath(targetGroup.folder);
-  const snapDir = resolveGroupFolderPath(tempFolder); // validated, within GROUPS_DIR
-
-  cpSync(realDir, snapDir, { recursive: true });
-
-  // Strip eval results from the snapshot. The agent must not see its own test
-  // history during a run — previous grading.json / feedback.json files could
-  // influence its responses and invalidate the eval.
-  const snapEvalsDir = join(snapDir, 'evals');
-  if (existsSync(snapEvalsDir)) rmSync(snapEvalsDir, { recursive: true, force: true });
-
-  const evalGroup: RegisteredGroup = { ...targetGroup, folder: tempFolder };
-
-  const cleanup = () => {
-    rmSync(snapDir, { recursive: true, force: true });
-    // Clean up any IPC state the container created under data/ipc/<tempFolder>/
-    const ipcDir = resolveGroupIpcPath(tempFolder);
-    if (existsSync(ipcDir)) rmSync(ipcDir, { recursive: true, force: true });
-  };
-
-  return { evalGroup, snapDir, cleanup };
 }
 
 // --- Eval execution ---
@@ -159,51 +116,6 @@ async function runEvalCase(
   } finally {
     cleanup(); // delete snapshot + IPC dir (output copy already done above)
   }
-}
-
-// --- Assertion grading ---
-
-async function gradeAssertions(
-  output: string,
-  outputsDir: string,
-  assertions: string[],
-  expectedOutput: string,
-) {
-  if (assertions.length === 0) return [];
-
-  const outputFiles = existsSync(outputsDir) ? readdirSync(outputsDir) : [];
-
-  const gradingPrompt = `Grade each assertion about an AI assistant's output.
-Return a JSON array only, no other text.
-
-Expected output: ${expectedOutput}
-Actual output:
-${output}
-Output files produced: ${outputFiles.length > 0 ? outputFiles.join(', ') : '(none)'}
-
-Assertions:
-${assertions.map((a, i) => `${i + 1}. ${a}`).join('\n')}
-
-Return: [{"text":"<assertion>","passed":true/false,"evidence":"<one sentence of concrete evidence>"}]`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: gradingPrompt }],
-    });
-    const text = response.content[0].type === 'text' ? response.content[0].text : '';
-    const match = text.match(/\[[\s\S]*\]/);
-    if (match) return JSON.parse(match[0]);
-  } catch {
-    /* fall through */
-  }
-
-  return assertions.map((text) => ({
-    text,
-    passed: null,
-    evidence: 'Grading failed — manual review needed',
-  }));
 }
 
 // --- Main loop ---

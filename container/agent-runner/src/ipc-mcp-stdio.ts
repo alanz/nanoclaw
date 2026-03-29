@@ -1214,6 +1214,63 @@ Useful for: finding papers on a topic, checking if a paper is in the library, ex
   );
 }
 
+server.tool(
+  'skill_eval',
+  'Run a single eval case for a skill — once with the skill loaded and once without. Returns assertion results, timing, and token counts for both runs. Main group only.',
+  {
+    skill_name: z.string().describe('Name of the skill to evaluate (must exist in container/skills/)'),
+    case_id: z.string().describe('Unique ID for this eval case'),
+    prompt: z.string().describe('The test prompt to send to the agent'),
+    with_skill: z.boolean().describe('true = run with skill in context, false = baseline run without'),
+    assertions: z.array(z.object({ text: z.string() })).optional().describe('Plain-text assertions to grade the output against'),
+    timeout_ms: z.number().optional().describe('Timeout in milliseconds (default: 120000)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Error: skill_eval is only available in the main group.' }],
+        isError: true,
+      };
+    }
+
+    const requestId = `eval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const responsePath = path.join(IPC_DIR, 'responses', `${requestId}.json`);
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'run_eval',
+      requestId,
+      skillName: args.skill_name,
+      caseId: args.case_id,
+      prompt: args.prompt,
+      withSkill: args.with_skill,
+      assertions: (args.assertions ?? []).map((a) => a.text),
+      timeoutMs: args.timeout_ms ?? 120_000,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    const maxWait = 180_000;
+    const deadline = Date.now() + maxWait;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          fs.unlinkSync(responsePath);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+        } catch {
+          /* file not fully written yet — retry */
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: `Error: eval timed out (requestId: ${requestId})` }],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

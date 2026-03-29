@@ -161,7 +161,14 @@ def run_container(runtime: str, image: str, payload: dict,
     host_uid = os.getuid()
     host_gid = os.getgid()
 
-    cmd = [runtime, "run", "-i", "--rm"]
+    # Assign a deterministic name so we can explicitly stop the container after
+    # claw exits. Apple Container does NOT stop the container when the
+    # `container run` stdio bridge process is terminated (unlike Docker), so
+    # `--rm` alone is not enough to prevent orphans.
+    import time as _time
+    container_name = f"claw-{os.getpid()}-{int(_time.time())}"
+
+    cmd = [runtime, "run", "-i", "--rm", "--name", container_name]
     if folder:
         for host, container, readonly in build_mounts(folder, is_main):
             if readonly:
@@ -187,6 +194,7 @@ def run_container(runtime: str, image: str, payload: dict,
 
     cmd.append(image)
     dbg(f"cmd: {' '.join(cmd)}")
+    dbg(f"container name: {container_name}")
 
     # Show payload sans secrets
     if VERBOSE:
@@ -219,6 +227,33 @@ def run_container(runtime: str, image: str, payload: dict,
             stderr_lines.append(line)
             print(line, file=sys.stderr)
 
+    def stop_container():
+        """Stop the container explicitly, then kill the stdio bridge process.
+
+        Apple Container does NOT stop the container when the `container run`
+        stdio bridge process is terminated (unlike Docker). Always call
+        `container stop <name>` first to avoid leaving orphaned containers
+        that compete for IPC input files.
+        """
+        dbg(f"stopping container {container_name}")
+        try:
+            subprocess.run(
+                [runtime, "stop", container_name],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception as e:
+            dbg(f"container stop failed (may already be gone): {e}")
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                dbg("graceful stop timed out, force killing bridge process")
+                proc.kill()
+        except ProcessLookupError:
+            pass
+
     def stream_stdout():
         for raw in proc.stdout:
             line = raw.decode(errors="replace").rstrip()
@@ -229,15 +264,7 @@ def run_container(runtime: str, image: str, payload: dict,
             if line.strip() == "---NANOCLAW_OUTPUT_END---":
                 dbg("output sentinel found, terminating container")
                 done.set()
-                try:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        dbg("graceful stop timed out, force killing container")
-                        proc.kill()
-                except ProcessLookupError:
-                    pass
+                stop_container()
                 return
 
     t_err = threading.Thread(target=stream_stderr, daemon=True)
@@ -250,7 +277,7 @@ def run_container(runtime: str, image: str, payload: dict,
         # Also check if process exited naturally
         t_out.join(timeout=2)
         if not done.is_set():
-            proc.kill()
+            stop_container()
             sys.exit(f"error: container timed out after {timeout}s (no output sentinel received)")
 
     t_err.join(timeout=5)

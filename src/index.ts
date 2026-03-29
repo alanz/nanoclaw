@@ -743,6 +743,7 @@ async function main(): Promise<void> {
   // Start web dashboard (localhost only — exposed via tailscale serve on port 8443)
   const webUiServer = startWebUi(WEB_UI_PORT, undefined, {
     sendMessage: (jid, text) => routeOutbound(channels, jid, text),
+    groupQueue: queue,
   });
 
   // Graceful shutdown handlers

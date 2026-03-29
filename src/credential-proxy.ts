@@ -16,6 +16,7 @@ import { request as httpRequest, RequestOptions } from 'http';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { stats } from './stats.js';
 
 export type AuthMode = 'api-key' | 'oauth';
 
@@ -46,6 +47,8 @@ export function startCredentialProxy(
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
+      stats.proxyRequests++;
+      if (req.url?.includes('/v1/messages')) stats.claudeRequests++;
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {

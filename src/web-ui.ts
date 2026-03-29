@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { URL } from 'url';
 
-import { ASSISTANT_NAME, GROUPS_DIR } from './config.js';
+import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR } from './config.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -22,7 +22,9 @@ import {
   getTaskRunLogs,
   storeMessage,
 } from './db.js';
+import { GroupQueue, GroupQueueStatus } from './group-queue.js';
 import { logger } from './logger.js';
+import { stats } from './stats.js';
 
 // ---------------------------------------------------------------------------
 // HTML dashboard (inline, no external assets needed)
@@ -164,12 +166,30 @@ button:disabled{opacity:.4;cursor:not-allowed}
 <body>
 <nav>
   <h1>NanoClaw</h1>
+  <a id="nav-overview" href="#overview">Overview</a>
   <a id="nav-groups" href="#groups">Groups</a>
   <a id="nav-feeds" href="#feeds">Feeds</a>
   <a id="nav-system" href="#system">System</a>
   <a id="nav-database" href="#database">Database</a>
 </nav>
 <main>
+  <!-- Overview -->
+  <div id="section-overview" class="section">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <h2 style="margin-bottom:0">System Overview</h2>
+      <span id="overview-refresh-status" class="dim" style="font-size:12px"></span>
+    </div>
+    <div id="overview-stats" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:24px"></div>
+    <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Active Containers</div>
+    <div id="overview-containers" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
+    <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">IPC Queue</div>
+    <div id="overview-ipc" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
+    <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Scheduled Tasks</div>
+    <div id="overview-tasks" class="card" style="margin-bottom:20px"></div>
+    <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Router State</div>
+    <div id="overview-routerstate" class="card" style="padding:0;overflow:hidden"></div>
+  </div>
+
   <!-- Groups: list + detail -->
   <div id="section-groups" class="section">
 
@@ -343,6 +363,7 @@ document.addEventListener('DOMContentLoaded', function() {
     hash = (hash || '').replace(/^#/, '') || 'groups';
     var parts = hash.split('/');
     var section = parts[0] || 'groups';
+    if (section === 'overview') return { section: 'overview' };
     if (section === 'feeds') return { section: 'feeds' };
     if (section === 'system') return { section: 'system' };
     if (section === 'database') return { section: 'database' };
@@ -357,6 +378,10 @@ document.addEventListener('DOMContentLoaded', function() {
     var state = parseHash(location.hash);
     skipHashUpdate = true;
     try {
+      if (state.section === 'overview') {
+        activateSection('overview'); clearInterval(pollTimer); pollTimer = null; startOverview(); return;
+      }
+      stopOverview();
       if (state.section === 'feeds') {
         activateSection('feeds'); clearInterval(pollTimer); pollTimer = null; loadFeeds(); return;
       }
@@ -421,6 +446,8 @@ document.addEventListener('DOMContentLoaded', function() {
     pushHash(name);
     activateSection(name);
     clearInterval(pollTimer); pollTimer = null;
+    stopOverview();
+    if (name === 'overview') startOverview();
     if (name === 'groups') showGroupListInternal();
     if (name === 'feeds') loadFeeds();
     if (name === 'system') loadSystem();
@@ -1214,6 +1241,134 @@ document.addEventListener('DOMContentLoaded', function() {
     }, 150);
   });
 
+  // ── Overview ────────────────────────────────────────────────────────────────
+
+  var overviewTimer = null;
+
+  function stopOverview() {
+    if (overviewTimer) { clearInterval(overviewTimer); overviewTimer = null; }
+  }
+
+  function startOverview() {
+    loadOverview();
+    overviewTimer = setInterval(loadOverview, 5000);
+  }
+
+  async function loadOverview() {
+    var statsEl = document.getElementById('overview-stats');
+    var containersEl = document.getElementById('overview-containers');
+    var ipcEl = document.getElementById('overview-ipc');
+    var tasksEl = document.getElementById('overview-tasks');
+    var routerEl = document.getElementById('overview-routerstate');
+    var statusEl = document.getElementById('overview-refresh-status');
+    try {
+      var data = await fetch('/api/status').then(function(r) { return r.json(); });
+      var q = data.queue; var u = data.usage;
+
+      // Uptime card
+      var up = data.uptime;
+      var uptimeStr = up < 3600 ? Math.floor(up/60)+'m '+up%60+'s' : Math.floor(up/3600)+'h '+Math.floor(up%3600/60)+'m';
+
+      statsEl.innerHTML = [
+        { label: 'Uptime', value: uptimeStr, color: '#3fb950' },
+        { label: 'Containers', value: q.activeCount+' / '+q.maxConcurrent, color: q.activeCount > 0 ? '#58a6ff' : '#8b949e' },
+        { label: 'Waiting', value: q.waitingCount, color: q.waitingCount > 0 ? '#d29922' : '#8b949e' },
+        { label: 'Claude Calls', value: u.claudeRequests, color: '#f0f6fc' },
+        { label: 'Proxy Requests', value: u.proxyRequests, color: '#8b949e' },
+        { label: 'Gemini Embeds', value: u.geminiEmbeds, color: '#8b949e' },
+        { label: 'Active Tasks', value: data.tasks.active, color: '#3fb950' },
+        { label: 'Due Now', value: data.tasks.dueSoon, color: data.tasks.dueSoon > 0 ? '#d29922' : '#8b949e' },
+      ].map(function(s) {
+        return '<div class="card" style="padding:14px 16px;text-align:center">'
+          +'<div style="font-size:24px;font-weight:700;color:'+s.color+';margin-bottom:4px;line-height:1">'+esc(String(s.value))+'</div>'
+          +'<div class="dim" style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;margin-top:2px">'+esc(s.label)+'</div>'
+          +'</div>';
+      }).join('');
+
+      // Active containers
+      var active = q.groups.filter(function(g) { return g.active; });
+      var queued = q.groups.filter(function(g) { return !g.active && (g.pendingMessages || g.pendingTaskCount > 0); });
+      if (!active.length && !queued.length) {
+        containersEl.innerHTML = '<div class="empty" style="padding:16px">No containers running</div>';
+      } else {
+        var html = '';
+        if (active.length) {
+          html += '<table><thead><tr><th>JID</th><th>Container</th><th>Type</th><th>State</th><th>Pending</th></tr></thead><tbody>'
+            + active.map(function(g) {
+              var typeBadge = g.isTaskContainer ? '<span class="badge bb">task</span>' : '<span class="badge bg">msg</span>';
+              var stateBadge = g.idleWaiting ? '<span class="badge by">idle-wait</span>' : '<span class="badge bg">running</span>';
+              var pending = [];
+              if (g.pendingMessages) pending.push('msg');
+              if (g.pendingTaskCount > 0) pending.push(g.pendingTaskCount+' task'+(g.pendingTaskCount>1?'s':''));
+              if (g.retryCount > 0) pending.push('retry #'+g.retryCount);
+              return '<tr>'
+                +'<td class="dim" style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(g.jid)+'">'+esc(g.groupFolder||g.jid)+'</td>'
+                +'<td class="dim" style="font-family:monospace;font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(g.containerName||'\u2014')+'</td>'
+                +'<td>'+typeBadge+'</td>'
+                +'<td>'+stateBadge+'</td>'
+                +'<td class="dim" style="font-size:11px">'+esc(pending.join(', ')||'\u2014')+'</td>'
+                +'</tr>';
+            }).join('')
+            +'</tbody></table>';
+        }
+        if (queued.length) {
+          html += '<div style="margin-top:'+(active.length?'0':'0')+'px;border-top:'+(active.length?'1px solid #30363d':'none')+'">'
+            +'<div class="dim" style="font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;padding:8px 12px;background:#0d1117">Queued</div>'
+            +'<table><thead><tr><th>Group</th><th>Pending Msgs</th><th>Pending Tasks</th></tr></thead><tbody>'
+            + queued.map(function(g) {
+              return '<tr>'
+                +'<td class="dim" style="font-size:11px">'+esc(g.groupFolder||g.jid)+'</td>'
+                +'<td class="dim" style="text-align:center;font-size:11px">'+(g.pendingMessages?'<span class="badge by">yes</span>':'\u2014')+'</td>'
+                +'<td class="dim" style="text-align:center;font-size:11px">'+(g.pendingTaskCount>0?'<span class="badge bb">'+g.pendingTaskCount+'</span>':'\u2014')+'</td>'
+                +'</tr>';
+            }).join('')
+            +'</tbody></table></div>';
+        }
+        containersEl.innerHTML = html;
+      }
+
+      // IPC queue
+      if (!data.ipc.length) {
+        ipcEl.innerHTML = '<div class="empty" style="padding:16px">No pending IPC items</div>';
+      } else {
+        ipcEl.innerHTML = '<table><thead><tr><th>Group Folder</th><th>Messages</th><th>Tasks</th></tr></thead><tbody>'
+          + data.ipc.map(function(item) {
+            return '<tr>'
+              +'<td class="dim" style="font-family:monospace;font-size:12px">'+esc(item.folder)+'</td>'
+              +'<td style="text-align:center">'+(item.pendingMessages?'<span class="badge by">'+item.pendingMessages+'</span>':'\u2014')+'</td>'
+              +'<td style="text-align:center">'+(item.pendingTasks?'<span class="badge bb">'+item.pendingTasks+'</span>':'\u2014')+'</td>'
+              +'</tr>';
+          }).join('')
+          +'</tbody></table>';
+      }
+
+      // Tasks summary
+      var t = data.tasks;
+      tasksEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center">'
+        +'<div><div style="font-size:28px;font-weight:700;color:#3fb950">'+t.active+'</div><div class="dim" style="font-size:11px">Active</div></div>'
+        +'<div><div style="font-size:28px;font-weight:700;color:#8b949e">'+t.paused+'</div><div class="dim" style="font-size:11px">Paused</div></div>'
+        +'<div><div style="font-size:28px;font-weight:700;color:#8b949e">'+t.completed+'</div><div class="dim" style="font-size:11px">Completed</div></div>'
+        +'<div><div style="font-size:28px;font-weight:700;color:'+(t.dueSoon>0?'#d29922':'#8b949e')+'">'+t.dueSoon+'</div><div class="dim" style="font-size:11px">Due Now</div></div>'
+        +'</div>';
+
+      // Router state
+      if (!data.routerState.length) {
+        routerEl.innerHTML = '<div class="empty" style="padding:16px">No router state</div>';
+      } else {
+        routerEl.innerHTML = '<table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>'
+          + data.routerState.map(function(row) {
+            return '<tr><td style="font-size:12px;white-space:nowrap">'+esc(row.key)+'</td>'
+              +'<td class="dim" style="font-family:monospace;font-size:12px;word-break:break-all">'+esc(row.value)+'</td></tr>';
+          }).join('')
+          +'</tbody></table>';
+      }
+
+      if (statusEl) statusEl.textContent = 'Updated '+new Date().toLocaleTimeString();
+    } catch(e) {
+      if (statusEl) statusEl.textContent = 'Error loading status';
+    }
+  }
+
   // ── System ─────────────────────────────────────────────────────────────────
 
   async function loadSystem() {
@@ -1377,6 +1532,7 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 <div id="mobile-nav">
+  <a id="mnav-overview" href="#overview">Overview</a>
   <a id="mnav-groups" href="#groups">Groups</a>
   <a id="mnav-feeds" href="#feeds">Feeds</a>
   <a id="mnav-system" href="#system">System</a>
@@ -1527,7 +1683,10 @@ function parseNoteFrontmatter(text: string): {
 export function startWebUi(
   port: number,
   host = '127.0.0.1',
-  opts: { sendMessage?: (jid: string, text: string) => Promise<void> } = {},
+  opts: {
+    sendMessage?: (jid: string, text: string) => Promise<void>;
+    groupQueue?: GroupQueue;
+  } = {},
 ): Server {
   const server = createServer(async (req, res) => {
     const baseUrl = `http://${req.headers.host || host}`;
@@ -1830,6 +1989,75 @@ export function startWebUi(
         }
 
         sendJson(res, { ok: true, id: msgId, timestamp });
+        return;
+      }
+
+      // GET /api/status
+      if (req.method === 'GET' && pathname === '/api/status') {
+        const queueStatus: GroupQueueStatus = opts.groupQueue
+          ? opts.groupQueue.getStatus()
+          : { activeCount: 0, maxConcurrent: 0, waitingCount: 0, groups: [] };
+
+        // Scan IPC directories for pending items
+        const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+        const ipcQueues: Array<{
+          folder: string;
+          pendingMessages: number;
+          pendingTasks: number;
+        }> = [];
+        try {
+          const folders = fs
+            .readdirSync(ipcBaseDir)
+            .filter(
+              (f) =>
+                fs.statSync(path.join(ipcBaseDir, f)).isDirectory() &&
+                f !== 'errors',
+            );
+          for (const folder of folders) {
+            const messagesDir = path.join(ipcBaseDir, folder, 'messages');
+            const tasksDir = path.join(ipcBaseDir, folder, 'tasks');
+            const pendingMessages = fs.existsSync(messagesDir)
+              ? fs.readdirSync(messagesDir).filter((f) => f.endsWith('.json'))
+                  .length
+              : 0;
+            const pendingTasks = fs.existsSync(tasksDir)
+              ? fs.readdirSync(tasksDir).filter((f) => f.endsWith('.json'))
+                  .length
+              : 0;
+            if (pendingMessages > 0 || pendingTasks > 0) {
+              ipcQueues.push({ folder, pendingMessages, pendingTasks });
+            }
+          }
+        } catch {
+          // ipc dir may not exist yet
+        }
+
+        // Task summary
+        const tasks = getAllTasks();
+        const now = new Date().toISOString();
+        const taskSummary = {
+          total: tasks.length,
+          active: tasks.filter((t) => t.status === 'active').length,
+          paused: tasks.filter((t) => t.status === 'paused').length,
+          completed: tasks.filter((t) => t.status === 'completed').length,
+          dueSoon: tasks.filter(
+            (t) => t.status === 'active' && t.next_run && t.next_run <= now,
+          ).length,
+        };
+
+        sendJson(res, {
+          uptime: Math.floor(process.uptime()),
+          queue: queueStatus,
+          ipc: ipcQueues,
+          tasks: taskSummary,
+          usage: {
+            proxyRequests: stats.proxyRequests,
+            claudeRequests: stats.claudeRequests,
+            geminiEmbeds: stats.geminiEmbeds,
+            startTime: stats.startTime,
+          },
+          routerState: getAllRouterStateRows(),
+        });
         return;
       }
 

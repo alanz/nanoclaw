@@ -1,5 +1,6 @@
 import { sanitizeAndNormalizeEmbedding } from './embedding-vectors.js';
 import { EmbeddingRateLimitError } from './embedding-errors.js';
+import { stats } from '../stats.js';
 
 export type GeminiTaskType =
   | 'RETRIEVAL_QUERY'
@@ -99,6 +100,7 @@ async function postGemini(
   embedding?: { values?: number[] };
   embeddings?: Array<{ values?: number[] }>;
 }> {
+  stats.geminiEmbeds++;
   const res = await fetch(`${url}?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

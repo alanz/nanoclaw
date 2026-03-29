@@ -3,6 +3,24 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+
+export interface GroupQueueStatus {
+  activeCount: number;
+  maxConcurrent: number;
+  waitingCount: number;
+  groups: Array<{
+    jid: string;
+    active: boolean;
+    idleWaiting: boolean;
+    isTaskContainer: boolean;
+    runningTaskId: string | null;
+    pendingMessages: boolean;
+    pendingTaskCount: number;
+    containerName: string | null;
+    groupFolder: string | null;
+    retryCount: number;
+  }>;
+}
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -444,6 +462,36 @@ export class GroupQueue {
     };
 
     setTimeout(poll, POLL_MS);
+  }
+
+  getStatus(): GroupQueueStatus {
+    const groups = [];
+    for (const [jid, state] of this.groups) {
+      if (
+        state.active ||
+        state.pendingMessages ||
+        state.pendingTasks.length > 0
+      ) {
+        groups.push({
+          jid,
+          active: state.active,
+          idleWaiting: state.idleWaiting,
+          isTaskContainer: state.isTaskContainer,
+          runningTaskId: state.runningTaskId,
+          pendingMessages: state.pendingMessages,
+          pendingTaskCount: state.pendingTasks.length,
+          containerName: state.containerName,
+          groupFolder: state.groupFolder,
+          retryCount: state.retryCount,
+        });
+      }
+    }
+    return {
+      activeCount: this.activeCount,
+      maxConcurrent: MAX_CONCURRENT_CONTAINERS,
+      waitingCount: this.waitingGroups.length,
+      groups,
+    };
   }
 
   async shutdown(_gracePeriodMs: number): Promise<void> {

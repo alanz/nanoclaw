@@ -893,9 +893,19 @@ document.addEventListener('DOMContentLoaded', function() {
         });
       } else if (key === 'tags') {
         val.split(',').forEach(function(t) {
+          t = t.trim();
           var tag = document.createElement('span');
           tag.className = 'fm-tag';
-          tag.textContent = t.trim();
+          tag.textContent = t;
+          tag.style.background = tagColor(t);
+          tag.style.color = '#0d1117';
+          tag.style.borderColor = 'transparent';
+          tag.style.cursor = 'pointer';
+          tag.title = 'Filter graph by tag';
+          tag.addEventListener('click', function() {
+            pendingGraphTag = t;
+            switchTab('notes');
+          });
           valEl.appendChild(tag);
         });
       } else if (key === 'doi') {
@@ -984,6 +994,7 @@ document.addEventListener('DOMContentLoaded', function() {
     switchTab('notes');
   });
   var pendingGraphSelect = null;
+  var pendingGraphTag = null;
 
   // ── Graph tab ──────────────────────────────────────────────────────────────
 
@@ -1017,6 +1028,33 @@ document.addEventListener('DOMContentLoaded', function() {
       graphData = data;
       if (!data.nodes.length) { status.textContent = 'No notes found.'; return; }
       renderGraph(data.nodes, data.edges, null);
+      // If navigating from note view with a tag filter
+      if (pendingGraphTag) {
+        graphActiveTag = pendingGraphTag;
+        pendingGraphTag = null;
+        // Ensure the tag has a colour and legend entry even if not dominant on any node
+        if (!graphTagMap[graphActiveTag]) {
+          tagColor(graphActiveTag);
+          var extraLegend = document.getElementById('graph-legend');
+          var extraTag = graphActiveTag;
+          var item = document.createElement('div');
+          item.className = 'graph-legend-item active';
+          item.dataset.tag = extraTag;
+          item.innerHTML = '<div class="graph-legend-dot" style="background:'+graphTagMap[extraTag]+'"></div>'+esc(extraTag);
+          item.addEventListener('click', function() {
+            graphActiveTag = graphActiveTag === extraTag ? null : extraTag;
+            document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+              el.classList.toggle('active', el.dataset.tag === graphActiveTag);
+            });
+            applyGraphFilter();
+          });
+          extraLegend.appendChild(item);
+        }
+        document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+          el.classList.toggle('active', el.dataset.tag === graphActiveTag);
+        });
+        applyGraphFilter();
+      }
       // If navigating from Files tab, select the target node
       if (pendingGraphSelect && graphCy) {
         var targetId = pendingGraphSelect;
@@ -1051,6 +1089,9 @@ document.addEventListener('DOMContentLoaded', function() {
     nodes.forEach(function(n) {
       (n.tags || []).forEach(function(t) { tagFreq[t] = (tagFreq[t] || 0) + 1; });
     });
+
+    // Register every tag so all appear in the legend and have a stable colour
+    Object.keys(tagFreq).sort().forEach(function(t) { tagColor(t); });
 
     // Sort tags by global frequency descending; pick 2nd most common for colour
     // (most common tag dominates too many nodes — 2nd gives better spread)

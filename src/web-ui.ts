@@ -153,7 +153,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
 #graph-search:focus{border-color:#58a6ff}
 #graph-status{font-size:12px;color:#8b949e;white-space:nowrap}
 #graph-legend{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-.graph-legend-item{display:flex;align-items:center;gap:4px;font-size:11px;color:#8b949e}
+.graph-legend-item{display:flex;align-items:center;gap:4px;font-size:11px;color:#8b949e;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid transparent;user-select:none}
+.graph-legend-item:hover{color:#e6edf3;background:rgba(255,255,255,0.05)}
+.graph-legend-item.active{color:#e6edf3;border-color:currentColor;background:rgba(255,255,255,0.08)}
 .graph-legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 #graph-node-panel{display:none;position:absolute;bottom:12px;right:12px;width:320px;background:rgba(22,27,34,0.95);border:1px solid #30363d;border-radius:8px;padding:14px;z-index:10;backdrop-filter:blur(8px)}
 #graph-node-panel h3{font-size:13px;font-weight:600;color:#f0f6fc;margin:0 0 10px;word-break:break-all}
@@ -934,6 +936,7 @@ document.addEventListener('DOMContentLoaded', function() {
   var graphColorIdx = 0;
   var graphCy = null;
   var graphData = null;
+  var graphActiveTag = null;
 
   function tagColor(tag) {
     if (!tag) return '#484f58';
@@ -943,7 +946,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   async function loadGroupGraph() {
     if (!currentGroup) return;
-    graphTagMap = {}; graphColorIdx = 0;
+    graphTagMap = {}; graphColorIdx = 0; graphActiveTag = null;
     var status = document.getElementById('graph-status');
     var legend = document.getElementById('graph-legend');
     var panel = document.getElementById('graph-node-panel');
@@ -1031,12 +1034,20 @@ document.addEventListener('DOMContentLoaded', function() {
       elements.push({ group:'edges', data:{ id:'e'+i, source:e.source, target:e.target } });
     });
 
-    // Legend
+    // Legend — clickable tag filters
     legend.innerHTML = '';
     Object.keys(graphTagMap).forEach(function(tag) {
       var item = document.createElement('div');
-      item.className = 'graph-legend-item';
+      item.className = 'graph-legend-item' + (graphActiveTag === tag ? ' active' : '');
+      item.dataset.tag = tag;
       item.innerHTML = '<div class="graph-legend-dot" style="background:'+graphTagMap[tag]+'"></div>'+esc(tag);
+      item.addEventListener('click', function() {
+        graphActiveTag = graphActiveTag === tag ? null : tag;
+        document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+          el.classList.toggle('active', el.dataset.tag === graphActiveTag);
+        });
+        applyGraphFilter();
+      });
       legend.appendChild(item);
     });
 
@@ -1169,15 +1180,38 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
+  function applyGraphFilter() {
+    if (!graphCy || !graphData) return;
+    var q = (document.getElementById('graph-search').value || '').trim().toLowerCase();
+    var hits = new Set();
+    var hasFilter = !!(q || graphActiveTag);
+    if (hasFilter) {
+      graphData.nodes.forEach(function(n) {
+        var textMatch = !q || [n.id, n.label].concat(n.tags||[]).concat(n.keywords||[]).some(function(t){ return t && t.toLowerCase().indexOf(q)!==-1; });
+        var tagMatch = !graphActiveTag || (n.tags||[]).indexOf(graphActiveTag) !== -1;
+        if (textMatch && tagMatch) hits.add(n.id);
+      });
+    }
+    graphCy.nodes().forEach(function(node) {
+      var faded = hasFilter && !hits.has(node.id());
+      if (faded) node.addClass('faded'); else node.removeClass('faded');
+    });
+    var status = document.getElementById('graph-status');
+    if (status) {
+      if (!hasFilter) status.textContent = '';
+      else if (hits.size === 0) status.textContent = 'No matches';
+      else status.textContent = hits.size + ' / ' + graphData.nodes.length;
+    }
+  }
+
+  var graphFilterTimer = null;
   document.getElementById('graph-search').addEventListener('input', function() {
     if (!graphData) return;
-    var q = this.value.trim().toLowerCase();
-    if (!q) { renderGraph(graphData.nodes, graphData.edges, null); return; }
-    var hits = new Set();
-    graphData.nodes.forEach(function(n) {
-      if ([n.id, n.label].concat(n.tags||[]).concat(n.keywords||[]).some(function(t){ return t && t.toLowerCase().indexOf(q)!==-1; })) hits.add(n.id);
-    });
-    renderGraph(graphData.nodes, graphData.edges, hits);
+    if (graphFilterTimer) clearTimeout(graphFilterTimer);
+    graphFilterTimer = setTimeout(function() {
+      graphFilterTimer = null;
+      applyGraphFilter();
+    }, 150);
   });
 
   // ── System ─────────────────────────────────────────────────────────────────

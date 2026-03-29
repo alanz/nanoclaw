@@ -23,6 +23,7 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue, GroupQueueStatus } from './group-queue.js';
+import { listAllManagedContainers } from './container-runtime.js';
 import { logger } from './logger.js';
 import { stats } from './stats.js';
 
@@ -182,6 +183,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div id="overview-stats" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:24px"></div>
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Active Containers</div>
     <div id="overview-containers" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
+    <div id="overview-orphans-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Orphan Containers</div>
+    <div id="overview-orphans" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
+    <div id="overview-ipc-errors-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">IPC Errors</div>
+    <div id="overview-ipc-errors" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">IPC Queue</div>
     <div id="overview-ipc" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Scheduled Tasks</div>
@@ -1269,10 +1274,14 @@ document.addEventListener('DOMContentLoaded', function() {
       var up = data.uptime;
       var uptimeStr = up < 3600 ? Math.floor(up/60)+'m '+up%60+'s' : Math.floor(up/3600)+'h '+Math.floor(up%3600/60)+'m';
 
+      var orphanCount = (data.orphanContainers || []).length;
+      var ipcErrorCount = (data.ipcErrors || []).length;
       statsEl.innerHTML = [
         { label: 'Uptime', value: uptimeStr, color: '#3fb950' },
         { label: 'Containers', value: q.activeCount+' / '+q.maxConcurrent, color: q.activeCount > 0 ? '#58a6ff' : '#8b949e' },
         { label: 'Waiting', value: q.waitingCount, color: q.waitingCount > 0 ? '#d29922' : '#8b949e' },
+        { label: 'Orphans', value: orphanCount, color: orphanCount > 0 ? '#f85149' : '#8b949e' },
+        { label: 'IPC Errors', value: ipcErrorCount, color: ipcErrorCount > 0 ? '#f85149' : '#8b949e' },
         { label: 'Claude Calls', value: u.claudeRequests, color: '#f0f6fc' },
         { label: 'Proxy Requests', value: u.proxyRequests, color: '#8b949e' },
         { label: 'Gemini Embeds', value: u.geminiEmbeds, color: '#8b949e' },
@@ -1325,6 +1334,54 @@ document.addEventListener('DOMContentLoaded', function() {
             +'</tbody></table></div>';
         }
         containersEl.innerHTML = html;
+      }
+
+      // Orphan containers
+      var orphansEl = document.getElementById('overview-orphans');
+      var orphansLabelEl = document.getElementById('overview-orphans-label');
+      var orphans = data.orphanContainers || [];
+      if (orphansLabelEl) orphansLabelEl.style.color = orphans.length > 0 ? '#f85149' : '#8b949e';
+      if (orphansEl) {
+        if (!orphans.length) {
+          orphansEl.innerHTML = '<div class="empty" style="padding:16px">None</div>';
+        } else {
+          function fmtAge(ms) {
+            var s = Math.floor(ms/1000);
+            if (s < 60) return s+'s';
+            var m = Math.floor(s/60); var rem = s%60;
+            if (m < 60) return m+'m '+rem+'s';
+            return Math.floor(m/60)+'h '+Math.floor(m%60)+'m';
+          }
+          orphansEl.innerHTML = '<table><thead><tr><th>Name</th><th>Kind</th><th>Running For</th></tr></thead><tbody>'
+            + orphans.map(function(c) {
+              var kindBadge = c.kind === 'claw'
+                ? '<span class="badge bb">claw CLI</span>'
+                : '<span class="badge br">nanoclaw</span>';
+              return '<tr>'
+                +'<td style="font-family:monospace;font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(c.name)+'">'+esc(c.name)+'</td>'
+                +'<td>'+kindBadge+'</td>'
+                +'<td class="dim" style="font-size:12px">'+esc(fmtAge(c.ageMs))+'</td>'
+                +'</tr>';
+            }).join('')
+            +'</tbody></table>';
+        }
+      }
+
+      // IPC errors
+      var ipcErrorsEl = document.getElementById('overview-ipc-errors');
+      var ipcErrorsLabelEl = document.getElementById('overview-ipc-errors-label');
+      var ipcErrors = data.ipcErrors || [];
+      if (ipcErrorsLabelEl) ipcErrorsLabelEl.style.color = ipcErrors.length > 0 ? '#f85149' : '#8b949e';
+      if (ipcErrorsEl) {
+        if (!ipcErrors.length) {
+          ipcErrorsEl.innerHTML = '<div class="empty" style="padding:16px">None</div>';
+        } else {
+          ipcErrorsEl.innerHTML = '<table><thead><tr><th>File</th></tr></thead><tbody>'
+            + ipcErrors.map(function(f) {
+              return '<tr><td style="font-family:monospace;font-size:11px">'+esc(f)+'</td></tr>';
+            }).join('')
+            +'</tbody></table>';
+        }
       }
 
       // IPC queue
@@ -2045,6 +2102,32 @@ export function startWebUi(
           ).length,
         };
 
+        // Orphan containers: running nanoclaw-* or claw-* containers not
+        // tracked by the GroupQueue. These can steal IPC input messages.
+        const allManagedContainers = listAllManagedContainers();
+        const trackedNames = new Set(
+          queueStatus.groups
+            .filter((g) => g.active && g.containerName)
+            .map((g) => g.containerName as string),
+        );
+        const orphanContainers = allManagedContainers
+          .filter((c) => !trackedNames.has(c.name))
+          .map((c) => ({
+            name: c.name,
+            kind: c.kind,
+            startedMs: c.startedMs,
+            ageMs: Date.now() - c.startedMs,
+          }));
+
+        // IPC error files left behind by failed IPC processing
+        const ipcErrorsDir = path.join(DATA_DIR, 'ipc', 'errors');
+        const ipcErrors: string[] = fs.existsSync(ipcErrorsDir)
+          ? fs
+              .readdirSync(ipcErrorsDir)
+              .filter((f) => f.endsWith('.json'))
+              .sort()
+          : [];
+
         sendJson(res, {
           uptime: Math.floor(process.uptime()),
           queue: queueStatus,
@@ -2057,6 +2140,8 @@ export function startWebUi(
             startTime: stats.startTime,
           },
           routerState: getAllRouterStateRows(),
+          orphanContainers,
+          ipcErrors,
         });
         return;
       }

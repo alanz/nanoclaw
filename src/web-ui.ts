@@ -850,12 +850,16 @@ document.addEventListener('DOMContentLoaded', function() {
     fmText.split('\\n').forEach(function(line) {
       line = line.replace(/\\r$/, '');
       var colon = line.indexOf(': ');
-      if (colon > 0) meta[line.slice(0, colon).trim()] = line.slice(colon + 2).trim();
+      if (colon > 0) {
+        var v = line.slice(colon + 2).trim();
+        if (v.charAt(0) === '[' && v.charAt(v.length - 1) === ']') v = v.slice(1, -1);
+        meta[line.slice(0, colon).trim()] = v;
+      }
     });
     return { meta: meta, body: text.slice(bodyStart) };
   }
 
-  function renderFrontMatter(meta) {
+  function renderFrontMatter(meta, filePath) {
     var el = document.createElement('div');
     el.className = 'fm-card';
     var SKIP = { title: 1 }; // already shown as # heading in body
@@ -867,7 +871,27 @@ document.addEventListener('DOMContentLoaded', function() {
       keyEl.textContent = key;
       var valEl = document.createElement('div');
       valEl.className = 'fm-val';
-      if (key === 'tags') {
+      if (key === 'links' && filePath) {
+        var baseDir = filePath.replace(/[^/]+$/, '');
+        valEl.style.display = 'flex';
+        valEl.style.flexDirection = 'column';
+        valEl.style.gap = '2px';
+        val.split(',').forEach(function(id) {
+          id = id.trim();
+          if (!id) return;
+          var a = document.createElement('a');
+          a.href = '#';
+          a.className = 'link-internal';
+          a.textContent = id;
+          a.addEventListener('click', function(e) {
+            e.preventDefault();
+            var notePath = baseDir + id + '.md';
+            if (currentGroup) pushHash('groups/' + currentGroup.folder + '/files/memory/notes/' + id + '.md');
+            openFile(notePath, id + '.md');
+          });
+          valEl.appendChild(a);
+        });
+      } else if (key === 'tags') {
         val.split(',').forEach(function(t) {
           var tag = document.createElement('span');
           tag.className = 'fm-tag';
@@ -912,7 +936,7 @@ document.addEventListener('DOMContentLoaded', function() {
         var fm = parseFrontMatter(text);
         var mdDiv = document.createElement('div');
         mdDiv.className = 'md-body';
-        if (fm && Object.keys(fm.meta).length > 0) mdDiv.appendChild(renderFrontMatter(fm.meta));
+        if (fm && Object.keys(fm.meta).length > 0) mdDiv.appendChild(renderFrontMatter(fm.meta, filePath));
         var bodyEl = document.createElement('div');
         var parsedDiv = document.createElement('div');
         parsedDiv.innerHTML = window.marked.parse(fm ? fm.body : text);
@@ -1701,7 +1725,7 @@ function safeReadFile(relPath: string): string | null {
   }
 }
 
-function parseNoteFrontmatter(text: string): {
+export function parseNoteFrontmatter(text: string): {
   id: string;
   created: string;
   keywords: string[];

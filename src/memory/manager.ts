@@ -115,6 +115,13 @@ export type MemoryFileEntry = {
   frontmatter?: Record<string, unknown>;
 };
 
+export function deriveSource(filePath: string, extraPaths: string[]): string {
+  const matched = extraPaths.find(
+    (ep) => filePath.startsWith(ep + '/') || filePath === ep,
+  );
+  return matched ? path.basename(matched) : 'memory';
+}
+
 export class MemoryIndexManager {
   private db!: Database.Database;
   private provider!: EmbeddingProvider;
@@ -405,6 +412,7 @@ export class MemoryIndexManager {
 
       // Insert new chunks
       const now = Date.now();
+      const source = deriveSource(entry.path, this.extraPaths);
       for (let ci = 0; ci < chunks.length; ci++) {
         const chunk = chunks[ci];
         const vec = embeddings[ci];
@@ -420,7 +428,7 @@ export class MemoryIndexManager {
           .run(
             chunkId,
             entry.path,
-            'memory',
+            source,
             chunk.startLine,
             chunk.endLine,
             chunk.hash,
@@ -450,7 +458,7 @@ export class MemoryIndexManager {
             chunk.text,
             chunkId,
             entry.path,
-            'memory',
+            source,
             this.model,
             chunk.startLine,
             chunk.endLine,
@@ -464,7 +472,7 @@ export class MemoryIndexManager {
         )
         .run(
           entry.path,
-          'memory',
+          source,
           entry.hash,
           Math.round(entry.mtimeMs),
           entry.size,

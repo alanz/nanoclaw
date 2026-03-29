@@ -2,7 +2,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryIndexManager, parseFrontmatterYaml } from './manager.js';
+import {
+  MemoryIndexManager,
+  deriveSource,
+  parseFrontmatterYaml,
+} from './manager.js';
 
 /**
  * Create a MemoryIndexManager backed by a real in-memory SQLite database.
@@ -563,5 +567,59 @@ describe('MemoryIndexManager.search with opts', () => {
 
     const results = await manager.search('', { maxResults: 10, minScore: 0 });
     expect(results).toEqual([]);
+  });
+});
+
+describe('deriveSource', () => {
+  const extraPaths = [
+    '/Users/alanz/Sync/org',
+    '/Users/alanz/nanoclaw/groups/main/zotero-md',
+  ];
+
+  it('tags files under an extra path with the directory basename', () => {
+    expect(deriveSource('/Users/alanz/Sync/org/notes.org', extraPaths)).toBe(
+      'org',
+    );
+    expect(
+      deriveSource(
+        '/Users/alanz/nanoclaw/groups/main/zotero-md/paper.md',
+        extraPaths,
+      ),
+    ).toBe('zotero-md');
+  });
+
+  it('tags nested files under an extra path correctly', () => {
+    expect(
+      deriveSource('/Users/alanz/Sync/org/subdir/nested.org', extraPaths),
+    ).toBe('org');
+  });
+
+  it('tags workspace files as memory when not under any extra path', () => {
+    expect(
+      deriveSource(
+        '/Users/alanz/nanoclaw/groups/main/memory/notes.md',
+        extraPaths,
+      ),
+    ).toBe('memory');
+    expect(
+      deriveSource('/Users/alanz/nanoclaw/groups/main/MEMORY.md', extraPaths),
+    ).toBe('memory');
+  });
+
+  it('does not match a path that merely starts with a similar prefix', () => {
+    expect(
+      deriveSource('/Users/alanz/Sync/org-other/file.md', extraPaths),
+    ).toBe('memory');
+  });
+
+  it('returns memory when extraPaths is empty', () => {
+    expect(deriveSource('/Users/alanz/Sync/org/file.org', [])).toBe('memory');
+  });
+
+  it('matches an exact file path listed as an extra path', () => {
+    const singleFile = ['/Users/alanz/notes/index.md'];
+    expect(deriveSource('/Users/alanz/notes/index.md', singleFile)).toBe(
+      'index.md',
+    );
   });
 });

@@ -215,10 +215,13 @@ export function isContainerRunning(name: string): boolean {
   }
 }
 
-/** Kill a container by name. No-op if it has already stopped. */
+/** Kill a container by name with a 1-second timeout. No-op if it has already stopped. */
 export function killContainer(name: string): void {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
+    throw new Error(`Invalid container name: ${name}`);
+  }
   try {
-    stopContainer(name);
+    execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
   } catch {
     /* already stopped */
   }

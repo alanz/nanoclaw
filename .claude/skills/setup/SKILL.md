@@ -163,10 +163,7 @@ onecli secrets list
 
 If an Anthropic secret is listed, confirm with user: keep or reconfigure? If keeping, skip to step 5.
 
-First, look up the exact command for creating an Anthropic secret:
-```bash
-onecli secrets create --help
-```
+AskUserQuestion: Do you want to use your **Claude subscription** (Pro/Max) or an **Anthropic API key**?
 
 Then AskUserQuestion, providing the user with two options:
 

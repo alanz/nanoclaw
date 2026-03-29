@@ -14,8 +14,6 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
-  ONECLI_GATEWAY_HOST,
-  ONECLI_URL,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -27,12 +25,10 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
-import { OneCLI } from '@onecli-sh/sdk';
+import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
-
-const onecli = new OneCLI({ url: ONECLI_URL });
 
 const envSecrets = readEnvFile([
   'BRAVE_API_KEY',
@@ -236,96 +232,31 @@ function buildVolumeMounts(
   return mounts;
 }
 
-async function buildContainerArgs(
+function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   isMain: boolean,
-  agentIdentifier?: string,
-): Promise<string[]> {
+): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // OneCLI gateway handles credential injection — containers never see real secrets.
-  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  // Try agent-specific config first; fall back to default if agent not found (404).
-  const onecliApplied =
-    (await onecli.applyContainerConfig(args, {
-      addHostMapping: false, // Nanoclaw already handles host gateway
-      agent: agentIdentifier,
-    })) ||
-    (agentIdentifier !== undefined &&
-      (await onecli.applyContainerConfig(args, {
-        addHostMapping: false,
-      })));
-  if (onecliApplied) {
-    // Apple Container fixups: the SDK generates args assuming Docker semantics.
-    if (CONTAINER_RUNTIME_BIN === 'container') {
-      // Apple Container VMs cannot read bind-mounted host files at all.
-      // Replace cert -v mounts with base64 env vars; the entrypoint writes
-      // them to /run/onecli/ inside the container's own (writable) filesystem.
-      // The combined CA bundle (~334KB) is too large for an env var, so only
-      // the gateway CA cert (< 1KB) is passed this way.
-      const certRemap = new Map<string, string>(); // old container path → new
-      const mountIndicesToRemove = new Set<number>();
+  // Route API traffic through the credential proxy (containers never see real secrets)
+  args.push(
+    '-e',
+    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+  );
 
-      for (let i = 0; i + 1 < args.length; i++) {
-        if (args[i] !== '-v') continue;
-        const parts = args[i + 1].split(':');
-        if (!parts[0].endsWith('.pem')) continue;
-
-        const oldContainerPath = parts[1]; // e.g. /tmp/onecli-gateway-ca.pem
-        const certBasename = path.basename(oldContainerPath); // onecli-gateway-ca.pem
-        const newContainerPath = `/run/onecli/${certBasename}`;
-        certRemap.set(oldContainerPath, newContainerPath);
-
-        if (certBasename === 'onecli-gateway-ca.pem') {
-          // Gateway CA cert (small): pass content as base64 env var for entrypoint to write
-          const certContent = fs.readFileSync(parts[0]);
-          args.push(
-            '-e',
-            `ONECLI_GATEWAY_CA_B64=${certContent.toString('base64')}`,
-          );
-        }
-        // Combined CA (onecli-combined-ca.pem) is ~334KB — too large for env var; skip it
-        // Mark both -v and its argument for removal (combined CA too large for env var)
-        mountIndicesToRemove.add(i);
-        mountIndicesToRemove.add(i + 1);
-      }
-
-      // Remove cert mount args (reverse order to preserve indices)
-      for (const idx of [...mountIndicesToRemove].sort((a, b) => b - a)) {
-        args.splice(idx, 1);
-      }
-
-      // Update env vars: remap cert paths, remove SSL_CERT_FILE (combined bundle
-      // unavailable), replace host.docker.internal with real gateway IP.
-      const sslCertFileIndicesToRemove = new Set<number>();
-      for (let i = 0; i + 1 < args.length; i++) {
-        if (args[i] !== '-e') continue;
-        // Remap cert paths in NODE_EXTRA_CA_CERTS etc.
-        for (const [oldPath, newPath] of certRemap) {
-          args[i + 1] = args[i + 1].replaceAll(oldPath, newPath);
-        }
-        // SSL_CERT_FILE uses the combined bundle which we can't pass — remove it
-        if (args[i + 1].startsWith('SSL_CERT_FILE=')) {
-          sslCertFileIndicesToRemove.add(i);
-          sslCertFileIndicesToRemove.add(i + 1);
-        }
-        // Fix proxy hostname
-        if (ONECLI_GATEWAY_HOST) {
-          args[i + 1] = args[i + 1].replaceAll(
-            'host.docker.internal',
-            ONECLI_GATEWAY_HOST,
-          );
-        }
-      }
-      for (const idx of [...sslCertFileIndicesToRemove].sort((a, b) => b - a)) {
-        args.splice(idx, 1);
-      }
-    }
-    logger.info({ containerName }, 'OneCLI gateway config applied');
+  // Mirror the host's auth method with a placeholder value.
+  // API key mode: SDK sends x-api-key, proxy replaces with real key.
+  // OAuth mode:   SDK exchanges placeholder token for temp API key,
+  //               proxy injects real OAuth token on that exchange request.
+  const authMode = detectAuthMode();
+  if (authMode === 'api-key') {
+    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  } else {
+    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
   // Pass Brave Search API key if configured
@@ -388,16 +319,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  // Main group uses the default OneCLI agent; others use their own agent.
-  const agentIdentifier = input.isMain
-    ? undefined
-    : group.folder.toLowerCase().replace(/_/g, '-');
-  const containerArgs = await buildContainerArgs(
-    mounts,
-    containerName,
-    input.isMain,
-    agentIdentifier,
-  );
+  const containerArgs = buildContainerArgs(mounts, containerName, input.isMain);
 
   logger.debug(
     {

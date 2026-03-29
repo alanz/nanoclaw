@@ -1,17 +1,15 @@
 import fs from 'fs';
 import path from 'path';
 
-import { OneCLI } from '@onecli-sh/sdk';
-
 import {
   ASSISTANT_NAME,
   CONTAINER_TIMEOUT,
+  CREDENTIAL_PROXY_PORT,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
-  ONECLI_URL,
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
@@ -84,6 +82,8 @@ import { startZoteroMonitorLoop } from './zotero-monitor.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
 import { closeAllMemoryManagers } from './memory/manager.js';
+import { startCredentialProxy } from './credential-proxy.js';
+import { PROXY_BIND_HOST } from './container-runtime.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -98,27 +98,6 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
-
-const onecli = new OneCLI({ url: ONECLI_URL });
-
-function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
-  if (group.isMain) return;
-  const identifier = group.folder.toLowerCase().replace(/_/g, '-');
-  onecli.createAgent({ name: group.name, identifier }).then(
-    (agent) => {
-      logger.info(
-        { jid, agentId: agent.id, identifier },
-        'OneCLI agent ensured',
-      );
-    },
-    (err) => {
-      logger.debug(
-        { jid, identifier, err: String(err) },
-        'OneCLI agent ensure skipped',
-      );
-    },
-  );
-}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -200,9 +179,6 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
     }
   }
-
-  // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
-  ensureOneCLIAgent(jid, group);
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -751,6 +727,12 @@ async function main(): Promise<void> {
 
   restoreRemoteControl();
 
+  // Start credential proxy (containers route API calls through this)
+  const proxyServer = await startCredentialProxy(
+    CREDENTIAL_PROXY_PORT,
+    PROXY_BIND_HOST,
+  );
+
   // Start web dashboard (localhost only — exposed via tailscale serve on port 8443)
   const webUiServer = startWebUi(WEB_UI_PORT, undefined, {
     sendMessage: (jid, text) => routeOutbound(channels, jid, text),
@@ -759,6 +741,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    proxyServer.close();
     webUiServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();

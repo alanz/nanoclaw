@@ -5,11 +5,11 @@ import { readEnvFile } from './env.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
+// Secrets (API keys, tokens) are NOT read here — they are loaded only
+// by the credential proxy (credential-proxy.ts), never exposed to containers.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
-  'ONECLI_URL',
-  'ONECLI_GATEWAY_HOST',
   'GROUPS_DIR',
   'STORE_DIR',
   'WEB_UI_BASE_URL',
@@ -98,12 +98,6 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   process.env.CREDENTIAL_PROXY_PORT || '3001',
   10,
 );
-export const ONECLI_URL =
-  process.env.ONECLI_URL || envConfig.ONECLI_URL || 'http://localhost:10254';
-// Real container IP for the OneCLI gateway (port 10255).
-// May differ from ONECLI_URL when a local relay is in use.
-export const ONECLI_GATEWAY_HOST =
-  process.env.ONECLI_GATEWAY_HOST || envConfig.ONECLI_GATEWAY_HOST || null;
 export const WEB_UI_PORT = parseInt(process.env.WEB_UI_PORT || '3002', 10);
 // Public-facing base URL for the web UI (e.g. a Tailscale Serve URL).
 // Used so agents can generate shareable deep links into the dashboard.

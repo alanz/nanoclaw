@@ -188,6 +188,41 @@ function createPreCompactHook(assistantName?: string): HookCallback {
   };
 }
 
+/**
+ * Write an IPC task file to set a reaction emoji on the host side.
+ * Used to show compaction state in the chat UI.
+ */
+function writeReactionTask(chatJid: string, emoji: string): void {
+  const ipcTaskDir = '/workspace/ipc/tasks';
+  try {
+    fs.mkdirSync(ipcTaskDir, { recursive: true });
+    const filename = `${Date.now()}-set-reaction.json`;
+    const task = JSON.stringify({
+      type: 'set_reaction',
+      jid: chatJid,
+      emoji,
+      timestamp: new Date().toISOString(),
+    });
+    fs.writeFileSync(path.join(ipcTaskDir, filename), task);
+  } catch (err) {
+    log(`Failed to write reaction IPC task: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function createPreCompactReactionHook(chatJid: string): HookCallback {
+  return async (_input, _toolUseId, _context) => {
+    writeReactionTask(chatJid, '⏳');
+    return {};
+  };
+}
+
+function createPostCompactReactionHook(chatJid: string): HookCallback {
+  return async (_input, _toolUseId, _context) => {
+    writeReactionTask(chatJid, '💭');
+    return {};
+  };
+}
+
 function sanitizeFilename(summary: string): string {
   return summary
     .toLowerCase()
@@ -452,7 +487,13 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreCompact: [
+          { hooks: [createPreCompactHook(containerInput.assistantName)] },
+          { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
+        ],
+        PostCompact: [
+          { hooks: [createPostCompactReactionHook(containerInput.chatJid)] },
+        ],
       },
     }
   })) {
@@ -628,7 +669,13 @@ async function main(): Promise<void> {
           allowDangerouslySkipPermissions: true,
           settingSources: ['project', 'user'] as const,
           hooks: {
-            PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+            PreCompact: [
+              { hooks: [createPreCompactHook(containerInput.assistantName)] },
+              { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
+            ],
+            PostCompact: [
+              { hooks: [createPostCompactReactionHook(containerInput.chatJid)] },
+            ],
           },
         },
       })) {

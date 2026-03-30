@@ -1057,6 +1057,10 @@ async function main(): Promise<void> {
     setPendingDispatchDepth: (jid, depth) => {
       pendingDispatchDepth[jid] = depth;
     },
+    setReaction: (jid, emoji) => {
+      const channel = findChannel(channels, jid);
+      return channel?.setReaction?.(jid, emoji) ?? Promise.resolve();
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

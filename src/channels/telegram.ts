@@ -288,6 +288,10 @@ export class TelegramChannel implements Channel {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
   }
+
+  async setReaction(_jid: string, _emoji: string): Promise<void> {
+    // TODO: implement Telegram reaction if desired
+  }
 }
 
 registerChannel('telegram', (opts: ChannelOpts) => {

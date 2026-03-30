@@ -648,16 +648,18 @@ export class DeltaChatChannel implements Channel {
 
   /** Update reaction on the last incoming message for this JID. */
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    const emoji = isTyping ? '💭' : '✅';
+    await this.setReaction(jid, emoji);
+  }
+
+  /** Set an arbitrary reaction emoji on the last incoming message for this JID. */
+  async setReaction(jid: string, emoji: string): Promise<void> {
     const msgId = this.lastMsgId.get(jid);
     if (msgId === undefined || !this.dc || this.accountId === null) return;
-    const emoji = isTyping ? '💭' : '✅';
     try {
       await this.dc.rpc.sendReaction(this.accountId, msgId, [emoji]);
     } catch (err) {
-      logger.warn(
-        { err, jid, emoji },
-        'DeltaChat: failed to send typing reaction',
-      );
+      logger.warn({ err, jid, emoji }, 'DeltaChat: failed to send reaction');
     }
   }
 

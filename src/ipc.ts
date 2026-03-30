@@ -56,6 +56,7 @@ export interface IpcDeps {
   ) => void;
   onTasksChanged: () => void;
   setPendingDispatchDepth: (jid: string, depth: number) => void;
+  setReaction?: (jid: string, emoji: string) => Promise<void>;
 }
 
 let ipcWatcherRunning = false;
@@ -270,6 +271,8 @@ export async function processTaskIpc(
     limit?: number;
     afterCursor?: string;
     includeBotMessages?: boolean;
+    // For set_reaction
+    emoji?: string;
     // For memory_search / memory_get / memory_list
     query?: string;
     path?: string;
@@ -1066,6 +1069,14 @@ export async function processTaskIpc(
           cleanup();
         }
       })();
+      break;
+    }
+
+    case 'set_reaction': {
+      const { jid, emoji } = data;
+      if (jid && emoji && deps.setReaction) {
+        await deps.setReaction(jid, emoji);
+      }
       break;
     }
 

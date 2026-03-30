@@ -638,6 +638,7 @@ export class MemoryIndexManager {
             queryVec,
             limit: candidates,
             vecAvailable: this.vecAvailable,
+            source,
           })
         : [];
 
@@ -647,6 +648,7 @@ export class MemoryIndexManager {
       providerModel: this.model,
       query,
       limit: candidates,
+      source,
     });
 
     const merged = mergeHybridResults({

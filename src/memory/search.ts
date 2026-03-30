@@ -34,25 +34,29 @@ export function searchVector(params: {
   queryVec: number[];
   limit: number;
   vecAvailable: boolean;
+  source?: string;
 }): SearchRowResult[] {
   if (params.queryVec.length === 0 || params.limit <= 0) return [];
 
   if (params.vecAvailable) {
+    const sourceClause = params.source ? ' AND c.source = ?' : '';
+    const bindArgs: unknown[] = [
+      vectorToBlob(params.queryVec),
+      params.providerModel,
+      ...(params.source ? [params.source] : []),
+      params.limit,
+    ];
     const rows = params.db
       .prepare(
         `SELECT c.id, c.path, c.start_line, c.end_line, c.text, c.source,\n` +
           `       vec_distance_cosine(v.embedding, ?) AS dist\n` +
           `  FROM ${params.vectorTable} v\n` +
           `  JOIN chunks c ON c.id = v.id\n` +
-          ` WHERE c.model = ?\n` +
+          ` WHERE c.model = ?${sourceClause}\n` +
           ` ORDER BY dist ASC\n` +
           ` LIMIT ?`,
       )
-      .all(
-        vectorToBlob(params.queryVec),
-        params.providerModel,
-        params.limit,
-      ) as Array<{
+      .all(...bindArgs) as Array<{
       id: string;
       path: string;
       start_line: number;
@@ -73,11 +77,16 @@ export function searchVector(params: {
   }
 
   // Fallback: in-memory cosine similarity
+  const fallbackSourceClause = params.source ? ' AND source = ?' : '';
+  const fallbackBindArgs: unknown[] = [
+    params.providerModel,
+    ...(params.source ? [params.source] : []),
+  ];
   const rows = params.db
     .prepare(
-      `SELECT id, path, start_line, end_line, text, embedding, source FROM chunks WHERE model = ?`,
+      `SELECT id, path, start_line, end_line, text, embedding, source FROM chunks WHERE model = ?${fallbackSourceClause}`,
     )
-    .all(params.providerModel) as Array<{
+    .all(...fallbackBindArgs) as Array<{
     id: string;
     path: string;
     start_line: number;
@@ -108,21 +117,29 @@ export function searchKeyword(params: {
   providerModel: string;
   query: string;
   limit: number;
+  source?: string;
 }): Array<SearchRowResult & { textScore: number }> {
   if (params.limit <= 0) return [];
   const ftsQuery = buildFtsQuery(params.query);
   if (!ftsQuery) return [];
 
+  const sourceClause = params.source ? ' AND source = ?' : '';
+  const bindArgs: unknown[] = [
+    ftsQuery,
+    params.providerModel,
+    ...(params.source ? [params.source] : []),
+    params.limit,
+  ];
   const rows = params.db
     .prepare(
       `SELECT id, path, source, start_line, end_line, text,\n` +
         `       bm25(${params.ftsTable}) AS rank\n` +
         `  FROM ${params.ftsTable}\n` +
-        ` WHERE ${params.ftsTable} MATCH ? AND model = ?\n` +
+        ` WHERE ${params.ftsTable} MATCH ? AND model = ?${sourceClause}\n` +
         ` ORDER BY rank ASC\n` +
         ` LIMIT ?`,
     )
-    .all(ftsQuery, params.providerModel, params.limit) as Array<{
+    .all(...bindArgs) as Array<{
     id: string;
     path: string;
     source: string;

@@ -10,7 +10,9 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
+  MEMORY_SEARCH_ENABLED,
   POLL_INTERVAL,
+  STORE_DIR,
   TIMEZONE,
   TRIGGER_PATTERN,
   WEB_UI_BASE_URL,
@@ -81,7 +83,10 @@ import { startRssMonitorLoop } from './rss-monitor.js';
 import { startZoteroMonitorLoop } from './zotero-monitor.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
-import { closeAllMemoryManagers } from './memory/manager.js';
+import {
+  closeAllMemoryManagers,
+  getOrCreateMemoryManager,
+} from './memory/manager.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import { PROXY_BIND_HOST } from './container-runtime.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -697,6 +702,25 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+
+  // Eagerly initialize memory managers for groups with an existing index.
+  // This triggers the startup sync (including any forced re-index from config
+  // changes) without waiting for the first search to arrive.
+  if (MEMORY_SEARCH_ENABLED) {
+    void (async () => {
+      for (const group of Object.values(registeredGroups)) {
+        const dbPath = path.join(STORE_DIR, group.folder, 'embeddings.db');
+        if (fs.existsSync(dbPath)) {
+          await getOrCreateMemoryManager(group.folder).catch((err) =>
+            logger.warn(
+              { err, folder: group.folder },
+              'Startup memory warm-up failed',
+            ),
+          );
+        }
+      }
+    })();
+  }
 
   // Recover orphaned containers from the previous process.
   // Instead of killing them immediately (which tears down Apple Container VMs

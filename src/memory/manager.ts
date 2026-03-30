@@ -82,6 +82,12 @@ const VECTOR_TABLE = 'chunks_vec';
 const FTS_TABLE = 'chunks_fts';
 const CACHE_TABLE = 'embedding_cache';
 const META_KEY = 'memory_index_meta_v1';
+const CONFIG_META_KEY = 'memory_index_config_v1';
+
+type ConfigFingerprint = {
+  extraPaths: string[];
+  model: string;
+};
 
 const CHUNKING = { tokens: 400, overlap: 80 };
 const VECTOR_WEIGHT = 0.7;
@@ -128,6 +134,7 @@ export class MemoryIndexManager {
   private rateLimiter!: TokenBucketRateLimiter;
   private watcher: FSWatcher | null = null;
   private dirty = true;
+  private forceNextSync = false;
   private syncLock: Promise<void> = Promise.resolve();
   private vecAvailable = false;
   private closed = false;
@@ -195,6 +202,26 @@ export class MemoryIndexManager {
       });
     }
 
+    // Detect config changes and force re-index if extra paths or model changed
+    const currentFingerprint: ConfigFingerprint = {
+      extraPaths: [...this.extraPaths].sort(),
+      model: this.model,
+    };
+    const storedFingerprint = this.readConfigFingerprint();
+    if (!storedFingerprint) {
+      // First init — write fingerprint; no force needed since all files are new
+      this.writeConfigFingerprint(currentFingerprint);
+    } else if (
+      JSON.stringify(storedFingerprint) !== JSON.stringify(currentFingerprint)
+    ) {
+      logger.info(
+        { old: storedFingerprint, new: currentFingerprint },
+        'Memory index config changed — forcing re-index on next sync',
+      );
+      this.forceNextSync = true;
+      this.writeConfigFingerprint(currentFingerprint);
+    }
+
     const { provider } = createGeminiEmbeddingProvider({
       apiKey: this.apiKey,
       model: this.model,
@@ -234,6 +261,24 @@ export class MemoryIndexManager {
     );
   }
 
+  private readConfigFingerprint(): ConfigFingerprint | null {
+    try {
+      const row = this.db
+        .prepare('SELECT value FROM meta WHERE key = ?')
+        .get(CONFIG_META_KEY) as { value: string } | undefined;
+      if (!row) return null;
+      return JSON.parse(row.value) as ConfigFingerprint;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeConfigFingerprint(fp: ConfigFingerprint): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
+      .run(CONFIG_META_KEY, JSON.stringify(fp));
+  }
+
   private readMeta(): MemoryMeta | null {
     try {
       const row = this.db
@@ -254,9 +299,12 @@ export class MemoryIndexManager {
 
   /** Synchronize the index: embed new/changed files, remove deleted ones. */
   async sync(opts?: { force?: boolean }): Promise<void> {
+    // Consume forceNextSync so the first queued sync run gets the flag
+    const force = (opts?.force ?? false) || this.forceNextSync;
+    this.forceNextSync = false;
     // Serialize syncs to avoid parallel embedding calls
     this.syncLock = this.syncLock
-      .then(() => this._doSync(opts?.force ?? false))
+      .then(() => this._doSync(force))
       .catch(() => {});
     return this.syncLock;
   }
@@ -516,6 +564,11 @@ export class MemoryIndexManager {
         } catch {}
       }
     }
+  }
+
+  /** Whether the next sync will be forced (config changed since last run). */
+  get isForceNextSync(): boolean {
+    return this.forceNextSync;
   }
 
   /** Total number of indexed chunks. */

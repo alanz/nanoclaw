@@ -570,6 +570,127 @@ describe('MemoryIndexManager.search with opts', () => {
   });
 });
 
+// ---- config fingerprint / forceNextSync ----
+
+describe('MemoryIndexManager config fingerprint', () => {
+  let workspaceDir: string;
+  let manager: MemoryIndexManager | null = null;
+
+  beforeEach(async () => {
+    workspaceDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'nanoclaw-mem-cfg-'),
+    );
+    stubGeminiFetch();
+  });
+
+  afterEach(async () => {
+    if (manager) {
+      await manager.close();
+      manager = null;
+    }
+    await fs.rm(workspaceDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('does not set forceNextSync on first init (no stored fingerprint)', async () => {
+    manager = createTestManager(workspaceDir);
+    await manager.init();
+    expect(manager.isForceNextSync).toBe(false);
+  });
+
+  it('does not set forceNextSync when config is unchanged on re-init', async () => {
+    // First init writes the fingerprint
+    manager = createTestManager(workspaceDir);
+    await manager.init();
+    await manager.close();
+
+    // Re-init with same config
+    manager = new MemoryIndexManager(
+      workspaceDir,
+      path.join(workspaceDir, 'test-index.db'),
+      [] /* same extraPaths */,
+      'test-api-key',
+      'gemini-embedding-001' /* same model */,
+      100,
+      0,
+      10,
+      0,
+    );
+    await manager.init();
+    expect(manager.isForceNextSync).toBe(false);
+  });
+
+  it('sets forceNextSync when extraPaths change', async () => {
+    // First init with no extra paths
+    manager = createTestManager(workspaceDir);
+    await manager.init();
+    await manager.close();
+
+    // Re-init with a new extra path
+    manager = new MemoryIndexManager(
+      workspaceDir,
+      path.join(workspaceDir, 'test-index.db'),
+      ['/some/new/path'],
+      'test-api-key',
+      'gemini-embedding-001',
+      100,
+      0,
+      10,
+      0,
+    );
+    await manager.init();
+    expect(manager.isForceNextSync).toBe(true);
+  });
+
+  it('sets forceNextSync when model changes', async () => {
+    // First init with default model
+    manager = createTestManager(workspaceDir);
+    await manager.init();
+    await manager.close();
+
+    // Re-init with a different model
+    manager = new MemoryIndexManager(
+      workspaceDir,
+      path.join(workspaceDir, 'test-index.db'),
+      [],
+      'test-api-key',
+      'gemini-embedding-002',
+      100,
+      0,
+      10,
+      0,
+    );
+    await manager.init();
+    expect(manager.isForceNextSync).toBe(true);
+  });
+
+  it('clears forceNextSync after sync() is called', async () => {
+    // First init
+    manager = createTestManager(workspaceDir);
+    await manager.init();
+    await manager.close();
+
+    // Re-init with changed extra paths to trigger forceNextSync
+    manager = new MemoryIndexManager(
+      workspaceDir,
+      path.join(workspaceDir, 'test-index.db'),
+      ['/changed/path'],
+      'test-api-key',
+      'gemini-embedding-001',
+      100,
+      9999,
+      10,
+      0,
+    );
+    await manager.init();
+    expect(manager.isForceNextSync).toBe(true);
+
+    await manager.sync();
+    expect(manager.isForceNextSync).toBe(false);
+  });
+});
+
 describe('deriveSource', () => {
   const extraPaths = [
     '/Users/alanz/Sync/org',

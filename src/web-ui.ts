@@ -405,10 +405,11 @@ document.addEventListener('DOMContentLoaded', function() {
       currentGroup = g;
       document.getElementById('groups-list').style.display = 'none';
       document.getElementById('group-detail').style.display = '';
-      document.getElementById('group-detail-name').textContent = g.name;
+      document.getElementById('group-detail-name').textContent = g.chatName || g.name;
       document.getElementById('group-detail-badges').innerHTML =
         (g.isMain ? '<span class="badge bb">main</span> ' : '')
-        + '<span class="badge bg">'+esc(g.channel)+'</span>';
+        + '<span class="badge bg">'+esc(g.channel)+'</span>'
+        + ' <code style="font-size:11px">'+esc(g.jid)+'</code>';
       switchTab(state.tab || 'chat', state.filePath);
     } finally {
       skipHashUpdate = false;
@@ -490,10 +491,10 @@ document.addEventListener('DOMContentLoaded', function() {
       el.innerHTML = data.map(function(g) {
         return '<div class="card group-card" data-jid="'+esc(g.jid)+'">'
           +'<div style="display:flex;justify-content:space-between;align-items:center">'
-          +'<strong>'+esc(g.name)+'</strong>'
+          +'<strong>'+(g.chatName ? esc(g.chatName) : esc(g.name))+'</strong>'
           +'<span>'+(g.isMain ? '<span class="badge bb">main</span> ' : '')+(g.trustedGroup ? '<span class="badge bb">trusted</span> ' : '')+(!g.isMain && !g.trustedGroup && g.requiresTrigger !== false ? '<span class="badge">trigger required</span> ' : '')+'<span class="badge bg">'+esc(g.channel)+'</span></span>'
           +'</div>'
-          +'<div class="dim" style="margin-top:6px">'+esc(g.folder)+(g.trigger ? ' &nbsp;&middot;&nbsp; trigger: <code>'+esc(g.trigger)+'</code>' : '')+' &nbsp;&middot;&nbsp; added '+fmtDate(g.added_at)+'</div>'
+          +'<div class="dim" style="margin-top:6px">'+esc(g.folder)+' &nbsp;&middot;&nbsp; <code>'+esc(g.jid)+'</code>'+(g.trigger ? ' &nbsp;&middot;&nbsp; trigger: <code>'+esc(g.trigger)+'</code>' : '')+' &nbsp;&middot;&nbsp; added '+fmtDate(g.added_at)+'</div>'
           +'</div>';
       }).join('');
       // store data for lookup on click
@@ -542,10 +543,11 @@ document.addEventListener('DOMContentLoaded', function() {
     currentGroup = g;
     document.getElementById('groups-list').style.display = 'none';
     document.getElementById('group-detail').style.display = '';
-    document.getElementById('group-detail-name').textContent = g.name;
+    document.getElementById('group-detail-name').textContent = g.chatName || g.name;
     document.getElementById('group-detail-badges').innerHTML =
       (g.isMain ? '<span class="badge bb">main</span> ' : '')
-      + '<span class="badge bg">'+esc(g.channel)+'</span>';
+      + '<span class="badge bg">'+esc(g.channel)+'</span>'
+      + ' <code style="font-size:11px">'+esc(g.jid)+'</code>';
     switchTab('chat');
   }
 
@@ -1834,9 +1836,12 @@ export function startWebUi(
       // GET /api/groups
       if (req.method === 'GET' && pathname === '/api/groups') {
         const groups = getAllRegisteredGroups();
+        const chats = getAllChats();
+        const chatNameByJid = new Map(chats.map((c) => [c.jid, c.name]));
         const result = Object.entries(groups).map(([jid, g]) => ({
           jid,
           name: g.name,
+          chatName: chatNameByJid.get(jid) ?? null,
           folder: g.folder,
           trigger: g.trigger,
           added_at: g.added_at,

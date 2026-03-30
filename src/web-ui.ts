@@ -5,6 +5,7 @@
  */
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { URL } from 'url';
 
@@ -1704,6 +1705,37 @@ interface FileEntry {
   children?: FileEntry[];
 }
 
+function expandMountHostPath(p: string): string {
+  const homeDir = process.env.HOME || os.homedir();
+  if (p.startsWith('~/')) return path.join(homeDir, p.slice(2));
+  if (p === '~') return homeDir;
+  return path.resolve(p);
+}
+
+// Returns the resolved extra mounts for a given group folder.
+// containerName is the name used under /workspace/extra/ in the container
+// (and under extra/ in the web UI file tree).
+function getGroupExtraMounts(
+  folder: string,
+): Array<{ containerName: string; hostPath: string }> {
+  const groups = getAllRegisteredGroups();
+  const group = Object.values(groups).find((g) => g.folder === folder);
+  if (!group?.containerConfig?.additionalMounts) return [];
+  const result: Array<{ containerName: string; hostPath: string }> = [];
+  for (const mount of group.containerConfig.additionalMounts) {
+    const containerName = mount.containerPath || path.basename(mount.hostPath);
+    const expandedHost = expandMountHostPath(mount.hostPath);
+    try {
+      if (fs.statSync(expandedHost).isDirectory()) {
+        result.push({ containerName, hostPath: expandedHost });
+      }
+    } catch {
+      // Mount path doesn't exist yet — skip silently
+    }
+  }
+  return result;
+}
+
 function readDirEntries(dir: string, relBase: string): FileEntry[] {
   let names: string[];
   try {
@@ -1751,13 +1783,51 @@ function listGroupFiles(): Array<{ name: string; entries: FileEntry[] }> {
         return false;
       }
     })
-    .map((g) => ({
-      name: g,
-      entries: readDirEntries(path.join(GROUPS_DIR, g), g),
-    }));
+    .map((g) => {
+      const entries = readDirEntries(path.join(GROUPS_DIR, g), g);
+      const extraMounts = getGroupExtraMounts(g);
+      if (extraMounts.length > 0) {
+        const extraChildren: FileEntry[] = extraMounts.map(
+          ({ containerName, hostPath }) => ({
+            name: containerName,
+            path: path.join(g, 'extra', containerName),
+            isDir: true,
+            children: readDirEntries(
+              hostPath,
+              path.join(g, 'extra', containerName),
+            ),
+          }),
+        );
+        entries.push({
+          name: 'extra',
+          path: path.join(g, 'extra'),
+          isDir: true,
+          children: extraChildren,
+        });
+      }
+      return { name: g, entries };
+    });
 }
 
 function safeReadFile(relPath: string): string | null {
+  // Check if this is an extra mount path: {groupFolder}/extra/{mountName}/{subpath}
+  const extraMatch = relPath.match(/^([^/]+)\/extra\/([^/]+)\/(.+)$/);
+  if (extraMatch) {
+    const [, groupFolder, mountName, subpath] = extraMatch;
+    const mounts = getGroupExtraMounts(groupFolder);
+    const mount = mounts.find((m) => m.containerName === mountName);
+    if (!mount) return null;
+    // Prevent path traversal within the mount
+    const abs = path.resolve(mount.hostPath, subpath);
+    const mountRoot = path.resolve(mount.hostPath);
+    if (!abs.startsWith(mountRoot + path.sep)) return null;
+    try {
+      return fs.readFileSync(abs, 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
   // Prevent path traversal — resolved path must stay within GROUPS_DIR
   const abs = path.resolve(GROUPS_DIR, relPath);
   if (!abs.startsWith(path.resolve(GROUPS_DIR) + path.sep)) return null;

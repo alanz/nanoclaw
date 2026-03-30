@@ -692,55 +692,58 @@ describe('MemoryIndexManager config fingerprint', () => {
 });
 
 describe('deriveSource', () => {
+  // workspaceDir is the absolute path stored in MemoryIndexManager
+  const workspaceDir = '/Users/alanz/nanoclaw/groups/main';
+  // extraPaths are absolute paths from MEMORY_SEARCH_EXTRA_PATHS
   const extraPaths = [
     '/Users/alanz/Sync/org',
     '/Users/alanz/nanoclaw/groups/main/zotero-md',
   ];
+  // filePath values are workspace-relative, as stored in the DB via
+  // path.relative(workspaceDir, absPath)
 
-  it('tags files under an extra path with the directory basename', () => {
-    expect(deriveSource('/Users/alanz/Sync/org/notes.org', extraPaths)).toBe(
-      'org',
+  it('tags files under an extra path inside workspaceDir', () => {
+    // zotero-md lives inside workspaceDir → relative form is just 'zotero-md'
+    expect(deriveSource('zotero-md/paper.md', extraPaths, workspaceDir)).toBe(
+      'zotero-md',
     );
-    expect(
-      deriveSource(
-        '/Users/alanz/nanoclaw/groups/main/zotero-md/paper.md',
-        extraPaths,
-      ),
-    ).toBe('zotero-md');
+  });
+
+  it('tags files under an extra path outside workspaceDir', () => {
+    // org lives outside workspaceDir → relative form is '../../../Sync/org'
+    const orgRel = '../../../Sync/org/notes.org';
+    expect(deriveSource(orgRel, extraPaths, workspaceDir)).toBe('org');
   });
 
   it('tags nested files under an extra path correctly', () => {
-    expect(
-      deriveSource('/Users/alanz/Sync/org/subdir/nested.org', extraPaths),
-    ).toBe('org');
+    const orgRel = '../../../Sync/org/subdir/nested.org';
+    expect(deriveSource(orgRel, extraPaths, workspaceDir)).toBe('org');
   });
 
   it('tags workspace files as memory when not under any extra path', () => {
-    expect(
-      deriveSource(
-        '/Users/alanz/nanoclaw/groups/main/memory/notes.md',
-        extraPaths,
-      ),
-    ).toBe('memory');
-    expect(
-      deriveSource('/Users/alanz/nanoclaw/groups/main/MEMORY.md', extraPaths),
-    ).toBe('memory');
+    expect(deriveSource('memory/notes.md', extraPaths, workspaceDir)).toBe(
+      'memory',
+    );
+    expect(deriveSource('MEMORY.md', extraPaths, workspaceDir)).toBe('memory');
   });
 
   it('does not match a path that merely starts with a similar prefix', () => {
-    expect(
-      deriveSource('/Users/alanz/Sync/org-other/file.md', extraPaths),
-    ).toBe('memory');
+    // org-other is not org
+    const orgOtherRel = '../../../Sync/org-other/file.md';
+    expect(deriveSource(orgOtherRel, extraPaths, workspaceDir)).toBe('memory');
   });
 
   it('returns memory when extraPaths is empty', () => {
-    expect(deriveSource('/Users/alanz/Sync/org/file.org', [])).toBe('memory');
+    expect(deriveSource('../../../Sync/org/file.org', [], workspaceDir)).toBe(
+      'memory',
+    );
   });
 
   it('matches an exact file path listed as an extra path', () => {
     const singleFile = ['/Users/alanz/notes/index.md'];
-    expect(deriveSource('/Users/alanz/notes/index.md', singleFile)).toBe(
-      'index.md',
-    );
+    // path.relative(workspaceDir, '/Users/alanz/notes/index.md') = '../../../notes/index.md'
+    expect(
+      deriveSource('../../../notes/index.md', singleFile, workspaceDir),
+    ).toBe('index.md');
   });
 });

@@ -121,10 +121,15 @@ export type MemoryFileEntry = {
   frontmatter?: Record<string, unknown>;
 };
 
-export function deriveSource(filePath: string, extraPaths: string[]): string {
-  const matched = extraPaths.find(
-    (ep) => filePath.startsWith(ep + '/') || filePath === ep,
-  );
+export function deriveSource(
+  filePath: string,
+  extraPaths: string[],
+  workspaceDir: string,
+): string {
+  const matched = extraPaths.find((ep) => {
+    const rel = path.relative(workspaceDir, ep);
+    return filePath.startsWith(rel + '/') || filePath === rel;
+  });
   return matched ? path.basename(matched) : 'memory';
 }
 
@@ -461,7 +466,11 @@ export class MemoryIndexManager {
 
       // Insert new chunks
       const now = Date.now();
-      const source = deriveSource(entry.path, this.extraPaths);
+      const source = deriveSource(
+        entry.path,
+        this.extraPaths,
+        this.workspaceDir,
+      );
       for (let ci = 0; ci < chunks.length; ci++) {
         const chunk = chunks[ci];
         const vec = embeddings[ci];

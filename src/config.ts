@@ -202,7 +202,7 @@ export const MEMORY_SEARCH_MIN_SCORE: number = parseFloat(
 export const MEMORY_SEARCH_RPM_LIMIT: number = parseInt(
   process.env.MEMORY_SEARCH_RPM_LIMIT ||
     envConfig.MEMORY_SEARCH_RPM_LIMIT ||
-    '70',
+    '50',
   10,
 );
 

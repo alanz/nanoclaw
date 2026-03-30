@@ -38,6 +38,7 @@ export class TokenBucketRateLimiter {
 
   private rpdSessionUsed: number = 0;
   private coolDownUntil: number = 0;
+  private rpdExhausted: boolean = false;
 
   constructor(config: RateLimitConfig) {
     this.accountKey = config.accountKey;
@@ -47,8 +48,8 @@ export class TokenBucketRateLimiter {
     this.rpdSessionBudget = config.rpdSessionBudget;
     this.coolDownMs = config.coolDownMs ?? 5000;
 
-    // Start RPM at half capacity to avoid burst compounding at startup
-    this.rpmTokens = (config.rpmLimit ?? 0) / 2;
+    // Start RPM at 20% capacity to avoid burst compounding at startup
+    this.rpmTokens = (config.rpmLimit ?? 0) * 0.2;
     this.rpmLastRefill = Date.now();
 
     this.rpdTokens = config.rpdLimit ?? 0;
@@ -73,6 +74,14 @@ export class TokenBucketRateLimiter {
     tokenCount = 0,
   ): Promise<void> {
     if (requestCount <= 0 && tokenCount <= 0) return;
+
+    if (this.rpdExhausted) {
+      throw new EmbeddingRateLimitError(
+        'RPD quota exhausted for this session.',
+        'rpd',
+        null,
+      );
+    }
 
     const LOG_THROTTLE_MS = 30_000;
     let lastCoolDownLogAt = 0;
@@ -210,14 +219,22 @@ export class TokenBucketRateLimiter {
     coolDownOverrideMs?: number | null,
   ): void {
     if (quotaType === 'rpm' || quotaType === 'unknown') this.rpmTokens = 0;
-    if (quotaType === 'rpd') this.rpdTokens = 0;
+    if (quotaType === 'rpd') {
+      this.rpdTokens = 0;
+      this.rpdExhausted = true;
+      logger.warn(
+        { accountKey: this.accountKey },
+        'memory rate limiter: RPD exhausted, stopping for this session',
+      );
+      return;
+    }
     if (quotaType === 'tpm') this.tpmTokens = 0;
 
     const baseCoolDownMs =
       coolDownOverrideMs != null && coolDownOverrideMs > 0
         ? coolDownOverrideMs
-        : quotaType === 'rpd'
-          ? 60_000
+        : quotaType === 'rpm' || quotaType === 'unknown'
+          ? 15_000
           : this.coolDownMs;
 
     const jitter = 0.8 + Math.random() * 0.4;

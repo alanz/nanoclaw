@@ -425,8 +425,9 @@ export class MemoryIndexManager {
             if (isEmbeddingRateLimitError(err) && err.quotaType === 'rpd') {
               logger.warn(
                 { file: absPath },
-                'Memory sync: RPD session budget exhausted, stopping',
+                'Memory sync: RPD exhausted, stopping for this session',
               );
+              this.rateLimiter.depleteQuotaForType('rpd');
               this.dirty = true; // retry next session
               return;
             }
@@ -608,6 +609,7 @@ export class MemoryIndexManager {
 
     let queryVec: number[] = [];
     try {
+      await this.rateLimiter.acquirePermit(1);
       queryVec = await this.provider.embedQuery(query);
     } catch (err) {
       logger.warn(

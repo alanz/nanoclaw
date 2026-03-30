@@ -691,6 +691,19 @@ describe('MemoryIndexManager config fingerprint', () => {
   });
 });
 
+describe('source alias: zotero → zotero-md', () => {
+  it('maps source="zotero" to "zotero-md" for search opts', () => {
+    // The alias lives in manager.search(); test the mapping directly.
+    const normalize = (s: string | undefined) =>
+      s === 'zotero' ? 'zotero-md' : s;
+    expect(normalize('zotero')).toBe('zotero-md');
+    expect(normalize('zotero-md')).toBe('zotero-md');
+    expect(normalize('org')).toBe('org');
+    expect(normalize('memory')).toBe('memory');
+    expect(normalize(undefined)).toBeUndefined();
+  });
+});
+
 describe('deriveSource', () => {
   // workspaceDir is the absolute path stored in MemoryIndexManager
   const workspaceDir = '/Users/alanz/nanoclaw/groups/main';

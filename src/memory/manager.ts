@@ -606,7 +606,7 @@ export class MemoryIndexManager {
     const maxResults = opts?.maxResults ?? this.maxResults;
     const minScore = opts?.minScore ?? this.minScore;
     const pathPrefix = opts?.pathPrefix;
-    const source = opts?.source;
+    const source = opts?.source === 'zotero' ? 'zotero-md' : opts?.source;
     const includeContent = opts?.includeContent ?? false;
 
     // Trigger background sync if dirty; search on current DB state immediately.

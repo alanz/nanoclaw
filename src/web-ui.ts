@@ -2023,8 +2023,10 @@ function extractOrgIds(
       if (m) {
         const id = m[1].trim();
         const subpath = path.relative(rootPath, filePath);
-        const relPath = `${groupFolder}/extra/${containerName}/${subpath}`;
-        result[id] = `#groups/${groupFolder}/files/${relPath}`;
+        // Hash URL format: #groups/{folder}/files/{autoFilePath}
+        // loadGroupFiles() prepends folder+'/' to autoFilePath, so omit it here.
+        const autoFilePath = `extra/${containerName}/${subpath}`;
+        result[id] = `#groups/${groupFolder}/files/${autoFilePath}`;
       }
     }
   }

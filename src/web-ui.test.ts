@@ -87,7 +87,7 @@ describe('orgInlineMarkup', () => {
 
   describe('id: links', () => {
     const idIndex = {
-      '20260311T200527.770720': '#groups/main/files/main/extra/org/journal.org',
+      '20260311T200527.770720': '#groups/main/files/extra/org/journal.org',
     };
 
     it('renders resolved id: link as <a> with org-id-link class', () => {
@@ -96,7 +96,7 @@ describe('orgInlineMarkup', () => {
         idIndex,
       );
       expect(out).toContain(
-        '<a href="#groups/main/files/main/extra/org/journal.org"',
+        '<a href="#groups/main/files/extra/org/journal.org"',
       );
       expect(out).toContain('class="org-id-link"');
       expect(out).toContain('nanoclaw-journal');

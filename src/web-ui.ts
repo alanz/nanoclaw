@@ -130,6 +130,10 @@ body.task-result-maximized #group-task-result{border-radius:0;height:100vh}
 .org-todo-cancelled,.org-todo-waiting{background:#6e7681}
 .org-tags{float:right;font-size:11px;color:#8b949e;font-weight:normal}
 .org-props{font-size:11px;color:#8b949e;background:#21262d;border-radius:4px;padding:4px 8px;margin:4px 0 8px;display:flex;flex-wrap:wrap;gap:8px}
+.org-date{font-family:monospace;font-size:12px;color:#8b949e;background:#21262d;border-radius:3px;padding:0 4px;white-space:nowrap}
+.org-id-link{color:#d2a8ff}
+a.org-id-link{color:#d2a8ff;text-decoration:none}
+a.org-id-link:hover{text-decoration:underline}
 .fm-card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;align-items:baseline}
 .fm-key{color:#8b949e;white-space:nowrap;user-select:none}
 .fm-val{color:#e6edf3;word-break:break-word}
@@ -328,6 +332,12 @@ document.addEventListener('DOMContentLoaded', function() {
   var skipHashUpdate = false;
   var groupTasksData = {};   // task id → task object
   var taskDetailLogs = [];   // run logs for currently open task detail
+  var orgIdCache = null;
+  async function fetchOrgIds() {
+    if (orgIdCache) return orgIdCache;
+    try { orgIdCache = await (await fetch('/api/org-ids')).json(); } catch { orgIdCache = {}; }
+    return orgIdCache;
+  }
 
   function esc(s) {
     if (s == null) return '';
@@ -940,7 +950,7 @@ document.addEventListener('DOMContentLoaded', function() {
     return el;
   }
 
-  function renderOrgToHtml(text) {
+  function renderOrgToHtml(text, idIndex) {
     var lines = text.split('\\n');
     var N = lines.length;
     var out = [];
@@ -950,7 +960,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     function inlineMarkup(s) {
       s = escHtml(s);
-      // [[url][label]] and [[url]] — character scan avoids [[ ]] regex escaping entirely
+      // [[dest][label]] and [[dest]] — character scan avoids [[ ]] regex escaping entirely
       var ls = ''; var lp = 0;
       while (lp < s.length) {
         var ob = s.indexOf('[[', lp);
@@ -960,17 +970,41 @@ document.addEventListener('DOMContentLoaded', function() {
         if (cb < 0) { ls += s.slice(lp); break; }
         var inn = s.slice(ob + 2, cb);
         var sp = inn.indexOf('][');
-        if (sp >= 0) { ls += '<a href="'+inn.slice(0,sp)+'" target="_blank">'+inn.slice(sp+2)+'</a>'; }
-        else { ls += '<a href="'+inn+'" target="_blank">'+inn+'</a>'; }
+        var dest = sp >= 0 ? inn.slice(0, sp) : inn;
+        var label = sp >= 0 ? inn.slice(sp + 2) : inn;
+        if (dest.indexOf('id:') === 0) {
+          var rawId = dest.slice(3);
+          var resolved = idIndex && idIndex[rawId];
+          if (resolved) {
+            ls += '<a href="' + resolved + '" class="org-id-link">' + label + '</a>';
+          } else {
+            ls += '<span class="org-id-link" title="' + dest + '">' + label + '</span>';
+          }
+        } else {
+          ls += '<a href="' + dest + '" target="_blank">' + label + '</a>';
+        }
         lp = cb + 2;
       }
       s = ls;
-      // Inline markup — use [*] [/] [+] char classes so / and * don't need backslash-escaping
-      s = s.replace(/[*]([^*\\n]+)[*]/g, '<strong>$1</strong>');
-      s = s.replace(/[/]([^/\\n]+)[/]/g, '<em>$1</em>');
-      s = s.replace(/=([^=\\n]+)=/g, '<code>$1</code>');
-      s = s.replace(/~([^~\\n]+)~/g, '<code>$1</code>');
-      s = s.replace(/[+]([^+\\n]+)[+]/g, '<del>$1</del>');
+      // Timestamps [2026-03-28 Sat] / [2026-03-28 Sat 18:21] and bare https:// URLs.
+      // First alternative matches HTML tags (pass through). Negative lookbehind (?<!>)
+      // on the URL alternative prevents re-wrapping URLs already used as link labels.
+      s = s.replace(/(<[^>]+>)|(\\[\\d{4}-\\d{2}-\\d{2} \\w{3}(?:\\s+\\d{2}:\\d{2})?\\])|(?<!>)(https?:\\/\\/[^\\s<>"')\\]]+)/g, function(m, tag, ts, url) {
+        if (tag) return tag;
+        if (ts) return '<span class="org-date">' + ts + '</span>';
+        return '<a href="' + url + '" target="_blank" class="org-ext-link">' + url + '</a>';
+      });
+      // Inline markup — applied only to text nodes (not inside HTML tag attributes)
+      s = s.replace(/(<[^>]*>)|([^<]+)/g, function(m, tag, text) {
+        if (tag) return tag;
+        if (!text) return '';
+        text = text.replace(/[*]([^*\\n]+)[*]/g, '<strong>$1</strong>');
+        text = text.replace(/[/]([^/\\n]+)[/]/g, '<em>$1</em>');
+        text = text.replace(/=([^=\\n]+)=/g, '<code>$1</code>');
+        text = text.replace(/~([^~\\n]+)~/g, '<code>$1</code>');
+        text = text.replace(/[+]([^+\\n]+)[+]/g, '<del>$1</del>');
+        return text;
+      });
       return s;
     }
     var curDepth = 0;
@@ -1134,9 +1168,10 @@ document.addEventListener('DOMContentLoaded', function() {
         view.appendChild(mdDiv);
         if (window.hljs) mdDiv.querySelectorAll('pre code').forEach(function(el) { hljs.highlightElement(el); });
       } else if (ext === 'org') {
+        var orgIds = await fetchOrgIds();
         var orgDiv = document.createElement('div');
         orgDiv.className = 'md-body';
-        orgDiv.innerHTML = renderOrgToHtml(text);
+        orgDiv.innerHTML = renderOrgToHtml(text, orgIds);
         view.innerHTML = header;
         view.appendChild(orgDiv);
         if (window.hljs) orgDiv.querySelectorAll('pre code').forEach(function(el) { hljs.highlightElement(el); });
@@ -1913,6 +1948,97 @@ function getGroupExtraMounts(
   return result;
 }
 
+// Org ID index: maps orgId → web-UI hash URL for the containing file.
+// Scans all .org files in extra mounts for :PROPERTIES: :ID: entries.
+let orgIdIndexCache: { ts: number; data: Record<string, string> } | null = null;
+
+function buildOrgIdIndex(): Record<string, string> {
+  const result: Record<string, string> = {};
+  const groups = getAllRegisteredGroups();
+  for (const group of Object.values(groups)) {
+    const mounts = getGroupExtraMounts(group.folder);
+    for (const mount of mounts) {
+      scanOrgDirForIds(
+        mount.hostPath,
+        mount.hostPath,
+        group.folder,
+        mount.containerName,
+        result,
+      );
+    }
+  }
+  return result;
+}
+
+function scanOrgDirForIds(
+  dir: string,
+  rootPath: string,
+  groupFolder: string,
+  containerName: string,
+  result: Record<string, string>,
+): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true }) as fs.Dirent[];
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      scanOrgDirForIds(fullPath, rootPath, groupFolder, containerName, result);
+    } else if (entry.isFile() && entry.name.endsWith('.org')) {
+      extractOrgIds(fullPath, rootPath, groupFolder, containerName, result);
+    }
+  }
+}
+
+function extractOrgIds(
+  filePath: string,
+  rootPath: string,
+  groupFolder: string,
+  containerName: string,
+  result: Record<string, string>,
+): void {
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return;
+  }
+  const lines = content.split('\n');
+  let inProps = false;
+  for (const line of lines) {
+    const t = line.trim();
+    if (t === ':PROPERTIES:') {
+      inProps = true;
+      continue;
+    }
+    if (t === ':END:') {
+      inProps = false;
+      continue;
+    }
+    if (inProps) {
+      const m = t.match(/^:ID:\s+(.+)$/);
+      if (m) {
+        const id = m[1].trim();
+        const subpath = path.relative(rootPath, filePath);
+        const relPath = `${groupFolder}/extra/${containerName}/${subpath}`;
+        result[id] = `#groups/${groupFolder}/files/${relPath}`;
+      }
+    }
+  }
+}
+
+function getOrgIdIndex(): Record<string, string> {
+  const now = Date.now();
+  if (orgIdIndexCache && now - orgIdIndexCache.ts < 60_000)
+    return orgIdIndexCache.data;
+  const data = buildOrgIdIndex();
+  orgIdIndexCache = { ts: now, data };
+  return data;
+}
+
 function readDirEntries(dir: string, relBase: string): FileEntry[] {
   let names: string[];
   try {
@@ -2051,6 +2177,83 @@ export function parseNoteFrontmatter(text: string): {
   };
 }
 
+/**
+ * Exported TypeScript mirror of the client-side inlineMarkup() function inside
+ * renderOrgToHtml(). Kept in sync manually; used by tests.
+ */
+export function orgInlineMarkup(
+  raw: string,
+  idIndex?: Record<string, string> | null,
+): string {
+  const esc = (s: string) =>
+    String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  let s = esc(raw);
+
+  // [[dest][label]] and [[dest]] — character scan
+  let ls = '';
+  let lp = 0;
+  while (lp < s.length) {
+    const ob = s.indexOf('[[', lp);
+    if (ob < 0) {
+      ls += s.slice(lp);
+      break;
+    }
+    ls += s.slice(lp, ob);
+    const cb = s.indexOf(']]', ob + 2);
+    if (cb < 0) {
+      ls += s.slice(lp);
+      break;
+    }
+    const inn = s.slice(ob + 2, cb);
+    const sp = inn.indexOf('][');
+    const dest = sp >= 0 ? inn.slice(0, sp) : inn;
+    const label = sp >= 0 ? inn.slice(sp + 2) : inn;
+    if (dest.startsWith('id:')) {
+      const rawId = dest.slice(3);
+      const resolved = idIndex?.[rawId];
+      if (resolved) {
+        ls += `<a href="${resolved}" class="org-id-link">${label}</a>`;
+      } else {
+        ls += `<span class="org-id-link" title="${dest}">${label}</span>`;
+      }
+    } else {
+      ls += `<a href="${dest}" target="_blank">${label}</a>`;
+    }
+    lp = cb + 2;
+  }
+  s = ls;
+
+  // Timestamps [2026-03-28 Sat] / [2026-03-28 Sat 18:21] and bare https:// URLs.
+  // First alternative matches HTML tags (pass through). Negative lookbehind (?<!>)
+  // on the URL alternative prevents re-wrapping URLs already used as link labels.
+  s = s.replace(
+    /(<[^>]+>)|(\[\d{4}-\d{2}-\d{2} \w{3}(?:\s+\d{2}:\d{2})?\])|(?<!>)(https?:\/\/[^\s<>"')\]]+)/g,
+    (_m, tag: string, ts: string, url: string) => {
+      if (tag) return tag;
+      if (ts) return `<span class="org-date">${ts}</span>`;
+      return `<a href="${url}" target="_blank" class="org-ext-link">${url}</a>`;
+    },
+  );
+
+  // Inline markup — applied only to text nodes (not inside HTML tag attributes)
+  s = s.replace(/(<[^>]*>)|([^<]+)/g, (_m, tag: string, text: string) => {
+    if (tag) return tag;
+    if (!text) return '';
+    text = text.replace(/[*]([^*\n]+)[*]/g, '<strong>$1</strong>');
+    text = text.replace(/[/]([^/\n]+)[/]/g, '<em>$1</em>');
+    text = text.replace(/=([^=\n]+)=/g, '<code>$1</code>');
+    text = text.replace(/~([^~\n]+)~/g, '<code>$1</code>');
+    text = text.replace(/[+]([^+\n]+)[+]/g, '<del>$1</del>');
+    return text;
+  });
+  return s;
+}
+
 export function startWebUi(
   port: number,
   host = '127.0.0.1',
@@ -2149,6 +2352,12 @@ export function startWebUi(
       // GET /api/files
       if (req.method === 'GET' && pathname === '/api/files') {
         sendJson(res, listGroupFiles());
+        return;
+      }
+
+      // GET /api/org-ids — map of orgId → hash URL for id: link resolution
+      if (req.method === 'GET' && pathname === '/api/org-ids') {
+        sendJson(res, getOrgIdIndex());
         return;
       }
 

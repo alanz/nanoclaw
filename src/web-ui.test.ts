@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseNoteFrontmatter } from './web-ui.js';
+import { orgInlineMarkup, parseNoteFrontmatter } from './web-ui.js';
 
 describe('parseNoteFrontmatter', () => {
   const NOTE = `---
@@ -41,5 +41,106 @@ Body text here.
 
   it('returns null for non-note text', () => {
     expect(parseNoteFrontmatter('no frontmatter here')).toBeNull();
+  });
+});
+
+describe('orgInlineMarkup', () => {
+  describe('timestamps', () => {
+    it('wraps date-only timestamp', () => {
+      const out = orgInlineMarkup('[2026-03-28 Sat]');
+      expect(out).toContain('class="org-date"');
+      expect(out).toContain('[2026-03-28 Sat]');
+    });
+
+    it('wraps datetime timestamp', () => {
+      const out = orgInlineMarkup('[2026-03-28 Sat 18:21]');
+      expect(out).toContain('class="org-date"');
+      expect(out).toContain('[2026-03-28 Sat 18:21]');
+    });
+
+    it('does not wrap non-timestamp bracketed text', () => {
+      const out = orgInlineMarkup('[not a date]');
+      expect(out).not.toContain('org-date');
+    });
+  });
+
+  describe('bare URLs', () => {
+    it('wraps a bare https URL as an external link', () => {
+      const out = orgInlineMarkup('see https://example.com for details');
+      expect(out).toContain('<a href="https://example.com"');
+      expect(out).toContain('class="org-ext-link"');
+      expect(out).toContain('target="_blank"');
+    });
+
+    it('wraps a bare http URL', () => {
+      const out = orgInlineMarkup('http://example.com');
+      expect(out).toContain('class="org-ext-link"');
+    });
+
+    it('does not double-wrap a URL already inside a [[...][...]] link', () => {
+      const out = orgInlineMarkup('[[https://example.com][a link]]');
+      // exactly one <a> tag
+      expect(out.match(/<a /g)?.length).toBe(1);
+      expect(out).not.toContain('org-ext-link');
+    });
+  });
+
+  describe('id: links', () => {
+    const idIndex = {
+      '20260311T200527.770720': '#groups/main/files/main/extra/org/journal.org',
+    };
+
+    it('renders resolved id: link as <a> with org-id-link class', () => {
+      const out = orgInlineMarkup(
+        '[[id:20260311T200527.770720][nanoclaw-journal]]',
+        idIndex,
+      );
+      expect(out).toContain(
+        '<a href="#groups/main/files/main/extra/org/journal.org"',
+      );
+      expect(out).toContain('class="org-id-link"');
+      expect(out).toContain('nanoclaw-journal');
+      expect(out).not.toContain('target="_blank"');
+    });
+
+    it('renders unresolved id: link as <span> with tooltip', () => {
+      const out = orgInlineMarkup('[[id:UNKNOWN][some note]]', idIndex);
+      expect(out).toContain('<span class="org-id-link"');
+      expect(out).toContain('title="id:UNKNOWN"');
+      expect(out).toContain('some note');
+    });
+
+    it('renders id: link as span when no idIndex provided', () => {
+      const out = orgInlineMarkup(
+        '[[id:20260311T200527.770720][nanoclaw-journal]]',
+      );
+      expect(out).toContain('<span class="org-id-link"');
+      expect(out).not.toContain('<a ');
+    });
+  });
+
+  describe('regular [[...][...]] links', () => {
+    it('renders https link as external <a>', () => {
+      const out = orgInlineMarkup('[[https://example.com][visit]]');
+      expect(out).toContain(
+        '<a href="https://example.com" target="_blank">visit</a>',
+      );
+    });
+
+    it('renders bare [[url]] link', () => {
+      const out = orgInlineMarkup('[[https://example.com]]');
+      expect(out).toContain(
+        '<a href="https://example.com" target="_blank">https://example.com</a>',
+      );
+    });
+  });
+
+  describe('HTML escaping', () => {
+    it('escapes < > & " in plain text', () => {
+      const out = orgInlineMarkup('a < b & "c"');
+      expect(out).toContain('&lt;');
+      expect(out).toContain('&amp;');
+      expect(out).toContain('&quot;');
+    });
   });
 });

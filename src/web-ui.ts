@@ -124,6 +124,12 @@ body.task-result-maximized #group-task-result{border-radius:0;height:100vh}
 .md-body th,.md-body td{border:1px solid #30363d;padding:6px 12px}
 .md-body th{background:#21262d}
 .md-body hr{border:none;border-top:1px solid #30363d;margin:16px 0}
+.org-todo{font-size:10px;padding:1px 5px;border-radius:3px;margin-right:6px;color:#fff;vertical-align:middle}
+.org-todo-todo,.org-todo-next,.org-todo-in-progress{background:#9e6a03}
+.org-todo-done{background:#238636}
+.org-todo-cancelled,.org-todo-waiting{background:#6e7681}
+.org-tags{float:right;font-size:11px;color:#8b949e;font-weight:normal}
+.org-props{font-size:11px;color:#8b949e;background:#21262d;border-radius:4px;padding:4px 8px;margin:4px 0 8px;display:flex;flex-wrap:wrap;gap:8px}
 .fm-card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;align-items:baseline}
 .fm-key{color:#8b949e;white-space:nowrap;user-select:none}
 .fm-val{color:#e6edf3;word-break:break-word}
@@ -934,6 +940,170 @@ document.addEventListener('DOMContentLoaded', function() {
     return el;
   }
 
+  function renderOrgToHtml(text) {
+    var lines = text.split('\\n');
+    var N = lines.length;
+    var out = [];
+    var i = 0;
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function inlineMarkup(s) {
+      s = escHtml(s);
+      // [[url][label]] and [[url]] — character scan avoids [[ ]] regex escaping entirely
+      var ls = ''; var lp = 0;
+      while (lp < s.length) {
+        var ob = s.indexOf('[[', lp);
+        if (ob < 0) { ls += s.slice(lp); break; }
+        ls += s.slice(lp, ob);
+        var cb = s.indexOf(']]', ob + 2);
+        if (cb < 0) { ls += s.slice(lp); break; }
+        var inn = s.slice(ob + 2, cb);
+        var sp = inn.indexOf('][');
+        if (sp >= 0) { ls += '<a href="'+inn.slice(0,sp)+'" target="_blank">'+inn.slice(sp+2)+'</a>'; }
+        else { ls += '<a href="'+inn+'" target="_blank">'+inn+'</a>'; }
+        lp = cb + 2;
+      }
+      s = ls;
+      // Inline markup — use [*] [/] [+] char classes so / and * don't need backslash-escaping
+      s = s.replace(/[*]([^*\\n]+)[*]/g, '<strong>$1</strong>');
+      s = s.replace(/[/]([^/\\n]+)[/]/g, '<em>$1</em>');
+      s = s.replace(/=([^=\\n]+)=/g, '<code>$1</code>');
+      s = s.replace(/~([^~\\n]+)~/g, '<code>$1</code>');
+      s = s.replace(/[+]([^+\\n]+)[+]/g, '<del>$1</del>');
+      return s;
+    }
+    var curDepth = 0;
+    while (i < N) {
+      var line = lines[i];
+      var trimmed = line.trim();
+      if (trimmed === '') { i++; continue; }
+      // Headline — [*]+ matches * chars without needing \*
+      var hm = trimmed.match(/^([*]+) (.*)/);
+      if (hm) {
+        var rawDepth = hm[1].length;
+        var depth = Math.min(rawDepth, 6);
+        curDepth = rawDepth;
+        var indent = (rawDepth - 1) * 18;
+        var title = hm[2].replace(/^[[][#][A-Z][]] */, '');
+        var tagsHtml = '';
+        var tagm = title.match(/^(.*?) +((?::[A-Za-z0-9_@#%]+:)+)\\s*$/);
+        if (tagm) { tagsHtml = '<span class="org-tags">'+escHtml(tagm[2])+'</span>'; title = tagm[1]; }
+        var todoHtml = '';
+        var todom = title.match(/^(TODO|DONE|NEXT|WAITING|CANCELLED|FIXME|IN-PROGRESS|HOLD) +(.*)/);
+        if (todom) { todoHtml = '<span class="org-todo org-todo-'+todom[1].toLowerCase()+'">'+todom[1]+'</span>'; title = todom[2]; }
+        out.push('<h'+depth+' style="clear:both;margin-left:'+indent+'px">'+todoHtml+inlineMarkup(title)+tagsHtml+'</h'+depth+'>');
+        i++; continue;
+      }
+      var bodyIndent = curDepth * 18;
+      // :PROPERTIES: drawer
+      if (trimmed === ':PROPERTIES:') {
+        var props = [];
+        i++;
+        while (i < N && lines[i].trim() !== ':END:') {
+          var pm = lines[i].trim().match(/^:([^:]+): *(.*)/);
+          if (pm) props.push([pm[1], pm[2]]);
+          i++;
+        }
+        if (props.length) {
+          out.push('<div class="org-props" style="margin-left:'+bodyIndent+'px">');
+          props.forEach(function(p) { out.push('<span><b>'+escHtml(p[0])+':</b> '+inlineMarkup(p[1])+'</span>'); });
+          out.push('</div>');
+        }
+        i++; continue;
+      }
+      // Skip logbook and other drawers
+      if (trimmed.match(/^:[A-Z]+:$/) && trimmed !== ':END:') {
+        i++; while (i < N && lines[i].trim() !== ':END:') i++;
+        i++; continue;
+      }
+      // #+begin_... — [+] matches literal +; \\w → word chars after template eval
+      var bm = trimmed.match(/^#[+]begin_(\\w+)(?: +(.*))?$/i);
+      if (bm) {
+        var btype = bm[1].toLowerCase();
+        var barg = (bm[2] || '').trim();
+        var bls = [];
+        i++;
+        var ep = new RegExp('^#[+]end_'+btype+'$', 'i');
+        while (i < N && !lines[i].trim().match(ep)) { bls.push(lines[i]); i++; }
+        if (btype === 'src') {
+          var blang = barg.split(' ')[0] || '';
+          out.push('<pre style="margin-left:'+bodyIndent+'px"><code'+(blang ? ' class="language-'+escHtml(blang)+'"' : '')+'>'+escHtml(bls.join('\\n'))+'</code></pre>');
+        } else if (btype === 'quote') {
+          out.push('<blockquote style="margin-left:'+bodyIndent+'px">'+bls.map(function(bl){ return inlineMarkup(bl.trim()); }).join('<br>')+'</blockquote>');
+        } else {
+          out.push('<pre style="margin-left:'+bodyIndent+'px">'+escHtml(bls.join('\\n'))+'</pre>');
+        }
+        i++; continue;
+      }
+      // #+KEYWORD: value
+      var kwm = trimmed.match(/^#[+](\\w+): *(.*)/i);
+      if (kwm) {
+        var kwName = kwm[1].toUpperCase();
+        var kwVal = kwm[2];
+        if (kwName === 'TITLE') out.push('<h1>'+inlineMarkup(kwVal)+'</h1>');
+        else if (kwName === 'AUTHOR' || kwName === 'DATE' || kwName === 'DESCRIPTION') out.push('<div style="font-size:12px;color:#8b949e;margin-bottom:4px"><b>'+escHtml(kwName)+':</b> '+inlineMarkup(kwVal)+'</div>');
+        i++; continue;
+      }
+      if (trimmed.match(/^-----+$/)) { out.push('<hr>'); i++; continue; }
+      // Table — [|] matches literal | without needing \|
+      if (trimmed.charAt(0) === '|') {
+        var trows = [];
+        while (i < N && lines[i].trim().charAt(0) === '|') { trows.push(lines[i].trim()); i++; }
+        var sepAt = -1;
+        for (var ti = 0; ti < trows.length; ti++) { if (trows[ti].match(/^[|][-+|]+[|]?$/)) { sepAt = ti; break; } }
+        out.push('<table style="margin-left:'+bodyIndent+'px">');
+        trows.forEach(function(row, ri) {
+          if (row.match(/^[|][-+|]+[|]?$/)) return;
+          var cells = row.split('|').slice(1,-1);
+          var ct = (sepAt > 0 && ri < sepAt) ? 'th' : 'td';
+          out.push('<tr>'+cells.map(function(c){ return '<'+ct+'>'+inlineMarkup(c.trim())+'</'+ct+'>'; }).join('')+'</tr>');
+        });
+        out.push('</table>');
+        continue;
+      }
+      // Lists — [0-9] avoids \d; \\S → non-whitespace after template eval
+      var ulm = trimmed.match(/^[-+] (.*)/);
+      var olm = trimmed.match(/^[0-9]+[.)] +(.*)/);
+      if (ulm || olm) {
+        var baseInd = line.search(/\\S/);
+        var ltype = ulm ? 'ul' : 'ol';
+        out.push('<'+ltype+' style="margin-left:'+bodyIndent+'px">');
+        while (i < N) {
+          var ll = lines[i];
+          var lt = ll.trim();
+          if (lt === '') { i++; break; }
+          if (ll.search(/\\S/) < baseInd) break;
+          var lulm = lt.match(/^[-+] (.*)/);
+          var lolm = lt.match(/^[0-9]+[.)] +(.*)/);
+          if (lulm || lolm) {
+            var lc = (lulm || lolm)[1];
+            // Checkbox prefix [ ], [X], [-]
+            if (lc.length >= 4 && lc.charAt(0) === '[' && lc.charAt(2) === ']' && lc.charAt(3) === ' ') {
+              var cbc = lc.charAt(1);
+              if (cbc === ' ' || cbc === 'X' || cbc === '-') {
+                lc = '<input type="checkbox" disabled'+(cbc==='X'?' checked':'')+' style="margin-right:4px">'+lc.slice(4);
+              }
+            }
+            out.push('<li>'+inlineMarkup(lc)+'</li>');
+          }
+          i++;
+        }
+        out.push('</'+ltype+'>');
+        continue;
+      }
+      // Paragraph — collect plain consecutive lines
+      var pls = [];
+      while (i < N) {
+        var pt = lines[i].trim();
+        if (!pt || pt.match(/^([*]+ |#[+]|:PROPERTIES:|[-+] |[0-9]+[.)] |[|])/)) break;
+        pls.push(pt); i++;
+      }
+      if (pls.length) out.push('<p style="margin-left:'+bodyIndent+'px">'+pls.map(inlineMarkup).join(' ')+'</p>');
+    }
+    return out.join('\\n');
+  }
+
   async function openFile(filePath, name) {
     var view = document.getElementById('group-file-content');
     view.innerHTML = '<div class="dim">Loading\u2026</div>';
@@ -963,6 +1133,13 @@ document.addEventListener('DOMContentLoaded', function() {
         view.innerHTML = header;
         view.appendChild(mdDiv);
         if (window.hljs) mdDiv.querySelectorAll('pre code').forEach(function(el) { hljs.highlightElement(el); });
+      } else if (ext === 'org') {
+        var orgDiv = document.createElement('div');
+        orgDiv.className = 'md-body';
+        orgDiv.innerHTML = renderOrgToHtml(text);
+        view.innerHTML = header;
+        view.appendChild(orgDiv);
+        if (window.hljs) orgDiv.querySelectorAll('pre code').forEach(function(el) { hljs.highlightElement(el); });
       } else if ((ext === 'json' || ext === 'ts' || ext === 'js') && window.hljs) {
         var lang = ext === 'json' ? 'json' : 'javascript';
         var codeEl = document.createElement('code');

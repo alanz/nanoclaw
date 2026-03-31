@@ -48,8 +48,8 @@ export class TokenBucketRateLimiter {
     this.rpdSessionBudget = config.rpdSessionBudget;
     this.coolDownMs = config.coolDownMs ?? 5000;
 
-    // Start RPM at 20% capacity to avoid burst compounding at startup
-    this.rpmTokens = (config.rpmLimit ?? 0) * 0.2;
+    // Start RPM at 0 so the first requests are paced from the beginning
+    this.rpmTokens = 0;
     this.rpmLastRefill = Date.now();
 
     this.rpdTokens = config.rpdLimit ?? 0;

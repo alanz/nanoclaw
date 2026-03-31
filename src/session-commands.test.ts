@@ -306,6 +306,57 @@ describe('handleSessionCommand', () => {
     );
   });
 
+  it('/reset: includes session metadata in prompt when sessionId provided', async () => {
+    let capturedPrompt = '';
+    const deps = makeDeps({
+      sessionId: 'abc123',
+      runAgent: vi.fn().mockImplementation(async (prompt, onOutput) => {
+        capturedPrompt = prompt;
+        await onOutput({ status: 'success', result: null });
+        return 'success';
+      }),
+    });
+    await handleSessionCommand({
+      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(capturedPrompt).toContain('abc123');
+    expect(capturedPrompt).toContain(
+      '/home/node/.claude/projects/-workspace-group/abc123.jsonl',
+    );
+    expect(capturedPrompt).toContain('abc123.jsonl');
+    expect(capturedPrompt).not.toContain('~/.claude/projects/');
+    expect(capturedPrompt).toContain('Session ended at:');
+  });
+
+  it('/reset: uses custom resetPrompt when provided', async () => {
+    let capturedPrompt = '';
+    const deps = makeDeps({
+      resetPrompt: 'Only record code decisions.',
+      runAgent: vi.fn().mockImplementation(async (prompt, onOutput) => {
+        capturedPrompt = prompt;
+        await onOutput({ status: 'success', result: null });
+        return 'success';
+      }),
+    });
+    await handleSessionCommand({
+      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(capturedPrompt).toContain('Only record code decisions.');
+    expect(capturedPrompt).not.toContain('key decisions made');
+    // sessionMeta still appended
+    expect(capturedPrompt).toContain('Session ended at:');
+  });
+
   it('/reset: sends fallback confirmation when agent returns no text', async () => {
     const deps = makeDeps({
       runAgent: vi.fn().mockImplementation(async (_prompt, onOutput) => {

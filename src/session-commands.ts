@@ -46,6 +46,10 @@ export interface SessionCommandDeps {
   advanceCursor: (timestamp: string) => void;
   formatMessages: (msgs: NewMessage[], timezone: string) => string;
   clearSession: () => void;
+  /** Current session ID — used to reference the .jsonl log in the summary note. */
+  sessionId?: string;
+  /** Custom summarisation prompt read from reset-prompt.md — overrides the default. */
+  resetPrompt?: string;
   /** Whether the denied sender would normally be allowed to interact (for denial messages). */
   canSenderInteract: (msg: NewMessage) => boolean;
 }
@@ -116,7 +120,7 @@ export async function handleSessionCommand(opts: {
   if (command === '/reset') {
     await deps.setTyping(true);
 
-    const RESET_SUMMARY_PROMPT =
+    const DEFAULT_RESET_PROMPT =
       'The session is about to be reset and the conversation history will be ' +
       'cleared. Before that happens, write a summary of this session to memory. ' +
       'Include: key decisions made, important facts learned, open questions or ' +
@@ -125,6 +129,21 @@ export async function handleSessionCommand(opts: {
       'or append to the daily log (memory/YYYY-MM-DD.md) if one already exists today. ' +
       'After writing, reply with a one-line confirmation: what you saved and where. ' +
       'Do not do anything else.';
+
+    const basePrompt = deps.resetPrompt ?? DEFAULT_RESET_PROMPT;
+
+    const now = new Date().toISOString();
+    const sessionMeta = deps.sessionId
+      ? '\n\nSession metadata:\n' +
+        `- Session ID: ${deps.sessionId}\n` +
+        `- Session ended at: ${now}\n` +
+        `- Read-path (for reading start time only, do not record in note): /home/node/.claude/projects/-workspace-group/${deps.sessionId}.jsonl\n` +
+        `- Log filename (use in note frontmatter "log" field): ${deps.sessionId}.jsonl\n` +
+        'Read the first line of the file at the read-path above and extract its ' +
+        '"timestamp" field to determine when the session started.'
+      : `\n\nSession ended at: ${now}.`;
+
+    const RESET_SUMMARY_PROMPT = basePrompt + sessionMeta;
 
     let summariseFailed = false;
     let summariseOutputSent = false;

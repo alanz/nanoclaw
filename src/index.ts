@@ -267,10 +267,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         lastAgentTimestamp[chatJid] = ts;
         saveState();
       },
+      resetPrompt: (() => {
+        try {
+          return (
+            fs
+              .readFileSync(
+                path.join(GROUPS_DIR, group.folder, 'reset-prompt.md'),
+                'utf8',
+              )
+              .trim() || undefined
+          );
+        } catch {
+          return undefined;
+        }
+      })(),
       clearSession: () => {
         delete sessions[group.folder];
         deleteSession(group.folder);
       },
+      sessionId: sessions[group.folder],
       formatMessages,
       canSenderInteract: (msg) => {
         const hasTrigger = TRIGGER_PATTERN.test(msg.content.trim());

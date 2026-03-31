@@ -12,6 +12,7 @@ export function extractSessionCommand(
   let text = content.trim();
   text = text.replace(triggerPattern, '').trim();
   if (text === '/compact') return '/compact';
+  if (text === '/reset') return '/reset';
   return null;
 }
 
@@ -44,6 +45,7 @@ export interface SessionCommandDeps {
   closeStdin: () => void;
   advanceCursor: (timestamp: string) => void;
   formatMessages: (msgs: NewMessage[], timezone: string) => string;
+  clearSession: () => void;
   /** Whether the denied sender would normally be allowed to interact (for denial messages). */
   canSenderInteract: (msg: NewMessage) => boolean;
 }
@@ -108,6 +110,60 @@ export async function handleSessionCommand(opts: {
 
   // AUTHORIZED: process pre-compact messages first, then run the command
   logger.info({ group: groupName, command }, 'Session command');
+
+  // Handle /reset: summarise session to memory, then clear session ID.
+  // No agent invocation for the reset itself — just summarise then clear.
+  if (command === '/reset') {
+    await deps.setTyping(true);
+
+    const RESET_SUMMARY_PROMPT =
+      'The session is about to be reset and the conversation history will be ' +
+      'cleared. Before that happens, write a summary of this session to memory. ' +
+      'Include: key decisions made, important facts learned, open questions or ' +
+      'threads left unresolved, and any tasks completed or started. ' +
+      'Write it as an A-MEM note (memory/notes/MEM-YYYY-MM-DD-session-reset-HHmm.md) ' +
+      'or append to the daily log (memory/YYYY-MM-DD.md) if one already exists today. ' +
+      'After writing, reply with a one-line confirmation: what you saved and where. ' +
+      'Do not do anything else.';
+
+    let summariseFailed = false;
+    let summariseOutputSent = false;
+
+    const summariseResult = await deps.runAgent(
+      RESET_SUMMARY_PROMPT,
+      async (result) => {
+        if (result.status === 'error') summariseFailed = true;
+        const text = resultToText(result.result);
+        if (text) {
+          await deps.sendMessage(text);
+          summariseOutputSent = true;
+        }
+        if (result.status === 'success' && result.result === null) {
+          deps.closeStdin();
+        }
+      },
+    );
+
+    if (summariseResult === 'error' || summariseFailed) {
+      logger.warn({ group: groupName }, 'Pre-reset summarisation failed');
+      await deps.sendMessage(
+        'Could not save session summary. Session was NOT reset. Try again or ' +
+          'use /compact first to reduce context.',
+      );
+      await deps.setTyping(false);
+      // Don't advance cursor — leave /reset pending so user can retry.
+      return { handled: true, success: false };
+    }
+
+    // Summarisation succeeded — now clear the session.
+    deps.clearSession();
+    if (!summariseOutputSent) {
+      await deps.sendMessage('Session cleared. Next message starts fresh.');
+    }
+    await deps.setTyping(false);
+    deps.advanceCursor(cmdMsg.timestamp);
+    return { handled: true, success: true };
+  }
 
   const cmdIndex = missedMessages.indexOf(cmdMsg);
   const preCompactMsgs = missedMessages.slice(0, cmdIndex);

@@ -14,6 +14,18 @@ describe('extractSessionCommand', () => {
     expect(extractSessionCommand('/compact', trigger)).toBe('/compact');
   });
 
+  it('detects bare /reset', () => {
+    expect(extractSessionCommand('/reset', trigger)).toBe('/reset');
+  });
+
+  it('detects /reset with trigger prefix', () => {
+    expect(extractSessionCommand('@Andy /reset', trigger)).toBe('/reset');
+  });
+
+  it('rejects /reset with extra text', () => {
+    expect(extractSessionCommand('/reset now', trigger)).toBeNull();
+  });
+
   it('detects /compact with trigger prefix', () => {
     expect(extractSessionCommand('@Andy /compact', trigger)).toBe('/compact');
   });
@@ -84,9 +96,10 @@ function makeDeps(
     closeStdin: vi.fn(),
     advanceCursor: vi.fn(),
     formatMessages: vi.fn().mockReturnValue('<formatted>'),
+    clearSession: vi.fn(),
     canSenderInteract: vi.fn().mockReturnValue(true),
     ...overrides,
-  };
+  } as SessionCommandDeps;
 }
 
 const trigger = /^@Andy\b/i;
@@ -242,6 +255,76 @@ describe('handleSessionCommand', () => {
     expect(result).toEqual({ handled: true, success: false });
     expect(deps.sendMessage).toHaveBeenCalledWith(
       expect.stringContaining('Failed to process'),
+    );
+  });
+
+  it('/reset: summarises session, clears session, advances cursor', async () => {
+    const deps = makeDeps({
+      runAgent: vi.fn().mockImplementation(async (_prompt, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result:
+            'Saved summary to memory/notes/MEM-2026-03-31-session-reset-1200.md',
+        });
+        await onOutput({ status: 'success', result: null });
+        return 'success';
+      }),
+    });
+    const result = await handleSessionCommand({
+      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(result).toEqual({ handled: true, success: true });
+    expect(deps.runAgent).toHaveBeenCalledOnce();
+    expect(deps.clearSession).toHaveBeenCalledOnce();
+    expect(deps.advanceCursor).toHaveBeenCalledWith('200');
+    // Summary text forwarded to user, no extra "Session cleared" message
+    expect(deps.sendMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Saved summary'),
+    );
+  });
+
+  it('/reset: aborts and does not clear session when summarisation fails', async () => {
+    const deps = makeDeps({ runAgent: vi.fn().mockResolvedValue('error') });
+    const result = await handleSessionCommand({
+      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(result).toEqual({ handled: true, success: false });
+    expect(deps.clearSession).not.toHaveBeenCalled();
+    expect(deps.advanceCursor).not.toHaveBeenCalled();
+    expect(deps.sendMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Could not save session summary'),
+    );
+  });
+
+  it('/reset: sends fallback confirmation when agent returns no text', async () => {
+    const deps = makeDeps({
+      runAgent: vi.fn().mockImplementation(async (_prompt, onOutput) => {
+        await onOutput({ status: 'success', result: null });
+        return 'success';
+      }),
+    });
+    const result = await handleSessionCommand({
+      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(result).toEqual({ handled: true, success: true });
+    expect(deps.clearSession).toHaveBeenCalledOnce();
+    expect(deps.sendMessage).toHaveBeenCalledWith(
+      'Session cleared. Next message starts fresh.',
     );
   });
 });

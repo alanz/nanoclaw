@@ -267,6 +267,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         lastAgentTimestamp[chatJid] = ts;
         saveState();
       },
+      clearSession: () => {
+        delete sessions[group.folder];
+        deleteSession(group.folder);
+      },
       formatMessages,
       canSenderInteract: (msg) => {
         const hasTrigger = TRIGGER_PATTERN.test(msg.content.trim());

@@ -353,6 +353,7 @@ export class DeltaChatChannel implements Channel {
               "/chatid — show this chat's ID and registration status",
               '/esc [context] — interrupt the running agent and inject new context',
               '/compact — compact the conversation to free up context',
+              '/reset — summarise session to memory, then start a fresh session',
             ];
             if (isMain) {
               lines.push(

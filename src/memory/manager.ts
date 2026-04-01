@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import Database from 'better-sqlite3';
-import chokidar, { type FSWatcher } from 'chokidar';
+import parcelWatcher from '@parcel/watcher';
 
 import {
   GROUPS_DIR,
@@ -12,11 +12,13 @@ import {
   MEMORY_SEARCH_ENABLED,
   MEMORY_SEARCH_EXTRA_PATHS,
   MEMORY_SEARCH_GEMINI_API_KEY,
+  MEMORY_SEARCH_GROUPS,
   MEMORY_SEARCH_MAX_RESULTS,
   MEMORY_SEARCH_MIN_SCORE,
   MEMORY_SEARCH_MODEL,
   MEMORY_SEARCH_RPD_SESSION_BUDGET,
   MEMORY_SEARCH_RPM_LIMIT,
+  MEMORY_SEARCH_TPM_LIMIT,
 } from '../config.js';
 import { logger } from '../logger.js';
 import {
@@ -137,8 +139,8 @@ export class MemoryIndexManager {
   private db!: Database.Database;
   private provider!: EmbeddingProvider;
   private rateLimiter!: TokenBucketRateLimiter;
-  private watcher: FSWatcher | null = null;
-  private dirty = true;
+  private watchers: parcelWatcher.AsyncSubscription[] = [];
+  private dirty = false;
   private forceNextSync = false;
   private syncLock: Promise<void> = Promise.resolve();
   private vecAvailable = false;
@@ -152,6 +154,7 @@ export class MemoryIndexManager {
     private readonly apiKey: string,
     private readonly model: string,
     private readonly rpmLimit: number,
+    private readonly tpmLimit: number | undefined,
     private readonly rpdSessionBudget: number,
     private readonly maxResults: number,
     private readonly minScore: number,
@@ -236,17 +239,19 @@ export class MemoryIndexManager {
     this.rateLimiter = new TokenBucketRateLimiter({
       accountKey: hashText(this.apiKey).slice(0, 16),
       rpmLimit: this.rpmLimit,
+      tpmLimit: this.tpmLimit,
       rpdSessionBudget: this.rpdSessionBudget,
     });
 
-    // Watch for file changes
+    // Watch for file changes using @parcel/watcher (FSEvents on macOS, inotify on Linux).
+    // Uses a single native event stream per root directory — no per-file fds.
     const watchPaths = [this.workspaceDir, ...this.extraPaths];
-    this.watcher = chokidar.watch(watchPaths, {
-      ignored: /(^|[/\\])(\.git|node_modules|venv|__pycache__)/,
-      persistent: false,
-      ignoreInitial: true,
-      usePolling: false,
-    });
+    const ignoredDirs = new Set([
+      '.git',
+      'node_modules',
+      'venv',
+      '__pycache__',
+    ]);
 
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     const markDirty = () => {
@@ -255,10 +260,26 @@ export class MemoryIndexManager {
         this.dirty = true;
       }, WATCH_DEBOUNCE_MS);
     };
-    this.watcher
-      .on('add', markDirty)
-      .on('change', markDirty)
-      .on('unlink', markDirty);
+
+    for (const watchPath of watchPaths) {
+      try {
+        const sub = await parcelWatcher.subscribe(watchPath, (err, events) => {
+          if (err) return;
+          const relevant = events.some(
+            (e) =>
+              !ignoredDirs.has(path.basename(path.dirname(e.path))) &&
+              !e.path.split(path.sep).some((part) => ignoredDirs.has(part)),
+          );
+          if (relevant) markDirty();
+        });
+        this.watchers.push(sub);
+      } catch (err) {
+        logger.warn(
+          { err, watchPath },
+          'Memory watcher failed to start for path',
+        );
+      }
+    }
 
     logger.info(
       { workspaceDir: this.workspaceDir, extraPaths: this.extraPaths },
@@ -402,8 +423,12 @@ export class MemoryIndexManager {
           if (this.closed) break;
           const batch = toEmbedFiltered.slice(b, b + BATCH_SIZE);
           const texts = batch.map((e) => e.chunk.text);
+          // Estimate token count: ~4 chars per token is a reasonable heuristic
+          const estimatedTokens = Math.ceil(
+            texts.reduce((s, t) => s + t.length, 0) / 4,
+          );
           try {
-            await this.rateLimiter.acquirePermit(1);
+            await this.rateLimiter.acquirePermit(1, 600_000, estimatedTokens);
             const vecs = await this.provider.embedBatch(texts);
             for (let j = 0; j < batch.length; j++) {
               const item = batch[j];
@@ -840,10 +865,8 @@ export class MemoryIndexManager {
       clearInterval(this.periodicSyncTimer);
       this.periodicSyncTimer = null;
     }
-    if (this.watcher) {
-      await this.watcher.close();
-      this.watcher = null;
-    }
+    await Promise.all(this.watchers.map((w) => w.unsubscribe()));
+    this.watchers = [];
     try {
       this.db.close();
     } catch {}
@@ -857,6 +880,7 @@ export async function getOrCreateMemoryManager(
   folder: string,
 ): Promise<MemoryIndexManager | null> {
   if (!MEMORY_SEARCH_ENABLED) return null;
+  if (!MEMORY_SEARCH_GROUPS.has(folder)) return null;
   if (!MEMORY_SEARCH_GEMINI_API_KEY) {
     logger.warn(
       'Memory search enabled but MEMORY_SEARCH_GEMINI_API_KEY not set',
@@ -879,6 +903,7 @@ export async function getOrCreateMemoryManager(
     MEMORY_SEARCH_GEMINI_API_KEY,
     MEMORY_SEARCH_MODEL,
     MEMORY_SEARCH_RPM_LIMIT,
+    MEMORY_SEARCH_TPM_LIMIT,
     MEMORY_SEARCH_RPD_SESSION_BUDGET,
     MEMORY_SEARCH_MAX_RESULTS,
     MEMORY_SEARCH_MIN_SCORE,
@@ -887,8 +912,7 @@ export async function getOrCreateMemoryManager(
   try {
     await mgr.init();
     managers.set(folder, mgr);
-    // Kick off initial sync in background, then sync daily to catch any gaps
-    void mgr.sync();
+    void mgr.sync({ force: true });
     mgr.startPeriodicSync(24 * 60 * 60 * 1000);
     return mgr;
   } catch (err) {

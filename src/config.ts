@@ -21,6 +21,8 @@ const envConfig = readEnvFile([
   'MEMORY_SEARCH_MODEL',
   'MEMORY_SEARCH_OUTPUT_DIMS',
   'MEMORY_SEARCH_EXTRA_PATHS',
+  'MEMORY_SEARCH_GROUPS',
+  'MEMORY_SEARCH_TPM_LIMIT',
   'MEMORY_SEARCH_MAX_RESULTS',
   'MEMORY_SEARCH_MIN_SCORE',
   'MEMORY_SEARCH_RPM_LIMIT',
@@ -179,6 +181,17 @@ export const MEMORY_SEARCH_OUTPUT_DIMS: number = parseInt(
   10,
 );
 
+/**
+ * Group folders that are allowed to have memory indexing.
+ * Defaults to ['main']. Comma-separated in config/env.
+ */
+export const MEMORY_SEARCH_GROUPS: Set<string> = new Set(
+  (process.env.MEMORY_SEARCH_GROUPS || envConfig.MEMORY_SEARCH_GROUPS || 'main')
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean),
+);
+
 /** Comma-separated absolute paths to extra directories to index. */
 export const MEMORY_SEARCH_EXTRA_PATHS: string[] = (
   process.env.MEMORY_SEARCH_EXTRA_PATHS ||
@@ -188,6 +201,14 @@ export const MEMORY_SEARCH_EXTRA_PATHS: string[] = (
   .split(',')
   .map((p) => p.trim().replace(/^~/, HOME_DIR))
   .filter(Boolean);
+
+/** Tokens per minute limit for Gemini embedding API. Default 15000 (half of gemini-embedding-001 free tier 30k). */
+export const MEMORY_SEARCH_TPM_LIMIT: number = parseInt(
+  process.env.MEMORY_SEARCH_TPM_LIMIT ||
+    envConfig.MEMORY_SEARCH_TPM_LIMIT ||
+    '15000',
+  10,
+);
 
 export const MEMORY_SEARCH_MAX_RESULTS: number = parseInt(
   process.env.MEMORY_SEARCH_MAX_RESULTS ||

@@ -124,6 +124,29 @@ describe('TokenBucketRateLimiter basic behavior', () => {
     await expect(limiter.acquirePermit(0)).resolves.toBeUndefined();
   });
 
+  it('TPM bucket starts empty — first call must wait even with tpmLimit configured', async () => {
+    const limiter = new TokenBucketRateLimiter({
+      accountKey: 'test-tpm-start-empty',
+      tpmLimit: 10000,
+    });
+
+    // With an empty bucket and tpmLimit=10000, requesting 1000 tokens requires
+    // waiting for ~6 seconds of refill time. maxWaitMs=1 should immediately throw.
+    await expect(limiter.acquirePermit(0, 1, 1000)).rejects.toThrow(
+      /quota exhausted/i,
+    );
+  });
+
+  it('TPM tokens accumulate over time and unblock acquirePermit', async () => {
+    const limiter = new TokenBucketRateLimiter({
+      accountKey: 'test-tpm-refill',
+      tpmLimit: 600, // 10 tokens/second for easy math
+    });
+
+    // Requesting 1 token with generous maxWaitMs should succeed (waits ~100ms)
+    await expect(limiter.acquirePermit(0, 2000, 1)).resolves.toBeUndefined();
+  });
+
   it('throws when maxWaitMs is exceeded for RPD limit', async () => {
     // Create limiter with very small rpdLimit so it runs out immediately
     const limiter = new TokenBucketRateLimiter({

@@ -29,6 +29,7 @@ function createTestManager(
     'test-api-key',
     'gemini-embedding-001',
     100 /* rpmLimit */,
+    undefined /* tpmLimit */,
     opts?.rpdSessionBudget ?? 0, // 0 = immediately exhausted; use 9999 for success-path tests
     10 /* maxResults */,
     0 /* minScore */,
@@ -339,7 +340,7 @@ describe('MemoryIndexManager.totalIndexed', () => {
     );
     manager = createTestManager(workspaceDir, { rpdSessionBudget: 9999 });
     await manager.init();
-    await manager.sync();
+    await manager.sync({ force: true });
     expect(manager.totalIndexed()).toBeGreaterThan(0);
   });
 });
@@ -472,7 +473,7 @@ describe('MemoryIndexManager.listFiles', () => {
     );
     manager = createTestManager(workspaceDir, { rpdSessionBudget: 9999 });
     await manager.init();
-    await manager.sync();
+    await manager.sync({ force: true });
 
     const { files, total } = manager.listFiles();
     expect(total).toBe(2);
@@ -495,7 +496,7 @@ describe('MemoryIndexManager.listFiles', () => {
     await fs.writeFile(path.join(workspaceDir, 'MEMORY.md'), 'Root file.');
     manager = createTestManager(workspaceDir, { rpdSessionBudget: 9999 });
     await manager.init();
-    await manager.sync();
+    await manager.sync({ force: true });
 
     const { files } = manager.listFiles({ pathPrefix: 'memory/notes/' });
     expect(files.length).toBeGreaterThan(0);
@@ -513,7 +514,7 @@ describe('MemoryIndexManager.listFiles', () => {
     }
     manager = createTestManager(workspaceDir, { rpdSessionBudget: 9999 });
     await manager.init();
-    await manager.sync();
+    await manager.sync({ force: true });
 
     const { files } = manager.listFiles({ limit: 2 });
     expect(files.length).toBe(2);
@@ -614,6 +615,7 @@ describe('MemoryIndexManager config fingerprint', () => {
       'gemini-embedding-001' /* same model */,
       100,
       0,
+      0,
       10,
       0,
     );
@@ -634,6 +636,7 @@ describe('MemoryIndexManager config fingerprint', () => {
       ['/some/new/path'],
       'test-api-key',
       'gemini-embedding-001',
+      0,
       100,
       0,
       10,
@@ -658,6 +661,7 @@ describe('MemoryIndexManager config fingerprint', () => {
       'gemini-embedding-002',
       100,
       0,
+      0,
       10,
       0,
     );
@@ -679,6 +683,7 @@ describe('MemoryIndexManager config fingerprint', () => {
       'test-api-key',
       'gemini-embedding-001',
       100,
+      0,
       9999,
       10,
       0,
@@ -686,7 +691,7 @@ describe('MemoryIndexManager config fingerprint', () => {
     await manager.init();
     expect(manager.isForceNextSync).toBe(true);
 
-    await manager.sync();
+    await manager.sync({ force: true });
     expect(manager.isForceNextSync).toBe(false);
   });
 });
@@ -758,5 +763,49 @@ describe('deriveSource', () => {
     expect(
       deriveSource('../../../notes/index.md', singleFile, workspaceDir),
     ).toBe('index.md');
+  });
+});
+
+describe('MemoryIndexManager dirty flag', () => {
+  let workspaceDir: string;
+  let manager: MemoryIndexManager;
+
+  beforeEach(async () => {
+    workspaceDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'nanoclaw-dirty-test-'),
+    );
+    await fs.writeFile(path.join(workspaceDir, 'note.md'), 'hello');
+    manager = createTestManager(workspaceDir);
+    await manager.init();
+  });
+
+  afterEach(async () => {
+    await manager.close();
+    await fs.rm(workspaceDir, { recursive: true, force: true });
+  });
+
+  it('starts with dirty=false so search() does not trigger background sync', async () => {
+    const syncSpy = vi.spyOn(manager, 'sync');
+    // search() with no vector index falls back to FTS — no embed call needed
+    await manager.search('anything');
+    // sync must not have been called by search()
+    expect(syncSpy).not.toHaveBeenCalled();
+    syncSpy.mockRestore();
+  });
+
+  it('sets dirty=true when sync() is called explicitly, resetting it after', async () => {
+    // Before any sync: dirty starts false
+    const syncSpy = vi.spyOn(manager, 'sync');
+    await manager.search('anything');
+    expect(syncSpy).not.toHaveBeenCalled();
+    syncSpy.mockRestore();
+
+    // After explicit sync: dirty is reset to false inside _doSync
+    await manager.sync({ force: true });
+    // A second search still should not re-trigger sync (dirty remains false after sync)
+    const syncSpy2 = vi.spyOn(manager, 'sync');
+    await manager.search('anything');
+    expect(syncSpy2).not.toHaveBeenCalled();
+    syncSpy2.mockRestore();
   });
 });

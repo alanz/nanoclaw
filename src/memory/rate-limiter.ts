@@ -55,8 +55,8 @@ export class TokenBucketRateLimiter {
     this.rpdTokens = config.rpdLimit ?? 0;
     this.rpdLastRefill = Date.now();
 
-    // Start at 0 so the first requests are paced from the beginning (matches RPM behaviour)
-    this.tpmTokens = 0;
+    // Start at 50% so the first batch can proceed without a long initial wait
+    this.tpmTokens = (this.tpmLimit ?? 0) / 2;
     this.tpmLastRefill = Date.now();
 
     logger.info(

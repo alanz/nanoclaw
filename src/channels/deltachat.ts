@@ -313,14 +313,14 @@ export class DeltaChatChannel implements Channel {
           // Skip info/system messages
           if (msg.isInfo) return;
           // Skip autocrypt setup messages
-          if (msg.isSetupmessage) return;
+          if (msg.systemMessageType === 'AutocryptSetupMessage') return;
           // Skip messages sent by this account (DC fires IncomingMsg for the bot's
           // own group messages, which would overwrite lastMsgId and break ✅ reactions)
           if (msg.fromId === 1) return; // DC_CONTACT_ID_SELF = 1
 
           const chat = await dc.rpc.getBasicChatInfo(aid, chatId);
           const contact = await dc.rpc.getContact(aid, msg.fromId);
-          const isGroup = chat.chatType !== 100; // 100 = single/DM in DC
+          const isGroup = chat.chatType !== 'Single';
 
           const jid = jidForChat(chatId);
           const sender = contact.address ?? String(msg.fromId);
@@ -455,7 +455,12 @@ export class DeltaChatChannel implements Channel {
           const aid = this.accountId!;
           const msg = await dc.rpc.getMessage(aid, msgId);
 
-          if (msg.isInfo || msg.isSetupmessage || msg.fromId === 1) return;
+          if (
+            msg.isInfo ||
+            msg.systemMessageType === 'AutocryptSetupMessage' ||
+            msg.fromId === 1
+          )
+            return;
 
           const jid = jidForChat(chatId);
           const groups = this.opts.registeredGroups();

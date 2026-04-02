@@ -64,6 +64,7 @@ import {
   formatOutbound,
   routeOutbound,
 } from './router.js';
+import { ChannelType } from './text-styles.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -955,7 +956,7 @@ async function main(): Promise<void> {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
         return;
       }
-      const text = formatOutbound(rawText);
+      const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) {
         await channel.sendMessage(jid, text);
         storeMessage({
@@ -983,7 +984,7 @@ async function main(): Promise<void> {
         logger.warn({ jid }, 'No channel owns JID, cannot send RSS message');
         return;
       }
-      const text = formatOutbound(rawText);
+      const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) {
         await channel.sendMessage(jid, text);
         storeMessage({
@@ -1010,7 +1011,7 @@ async function main(): Promise<void> {
         logger.warn({ jid }, 'No channel owns JID, cannot send Zotero message');
         return;
       }
-      const text = formatOutbound(rawText);
+      const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) {
         await channel.sendMessage(jid, text);
         storeMessage({
@@ -1027,9 +1028,11 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: async (jid, text, sender) => {
+    sendMessage: async (jid, rawText, sender) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      const text = formatOutbound(rawText, channel.name as ChannelType);
+      if (!text) return;
       await channel.sendMessage(jid, text, sender);
       storeMessage({
         id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,

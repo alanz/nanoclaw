@@ -1243,6 +1243,8 @@ document.addEventListener('DOMContentLoaded', function() {
       graphData = data;
       if (!data.nodes.length) { status.textContent = 'No notes found.'; return; }
       renderGraph(data.nodes, data.edges, null);
+      // Re-apply any existing text filter (persists across refreshes)
+      applyGraphFilter();
       // If navigating from note view with a tag filter
       if (pendingGraphTag) {
         graphActiveTag = pendingGraphTag;

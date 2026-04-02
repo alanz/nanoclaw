@@ -146,6 +146,9 @@ export class MemoryIndexManager {
   private vecAvailable = false;
   private closed = false;
   private periodicSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private _syncing = false;
+  private _lastSyncAt: number | null = null;
+  private _embedCalls = 0;
 
   constructor(
     private readonly workspaceDir: string,
@@ -338,9 +341,10 @@ export class MemoryIndexManager {
   private async _doSync(force: boolean): Promise<void> {
     if (!force && !this.dirty) return;
     this.dirty = false;
+    this._syncing = true;
 
     const files = await listMemoryFiles(this.workspaceDir, this.extraPaths);
-    logger.debug({ count: files.length }, 'Memory sync: discovered files');
+    logger.info({ count: files.length, force }, 'Memory sync: starting');
 
     let indexed = 0;
     let skipped = 0;
@@ -429,6 +433,7 @@ export class MemoryIndexManager {
           );
           try {
             await this.rateLimiter.acquirePermit(1, 600_000, estimatedTokens);
+            this._embedCalls++;
             const vecs = await this.provider.embedBatch(texts);
             for (let j = 0; j < batch.length; j++) {
               const item = batch[j];
@@ -562,9 +567,6 @@ export class MemoryIndexManager {
         );
 
       indexed++;
-      if (i % 50 === 0 && i > 0) {
-        logger.info({ indexed, total: files.length }, 'Memory sync: progress');
-      }
     }
 
     // Remove chunks for files no longer present
@@ -579,7 +581,18 @@ export class MemoryIndexManager {
       }
     }
 
-    logger.info({ indexed, skipped, removed }, 'Memory sync complete');
+    this._syncing = false;
+    this._lastSyncAt = Date.now();
+    logger.info(
+      {
+        indexed,
+        skipped,
+        removed,
+        embedCalls: this._embedCalls,
+        totalFiles: files.length,
+      },
+      'Memory sync complete',
+    );
   }
 
   private deleteFileChunks(filePath: string): void {
@@ -601,14 +614,42 @@ export class MemoryIndexManager {
     }
   }
 
+  /** Whether files have changed since the last sync. */
+  get isDirty(): boolean {
+    return this.dirty;
+  }
+
   /** Whether the next sync will be forced (config changed since last run). */
   get isForceNextSync(): boolean {
     return this.forceNextSync;
   }
 
+  /** Whether a sync is currently in progress. */
+  get syncing(): boolean {
+    return this._syncing;
+  }
+
+  /** Timestamp (ms) of when the last sync completed, or null if never. */
+  get lastSyncAt(): number | null {
+    return this._lastSyncAt;
+  }
+
+  /** Cumulative number of Gemini embedBatch calls made by this manager. */
+  get embedCalls(): number {
+    return this._embedCalls;
+  }
+
   /** Total number of indexed chunks. */
   totalIndexed(): number {
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM chunks').get() as {
+      n: number;
+    };
+    return row.n;
+  }
+
+  /** Total number of indexed files. */
+  totalFiles(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM files').get() as {
       n: number;
     };
     return row.n;
@@ -924,6 +965,28 @@ export async function getOrCreateMemoryManager(
 export async function closeAllMemoryManagers(): Promise<void> {
   await Promise.all(Array.from(managers.values()).map((m) => m.close()));
   managers.clear();
+}
+
+export interface MemoryManagerStat {
+  folder: string;
+  syncing: boolean;
+  dirty: boolean;
+  lastSyncAt: number | null;
+  totalChunks: number;
+  totalFiles: number;
+  embedCalls: number;
+}
+
+export function getAllManagerStats(): MemoryManagerStat[] {
+  return Array.from(managers.entries()).map(([folder, mgr]) => ({
+    folder,
+    syncing: mgr.syncing,
+    dirty: mgr.isDirty,
+    lastSyncAt: mgr.lastSyncAt,
+    totalChunks: mgr.totalIndexed(),
+    totalFiles: mgr.totalFiles(),
+    embedCalls: mgr.embedCalls,
+  }));
 }
 
 /** Format memory search results as XML for injection into the agent prompt. */

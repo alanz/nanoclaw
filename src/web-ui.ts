@@ -27,6 +27,7 @@ import { GroupQueue, GroupQueueStatus } from './group-queue.js';
 import { listAllManagedContainers } from './container-runtime.js';
 import { logger } from './logger.js';
 import { stats } from './stats.js';
+import { getAllManagerStats } from './memory/manager.js';
 
 // ---------------------------------------------------------------------------
 // HTML dashboard (inline, no external assets needed)
@@ -203,7 +204,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Scheduled Tasks</div>
     <div id="overview-tasks" class="card" style="margin-bottom:20px"></div>
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Router State</div>
-    <div id="overview-routerstate" class="card" style="padding:0;overflow:hidden"></div>
+    <div id="overview-routerstate" class="card" style="padding:0;overflow:hidden;margin-bottom:20px"></div>
+    <div id="overview-indexing-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Embedding Index</div>
+    <div id="overview-indexing" class="card" style="padding:0;overflow:hidden"></div>
   </div>
 
   <!-- Groups: list + detail -->
@@ -1702,6 +1705,38 @@ document.addEventListener('DOMContentLoaded', function() {
           +'</tbody></table>';
       }
 
+      // Embedding index
+      var indexingEl = document.getElementById('overview-indexing');
+      var indexingLabelEl = document.getElementById('overview-indexing-label');
+      var indexing = data.indexing || [];
+      if (!indexing.length) {
+        if (indexingEl) indexingEl.style.display = 'none';
+        if (indexingLabelEl) indexingLabelEl.style.display = 'none';
+      } else {
+        if (indexingEl) indexingEl.style.display = '';
+        if (indexingLabelEl) indexingLabelEl.style.display = '';
+        indexingEl.innerHTML = '<table><thead><tr><th>Group</th><th>Files</th><th>Chunks</th><th>Embed Calls</th><th>Status</th><th>Last Sync</th></tr></thead><tbody>'
+          + indexing.map(function(idx) {
+            var statusBadge = idx.syncing
+              ? '<span class="badge by">syncing</span>'
+              : idx.dirty
+                ? '<span class="badge bb">dirty</span>'
+                : '<span class="badge bg">ok</span>';
+            var lastSync = idx.lastSyncAt
+              ? new Date(idx.lastSyncAt).toLocaleTimeString()
+              : '<span class="dim">\u2014</span>';
+            return '<tr>'
+              +'<td style="font-size:12px">'+esc(idx.folder)+'</td>'
+              +'<td style="font-size:12px;text-align:right">'+idx.totalFiles+'</td>'
+              +'<td style="font-size:12px;text-align:right">'+idx.totalChunks+'</td>'
+              +'<td style="font-size:12px;text-align:right">'+idx.embedCalls+'</td>'
+              +'<td>'+statusBadge+'</td>'
+              +'<td class="dim" style="font-size:11px">'+lastSync+'</td>'
+              +'</tr>';
+          }).join('')
+          +'</tbody></table>';
+      }
+
       if (statusEl) statusEl.textContent = 'Updated '+new Date().toLocaleTimeString();
     } catch(e) {
       if (statusEl) statusEl.textContent = 'Error loading status';
@@ -2672,6 +2707,7 @@ export function startWebUi(
           routerState: getAllRouterStateRows(),
           orphanContainers,
           ipcErrors,
+          indexing: getAllManagerStats(),
         });
         return;
       }

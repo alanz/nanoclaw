@@ -1,0 +1,594 @@
+-- allium: 3
+-- ipc.allium
+--
+-- NanoClaw IPC/MCP bridge between agent containers and the host process.
+-- Agents communicate with the host exclusively through file-based IPC under /workspace/ipc/.
+-- Inside each container an MCP server (ipc-mcp-stdio) translates tool calls into JSON files.
+-- The host IPC watcher polls per-group IPC directories, processes files, and writes responses.
+--
+-- Scope: IPC protocol, MCP tool surface, authorization, request-response queries
+-- Includes: message/file delivery, task commands, read-only snapshot reads,
+--           request-response queries, agent-to-agent deliver_result
+-- Excludes:
+--   - Task lifecycle state machine (see scheduling.allium)
+--   - Memory indexing internals (see memory.allium)
+--   - Core routing and session management (see nanoclaw.allium)
+--   - Channel wire protocols (Telegram, DeltaChat, etc.)
+--   - Container runtime mechanics (Apple Container / Docker)
+--   - Brave Search and Zotero search (third-party: treated as read-only lookups)
+
+use "./nanoclaw.allium" as nanoclaw
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+-- The kind of query a request-response IPC call represents.
+enum QueryKind {
+    transcript        -- query_transcript: message history for a chat
+  | memory_search     -- memory_search: hybrid vector + keyword search
+  | memory_get        -- memory_get: full content of a specific memory file
+  | memory_list       -- memory_list: list indexed files by path prefix
+  | skill_eval        -- skill_eval: run an eval case for a skill (main only)
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The source identity of an IPC call.
+-- Determined entirely by which IPC directory the file appeared in — not from payload contents.
+-- The host never trusts group identity claims written inside a file.
+-- dispatch_depth is read from the NANOCLAW_DISPATCH_DEPTH environment variable set by the
+-- container runner when the container starts; it is not taken from the IPC file payload.
+value IpcAuthor {
+    group_folder: String    -- name of the group whose IPC directory contained the file
+    is_main: Boolean        -- whether that group is the registered main group
+    dispatch_depth: Integer -- nesting level of the current container run (0 for top-level runs)
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A pending request-response IPC call issued by an agent.
+-- The agent writes a task file containing a unique requestId, then polls
+-- /workspace/ipc/responses/{requestId}.json until it appears or times out.
+entity IpcQuery {
+    author: IpcAuthor
+    kind: QueryKind
+    request_id: String
+    issued_at: Timestamp
+    status: pending | fulfilled | timed_out
+
+    transitions status {
+        pending -> fulfilled
+        pending -> timed_out
+        terminal: fulfilled
+        terminal: timed_out
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    ipc_poll_interval: Duration = 500.ms   -- host polling cadence for IPC directories
+    query_timeout: Duration = 15.seconds   -- default timeout for transcript + memory queries
+    eval_timeout: Duration = 180.seconds   -- timeout for skill_eval (longer: runs a full agent)
+    file_path_prefix: String = "/workspace/ipc/"  -- send_file paths must be under this prefix
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Fire-and-Forget: Message and File Delivery ----
+
+-- An agent sends a text message to a chat.
+-- Non-main groups can only target their own chat.
+-- The host delivers it through the appropriate channel adapter.
+rule AgentSentMessage {
+    when: AgentMcpCall(author, "send_message", chat_jid, text, sender?)
+
+    requires: author.is_main or chat_jid = own_chat_jid(author)
+
+    ensures: nanoclaw.Message.created(
+        chat: Chat{jid: chat_jid},
+        content: text,
+        sent_at: now,
+        is_from_me: true,
+        is_bot_response: true
+    )
+
+    @guidance
+        -- The optional sender param gives the message a named bot identity in the channel
+        -- (e.g. "Researcher" appears as a dedicated Telegram bot). When omitted the default
+        -- NanoClaw bot identity is used.
+}
+
+-- An agent sends a file to a chat.
+-- The file must already exist at a path under /workspace/ipc/ — the only directory
+-- visible to both the container and the host at the same location.
+-- The host resolves the container path to the corresponding host path and validates
+-- it cannot escape the IPC directory via path traversal.
+rule AgentSentFile {
+    when: AgentMcpCall(author, "send_file", chat_jid, ipc_relative_path, caption?)
+
+    requires: author.is_main or chat_jid = own_chat_jid(author)
+    requires: not path_escapes_ipc_dir(ipc_relative_path)
+
+    ensures: FileSent(chat: Chat{jid: chat_jid}, path: ipc_relative_path, caption: caption)
+
+    @guidance
+        -- The host resolves ipc_relative_path against the group's IPC directory on the
+        -- host filesystem. Path traversal (containing "..") is blocked both in the
+        -- container (MCP validation) and on the host (path.relative check).
+}
+
+-- ---- Fire-and-Forget: Task Commands ----
+-- These rules share the same authorization model: non-main groups may only target tasks
+-- that belong to their own group. Authorisation is re-checked on the host from the
+-- source-group identity (the IPC directory name), not from any field inside the file.
+
+-- An agent creates a new scheduled task.
+-- Non-main groups may only schedule tasks targeting their own chat.
+-- The schedule is validated before the IPC file is written (cron, interval, once).
+-- The dispatchDepth is incremented from the current container's depth to prevent loops.
+rule AgentScheduledTask {
+    when: AgentMcpCall(author, "schedule_task", task_id, target_jid, prompt, schedule, context_mode, script?)
+
+    requires: author.is_main or target_jid = own_chat_jid(author)
+    requires: valid_schedule(schedule)
+
+    ensures: scheduling.TaskCreated(
+        group: Group{folder: author.group_folder},
+        target_chat: Chat{jid: target_jid},
+        prompt: prompt,
+        schedule: schedule,
+        context_mode: context_mode,
+        dispatch_depth: author.dispatch_depth + 1
+    )
+}
+
+-- When the main group agent creates a task for a *different* group, it is a delegation.
+-- This emits AgentDelegatedTask so orchestration.allium can open an OrchestrationCycle.
+-- Fires in addition to AgentScheduledTask (same trigger, different requires).
+rule DelegationObserved {
+    when: AgentMcpCall(author, "schedule_task", task_id, target_jid, prompt, schedule, context_mode, script?)
+
+    let sub_group = nanoclaw.Group{chat: nanoclaw.Chat{jid: target_jid}}
+
+    requires: author.is_main
+    requires: target_jid != own_chat_jid(author)
+    requires: exists sub_group
+    requires: valid_schedule(schedule)
+
+    ensures: AgentDelegatedTask(
+        delegating_group_folder: author.group_folder,
+        sub_group: sub_group,
+        task_id: task_id,
+        parent_depth: author.dispatch_depth
+    )
+}
+
+-- An agent pauses a scheduled task.
+rule AgentPausedTask {
+    when: AgentMcpCall(author, "pause_task", task_id)
+
+    let task = scheduling.ScheduledTask{id: task_id}
+
+    requires: exists task
+    requires: author.is_main or task.group.folder = author.group_folder
+
+    ensures: scheduling.TaskPaused(requesting_group: Group{folder: author.group_folder}, task: task)
+}
+
+-- An agent resumes a paused task.
+rule AgentResumedTask {
+    when: AgentMcpCall(author, "resume_task", task_id)
+
+    let task = scheduling.ScheduledTask{id: task_id}
+
+    requires: exists task
+    requires: author.is_main or task.group.folder = author.group_folder
+
+    ensures: scheduling.TaskResumed(requesting_group: Group{folder: author.group_folder}, task: task)
+}
+
+-- An agent cancels a task.
+rule AgentCancelledTask {
+    when: AgentMcpCall(author, "cancel_task", task_id)
+
+    let task = scheduling.ScheduledTask{id: task_id}
+
+    requires: exists task
+    requires: author.is_main or task.group.folder = author.group_folder
+
+    ensures: scheduling.TaskCancelled(requesting_group: Group{folder: author.group_folder}, task: task)
+}
+
+-- An agent updates an existing task's prompt or schedule.
+-- Only provided fields are changed; omitted fields stay the same.
+rule AgentUpdatedTask {
+    when: AgentMcpCall(author, "update_task", task_id, new_prompt?, new_schedule?)
+
+    let task = scheduling.ScheduledTask{id: task_id}
+
+    requires: exists task
+    requires: author.is_main or task.group.folder = author.group_folder
+    requires: new_schedule = null or valid_schedule(new_schedule)
+
+    ensures: scheduling.TaskUpdated(
+        requesting_group: Group{folder: author.group_folder},
+        task: task,
+        new_prompt: new_prompt ?? task.prompt,
+        new_schedule: new_schedule ?? task.schedule
+    )
+}
+
+-- An agent subscribes an RSS feed.
+-- Non-main groups always subscribe for their own chat (target is implicit).
+-- Main groups may subscribe for any registered group's chat via target_group_jid.
+rule AgentSubscribedFeed {
+    when: AgentMcpCall(author, "subscribe_rss", url, schedule, interest?, target_jid?)
+
+    let target = target_jid ?? own_chat_jid(author)
+
+    requires: author.is_main or target = own_chat_jid(author)
+    requires: valid_schedule(schedule)
+
+    ensures: scheduling.FeedSubscribed(
+        group: Group{folder: author.group_folder},
+        url: url,
+        schedule: schedule,
+        interest: interest
+    )
+}
+
+-- An agent removes an RSS feed subscription.
+rule AgentUnsubscribedFeed {
+    when: AgentMcpCall(author, "unsubscribe_rss", feed_id)
+
+    let feed = scheduling.RssFeed{id: feed_id}
+
+    requires: exists feed
+    requires: author.is_main or feed.group.folder = author.group_folder
+
+    ensures: scheduling.FeedUnsubscribed(
+        group: Group{folder: author.group_folder},
+        feed: feed
+    )
+}
+
+-- ---- Fire-and-Forget: Main-Group-Only Commands ----
+
+-- Only the main group agent may register a new group.
+-- is_main cannot be set via IPC — if the group is already registered as main,
+-- that flag is preserved; if not, the new registration has is_main = false.
+rule AgentRegisteredGroup {
+    when: AgentMcpCall(author, "register_group", jid, name, folder, trigger)
+
+    requires: author.is_main
+
+    ensures: nanoclaw.GroupRegistered(
+        chat: Chat{jid: jid},
+        folder: folder,
+        trigger_pattern: trigger,
+        is_main: false,   -- IPC can never elevate a group to main
+        requires_trigger: true
+    )
+
+    @guidance
+        -- The folder name must match the channel prefix convention: "{channel}_{group-name}"
+        -- (e.g. "whatsapp_family-chat"). The host validates the folder name is filesystem-safe.
+        -- If the group was already registered, its is_main flag is preserved (not overwritten).
+}
+
+-- Only the main group agent may change another group's trusted status.
+rule AgentSetGroupTrusted {
+    when: AgentMcpCall(author, "set_group_trusted", jid, trusted)
+
+    requires: author.is_main
+
+    ensures: nanoclaw.Group{chat: Chat{jid: jid}}.is_trusted = trusted
+}
+
+-- Only the main group agent may start a Claude Code remote control session.
+-- The host responds in chat with the session URL.
+rule AgentStartedRemoteControl {
+    when: AgentMcpCall(author, "start_remote_control")
+
+    requires: author.is_main
+
+    ensures: RemoteControlStarted(chat: Chat{jid: own_chat_jid(author)})
+}
+
+-- Only the main group agent may stop the active remote control session.
+rule AgentStoppedRemoteControl {
+    when: AgentMcpCall(author, "stop_remote_control")
+
+    requires: author.is_main
+
+    ensures: RemoteControlStopped()
+}
+
+-- ---- Agent-to-Agent: deliver_result ----
+
+-- A sub-group agent delivers a result to the main group agent.
+-- This injects a synthetic message into the main group's chat, which triggers
+-- the main agent as if it received an inbound message from the sub-group.
+-- The dispatch depth is checked to prevent infinite orchestrator↔sub-agent loops.
+-- Each container run may call deliver_result at most once (enforced in the container).
+rule SubGroupDeliveredResult {
+    when: AgentMcpCall(author, "deliver_result", text)
+
+    requires: not author.is_main
+    requires: author.dispatch_depth < nanoclaw.config.max_dispatch_depth
+
+    let main_group = nanoclaw.Groups where is_main = true .first
+
+    requires: exists main_group
+
+    ensures: nanoclaw.Message.created(
+        chat: main_group.chat,
+        sender_name: author.group_folder,
+        content: text,
+        sent_at: now,
+        is_from_me: false,
+        is_bot_response: false
+    )
+    ensures: SubGroupResultInjected(
+        main_group: main_group,
+        sub_group_folder: author.group_folder,
+        sub_group_depth: author.dispatch_depth,
+        result_text: text
+    )
+
+    @guidance
+        -- The injected message is attributed to the sub-group folder name so the main
+        -- agent knows which sub-agent produced the result.
+        -- SubGroupResultInjected is handled by nanoclaw.PendingDepthSet, which records
+        -- main_group.pending_dispatch_depth = author.dispatch_depth + 1 so the next
+        -- AgentInvoked run for the main group carries the correct depth.
+        -- The one-call guard (deliverResultUsed) is enforced in the container MCP server,
+        -- not re-enforced on the host.
+}
+
+-- ---- Request-Response Queries ----
+-- These use a requestId written in the task file. The host writes a response file
+-- at /workspace/ipc/responses/{requestId}.json; the agent polls until it appears
+-- or the timeout elapses.
+
+-- Common lifecycle for all query types:
+--   1. Agent issues the query (IpcQuery created, status = pending)
+--   2. Host processes it and writes the response file (status → fulfilled)
+--   3. Agent reads and deletes the response file
+--   4. If the host does not respond in time, the agent gives up (status → timed_out)
+
+rule AgentQueriedTranscript {
+    when: AgentMcpCall(author, "query_transcript", request_id, chat_jid, params)
+
+    requires: author.is_main or chat_jid = own_chat_jid(author)
+
+    ensures: IpcQuery.created(
+        author: author,
+        kind: transcript,
+        request_id: request_id,
+        issued_at: now,
+        status: pending
+    )
+    ensures: TranscriptQueryIssued(author: author, request_id: request_id, chat_jid: chat_jid, params: params)
+
+    @guidance
+        -- params includes: from?, to?, limit (1–200, default 50), after_cursor?, include_bot_messages?
+        -- The host returns paginated results with has_more and next_cursor.
+        -- Non-main groups may only query their own chat's transcript.
+}
+
+rule HostFulfilledTranscriptQuery {
+    when: TranscriptQueryIssued(author, request_id, chat_jid, params)
+
+    let q = IpcQuery{request_id: request_id}
+
+    requires: exists q
+    requires: q.status = pending
+
+    ensures: q.status = fulfilled
+    ensures: ResponseFileWritten(request_id: request_id, payload: query_transcript(chat_jid, params))
+}
+
+rule AgentQueriedMemorySearch {
+    when: AgentMcpCall(author, "memory_search", request_id, query, search_params)
+
+    ensures: IpcQuery.created(
+        author: author,
+        kind: memory_search,
+        request_id: request_id,
+        issued_at: now,
+        status: pending
+    )
+    ensures: MemorySearchQueryIssued(author: author, request_id: request_id, query: query, search_params: search_params)
+}
+
+rule HostFulfilledMemorySearchQuery {
+    when: MemorySearchQueryIssued(author, request_id, query, search_params)
+
+    let q = IpcQuery{request_id: request_id}
+
+    requires: exists q
+    requires: q.status = pending
+
+    ensures: q.status = fulfilled
+    ensures: ResponseFileWritten(
+        request_id: request_id,
+        payload: memory.hybrid_search(author.group_folder, query, search_params)
+    )
+
+    @guidance
+        -- If memory search is not enabled (MEMORY_SEARCH_ENABLED = false) or the group
+        -- has no memory manager, the response payload is { error: "Memory search not available" }.
+        -- search_params may include: limit?, min_score?, path_prefix?, source?, include_content?
+}
+
+rule AgentQueriedMemoryGet {
+    when: AgentMcpCall(author, "memory_get", request_id, path, parse_frontmatter?)
+
+    ensures: IpcQuery.created(
+        author: author,
+        kind: memory_get,
+        request_id: request_id,
+        issued_at: now,
+        status: pending
+    )
+    ensures: MemoryGetQueryIssued(author: author, request_id: request_id, path: path, parse_frontmatter: parse_frontmatter ?? true)
+}
+
+rule HostFulfilledMemoryGetQuery {
+    when: MemoryGetQueryIssued(author, request_id, path, parse_frontmatter)
+
+    let q = IpcQuery{request_id: request_id}
+
+    requires: exists q
+    requires: q.status = pending
+
+    ensures: q.status = fulfilled
+    ensures: ResponseFileWritten(
+        request_id: request_id,
+        payload: memory.get_file_content(author.group_folder, path, parse_frontmatter)
+    )
+}
+
+rule AgentQueriedMemoryList {
+    when: AgentMcpCall(author, "memory_list", request_id, list_params)
+
+    ensures: IpcQuery.created(
+        author: author,
+        kind: memory_list,
+        request_id: request_id,
+        issued_at: now,
+        status: pending
+    )
+    ensures: MemoryListQueryIssued(author: author, request_id: request_id, list_params: list_params)
+
+    @guidance
+        -- list_params: path_prefix?, source?, limit?, order_by (mtime|path|size)?, parse_frontmatter?
+        -- parse_frontmatter is expensive; enforces limit ≤ 50 when true.
+}
+
+rule HostFulfilledMemoryListQuery {
+    when: MemoryListQueryIssued(author, request_id, list_params)
+
+    let q = IpcQuery{request_id: request_id}
+
+    requires: exists q
+    requires: q.status = pending
+
+    ensures: q.status = fulfilled
+    ensures: ResponseFileWritten(
+        request_id: request_id,
+        payload: memory.list_files(author.group_folder, list_params)
+    )
+}
+
+-- skill_eval runs a full agent container and grades assertions — main group only.
+-- The host processes the request asynchronously (fire-and-forget on the host side)
+-- and writes the result file when done. The agent waits up to eval_timeout.
+rule AgentQueriedSkillEval {
+    when: AgentMcpCall(author, "skill_eval", request_id, skill_name, case_id, prompt, with_skill, assertions?)
+
+    requires: author.is_main
+
+    ensures: IpcQuery.created(
+        author: author,
+        kind: skill_eval,
+        request_id: request_id,
+        issued_at: now,
+        status: pending
+    )
+    ensures: EvalQueryIssued(
+        author: author,
+        request_id: request_id,
+        skill_name: skill_name,
+        case_id: case_id,
+        prompt: prompt,
+        with_skill: with_skill,
+        assertions: assertions ?? {}
+    )
+
+    @guidance
+        -- The host snapshots the main group workspace for isolation, runs a fresh
+        -- container agent with the given prompt, optionally excluding the named skill,
+        -- then grades the assertions using an LLM grader.
+        -- The response payload includes: status, passed, assertionResults, output, durationMs, totalTokens.
+}
+
+-- A query times out if the host has not written a response file within the timeout window.
+rule IpcQueryTimedOut {
+    when: q: IpcQuery.issued_at + query_timeout_for(q.kind) <= now
+
+    requires: q.status = pending
+
+    ensures: q.status = timed_out
+}
+
+-- ---- Read-Only Snapshot Files ----
+-- The host writes a set of JSON snapshot files into /workspace/ipc/ before the
+-- agent starts. Agents read these directly from disk (no IPC round-trip needed).
+
+-- @guidance
+--   Snapshot files written by the host into the mounted IPC volume:
+--
+--   current_tasks.json   — array of all active/paused ScheduledTask records visible to this group.
+--                          Used by list_tasks (main: all tasks; non-main: own group only).
+--
+--   rss_feeds.json       — array of all RssFeed records visible to this group.
+--                          Used by list_rss_feeds (main: all feeds; non-main: own group only).
+--
+--   available_groups.json — array of all registered groups with name, folder, JID.
+--                           Used by register_group to find a target JID.
+--                           Main group only; non-main groups do not receive this file.
+--
+--   nanoclaw_meta.json   — host metadata: { webUiBaseUrl? }.
+--                          Used by get_file_url to build dashboard links.
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Non-main groups may only send messages or files to their own chat.
+invariant NonMainGroupTargetsOwnChat {
+    for q in IpcQueries:
+        not q.author.is_main implies q.kind != skill_eval
+}
+
+-- Only sub-groups (non-main) may call deliver_result.
+invariant DeliverResultSubGroupOnly {
+    -- Encoded in rule SubGroupDeliveredResult: requires not author.is_main.
+    -- Restated here to make the constraint explicit as an invariant.
+    for m in nanoclaw.Messages where sender_name != null:
+        -- If the sender_name is a group folder (i.e. came from deliver_result),
+        -- the target chat must be the main group's chat.
+        is_deliver_result_message(m) implies is_main_group_chat(m.chat)
+}
+
+-- skill_eval is restricted to the main group.
+invariant SkillEvalMainGroupOnly {
+    for q in IpcQueries:
+        q.kind = skill_eval implies q.author.is_main
+}
+
+-- A query's dispatch depth never exceeds the system limit.
+invariant QueryDispatchDepthBounded {
+    for q in IpcQueries:
+        current_dispatch_depth(q.author) < nanoclaw.config.max_dispatch_depth
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "list_tasks / list_rss_feeds read snapshot files directly from disk — should these be modelled as reads against current spec state instead, or is the snapshot-file pattern a domain concept worth preserving?"
+open question "deliver_result one-call guard is enforced in the container process (in-memory flag) — should this be an entity-level constraint in the spec, or is the container-process boundary sufficient?"
+open question "Brave Search and search_zotero are conditionally available — should their availability conditions (BRAVE_API_KEY present, /workspace/group/zotero-md exists) be modelled as config flags?"

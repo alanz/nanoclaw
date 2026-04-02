@@ -1,0 +1,227 @@
+-- allium: 3
+-- orchestration.allium
+--
+-- Agent orchestration: the complete lifecycle of a main-group agent delegating work
+-- to a sub-group agent and receiving the result back.
+--
+-- Scope: OrchestrationCycle entity, delegation rules, result delivery, depth enforcement
+-- Includes: cycle creation, running, result delivery, abandonment (no-delivery, cancel, timeout)
+-- Excludes:
+--   - Task scheduling mechanics (see scheduling.allium)
+--   - IPC/MCP wire protocol (see ipc.allium)
+--   - Core agent session lifecycle (see nanoclaw.allium)
+
+use "./nanoclaw.allium" as nanoclaw
+use "./scheduling.allium" as scheduling
+use "./ipc.allium" as ipc
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- One complete delegation round-trip: main group assigns work to a sub-group and
+-- the sub-group delivers a result back.
+-- A cycle is opened when the main agent calls schedule_task targeting a different group.
+-- It closes (returned or abandoned) when the sub-group either delivers a result or exits
+-- without doing so.
+entity OrchestrationCycle {
+    delegating_group: nanoclaw.Group    -- always the main group
+    sub_group: nanoclaw.Group           -- the group that will execute the task
+    task_id: String                     -- ID of the delegated ScheduledTask
+    parent_depth: Integer               -- dispatch_depth of the delegating session
+    sub_depth: Integer                  -- dispatch_depth the sub-group runs at
+    result: String?                     -- payload from deliver_result; null until returned
+    delegated_at: Timestamp
+    closed_at: Timestamp?
+    status: delegated | running | returned | abandoned
+
+    -- Derived
+    is_overdue: status = running and now - delegated_at > config.cycle_timeout
+
+    transitions status {
+        delegated -> running            -- task fired; sub-group container started
+        delegated -> abandoned          -- task cancelled before it ran
+        running -> returned             -- sub-group called deliver_result
+        running -> abandoned            -- sub-group exited without deliver_result, or timed out
+        terminal: returned
+        terminal: abandoned
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    cycle_timeout: Duration = 30.minutes  -- running cycles older than this are abandoned
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Cycle Opening ----
+
+-- The main group agent creates a task for a sub-group.
+-- ipc.DelegationObserved emits AgentDelegatedTask for each such task creation.
+rule CycleCreated {
+    when: AgentDelegatedTask(delegating_group_folder, sub_group, task_id, parent_depth)
+
+    let delegating_group = nanoclaw.Group{folder: delegating_group_folder}
+
+    requires: exists delegating_group
+    requires: delegating_group.is_main
+    requires: sub_group != delegating_group
+    requires: parent_depth + 1 < nanoclaw.config.max_dispatch_depth
+
+    ensures: OrchestrationCycle.created(
+        delegating_group: delegating_group,
+        sub_group: sub_group,
+        task_id: task_id,
+        parent_depth: parent_depth,
+        sub_depth: parent_depth + 1,
+        delegated_at: now,
+        status: delegated
+    )
+}
+
+-- ---- Cycle Progression ----
+
+-- The delegated task fires and the sub-group container starts.
+rule CycleBegan {
+    when: scheduling.TaskAgentStarted(task, conversation_session, dispatch_depth)
+
+    let cycle = OrchestrationCycle{task_id: task.id}
+
+    requires: exists cycle
+    requires: cycle.status = delegated
+
+    ensures: cycle.status = running
+}
+
+-- The sub-group calls deliver_result; the result text is stored and the cycle succeeds.
+rule CycleReturned {
+    when: ipc.SubGroupResultInjected(main_group, sub_group_folder, sub_group_depth, result_text)
+
+    let sub_group = nanoclaw.Group{folder: sub_group_folder}
+    let cycle = OrchestrationCycle{sub_group: sub_group}
+
+    requires: exists sub_group
+    requires: exists cycle
+    requires: cycle.status = running
+    requires: cycle.sub_depth = sub_group_depth
+
+    ensures: cycle.result = result_text
+    ensures: cycle.status = returned
+    ensures: cycle.closed_at = now
+}
+
+-- ---- Cycle Abandonment ----
+
+-- The task's agent completed without calling deliver_result.
+-- If deliver_result was called, CycleReturned would have already fired (status = returned),
+-- so this rule only fires for genuine no-delivery completions.
+rule CycleAbandonedNoDelivery {
+    when: scheduling.TaskAgentCompleted(task, result)
+
+    let cycle = OrchestrationCycle{task_id: task.id}
+
+    requires: exists cycle
+    requires: cycle.status = running
+
+    ensures: cycle.status = abandoned
+    ensures: cycle.closed_at = now
+
+    @guidance
+        -- A sub-group agent may legitimately choose not to call deliver_result —
+        -- for example, a fire-and-forget background task where no reply is expected.
+        -- In that case this rule fires and closes the cycle as abandoned.
+        -- The fact that it is abandoned does not indicate failure; it reflects that
+        -- no result was injected into the main group's message queue.
+}
+
+-- The task was cancelled (via cancel_task IPC) before it ran.
+rule CycleAbandonedCancelled {
+    when: scheduling.TaskCancelled(requesting_group, task)
+
+    let cycle = OrchestrationCycle{task_id: task.id}
+
+    requires: exists cycle
+    requires: cycle.status = delegated
+
+    ensures: cycle.status = abandoned
+    ensures: cycle.closed_at = now
+}
+
+-- A running cycle that has not produced a result within cycle_timeout is abandoned.
+rule CycleTimedOut {
+    when: cycle: OrchestrationCycle.is_overdue
+
+    requires: cycle.status = running
+
+    ensures: cycle.status = abandoned
+    ensures: cycle.closed_at = now
+
+    @guidance
+        -- A cycle can time out if the sub-group container crashes, is killed, or
+        -- simply takes longer than cycle_timeout to run. The main group will not
+        -- receive a result delivery for a timed-out cycle.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- sub_depth is always exactly one greater than parent_depth.
+invariant SubDepthIsParentPlusOne {
+    for c in OrchestrationCycles:
+        c.sub_depth = c.parent_depth + 1
+}
+
+-- No cycle is created at or beyond the dispatch depth limit.
+invariant CycleDepthBounded {
+    for c in OrchestrationCycles:
+        c.sub_depth < nanoclaw.config.max_dispatch_depth
+}
+
+-- Delegation always flows from the registered main group.
+invariant DelegationAlwaysFromMain {
+    for c in OrchestrationCycles:
+        c.delegating_group.is_main
+}
+
+-- A group is never both the delegating group and the sub-group in the same cycle.
+invariant NoCycleSelfDelegation {
+    for c in OrchestrationCycles:
+        c.delegating_group != c.sub_group
+}
+
+-- At most one running cycle per sub-group at a time.
+-- (The sub-group can run at most one agent session at a time; two simultaneous
+-- delegations to the same sub-group cannot both be running concurrently.)
+invariant OneRunningCyclePerSubGroup {
+    for g in nanoclaw.Groups:
+        OrchestrationCycles where sub_group = g and status = running .count <= 1
+}
+
+-- A cycle carries a result only when it has returned.
+invariant ResultPresentOnlyWhenReturned {
+    for c in OrchestrationCycles:
+        c.result != null implies c.status = returned
+}
+
+-- A closed_at timestamp is present for terminal cycles and absent for live ones.
+invariant ClosedAtPresentWhenTerminal {
+    for c in OrchestrationCycles:
+        c.status in { returned, abandoned } implies c.closed_at != null
+    for c in OrchestrationCycles:
+        c.status in { delegated, running } implies c.closed_at = null
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Should a sub-group be able to open its own OrchestrationCycle by scheduling a task for yet another group? Currently only main can delegate (ipc.allium auth), but if that restriction is ever relaxed this spec would need a generalised delegating_group model."
+open question "Chained delegation: if the main group at depth 2 (re-invoked after a cycle) delegates again, should this be a new top-level cycle or a child cycle? The current model creates independent cycles; a parent-child relationship is not captured."
+open question "Should CycleAbandonedNoDelivery be a warning condition that the main group is notified of, or is silent abandonment always acceptable?"

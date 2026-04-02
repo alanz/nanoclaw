@@ -1,0 +1,325 @@
+-- allium: 3
+-- scheduling.allium
+--
+-- NanoClaw scheduled tasks and RSS monitoring.
+-- Agents can create recurring or one-time tasks that invoke the agent on a schedule.
+-- Groups can subscribe to RSS feeds whose new items are delivered by the agent.
+--
+-- Scope: task scheduling and RSS feed monitoring
+-- Includes: scheduled tasks (cron/interval/once), RSS feeds, agent-initiated task management
+-- Excludes:
+--   - Core message routing (see nanoclaw.allium)
+--   - Memory indexing (see memory.allium)
+
+use "./nanoclaw.allium" as nanoclaw
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- A schedule specification: either a cron expression, a repeat interval, or a one-time timestamp.
+value Schedule {
+    type: ScheduleType
+    value: String                       -- cron expr ("0 9 * * 1-5"), interval ms, or ISO timestamp
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum ScheduleType { cron | interval | once }
+
+-- Whether a task uses the group's persisted conversation session or starts fresh each run.
+enum ContextMode { isolated | group }
+
+enum TaskStatus { active | paused | completed }
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A recurring or one-time agent invocation for a group, running on a schedule.
+-- Tasks can be created by agents (via IPC) or through the web UI.
+entity ScheduledTask {
+    group: nanoclaw.Group
+    target_chat: nanoclaw.Chat          -- where to deliver output
+    prompt: String                      -- instruction sent to the agent
+    schedule: Schedule
+    context_mode: ContextMode
+    status: TaskStatus
+    next_run: Timestamp?                -- null when completed
+    last_run: Timestamp?
+    last_result: String?
+    dispatch_depth: Integer             -- nesting level; prevents agent-to-agent loops
+    created_at: Timestamp
+
+    -- Derived
+    is_due: status = active and next_run != null and next_run <= now
+
+    transitions status {
+        active -> paused
+        paused -> active
+        active -> completed
+        paused -> completed
+        terminal: completed
+    }
+}
+
+-- A subscribed RSS feed that delivers new items to a group's chat on a schedule.
+entity RssFeed {
+    group: nanoclaw.Group
+    target_chat: nanoclaw.Chat
+    url: String
+    schedule: Schedule
+    interest: String?                   -- optional focus prompt: "summarise posts about AI safety"
+    next_check: Timestamp
+    seen_item_ids: Set<String>          -- GUIDs of already-delivered items (capped to prevent unbounded growth)
+    created_at: Timestamp
+}
+
+-- A single item from an RSS feed that has been delivered to the target chat.
+-- Recorded to prevent re-delivery.
+entity DeliveredFeedItem {
+    feed: RssFeed
+    guid: String
+    delivered_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    task_poll_interval: Duration = 60.seconds
+    rss_poll_interval: Duration = 1.hour
+    max_seen_guids: Integer = 500       -- cap on seen_item_ids per feed
+    max_dispatch_depth: Integer = 5
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Task Lifecycle ----
+
+-- A new scheduled task is created by an agent (via IPC) or through the web UI.
+-- Non-main groups can only create tasks targeting their own chat.
+rule TaskCreated {
+    when: CreateTask(group, target_chat, prompt, schedule, context_mode, dispatch_depth)
+
+    requires: group.is_main or target_chat = group.chat
+    requires: dispatch_depth < config.max_dispatch_depth
+
+    let next_run = compute_next_run(schedule, now)
+
+    ensures: ScheduledTask.created(
+        group: group,
+        target_chat: target_chat,
+        prompt: prompt,
+        schedule: schedule,
+        context_mode: context_mode,
+        status: active,
+        next_run: next_run,
+        dispatch_depth: dispatch_depth,
+        created_at: now
+    )
+}
+
+-- A due task invokes the agent with its prompt when a concurrency slot is free.
+-- If context_mode is group, the group's existing conversation session is reused.
+rule TaskExecuted {
+    when: task: ScheduledTask.is_due
+
+    requires: task.status = active
+    requires: nanoclaw.AgentSessions where status = active .count < nanoclaw.config.max_concurrent_agents
+
+    ensures: task.last_run = now
+    ensures: TaskAgentStarted(
+        task: task,
+        conversation_session: if task.context_mode = group: task.group.session else: null,
+        dispatch_depth: task.dispatch_depth
+    )
+
+    @guidance
+        -- task.dispatch_depth is passed to the container as NANOCLAW_DISPATCH_DEPTH so
+        -- the MCP server knows its depth in the orchestration chain.
+        -- For tasks created via schedule_task from an agent, dispatch_depth = caller's depth + 1
+        -- (set at creation time in ipc.allium: AgentScheduledTask).
+        -- For tasks created via the web UI or directly, dispatch_depth = 0.
+        -- Task agent containers have a shorter close delay (10 seconds after output)
+        -- compared to message-triggered sessions (which idle for up to idle_timeout).
+}
+
+-- When all agent slots are occupied, a due task is enqueued with kind = task.
+-- Because kind is ordered task < message, tasks are drained before queued messages
+-- when a slot frees (see nanoclaw.AgentSlotFreed).
+rule TaskQueued {
+    when: task: ScheduledTask.is_due
+
+    requires: task.status = active
+    requires: nanoclaw.AgentSessions where status = active .count >= nanoclaw.config.max_concurrent_agents
+    requires: not exists nanoclaw.WaitingGroup{group: task.group}
+
+    ensures: nanoclaw.WaitingGroup.created(
+        group: task.group,
+        queued_at: now,
+        kind: task
+    )
+    ensures: task.last_run = now      -- mark attempted so next_run advances normally
+}
+
+-- After a task runs, it is rescheduled or completed depending on schedule type.
+rule TaskRescheduled {
+    when: TaskAgentCompleted(task, result)
+
+    let next_run = compute_next_run(task.schedule, task.last_run)
+
+    requires: task.schedule.type in { cron, interval }
+
+    ensures: task.last_result = result
+    ensures: task.next_run = next_run
+}
+
+rule TaskCompleted {
+    when: TaskAgentCompleted(task, result)
+
+    requires: task.schedule.type = once
+
+    ensures: task.last_result = result
+    ensures: task.next_run = null
+    ensures: task.status = completed
+}
+
+-- ---- Task Management (agent-initiated via IPC) ----
+
+-- Non-main groups can only manage tasks belonging to their own group.
+rule TaskPaused {
+    when: PauseTask(requesting_group, task)
+
+    requires: requesting_group.is_main or task.group = requesting_group
+    requires: task.status = active
+
+    ensures: task.status = paused
+}
+
+rule TaskResumed {
+    when: ResumeTask(requesting_group, task)
+
+    requires: requesting_group.is_main or task.group = requesting_group
+    requires: task.status = paused
+
+    ensures: task.status = active
+}
+
+rule TaskCancelled {
+    when: CancelTask(requesting_group, task)
+
+    requires: requesting_group.is_main or task.group = requesting_group
+    requires: task.status in { active, paused }
+
+    ensures: task.status = completed
+    ensures: task.next_run = null
+}
+
+rule TaskUpdated {
+    when: UpdateTask(requesting_group, task, new_prompt, new_schedule)
+
+    requires: requesting_group.is_main or task.group = requesting_group
+    requires: task.status in { active, paused }
+
+    let next_run = compute_next_run(new_schedule, now)
+
+    ensures: task.prompt = new_prompt
+    ensures: task.schedule = new_schedule
+    ensures: task.next_run = next_run
+}
+
+-- ---- RSS Feed Lifecycle ----
+
+-- Non-main groups can only subscribe feeds targeting their own chat.
+rule FeedSubscribed {
+    when: SubscribeFeed(group, url, schedule, interest)
+
+    requires: group.is_main or true     -- RSS feeds always target the subscribing group's chat
+
+    let next_check = compute_next_run(schedule, now)
+
+    ensures: RssFeed.created(
+        group: group,
+        target_chat: group.chat,
+        url: url,
+        schedule: schedule,
+        interest: interest,
+        next_check: next_check,
+        seen_item_ids: {},
+        created_at: now
+    )
+}
+
+-- When a feed is due for checking, its URL is fetched and new items are identified.
+-- The ensures clause updates next_check to a future time, preventing immediate re-firing.
+rule FeedChecked {
+    when: feed: RssFeed.next_check <= now
+
+    let new_items = fetch_new_items(feed.url, feed.seen_item_ids)
+    let next_check = compute_next_run(feed.schedule, now)
+
+    ensures: feed.next_check = next_check
+    ensures:
+        for item in new_items:
+            FeedItemAvailable(feed: feed, item: item)
+
+    @guidance
+        -- seen_item_ids is capped at max_seen_guids. Items beyond the cap
+        -- are trimmed from the oldest end to prevent unbounded growth.
+}
+
+-- Each new feed item is delivered to the target chat by invoking the agent.
+-- If an interest prompt is set, the agent uses it to filter or summarise the item.
+rule FeedItemDelivered {
+    when: FeedItemAvailable(feed, item)
+
+    ensures: DeliveredFeedItem.created(
+        feed: feed,
+        guid: item.guid,
+        delivered_at: now
+    )
+    ensures: feed.seen_item_ids.add(item.guid)
+    ensures: FeedAgentStarted(feed: feed, item: item)
+}
+
+rule FeedUnsubscribed {
+    when: UnsubscribeFeed(group, feed)
+
+    requires: group.is_main or feed.group = group
+
+    ensures: not exists feed
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Non-main groups can only schedule tasks targeting their own chat.
+invariant TaskTargetAuthorisation {
+    for t in ScheduledTasks:
+        not t.group.is_main implies t.target_chat = t.group.chat
+}
+
+-- Tasks respect the dispatch depth limit to prevent infinite agent-to-agent loops.
+invariant TaskDispatchDepthBounded {
+    for t in ScheduledTasks:
+        t.dispatch_depth < config.max_dispatch_depth
+}
+
+-- Active tasks always have a next_run timestamp.
+invariant ActiveTasksHaveNextRun {
+    for t in ScheduledTasks:
+        t.status = active implies t.next_run != null
+}
+
+-- Completed tasks never have a next_run timestamp.
+invariant CompletedTasksHaveNoNextRun {
+    for t in ScheduledTasks:
+        t.status = completed implies t.next_run = null
+}

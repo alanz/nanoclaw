@@ -1,0 +1,674 @@
+-- allium: 3
+-- nanoclaw.allium
+--
+-- NanoClaw: personal Claude assistant
+-- Routes messages from chat channels to Claude AI agents running in isolated per-group workspaces.
+-- Each group has its own conversation session, task queue, memory index, and access controls.
+--
+-- Scope: core routing, group management, agent sessions, IPC from agents
+-- Includes: groups, messages, agent invocation, session persistence, IPC message delivery
+-- Excludes:
+--   - Scheduled tasks and RSS feeds (see scheduling.allium)
+--   - Memory indexing and search (see memory.allium)
+--   - Channel implementation details (Telegram wire protocol, DeltaChat RPC)
+--   - Container runtime mechanics (Docker vs Apple Container)
+--   - Credential proxy (infrastructure: agents never see real API keys)
+--   - Web dashboard (operational UI only)
+--   - Zotero sync (external library integration)
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- A contact in any messaging channel.
+external entity Contact {
+    id: String
+    name: String
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum ChannelType { telegram | deltachat | emacs }
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A chat conversation discovered from any channel.
+-- Chats exist regardless of registration; only registered chats trigger agent processing.
+entity Chat {
+    jid: String                         -- unique across all channels: "tg:123", "dc:456"
+    name: String
+    channel: ChannelType
+    is_group: Boolean
+    last_message_at: Timestamp?
+
+    -- Relationships
+    messages: Message with chat = this
+    group: Group with chat = this
+
+    -- Projections
+    unprocessed_messages: messages where is_bot_response = false and content != ""
+
+    -- Derived
+    is_registered: exists group
+}
+
+-- A message stored in a chat, either inbound from a contact or outbound from the agent.
+-- Bot messages are stored but excluded from the context sent to the agent.
+-- The rendered_content field holds the enriched form delivered to the agent prompt.
+entity Message {
+    chat: Chat
+    sender: Contact?                    -- null for agent-generated outbound messages
+    sender_name: String?
+    content: String
+    rendered_content: String            -- enriched form: quoted reply prefix + media labels + edit marker
+    sent_at: Timestamp
+    is_from_me: Boolean
+    is_bot_response: Boolean            -- true for agent-generated replies
+    is_edit: Boolean                    -- true when message replaces an earlier message
+}
+
+-- A registered chat group with an isolated agent workspace.
+-- Registration is the prerequisite for agent processing; unregistered chats are metadata only.
+entity Group {
+    chat: Chat
+    folder: String                      -- workspace directory name: "main", "research", etc.
+    trigger_pattern: String?            -- regex; absent means no trigger required
+    is_main: Boolean                    -- elevated: can message any chat, no trigger required
+    is_trusted: Boolean                 -- session commands accepted from any sender; revoked if group gains members
+    requires_trigger: Boolean           -- when true, trigger_pattern must match to invoke agent
+    added_at: Timestamp
+    last_agent_at: Timestamp?           -- cursor: last time agent processed messages for this group
+    last_member_count: Integer          -- member count as of last trust check; used to detect new members
+    pending_dispatch_depth: Integer?    -- set when a sub-group delivers a result; consumed at next agent run start
+
+    -- Relationships
+    session: ConversationSession with group = this
+    agent_session: AgentSession with group = this
+
+    -- Derived
+    triggers_on_all_messages: not requires_trigger or is_main
+
+    invariant MainGroupHasNoTriggerRequirement {
+        is_main implies not requires_trigger
+    }
+}
+
+-- Persistent conversation state enabling continuity across agent invocations.
+-- Stores the Claude conversation ID so the agent can resume prior context.
+entity ConversationSession {
+    group: Group
+    session_id: String
+    status: active | stale | cleared
+
+    transitions status {
+        active -> stale             -- conversation file missing; agent started fresh
+        stale -> active             -- new run succeeded; session restored
+        active -> cleared           -- user issued /clear-session
+        stale -> cleared            -- user cleared a stale session
+        terminal: cleared
+    }
+}
+
+-- A group whose agent invocation is queued because the system is at capacity.
+-- The group will be retried in priority order once an agent slot frees.
+entity WaitingGroup {
+    group: Group
+    queued_at: Timestamp
+    kind: message | task              -- tasks are drained before messages
+}
+
+-- A currently running agent processing messages for a group.
+-- Multiple messages can be piped into an active session rather than starting a new one.
+-- Sessions close gracefully after an idle period or when interrupted.
+entity AgentSession {
+    group: Group
+    started_at: Timestamp
+    last_output_at: Timestamp?
+    retry_count: Integer
+    dispatch_depth: Integer             -- nesting level from orchestration chain; 0 for user-initiated runs
+    status: active | closing | closed
+
+    -- Derived
+    is_idle: last_output_at != null and now - last_output_at > config.idle_timeout
+
+    transitions status {
+        active -> closing           -- graceful shutdown (idle timeout or /esc)
+        active -> closed            -- failure: retries exhausted or gave up
+        closing -> closed           -- process exited after receiving close signal
+        terminal: closed
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    idle_timeout: Duration = 5.minutes
+    max_concurrent_agents: Integer = 5
+    max_messages_per_prompt: Integer = 10
+    max_agent_retries: Integer = 5
+    max_dispatch_depth: Integer = 5     -- prevents infinite agent-to-agent loops
+    message_debounce_window: Duration = 1.5.seconds
+    edit_rerender_window: Duration = 1.hour  -- edits outside this window are treated as new messages
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Message Ingestion ----
+
+-- Every inbound message is stored, regardless of whether the chat is registered.
+-- rendered_content is built from content by applying enrichment rules:
+--   • Quoted replies prepend "[Replying to {author}: "{excerpt}"]"
+--   • Media / file attachments are labelled: "[Image: /workspace/ipc/attachments/{filename}]", etc.
+--   • Edits within the edit_rerender_window are stored with an "[Message edited]" marker.
+rule MessageReceived {
+    when: InboundMessage(chat, sender, sender_name, content, sent_at, quoted_message?, attachments?)
+
+    let rendered = render_message(content, quoted_message, attachments)
+
+    ensures: Message.created(
+        chat: chat,
+        sender: sender,
+        sender_name: sender_name,
+        content: content,
+        rendered_content: rendered,
+        sent_at: sent_at,
+        is_from_me: false,
+        is_bot_response: false,
+        is_edit: false
+    )
+    ensures: chat.last_message_at = sent_at
+
+    @guidance
+        -- render_message prepends a "[Replying to …]" prefix for quoted replies,
+        -- converts each attachment path to a labelled bracket token,
+        -- and passes plain text through unchanged.
+}
+
+-- An edited message replaces an earlier stored message if the edit arrives within
+-- edit_rerender_window of the original. Outside that window it is stored as a new message.
+rule MessageEdited {
+    when: InboundMessageEdit(chat, sender, original_message, new_content, sent_at)
+
+    requires: sent_at - original_message.sent_at <= config.edit_rerender_window
+
+    let rendered = render_message(new_content, null, null)
+
+    ensures: original_message.content = new_content
+    ensures: original_message.rendered_content = rendered + " [Message edited]"
+    ensures: original_message.is_edit = true
+
+    @guidance
+        -- Edits update the existing Message record in place so the agent sees
+        -- the corrected text in context rather than both versions.
+}
+
+-- Rapid consecutive messages within the debounce window are coalesced: the second
+-- (and subsequent) arrivals are stored normally but the agent invocation is deferred
+-- until the window expires with no further messages.
+--
+-- This is modelled as a constraint on AgentInvoked rather than a separate entity:
+-- the requires clause below captures "no message arrived within the last debounce window".
+-- The scheduling layer is responsible for re-checking NewMessagesAvailable after the window.
+
+-- ---- Trust Revocation ----
+
+-- When a group chat gains new members the is_trusted flag is revoked to prevent
+-- an unknown member from issuing session commands.
+rule TrustRevoked {
+    when: ChatMemberCountChanged(group, new_count)
+
+    requires: group.is_trusted
+    requires: new_count > group.last_member_count
+
+    ensures: group.is_trusted = false
+    ensures: group.last_member_count = new_count
+
+    @guidance
+        -- The channel adapter emits ChatMemberCountChanged whenever a member joins.
+        -- is_trusted can only be re-enabled through an explicit admin action outside
+        -- the scope of this spec.
+}
+
+-- When member count decreases or stays the same, only the cursor is updated.
+rule MemberCountUpdated {
+    when: ChatMemberCountChanged(group, new_count)
+
+    requires: new_count <= group.last_member_count
+
+    ensures: group.last_member_count = new_count
+}
+
+-- ---- Session Commands ----
+
+-- Session management commands are intercepted and handled before trigger checking.
+-- In trusted or main groups, any sender may issue them; otherwise the sender must be authorised.
+rule SessionCommandIntercepted {
+    when: SessionCommand(group, sender, command)
+
+    requires: command in { compact, reset, clear_session }
+    requires: group.is_main or group.is_trusted or sender_is_authorised(sender, group)
+
+    ensures: SessionCommandApplied(group: group, command: command)
+}
+
+rule SessionCleared {
+    when: SessionCommandApplied(group, command)
+
+    let cs = ConversationSession{group: group}
+
+    requires: command = clear_session
+    requires: exists cs
+    requires: cs.status in { active, stale }
+
+    ensures: cs.status = cleared
+}
+
+-- ---- Agent Invocation ----
+
+-- New unprocessed messages in a registered group invoke the agent when:
+-- (a) no agent is currently active for the group,
+-- (b) the trigger condition is satisfied (or the group triggers on all messages),
+-- (c) a debounce window has elapsed since the last inbound message (no rapid follow-ups pending), and
+-- (d) a concurrency slot is free.
+rule AgentInvoked {
+    when: NewMessagesAvailable(group)
+
+    let new_messages = group.chat.messages where sent_at > group.last_agent_at ?? group.added_at
+                                               and is_bot_response = false
+                                               and content != ""
+    let depth = group.pending_dispatch_depth ?? 0
+
+    requires: new_messages.count > 0
+    requires: group.triggers_on_all_messages
+              or any_matches_trigger(new_messages, group.trigger_pattern)
+    requires: not exists group.agent_session
+    requires: depth < config.max_dispatch_depth
+    requires: now - new_messages.last(m => m.sent_at).sent_at >= config.message_debounce_window
+    requires: AgentSessions where status = active .count < config.max_concurrent_agents
+
+    ensures: AgentSession.created(
+        group: group,
+        started_at: now,
+        retry_count: 0,
+        dispatch_depth: depth,
+        status: active
+    )
+    ensures: group.pending_dispatch_depth = null
+    ensures: group.last_agent_at = now
+    ensures: AgentStarted(
+        group: group,
+        messages: new_messages,
+        conversation_session: group.session
+    )
+
+    @guidance
+        -- The conversation_session provides the Claude conversation ID so the
+        -- agent can resume prior context. Absent or cleared sessions start fresh.
+        -- The debounce_window check defers invocation until the user stops typing.
+        -- pending_dispatch_depth is set by SubGroupDeliveredResult (ipc.allium) when a
+        -- sub-group delivers a result; it is consumed here and cleared so subsequent
+        -- user-initiated runs start at depth 0.
+}
+
+-- When the system is at capacity and a group has new messages, it is queued.
+-- The group waits in the queue until a slot frees (see AgentSlotFreed).
+rule GroupQueued {
+    when: NewMessagesAvailable(group)
+
+    let new_messages = group.chat.messages where sent_at > group.last_agent_at ?? group.added_at
+                                               and is_bot_response = false
+                                               and content != ""
+
+    requires: new_messages.count > 0
+    requires: group.triggers_on_all_messages
+              or any_matches_trigger(new_messages, group.trigger_pattern)
+    requires: not exists group.agent_session
+    requires: AgentSessions where status = active .count >= config.max_concurrent_agents
+    requires: not exists WaitingGroup{group: group}
+
+    ensures: WaitingGroup.created(
+        group: group,
+        queued_at: now,
+        kind: message
+    )
+}
+
+-- When an agent slot frees, the highest-priority waiting group is dequeued and invoked.
+-- Tasks (kind = task) are drained before messages (kind = message).
+-- Among equal kinds, earliest queued_at wins (FIFO).
+rule AgentSlotFreed {
+    when: session: AgentSession.status transitions_to closed
+
+    let next = next_waiting_group(WaitingGroups)  -- task kind before message; FIFO within kind
+
+    requires: exists next
+
+    ensures: not exists next
+    ensures: NewMessagesAvailable(next.group)
+
+    @guidance
+        -- next_waiting_group selects the WaitingGroup with kind = task first (tasks
+        -- have higher priority than messages), then the earliest queued_at within that kind.
+        -- Emitting NewMessagesAvailable re-triggers AgentInvoked for the dequeued group.
+        -- Tasks queued from the scheduler set kind = task when creating their WaitingGroup entry.
+}
+
+-- When the agent is already active and new messages arrive, they are piped into
+-- the running session instead of starting a new one.
+rule AgentInputPiped {
+    when: NewMessagesAvailable(group)
+
+    let new_messages = group.chat.messages where sent_at > group.last_agent_at ?? group.added_at
+                                               and is_bot_response = false
+                                               and content != ""
+
+    requires: new_messages.count > 0
+    requires: exists group.agent_session
+    requires: group.agent_session.status = active
+    requires: not new_messages.any(m => is_escape_command(m.content))
+
+    ensures: AgentInputQueued(session: group.agent_session, messages: new_messages)
+    ensures: group.last_agent_at = now
+}
+
+-- /esc in a new message while the agent is active interrupts the running session.
+-- The session closes and will be re-invoked with fresh context.
+rule AgentInterrupted {
+    when: NewMessagesAvailable(group)
+
+    let new_messages = group.chat.messages where sent_at > group.last_agent_at ?? group.added_at
+                                               and content != ""
+
+    requires: exists group.agent_session
+    requires: group.agent_session.status = active
+    requires: new_messages.any(m => is_escape_command(m.content))
+
+    ensures: group.agent_session.status = closing
+}
+
+-- ---- Agent Output ----
+
+-- Agent output is delivered to the chat and stored as a bot message.
+-- Delivery updates the idle timer, resetting the timeout clock.
+rule AgentResponded {
+    when: AgentOutput(session, text)
+
+    requires: session.status = active
+
+    ensures: Message.created(
+        chat: session.group.chat,
+        content: text,
+        sent_at: now,
+        is_from_me: true,
+        is_bot_response: true
+    )
+    ensures: session.last_output_at = now
+}
+
+-- ---- Agent Session Lifecycle ----
+
+-- An agent session that has produced output but received none for idle_timeout closes.
+rule AgentIdleTimeout {
+    when: session: AgentSession.is_idle
+
+    requires: session.status = active
+
+    ensures: session.status = closing
+
+    @guidance
+        -- Implementation sends a _close sentinel to the agent's stdin, allowing
+        -- it to flush any pending output before exiting.
+}
+
+-- ---- Agent Session Closure ----
+
+-- An agent session that has been signalled to close transitions to closed.
+-- Modelled as immediate for spec clarity; in practice there is a brief drain delay.
+rule AgentSessionClosed {
+    when: session: AgentSession.status transitions_to closing
+
+    requires: session.status = closing
+
+    ensures: session.status = closed
+
+    @guidance
+        -- Implementation sends a _close sentinel to the agent's stdin,
+        -- allowing it to flush any pending output before the process exits.
+}
+
+-- ---- Session Persistence ----
+
+-- When an agent session closes successfully, emit a group-scoped event carrying the new session ID.
+-- This gives downstream ConversationSession rules a direct `group` binding to look up against.
+rule AgentSessionCompletionDispatched {
+    when: AgentSessionCompleted(agent_session, new_session_id)
+
+    requires: agent_session.status = closed
+
+    ensures: GroupAgentCompleted(group: agent_session.group, new_session_id: new_session_id)
+}
+
+-- When an agent session fails because the conversation file is missing, emit a group-scoped event.
+rule AgentSessionStalenessDispatched {
+    when: AgentSessionFailed(agent_session, reason)
+
+    requires: reason = session_not_found
+
+    ensures: GroupSessionStale(group: agent_session.group)
+}
+
+-- A stale conversation session is re-activated when the agent completes a new run.
+rule ConversationSessionReactivated {
+    when: GroupAgentCompleted(group, new_session_id)
+
+    let cs = ConversationSession{group: group}
+
+    requires: exists cs
+    requires: cs.status = stale
+
+    ensures: cs.session_id = new_session_id
+    ensures: cs.status = active
+}
+
+-- An active conversation session receives a refreshed session ID after each successful run.
+rule ConversationSessionRefreshed {
+    when: GroupAgentCompleted(group, new_session_id)
+
+    let cs = ConversationSession{group: group}
+
+    requires: exists cs
+    requires: cs.status = active
+
+    ensures: cs.session_id = new_session_id
+    -- status remains active; no transition needed
+}
+
+-- A new conversation session is created the first time a group's agent completes successfully.
+rule ConversationSessionStarted {
+    when: GroupAgentCompleted(group, new_session_id)
+
+    requires: not exists ConversationSession{group: group}
+
+    ensures: ConversationSession.created(
+        group: group,
+        session_id: new_session_id,
+        status: active
+    )
+}
+
+-- A conversation session becomes stale when the agent cannot find the conversation file on disk.
+rule ConversationSessionBecameStale {
+    when: GroupSessionStale(group)
+
+    let cs = ConversationSession{group: group}
+
+    requires: exists cs
+    requires: cs.status = active
+
+    ensures: cs.status = stale
+}
+
+-- A failed agent session retries with exponential backoff, up to max_agent_retries.
+rule AgentRetried {
+    when: AgentSessionFailed(session, reason)
+
+    requires: session.status = active
+    requires: reason != session_not_found
+    requires: session.retry_count < config.max_agent_retries
+
+    ensures: session.status = closed
+    ensures: AgentSession.created(
+        group: session.group,
+        started_at: now + backoff_delay(session.retry_count),
+        retry_count: session.retry_count + 1,
+        dispatch_depth: session.dispatch_depth,   -- preserve depth across retries
+        status: active
+    )
+}
+
+-- After exhausting retries, the session closes without rescheduling.
+rule AgentGaveUp {
+    when: AgentSessionFailed(session, reason)
+
+    requires: session.status = active
+    requires: reason != session_not_found
+    requires: session.retry_count >= config.max_agent_retries
+
+    ensures: session.status = closed
+}
+
+-- ---- IPC Actions from Agents ----
+
+-- An agent can post messages to chats via IPC.
+-- Main group agents can target any registered chat; others can only target their own group's chat.
+rule AgentPostedMessage {
+    when: AgentPostMessage(group, target_chat, text)
+
+    requires: group.is_main or target_chat = group.chat
+
+    ensures: Message.created(
+        chat: target_chat,
+        content: text,
+        sent_at: now,
+        is_from_me: true,
+        is_bot_response: true
+    )
+}
+
+-- ---- Group Registration ----
+
+rule GroupRegistered {
+    when: GroupRegister(chat, folder, trigger_pattern, is_main, requires_trigger, initial_member_count?)
+
+    requires: not exists Group{chat: chat}
+    requires: not exists Group{folder: folder}
+    requires: is_main implies not requires_trigger
+
+    ensures: Group.created(
+        chat: chat,
+        folder: folder,
+        trigger_pattern: trigger_pattern,
+        is_main: is_main,
+        is_trusted: false,
+        requires_trigger: requires_trigger,
+        last_member_count: initial_member_count ?? 0,
+        added_at: now
+    )
+}
+
+-- ---- Agent Orchestration Cycle ----
+-- See orchestration.allium for the full lifecycle, invariants, and timeout rules.
+-- This section contains only the host-side bridge rules that update Group state.
+
+-- When a sub-group delivers a result, the main group's pending dispatch depth is set.
+-- This is the bridge between ipc.allium's SubGroupDeliveredResult and AgentInvoked.
+-- The ensures clause here mirrors what SubGroupDeliveredResult does on the host side.
+rule PendingDepthSet {
+    when: SubGroupResultInjected(main_group, sub_group_folder, sub_group_depth, result_text)
+
+    requires: exists main_group
+    requires: main_group.is_main
+
+    ensures: main_group.pending_dispatch_depth = sub_group_depth + 1
+
+    @guidance
+        -- SubGroupResultInjected is emitted by ipc.SubGroupDeliveredResult when the host
+        -- processes a deliver_result file. The pending depth is consumed by AgentInvoked
+        -- so the re-triggered main group run carries the correct dispatch depth.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Bot-generated messages are never included in the context sent to the agent.
+-- This prevents the agent from re-processing its own previous replies.
+invariant BotMessagesExcludedFromContext {
+    for chat in Chats:
+        for m in chat.unprocessed_messages:
+            not m.is_bot_response
+}
+
+-- Only one agent session may be active per group at a time.
+invariant OneActiveAgentSessionPerGroup {
+    for g in Groups:
+        AgentSessions where group = g and status = active .count <= 1
+}
+
+-- The total number of active agent sessions across all groups is bounded.
+invariant AgentConcurrencyLimit {
+    AgentSessions where status = active .count <= config.max_concurrent_agents
+}
+
+-- A folder name is unique across all registered groups.
+invariant UniqueFolderNames {
+    for a in Groups:
+        for b in Groups:
+            a != b implies a.folder != b.folder
+}
+
+-- Each chat can be registered as at most one group.
+invariant OneChatPerGroup {
+    for a in Groups:
+        for b in Groups:
+            a != b implies a.chat != b.chat
+}
+
+-- A group appears in the waiting queue at most once.
+invariant AtMostOneWaitingEntryPerGroup {
+    for a in WaitingGroups:
+        for b in WaitingGroups:
+            a != b implies a.group != b.group
+}
+
+-- ---- Workspace Isolation ----
+-- Each group's agent container is mounted with a specific filesystem layout:
+--   • Main group: read-write access to its own folder + read-only project root + read-only shared global folder
+--   • Non-main groups: read-write access to their own folder only + read-only shared global folder
+-- Enforced by the container runner at mount time; captured here as an invariant on the contract.
+--
+-- @guidance
+--   The shared global folder (e.g. groups/global/) contains read-only reference material
+--   accessible to all agents. The project root mount for the main group allows it to read
+--   source files and configuration, but never to write outside its own folder.
+invariant WorkspaceIsolation {
+    for g in Groups:
+        g.is_main implies workspace_mounts(g) includes project_root as read_only
+    for g in Groups:
+        not g.is_main implies workspace_mounts(g) excludes project_root
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Sender authorisation - exact rules for who is an authorised sender in non-trusted, non-main groups?"
+open question "Trigger matching - should trigger_pattern apply to sender name, message content, or both?"

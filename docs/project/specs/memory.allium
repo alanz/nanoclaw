@@ -1,0 +1,200 @@
+-- allium: 3
+-- memory.allium
+--
+-- NanoClaw memory indexing and semantic search.
+-- Each group has an embedded memory index built from markdown and org files in its workspace.
+-- Agents can search memory using natural language queries; results use hybrid vector + keyword scoring.
+--
+-- Scope: memory indexing and retrieval
+-- Includes: file watching, chunking, embedding, hybrid search, FTS fallback
+-- Excludes:
+--   - Core routing (see nanoclaw.allium)
+--   - Embedding provider internals (Gemini API: treated as black box)
+--   - sqlite-vec extension mechanics (implementation detail)
+
+use "./nanoclaw.allium" as nanoclaw
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- A scored search result returned to the querying agent.
+value MemorySearchResult {
+    chunk: MemoryChunk
+    score: Decimal                      -- 0.0 – 1.0; hybrid of vector and keyword scores
+    snippet: String                     -- short excerpt for display
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A file in a group's workspace that is tracked and indexed for semantic search.
+-- Files are re-indexed whenever their content changes.
+entity MemoryFile {
+    group: nanoclaw.Group
+    path: String                        -- absolute path within the workspace
+    content_hash: String
+    indexed_at: Timestamp?              -- null until first successful index
+    status: pending | indexed | removed
+
+    -- Relationships
+    chunks: MemoryChunk with file = this
+
+    -- Derived
+    needs_reindex: indexed_at = null or content_hash != last_indexed_hash(this)
+
+    transitions status {
+        pending -> indexed
+        indexed -> pending              -- file changed; needs re-index
+        indexed -> removed
+        pending -> removed
+        terminal: removed
+    }
+}
+
+-- A contiguous chunk of a memory file, stored with its embedding for vector search.
+-- Chunks overlap slightly to preserve context across boundaries.
+entity MemoryChunk {
+    file: MemoryFile
+    start_line: Integer
+    end_line: Integer
+    content: String
+    indexed_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    chunk_tokens: Integer = 400
+    chunk_overlap_tokens: Integer = 80
+    search_top_k: Integer = 6
+    min_search_score: Decimal = 0.35
+    vector_score_weight: Decimal = 0.7
+    keyword_score_weight: Decimal = 0.3
+    embedding_rpm_limit: Integer = 50   -- requests per minute to embedding provider
+    embedding_tpm_limit: Integer = 15_000
+    embedding_rpd_budget: Integer = 900 -- requests per session day; exhausted → defer to next session
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- File Watching ----
+
+-- A known file has changed content and needs re-indexing.
+-- Covers both the indexed→pending and pending→pending (hash changed again before sync) cases.
+rule FileUpdated {
+    when: WorkspaceFileChanged(group, path, content_hash)
+
+    let file = MemoryFile{group: group, path: path}
+
+    requires: exists file
+    requires: file.status in { pending, indexed }
+
+    ensures: file.content_hash = content_hash
+    ensures: file.status = pending
+}
+
+-- A new file has appeared in the workspace and needs initial indexing.
+rule FileDiscovered {
+    when: WorkspaceFileChanged(group, path, content_hash)
+
+    requires: not exists MemoryFile{group: group, path: path}
+
+    ensures: MemoryFile.created(
+        group: group,
+        path: path,
+        content_hash: content_hash,
+        status: pending
+    )
+}
+
+-- When a file is removed from the workspace, its chunks are deleted and the file is marked removed.
+rule FileRemoved {
+    when: WorkspaceFileRemoved(group, path)
+
+    let file = MemoryFile{group: group, path: path}
+
+    requires: exists file
+    requires: file.status in { pending, indexed }
+
+    ensures: file.status = removed
+    ensures:
+        for chunk in file.chunks:
+            not exists chunk
+
+    @guidance
+        -- FTS index rows and embedding rows for removed chunks are also deleted
+        -- as part of the same operation to keep the search index consistent.
+}
+
+-- ---- Indexing ----
+
+-- A pending file is chunked, embedded, and its chunks stored for search.
+-- Existing chunks for the file are replaced with the new set.
+rule FileSynced {
+    when: file: MemoryFile.status becomes pending
+
+    requires: file.status = pending
+
+    let new_chunks = chunk_file(file.content_hash, config.chunk_tokens, config.chunk_overlap_tokens)
+
+    ensures: file.status = indexed
+    ensures: file.indexed_at = now
+    ensures:
+        for chunk in file.chunks:
+            not exists chunk
+    ensures:
+        for c in new_chunks:
+            MemoryChunk.created(
+                file: file,
+                start_line: c.start_line,
+                end_line: c.end_line,
+                content: c.content,
+                indexed_at: now
+            )
+
+    @guidance
+        -- Embeddings are generated in batches with rate limiting (rpm, tpm, rpd).
+        -- If the daily budget is exhausted the sync is deferred to the next session.
+        -- Embeddings are cached by content hash and reused across groups where possible.
+}
+
+-- ---- Search ----
+
+-- An agent queries its group's memory with a natural language string.
+-- Results are ranked by hybrid vector + keyword score and filtered by min_search_score.
+rule MemorySearched {
+    when: AgentMemorySearch(group, query, top_k?)
+
+    let k = top_k ?? config.search_top_k
+    let results = hybrid_search(group, query, k, config.min_search_score,
+                                config.vector_score_weight, config.keyword_score_weight)
+
+    ensures: MemorySearchCompleted(group: group, query: query, results: results)
+
+    @guidance
+        -- hybrid_search combines vector similarity (sqlite-vec cosine distance)
+        -- and FTS5 keyword match, weighted by vector_score_weight and keyword_score_weight.
+        -- If the vector index is unavailable, falls back to keyword-only search.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Every chunk belongs to an indexed (or pending) file, never a removed one.
+invariant NoChunksForRemovedFiles {
+    for c in MemoryChunks:
+        c.file.status != removed
+}
+
+-- A file's chunks are only present when the file is indexed.
+invariant ChunksPresentOnlyWhenIndexed {
+    for f in MemoryFiles:
+        f.status != indexed implies f.chunks.count = 0
+}

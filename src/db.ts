@@ -74,12 +74,14 @@ function createSchema(database: Database.Database): void {
       title TEXT,
       schedule_type TEXT NOT NULL DEFAULT 'interval',
       schedule_value TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
       next_check TEXT,
       seen_guids TEXT NOT NULL DEFAULT '[]',
       interest TEXT,
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_rss_next_check ON rss_feeds(next_check);
+    CREATE INDEX IF NOT EXISTS idx_rss_status ON rss_feeds(status);
 
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
@@ -196,6 +198,15 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT`);
   } catch {
     /* columns already exist */
+  }
+
+  // Add status column to rss_feeds if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE rss_feeds ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
+    );
+  } catch {
+    /* column already exists */
   }
 }
 
@@ -871,8 +882,8 @@ export function getTaskRunLogs(
 
 export function createRssFeed(feed: RssFeed): void {
   db.prepare(
-    `INSERT INTO rss_feeds (id, group_folder, chat_jid, url, title, schedule_type, schedule_value, next_check, seen_guids, interest, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO rss_feeds (id, group_folder, chat_jid, url, title, schedule_type, schedule_value, status, next_check, seen_guids, interest, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     feed.id,
     feed.group_folder,
@@ -881,10 +892,32 @@ export function createRssFeed(feed: RssFeed): void {
     feed.title,
     feed.schedule_type,
     feed.schedule_value,
+    feed.status,
     feed.next_check,
     feed.seen_guids,
     feed.interest,
     feed.created_at,
+  );
+}
+
+export function updateRssFeed(
+  id: string,
+  updates: Partial<Pick<RssFeed, 'status' | 'next_check'>>,
+): void {
+  const fields: string[] = [];
+  const values: (string | null)[] = [];
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if (updates.next_check !== undefined) {
+    fields.push('next_check = ?');
+    values.push(updates.next_check);
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE rss_feeds SET ${fields.join(', ')} WHERE id = ?`).run(
+    ...values,
   );
 }
 
@@ -912,7 +945,7 @@ export function getDueRssFeeds(): RssFeed[] {
   const now = new Date().toISOString();
   return db
     .prepare(
-      `SELECT * FROM rss_feeds WHERE next_check IS NOT NULL AND next_check <= ? ORDER BY next_check`,
+      `SELECT * FROM rss_feeds WHERE status = 'active' AND next_check IS NOT NULL AND next_check <= ? ORDER BY next_check`,
     )
     .all(now) as RssFeed[];
 }

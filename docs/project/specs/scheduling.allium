@@ -34,6 +34,8 @@ enum ContextMode { isolated | group }
 
 enum TaskStatus { active | paused | completed | cancelled }
 
+enum RssFeedStatus { active | paused | cancelled }
+
 ------------------------------------------------------------
 -- Entities
 ------------------------------------------------------------
@@ -75,9 +77,18 @@ entity RssFeed {
     url: String
     schedule: Schedule
     interest: String?                   -- optional focus prompt: "summarise posts about AI safety"
-    next_check: Timestamp
+    status: RssFeedStatus
+    next_check: Timestamp?              -- null when paused or cancelled
     seen_item_ids: Set<String>          -- GUIDs of already-delivered items (capped to prevent unbounded growth)
     created_at: Timestamp
+
+    transitions status {
+        active -> paused
+        paused -> active
+        active -> cancelled
+        paused -> cancelled
+        terminal: cancelled
+    }
 }
 
 -- A single item from an RSS feed that has been delivered to the target chat.
@@ -266,6 +277,8 @@ rule FeedSubscribed {
 rule FeedChecked {
     when: feed: RssFeed.next_check <= now
 
+    requires: feed.status = active
+
     let new_items = fetch_new_items(feed.url, feed.seen_item_ids)
     let next_check = compute_next_run(feed.schedule, now)
 
@@ -293,12 +306,38 @@ rule FeedItemDelivered {
     ensures: FeedAgentStarted(feed: feed, item: item)
 }
 
-rule FeedUnsubscribed {
-    when: UnsubscribeFeed(group, feed)
+rule FeedPaused {
+    when: PauseFeed(requesting_group, feed)
 
-    requires: group.is_main or feed.group = group
+    requires: requesting_group.is_main or feed.group = requesting_group
+    requires: feed.status = active
 
-    ensures: not exists feed
+    ensures: feed.status = paused
+    ensures: feed.next_check = null
+}
+
+rule FeedResumed {
+    when: ResumeFeed(requesting_group, feed)
+
+    requires: requesting_group.is_main or feed.group = requesting_group
+    requires: feed.status = paused
+
+    let next_check = compute_next_run(feed.schedule, now)
+
+    ensures: feed.status = active
+    ensures: feed.next_check = next_check
+}
+
+rule FeedCancelled {
+    when: CancelFeed(requesting_group, feed)
+
+    requires: requesting_group.is_main or feed.group = requesting_group
+    requires: feed.status in { active, paused }
+
+    ensures: feed.status = cancelled
+    ensures: feed.next_check = null
+    -- Feed record and seen_item_ids history retained as a tombstone.
+    -- cancelled is terminal: resume is rejected for cancelled feeds.
 }
 
 ------------------------------------------------------------

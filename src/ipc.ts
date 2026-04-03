@@ -20,8 +20,8 @@ import { snapshotGroup, gradeAssertions } from './eval-utils.js';
 import {
   createRssFeed,
   createTask,
-  deleteRssFeed,
   getRssFeedById,
+  updateRssFeed,
   getTaskById,
   queryTranscript,
   storeMessage,
@@ -32,6 +32,30 @@ import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 type RemoteEnvResult = { ok: true; url: string } | { ok: false; error: string };
+
+/** Compute the next ISO timestamp for an RSS feed schedule starting from now. Returns null on error. */
+function computeRssNextCheck(
+  scheduleType: 'cron' | 'interval',
+  scheduleValue: string,
+): string | null {
+  if (scheduleType === 'cron') {
+    try {
+      const interval = CronExpressionParser.parse(scheduleValue, {
+        tz: TIMEZONE,
+      });
+      return (
+        interval.next().toISOString() ??
+        new Date(Date.now() + 86400000).toISOString()
+      );
+    } catch {
+      return null;
+    }
+  } else {
+    const ms = parseInt(scheduleValue, 10);
+    if (isNaN(ms) || ms <= 0) return null;
+    return new Date(Date.now() + ms).toISOString();
+  }
+}
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
@@ -677,33 +701,16 @@ export async function processTaskIpc(
         break;
       }
 
-      // Compute first next_check
-      let nextCheck: string;
-      if (data.feedScheduleType === 'cron') {
-        try {
-          const interval = CronExpressionParser.parse(data.feedScheduleValue, {
-            tz: TIMEZONE,
-          });
-          nextCheck =
-            interval.next().toISOString() ??
-            new Date(Date.now() + 86400000).toISOString();
-        } catch {
-          logger.warn(
-            { value: data.feedScheduleValue },
-            'subscribe_rss: invalid cron',
-          );
-          break;
-        }
-      } else {
-        const ms = parseInt(data.feedScheduleValue, 10);
-        if (isNaN(ms) || ms <= 0) {
-          logger.warn(
-            { value: data.feedScheduleValue },
-            'subscribe_rss: invalid interval',
-          );
-          break;
-        }
-        nextCheck = new Date(Date.now() + ms).toISOString();
+      const nextCheck = computeRssNextCheck(
+        data.feedScheduleType,
+        data.feedScheduleValue,
+      );
+      if (!nextCheck) {
+        logger.warn(
+          { value: data.feedScheduleValue, type: data.feedScheduleType },
+          'subscribe_rss: invalid schedule',
+        );
+        break;
       }
 
       createRssFeed({
@@ -714,6 +721,7 @@ export async function processTaskIpc(
         title: null,
         schedule_type: data.feedScheduleType,
         schedule_value: data.feedScheduleValue,
+        status: 'active',
         next_check: nextCheck,
         seen_guids: '[]',
         interest: data.feedInterest ?? null,
@@ -753,10 +761,99 @@ export async function processTaskIpc(
         );
         break;
       }
-      deleteRssFeed(data.feedId);
+      updateRssFeed(data.feedId, { status: 'cancelled', next_check: null });
       logger.info(
         { feedId: data.feedId, sourceGroup },
-        'RSS feed unsubscribed via IPC',
+        'RSS feed cancelled via IPC',
+      );
+      break;
+    }
+
+    case 'pause_rss': {
+      if (!data.feedId) {
+        logger.warn({ data }, 'Invalid pause_rss request — missing feedId');
+        break;
+      }
+      const feedToPause = getRssFeedById(data.feedId);
+      if (!feedToPause) {
+        logger.warn(
+          { feedId: data.feedId, sourceGroup },
+          'pause_rss — feed not found',
+        );
+        break;
+      }
+      if (!isMain && feedToPause.group_folder !== sourceGroup) {
+        logger.warn(
+          {
+            feedId: data.feedId,
+            feedGroup: feedToPause.group_folder,
+            sourceGroup,
+          },
+          'Unauthorized pause_rss attempt blocked',
+        );
+        break;
+      }
+      if (feedToPause.status !== 'active') {
+        logger.warn(
+          { feedId: data.feedId, status: feedToPause.status },
+          'pause_rss — feed is not active',
+        );
+        break;
+      }
+      updateRssFeed(data.feedId, { status: 'paused', next_check: null });
+      logger.info(
+        { feedId: data.feedId, sourceGroup },
+        'RSS feed paused via IPC',
+      );
+      break;
+    }
+
+    case 'resume_rss': {
+      if (!data.feedId) {
+        logger.warn({ data }, 'Invalid resume_rss request — missing feedId');
+        break;
+      }
+      const feedToResume = getRssFeedById(data.feedId);
+      if (!feedToResume) {
+        logger.warn(
+          { feedId: data.feedId, sourceGroup },
+          'resume_rss — feed not found',
+        );
+        break;
+      }
+      if (!isMain && feedToResume.group_folder !== sourceGroup) {
+        logger.warn(
+          {
+            feedId: data.feedId,
+            feedGroup: feedToResume.group_folder,
+            sourceGroup,
+          },
+          'Unauthorized resume_rss attempt blocked',
+        );
+        break;
+      }
+      if (feedToResume.status === 'cancelled') {
+        logger.warn(
+          { feedId: data.feedId },
+          'resume_rss — cannot resume a cancelled feed',
+        );
+        break;
+      }
+      const nextCheck = computeRssNextCheck(
+        feedToResume.schedule_type,
+        feedToResume.schedule_value,
+      );
+      if (!nextCheck) {
+        logger.warn(
+          { feedId: data.feedId },
+          'resume_rss — feed has invalid schedule, cannot compute next_check',
+        );
+        break;
+      }
+      updateRssFeed(data.feedId, { status: 'active', next_check: nextCheck });
+      logger.info(
+        { feedId: data.feedId, sourceGroup, nextCheck },
+        'RSS feed resumed via IPC',
       );
       break;
     }
@@ -1102,7 +1199,15 @@ export async function processTaskIpc(
     case 'set_reaction': {
       const { jid, emoji } = data;
       if (jid && emoji && deps.setReaction) {
-        await deps.setReaction(jid, emoji);
+        const targetGroup = registeredGroups[jid];
+        if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+          await deps.setReaction(jid, emoji);
+        } else {
+          logger.warn(
+            { jid, sourceGroup },
+            'Unauthorized set_reaction attempt blocked',
+          );
+        }
       }
       break;
     }

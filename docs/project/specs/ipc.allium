@@ -260,7 +260,7 @@ rule AgentSubscribedFeed {
     )
 }
 
--- An agent removes an RSS feed subscription.
+-- An agent permanently cancels an RSS feed subscription, retaining the record as a tombstone.
 rule AgentUnsubscribedFeed {
     when: AgentMcpCall(author, "unsubscribe_rss", feed_id)
 
@@ -269,8 +269,38 @@ rule AgentUnsubscribedFeed {
     requires: exists feed
     requires: author.is_main or feed.group.folder = author.group_folder
 
-    ensures: scheduling.FeedUnsubscribed(
+    ensures: scheduling.FeedCancelled(
         group: Group{folder: author.group_folder},
+        feed: feed
+    )
+}
+
+-- An agent temporarily pauses an RSS feed.
+rule AgentPausedFeed {
+    when: AgentMcpCall(author, "pause_rss", feed_id)
+
+    let feed = scheduling.RssFeed{id: feed_id}
+
+    requires: exists feed
+    requires: author.is_main or feed.group.folder = author.group_folder
+
+    ensures: scheduling.FeedPaused(
+        requesting_group: Group{folder: author.group_folder},
+        feed: feed
+    )
+}
+
+-- An agent resumes a paused RSS feed, recomputing its next check from now.
+rule AgentResumedFeed {
+    when: AgentMcpCall(author, "resume_rss", feed_id)
+
+    let feed = scheduling.RssFeed{id: feed_id}
+
+    requires: exists feed
+    requires: author.is_main or feed.group.folder = author.group_folder
+
+    ensures: scheduling.FeedResumed(
+        requesting_group: Group{folder: author.group_folder},
         feed: feed
     )
 }

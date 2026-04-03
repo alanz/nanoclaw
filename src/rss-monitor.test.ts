@@ -17,6 +17,7 @@ function makeFeed(overrides: Partial<RssFeed> = {}): RssFeed {
     title: 'Test Feed',
     schedule_type: 'interval',
     schedule_value: '3600000',
+    status: 'active',
     next_check: new Date(Date.now() - 1000).toISOString(),
     seen_guids: '[]',
     interest: null,

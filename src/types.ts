@@ -83,6 +83,7 @@ export interface RssFeed {
   title: string | null;
   schedule_type: 'interval' | 'cron';
   schedule_value: string;
+  status: 'active' | 'paused' | 'cancelled';
   next_check: string | null;
   seen_guids: string; // JSON array, capped at 500
   interest: string | null;

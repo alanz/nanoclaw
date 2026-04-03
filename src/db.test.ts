@@ -3,12 +3,18 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   _initTestDatabase,
   createTask,
+  createSpecialistTask,
+  createSpecialistSession,
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getSpecialistSession,
+  getSpecialistSubTasks,
+  getSpecialistTask,
+  getSpecialistTasksByStatus,
   getTaskById,
   getTaskRunLogs,
   logTaskRun,
@@ -16,6 +22,8 @@ import {
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
+  updateSpecialistSession,
+  updateSpecialistTask,
   updateTask,
 } from './db.js';
 import { formatMessages } from './router.js';
@@ -946,5 +954,282 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- Specialist task accessors ---
+
+function makeTask(
+  overrides: Partial<Parameters<typeof createSpecialistTask>[0]> = {},
+): Parameters<typeof createSpecialistTask>[0] {
+  return {
+    id: 'task-1',
+    specialist_type: 'researcher',
+    prompt: 'Find something',
+    requester_group: 'main@g.us',
+    requester_task_id: null,
+    depth: 0,
+    chain_delegation_count: 1,
+    ancestor_types: '[]',
+    is_last_same_type_dispatch: false,
+    status: 'queued',
+    pending_sub_task_id: null,
+    result: null,
+    failure_kind: null,
+    failure_detail: null,
+    restart_attempt_count: 0,
+    delegated_at: '2024-01-01T00:00:00.000Z',
+    closed_at: null,
+    ...overrides,
+  };
+}
+
+describe('specialist tasks — createSpecialistTask / getSpecialistTask', () => {
+  it('creates and retrieves a queued task', () => {
+    createSpecialistTask(makeTask());
+    const task = getSpecialistTask('task-1');
+    expect(task).toBeDefined();
+    expect(task!.id).toBe('task-1');
+    expect(task!.specialist_type).toBe('researcher');
+    expect(task!.status).toBe('queued');
+    expect(task!.depth).toBe(0);
+    expect(task!.chain_delegation_count).toBe(1);
+    expect(task!.ancestor_types).toBe('[]');
+    expect(task!.is_last_same_type_dispatch).toBe(0);
+    expect(task!.requester_group).toBe('main@g.us');
+    expect(task!.requester_task_id).toBeNull();
+    expect(task!.result).toBeNull();
+    expect(task!.failure_kind).toBeNull();
+    expect(task!.failure_detail).toBeNull();
+    expect(task!.closed_at).toBeNull();
+    expect(task!.restart_attempt_count).toBe(0);
+  });
+
+  it('returns undefined for a non-existent task id', () => {
+    expect(getSpecialistTask('no-such-task')).toBeUndefined();
+  });
+
+  it('stores is_last_same_type_dispatch as 1 when true', () => {
+    createSpecialistTask(
+      makeTask({ id: 'task-last', is_last_same_type_dispatch: true }),
+    );
+    const task = getSpecialistTask('task-last');
+    expect(task!.is_last_same_type_dispatch).toBe(1);
+  });
+
+  it('stores a sub-task with requester_task_id and no requester_group', () => {
+    createSpecialistTask(makeTask({ id: 'parent' }));
+    createSpecialistTask(
+      makeTask({
+        id: 'child',
+        requester_group: null,
+        requester_task_id: 'parent',
+        depth: 1,
+        chain_delegation_count: 2,
+        ancestor_types: '["researcher"]',
+      }),
+    );
+    const child = getSpecialistTask('child');
+    expect(child!.requester_task_id).toBe('parent');
+    expect(child!.requester_group).toBeNull();
+    expect(child!.depth).toBe(1);
+    expect(child!.ancestor_types).toBe('["researcher"]');
+  });
+});
+
+describe('specialist tasks — updateSpecialistTask', () => {
+  it('transitions status from queued to running', () => {
+    createSpecialistTask(makeTask());
+    updateSpecialistTask('task-1', { status: 'running' });
+    expect(getSpecialistTask('task-1')!.status).toBe('running');
+  });
+
+  it('sets result and status on completion', () => {
+    createSpecialistTask(makeTask());
+    updateSpecialistTask('task-1', {
+      status: 'completed',
+      result: 'Here is the answer',
+      closed_at: '2024-01-01T01:00:00.000Z',
+    });
+    const task = getSpecialistTask('task-1')!;
+    expect(task.status).toBe('completed');
+    expect(task.result).toBe('Here is the answer');
+    expect(task.closed_at).toBe('2024-01-01T01:00:00.000Z');
+  });
+
+  it('sets failure fields on failure', () => {
+    createSpecialistTask(makeTask());
+    updateSpecialistTask('task-1', {
+      status: 'failed',
+      failure_kind: 'timeout',
+      failure_detail: 'Container invocation exceeded timeout',
+      closed_at: '2024-01-01T02:00:00.000Z',
+    });
+    const task = getSpecialistTask('task-1')!;
+    expect(task.status).toBe('failed');
+    expect(task.failure_kind).toBe('timeout');
+    expect(task.failure_detail).toBe('Container invocation exceeded timeout');
+  });
+
+  it('sets pending_sub_task_id when awaiting sub-task', () => {
+    createSpecialistTask(makeTask({ id: 'parent' }));
+    createSpecialistTask(
+      makeTask({
+        id: 'child',
+        requester_group: null,
+        requester_task_id: 'parent',
+        depth: 1,
+      }),
+    );
+    updateSpecialistTask('parent', {
+      status: 'awaiting_sub_task',
+      pending_sub_task_id: 'child',
+    });
+    const parent = getSpecialistTask('parent')!;
+    expect(parent.status).toBe('awaiting_sub_task');
+    expect(parent.pending_sub_task_id).toBe('child');
+  });
+
+  it('clears pending_sub_task_id when resuming', () => {
+    createSpecialistTask(
+      makeTask({
+        id: 'parent',
+        status: 'awaiting_sub_task',
+        pending_sub_task_id: 'child',
+      }),
+    );
+    updateSpecialistTask('parent', {
+      status: 'running',
+      pending_sub_task_id: null,
+    });
+    const parent = getSpecialistTask('parent')!;
+    expect(parent.status).toBe('running');
+    expect(parent.pending_sub_task_id).toBeNull();
+  });
+
+  it('increments restart_attempt_count', () => {
+    createSpecialistTask(makeTask());
+    updateSpecialistTask('task-1', { restart_attempt_count: 1 });
+    expect(getSpecialistTask('task-1')!.restart_attempt_count).toBe(1);
+  });
+
+  it('is a no-op when called with empty updates', () => {
+    createSpecialistTask(makeTask());
+    updateSpecialistTask('task-1', {});
+    expect(getSpecialistTask('task-1')!.status).toBe('queued');
+  });
+});
+
+describe('specialist tasks — getSpecialistTasksByStatus', () => {
+  it('returns tasks matching the given status', () => {
+    createSpecialistTask(makeTask({ id: 't1', status: 'queued' }));
+    createSpecialistTask(makeTask({ id: 't2', status: 'running' }));
+    createSpecialistTask(makeTask({ id: 't3', status: 'queued' }));
+    const queued = getSpecialistTasksByStatus('queued');
+    expect(queued.map((t) => t.id).sort()).toEqual(['t1', 't3']);
+  });
+
+  it('returns an empty array when no tasks match', () => {
+    createSpecialistTask(makeTask({ id: 't1', status: 'queued' }));
+    expect(getSpecialistTasksByStatus('running')).toHaveLength(0);
+  });
+});
+
+describe('specialist tasks — getSpecialistSubTasks', () => {
+  it('returns sub-tasks for a given parent', () => {
+    createSpecialistTask(makeTask({ id: 'parent' }));
+    createSpecialistTask(
+      makeTask({
+        id: 'child1',
+        requester_group: null,
+        requester_task_id: 'parent',
+        depth: 1,
+      }),
+    );
+    createSpecialistTask(
+      makeTask({
+        id: 'child2',
+        requester_group: null,
+        requester_task_id: 'parent',
+        depth: 1,
+      }),
+    );
+    createSpecialistTask(makeTask({ id: 'unrelated' }));
+    const subs = getSpecialistSubTasks('parent');
+    expect(subs.map((t) => t.id).sort()).toEqual(['child1', 'child2']);
+  });
+
+  it('returns empty array when parent has no sub-tasks', () => {
+    createSpecialistTask(makeTask());
+    expect(getSpecialistSubTasks('task-1')).toHaveLength(0);
+  });
+});
+
+// --- Specialist conversation session accessors ---
+
+describe('specialist conversation sessions — createSpecialistSession / getSpecialistSession', () => {
+  it('creates and retrieves a session', () => {
+    createSpecialistTask(makeTask());
+    createSpecialistSession({
+      task_id: 'task-1',
+      session_id: 'sess-abc',
+      status: 'active',
+    });
+    const session = getSpecialistSession('task-1');
+    expect(session).toBeDefined();
+    expect(session!.task_id).toBe('task-1');
+    expect(session!.session_id).toBe('sess-abc');
+    expect(session!.status).toBe('active');
+  });
+
+  it('returns undefined for a task with no session', () => {
+    createSpecialistTask(makeTask());
+    expect(getSpecialistSession('task-1')).toBeUndefined();
+  });
+});
+
+describe('specialist conversation sessions — updateSpecialistSession', () => {
+  it('updates session_id', () => {
+    createSpecialistTask(makeTask());
+    createSpecialistSession({
+      task_id: 'task-1',
+      session_id: 'old-id',
+      status: 'active',
+    });
+    updateSpecialistSession('task-1', { session_id: 'new-id' });
+    expect(getSpecialistSession('task-1')!.session_id).toBe('new-id');
+  });
+
+  it('transitions status from active to stale', () => {
+    createSpecialistTask(makeTask());
+    createSpecialistSession({
+      task_id: 'task-1',
+      session_id: 'sess-abc',
+      status: 'active',
+    });
+    updateSpecialistSession('task-1', { status: 'stale' });
+    expect(getSpecialistSession('task-1')!.status).toBe('stale');
+  });
+
+  it('transitions status to cleared', () => {
+    createSpecialistTask(makeTask());
+    createSpecialistSession({
+      task_id: 'task-1',
+      session_id: 'sess-abc',
+      status: 'active',
+    });
+    updateSpecialistSession('task-1', { status: 'cleared' });
+    expect(getSpecialistSession('task-1')!.status).toBe('cleared');
+  });
+
+  it('is a no-op when called with empty updates', () => {
+    createSpecialistTask(makeTask());
+    createSpecialistSession({
+      task_id: 'task-1',
+      session_id: 'sess-abc',
+      status: 'active',
+    });
+    updateSpecialistSession('task-1', {});
+    expect(getSpecialistSession('task-1')!.session_id).toBe('sess-abc');
   });
 });

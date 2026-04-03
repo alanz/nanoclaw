@@ -100,6 +100,56 @@ export interface TaskRunLog {
   total_tokens?: number;
 }
 
+// --- Specialist task types ---
+
+export type SpecialistTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'awaiting_sub_task'
+  | 'awaiting_restart'
+  | 'completed'
+  | 'failed';
+
+export type FailureKind =
+  | 'cycle_detected'
+  | 'depth_exceeded'
+  | 'count_exceeded'
+  | 'same_type_limit_exceeded'
+  | 'timeout'
+  | 'execution_error'
+  | 'host_restart';
+
+export type SpecialistConversationSessionStatus =
+  | 'active'
+  | 'stale'
+  | 'cleared';
+
+export interface SpecialistTask {
+  id: string;
+  specialist_type: string;
+  prompt: string;
+  requester_group: string | null;
+  requester_task_id: string | null;
+  depth: number;
+  chain_delegation_count: number;
+  ancestor_types: string; // JSON array of specialist type names
+  is_last_same_type_dispatch: number; // SQLite boolean (0|1)
+  status: SpecialistTaskStatus;
+  pending_sub_task_id: string | null;
+  result: string | null;
+  failure_kind: FailureKind | null;
+  failure_detail: string | null;
+  restart_attempt_count: number;
+  delegated_at: string;
+  closed_at: string | null;
+}
+
+export interface SpecialistConversationSession {
+  task_id: string;
+  session_id: string;
+  status: SpecialistConversationSessionStatus;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

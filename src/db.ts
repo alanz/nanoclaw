@@ -6,10 +6,15 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  FailureKind,
   NewMessage,
   RegisteredGroup,
   RssFeed,
   ScheduledTask,
+  SpecialistConversationSession,
+  SpecialistConversationSessionStatus,
+  SpecialistTask,
+  SpecialistTaskStatus,
   TaskRunLog,
 } from './types.js';
 
@@ -99,6 +104,34 @@ function createSchema(database: Database.Database): void {
       added_at TEXT NOT NULL,
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS specialist_tasks (
+      id TEXT PRIMARY KEY,
+      specialist_type TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      requester_group TEXT,
+      requester_task_id TEXT,
+      depth INTEGER NOT NULL DEFAULT 0,
+      chain_delegation_count INTEGER NOT NULL DEFAULT 1,
+      ancestor_types TEXT NOT NULL DEFAULT '[]',
+      is_last_same_type_dispatch INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'queued',
+      pending_sub_task_id TEXT,
+      result TEXT,
+      failure_kind TEXT,
+      failure_detail TEXT,
+      restart_attempt_count INTEGER NOT NULL DEFAULT 0,
+      delegated_at TEXT NOT NULL,
+      closed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_specialist_tasks_status ON specialist_tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_specialist_tasks_requester ON specialist_tasks(requester_task_id);
+
+    CREATE TABLE IF NOT EXISTS specialist_conversation_sessions (
+      task_id TEXT PRIMARY KEY REFERENCES specialist_tasks(id),
+      session_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
     );
   `);
 
@@ -969,6 +1002,163 @@ export function updateRssFeedAfterCheck(
 
 export function deleteRssFeed(id: string): void {
   db.prepare('DELETE FROM rss_feeds WHERE id = ?').run(id);
+}
+
+// --- Specialist task accessors ---
+
+export function createSpecialistTask(
+  task: Omit<SpecialistTask, 'is_last_same_type_dispatch'> & {
+    is_last_same_type_dispatch?: boolean;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO specialist_tasks
+       (id, specialist_type, prompt, requester_group, requester_task_id,
+        depth, chain_delegation_count, ancestor_types, is_last_same_type_dispatch,
+        status, pending_sub_task_id, result, failure_kind, failure_detail,
+        restart_attempt_count, delegated_at, closed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    task.id,
+    task.specialist_type,
+    task.prompt,
+    task.requester_group ?? null,
+    task.requester_task_id ?? null,
+    task.depth,
+    task.chain_delegation_count,
+    task.ancestor_types,
+    task.is_last_same_type_dispatch ? 1 : 0,
+    task.status,
+    task.pending_sub_task_id ?? null,
+    task.result ?? null,
+    task.failure_kind ?? null,
+    task.failure_detail ?? null,
+    task.restart_attempt_count,
+    task.delegated_at,
+    task.closed_at ?? null,
+  );
+}
+
+export function getSpecialistTask(id: string): SpecialistTask | undefined {
+  return db.prepare('SELECT * FROM specialist_tasks WHERE id = ?').get(id) as
+    | SpecialistTask
+    | undefined;
+}
+
+export function updateSpecialistTask(
+  id: string,
+  updates: Partial<
+    Pick<
+      SpecialistTask,
+      | 'status'
+      | 'pending_sub_task_id'
+      | 'result'
+      | 'failure_kind'
+      | 'failure_detail'
+      | 'restart_attempt_count'
+      | 'closed_at'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if ('pending_sub_task_id' in updates) {
+    fields.push('pending_sub_task_id = ?');
+    values.push(updates.pending_sub_task_id ?? null);
+  }
+  if ('result' in updates) {
+    fields.push('result = ?');
+    values.push(updates.result ?? null);
+  }
+  if ('failure_kind' in updates) {
+    fields.push('failure_kind = ?');
+    values.push(updates.failure_kind ?? null);
+  }
+  if ('failure_detail' in updates) {
+    fields.push('failure_detail = ?');
+    values.push(updates.failure_detail ?? null);
+  }
+  if (updates.restart_attempt_count !== undefined) {
+    fields.push('restart_attempt_count = ?');
+    values.push(updates.restart_attempt_count);
+  }
+  if ('closed_at' in updates) {
+    fields.push('closed_at = ?');
+    values.push(updates.closed_at ?? null);
+  }
+
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE specialist_tasks SET ${fields.join(', ')} WHERE id = ?`,
+  ).run(...values);
+}
+
+export function getSpecialistTasksByStatus(
+  status: SpecialistTaskStatus,
+): SpecialistTask[] {
+  return db
+    .prepare(
+      'SELECT * FROM specialist_tasks WHERE status = ? ORDER BY delegated_at',
+    )
+    .all(status) as SpecialistTask[];
+}
+
+export function getSpecialistSubTasks(parentTaskId: string): SpecialistTask[] {
+  return db
+    .prepare(
+      'SELECT * FROM specialist_tasks WHERE requester_task_id = ? ORDER BY delegated_at',
+    )
+    .all(parentTaskId) as SpecialistTask[];
+}
+
+// --- Specialist conversation session accessors ---
+
+export function createSpecialistSession(
+  session: SpecialistConversationSession,
+): void {
+  db.prepare(
+    `INSERT INTO specialist_conversation_sessions (task_id, session_id, status)
+     VALUES (?, ?, ?)`,
+  ).run(session.task_id, session.session_id, session.status);
+}
+
+export function getSpecialistSession(
+  taskId: string,
+): SpecialistConversationSession | undefined {
+  return db
+    .prepare('SELECT * FROM specialist_conversation_sessions WHERE task_id = ?')
+    .get(taskId) as SpecialistConversationSession | undefined;
+}
+
+export function updateSpecialistSession(
+  taskId: string,
+  updates: Partial<
+    Pick<SpecialistConversationSession, 'session_id' | 'status'>
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.session_id !== undefined) {
+    fields.push('session_id = ?');
+    values.push(updates.session_id);
+  }
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+
+  if (fields.length === 0) return;
+  values.push(taskId);
+  db.prepare(
+    `UPDATE specialist_conversation_sessions SET ${fields.join(', ')} WHERE task_id = ?`,
+  ).run(...values);
 }
 
 // --- Database explorer ---

@@ -659,6 +659,12 @@ invariant AtMostOneWaitingEntryPerGroup {
 --   The shared global folder (e.g. groups/global/) contains read-only reference material
 --   accessible to all agents. The project root mount for the main group allows it to read
 --   source files and configuration, but never to write outside its own folder.
+--
+--   Memory provider specialists (non-main) receive a targeted read-only mount of
+--   groups/main/memory/ for staging submissions. This is a narrow sub-path mount,
+--   not the project_root mount itself, and does not violate the excludes project_root
+--   clause. The container runner adds this mount only for specialist containers whose
+--   type has memory_provider capability.
 invariant WorkspaceIsolation {
     for g in Groups:
         g.is_main implies workspace_mounts(g) includes project_root as read_only

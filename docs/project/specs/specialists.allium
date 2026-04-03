@@ -1019,6 +1019,17 @@ deferred NullChannel               -- see: src/channels/null-channel.ts (impleme
 -- Open Questions
 ------------------------------------------------------------
 
-open question "IPC surface for specialist tools: this spec uses AgentDispatchesSpecialistTask, SpecialistSubTaskRequested, SpecialistMemorySubmission, and SpecialistDeliveredResult as trigger events, but the corresponding MCP tools are not yet defined in ipc.allium. ipc.allium needs: dispatch_specialist tool (main group → specialist), dispatch_sub_task tool (specialist → sub-specialist), submit_memory tool (specialist → staging), and clarification of whether deliver_result is reused for specialist result delivery or a parallel tool is added. This is the primary cross-spec gap."
+-- Resolved: IPC surface for specialist tools is defined in ipc.allium.
+-- Tools added: dispatch_specialist (main → specialist), dispatch_sub_task (specialist → sub),
+-- submit_memory (specialist → staging), deliver_specialist_result (specialist → requester).
+-- Decision: deliver_specialist_result is a parallel tool, not a reuse of deliver_result.
+-- deliver_result remains for sub-group-to-main-group orchestration cycle delivery;
+-- specialist delivery has different semantics (task entity update, dual routing to
+-- main group or parent specialist) and a different IPC namespace (per-task directories).
 
-open question "WorkspaceIsolation and memory providers: nanoclaw.allium invariant WorkspaceIsolation states that non-main groups exclude project_root. Memory provider specialists need read-only access to groups/main/memory/ (not project_root itself). Confirm whether groups/main/memory/ is within or outside project_root in the mount configuration, and update WorkspaceIsolation or its guidance if the invariant needs a carve-out for memory provider specialist mounts."
+-- Resolved: groups/main/memory/ is within project_root (GROUPS_DIR defaults to
+-- {project_root}/groups/). The WorkspaceIsolation invariant expression is unchanged:
+-- non-main groups still exclude project_root (the whole-tree mount). Memory provider
+-- specialists receive a targeted read-only mount of groups/main/memory/ only, which
+-- is a narrow sub-path mount distinct from project_root. Guidance added to the
+-- WorkspaceIsolation invariant in nanoclaw.allium documenting this carve-out.

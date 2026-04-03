@@ -1,0 +1,166 @@
+-- allium: 3
+-- delegation-policy.allium
+--
+-- Delegation policy: decides whether a specialist-to-specialist dispatch is allowed.
+-- This module owns all "is this delegation allowed?" logic as a policy module.
+-- specialists.allium owns the mechanism (task creation, lifecycle); this module owns
+-- the decision (should this dispatch proceed or be rejected?).
+--
+-- The policy is a single black box function, check_delegation_policy, whose complete
+-- semantics are formally defined here. The function evaluates four checks in priority
+-- order and returns a DelegationDecision.
+--
+-- Scope: delegation policy evaluation, same_type_dispatch_count computation
+-- Includes: cycle detection, depth check, chain count check, same-type limit check,
+--           same_type_dispatch_count counting rule, DelegationDecision value type
+-- Excludes:
+--   - Task lifecycle and state machine (see specialists.allium)
+--   - IPC/MCP wire protocol (see ipc.allium)
+--   - Memory provider dispatches (bypass this policy entirely via SpecialistQueriesMemory)
+-- Dependencies: specialists.allium (SpecialistTask, SpecialistType, FailureKind, config)
+
+use "./specialists.allium" as specialists
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The result of evaluating the delegation policy for a proposed dispatch.
+-- Returned by check_delegation_policy.
+value DelegationDecision {
+    outcome: allowed | rejected
+    rejection_kind: specialists.FailureKind?    -- non-null when outcome = rejected
+    rejection_detail: String?                   -- human-readable reason; non-null when outcome = rejected
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Formally defines the semantics of check_delegation_policy(parent_task, target_type).
+-- This is a black box function: its implementation is algorithmic, but its complete
+-- behaviour is specified here. The function is pure and deterministic for the same inputs.
+--
+-- The function evaluates four checks in strict priority order. The first failing check
+-- determines the rejection; if all pass, the delegation is allowed.
+--
+-- Priority order:
+--   1. Cycle detection    — target_type must not appear in parent_task.ancestor_types
+--   2. Depth limit        — parent_task.depth + 1 must be < specialists.config.max_specialist_depth
+--   3. Chain count limit  — parent_task.chain_delegation_count must be < specialists.config.max_chain_delegations
+--   4. Same-type limit    — same_type_dispatch_count(parent_task, target_type) must be
+--                           < specialists.config.max_same_type_dispatches
+--
+-- Memory provider dispatches (target_type.is_memory_provider = true) are NOT subject to
+-- this policy. They use specialists.SpecialistQueriesMemory which bypasses the check entirely.
+rule CheckDelegationPolicySemantics {
+    when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
+
+    requires: parent_task.status = running
+    requires: not parent_task.specialist_type.is_memory_provider
+    requires: not target_type.is_memory_provider
+
+    let policy_rejection_kinds = { cycle_detected, depth_exceeded, count_exceeded, same_type_limit_exceeded }
+
+    -- same_type_dispatch_count: counts prior dispatches from parent_task to target_type,
+    -- excluding tasks that failed due to a policy rejection kind. Tasks that failed due
+    -- to non-policy failures (timeout, execution_error, host_restart) DO count because
+    -- those dispatches actually consumed a slot (parent transitioned to awaiting_sub_task).
+    let stdc = specialists.SpecialistTasks
+        where requester_task = parent_task
+          and specialist_type = target_type
+          and not (status = failed and failure.kind in policy_rejection_kinds)
+        .count
+
+    -- Check 1: Cycle detection
+    let decision =
+        if target_type in parent_task.ancestor_types:
+            DelegationDecision {
+                outcome: rejected,
+                rejection_kind: cycle_detected,
+                rejection_detail: "Target type already in ancestor chain"
+            }
+        -- Check 2: Depth limit
+        else if parent_task.depth + 1 >= specialists.config.max_specialist_depth:
+            DelegationDecision {
+                outcome: rejected,
+                rejection_kind: depth_exceeded,
+                rejection_detail: "Maximum specialist chain depth reached"
+            }
+        -- Check 3: Chain count limit
+        else if parent_task.chain_delegation_count >= specialists.config.max_chain_delegations:
+            DelegationDecision {
+                outcome: rejected,
+                rejection_kind: count_exceeded,
+                rejection_detail: "Maximum chain delegation count reached"
+            }
+        -- Check 4: Same-type limit
+        else if stdc >= specialists.config.max_same_type_dispatches:
+            DelegationDecision {
+                outcome: rejected,
+                rejection_kind: same_type_limit_exceeded,
+                rejection_detail: "Maximum dispatches to this specialist type reached"
+            }
+        else:
+            DelegationDecision {
+                outcome: allowed,
+                rejection_kind: null,
+                rejection_detail: null
+            }
+
+    ensures: DelegationPolicyEvaluated(
+        parent_task: parent_task,
+        target_type: target_type,
+        decision: decision,
+        same_type_count: stdc
+    )
+
+    @guidance
+        -- This rule defines the complete semantics of check_delegation_policy. The actual
+        -- function is a black box called from specialists.SpecialistDispatchesSubTask and
+        -- the SubTaskRejected* rules. This rule makes the algorithm auditable in spec form.
+        --
+        -- same_type_dispatch_count is computed inline as a where...count expression over
+        -- specialists.SpecialistTasks. The exclusion of policy-rejected tasks is intentional:
+        -- a task that was rejected by this policy never ran (the parent never transitioned
+        -- to awaiting_sub_task), so it should not consume a dispatch slot. Non-policy failures
+        -- (timeout, execution_error, host_restart) represent dispatches that actually occurred
+        -- and consumed real resources, so they count toward the limit.
+        --
+        -- The priority order matters: cycle detection is checked first because cycles are
+        -- structurally invalid regardless of depth or count. Depth is checked second because
+        -- it is a hard structural limit. Chain count third because it bounds total work.
+        -- Same-type limit last because it is the most situational (bounds iteration loops).
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- An allowed decision has no rejection fields.
+invariant AllowedDecisionClean {
+    for d in DelegationPolicyEvaluateds:
+        d.decision.outcome = allowed implies
+            d.decision.rejection_kind = null and d.decision.rejection_detail = null
+}
+
+-- A rejected decision has both rejection fields populated.
+invariant RejectedDecisionComplete {
+    for d in DelegationPolicyEvaluateds:
+        d.decision.outcome = rejected implies
+            d.decision.rejection_kind != null and d.decision.rejection_detail != null
+}
+
+-- A rejected decision's rejection_kind is always a policy rejection kind (never timeout,
+-- execution_error, or host_restart — those are runtime failures, not policy rejections).
+invariant RejectionKindIsPolicyKind {
+    for d in DelegationPolicyEvaluateds:
+        d.decision.outcome = rejected implies
+            d.decision.rejection_kind in { cycle_detected, depth_exceeded, count_exceeded, same_type_limit_exceeded }
+}
+
+-- same_type_dispatch_count is non-negative.
+invariant SameTypeCountNonNegative {
+    for d in DelegationPolicyEvaluateds:
+        d.same_type_count >= 0
+}

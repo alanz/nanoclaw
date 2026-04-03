@@ -27,6 +27,7 @@
 --   - Specialist-internal behaviour (researcher CLAUDE.md, coder constraints, etc.)
 
 use "./nanoclaw.allium" as nanoclaw
+use "./delegation-policy.allium" as policy
 
 ------------------------------------------------------------
 -- Enumerations
@@ -205,12 +206,11 @@ rule MainDispatchesSpecialistTask {
 rule SpecialistDispatchesSubTask {
     when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
 
+    let decision = check_delegation_policy(parent_task, target_type)
+
     requires: parent_task.status = running
     requires: not parent_task.specialist_type.is_memory_provider
-    requires: target_type not in parent_task.ancestor_types
-    requires: parent_task.depth + 1 < config.max_specialist_depth
-    requires: parent_task.chain_delegation_count < config.max_chain_delegations
-    requires: same_type_dispatch_count(parent_task, target_type) < config.max_same_type_dispatches
+    requires: decision.outcome = allowed
 
     let is_last = same_type_dispatch_count(parent_task, target_type) = config.max_same_type_dispatches - 1
 
@@ -233,9 +233,11 @@ rule SpecialistDispatchesSubTask {
             parent_task.conversation.session_id = session_id
 
     @guidance
-        -- same_type_dispatch_count counts prior non-rejected dispatches from parent_task to
-        -- target_type (status not in { failed with kind = policy rejection }). This counts
-        -- each iteration of a producer-critic loop regardless of whether the sub-task succeeded.
+        -- check_delegation_policy is a black box function whose semantics are formally
+        -- defined in delegation-policy.allium. It evaluates cycle detection, depth limit,
+        -- chain count limit, and same-type limit in priority order.
+        -- same_type_dispatch_count is also defined in delegation-policy.allium: it counts
+        -- prior non-policy-rejected dispatches from parent_task to target_type.
         -- The specialist emits SpecialistSubTaskRequested via IPC before its container exits.
         -- The host records the session_id (the current Claude conversation ID) so the specialist
         -- can resume its conversation when re-invoked after the sub-task completes.
@@ -246,9 +248,12 @@ rule SpecialistDispatchesSubTask {
 rule SubTaskRejectedCycle {
     when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
 
+    let decision = check_delegation_policy(parent_task, target_type)
+
     requires: parent_task.status = running
     requires: not parent_task.specialist_type.is_memory_provider
-    requires: target_type in parent_task.ancestor_types
+    requires: decision.outcome = rejected
+    requires: decision.rejection_kind = cycle_detected
 
     ensures: SpecialistTask.created(
         specialist_type: target_type,
@@ -261,7 +266,7 @@ rule SubTaskRejectedCycle {
         delegated_at: now,
         closed_at: now,
         status: failed,
-        failure: { kind: cycle_detected, detail: "Target type already in ancestor chain" }
+        failure: { kind: decision.rejection_kind, detail: decision.rejection_detail }
     )
 
     @guidance
@@ -274,10 +279,12 @@ rule SubTaskRejectedCycle {
 rule SubTaskRejectedDepth {
     when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
 
+    let decision = check_delegation_policy(parent_task, target_type)
+
     requires: parent_task.status = running
     requires: not parent_task.specialist_type.is_memory_provider
-    requires: target_type not in parent_task.ancestor_types
-    requires: parent_task.depth + 1 >= config.max_specialist_depth
+    requires: decision.outcome = rejected
+    requires: decision.rejection_kind = depth_exceeded
 
     ensures: SpecialistTask.created(
         specialist_type: target_type,
@@ -290,7 +297,7 @@ rule SubTaskRejectedDepth {
         delegated_at: now,
         closed_at: now,
         status: failed,
-        failure: { kind: depth_exceeded, detail: "Maximum specialist chain depth reached" }
+        failure: { kind: decision.rejection_kind, detail: decision.rejection_detail }
     )
 }
 
@@ -298,11 +305,12 @@ rule SubTaskRejectedDepth {
 rule SubTaskRejectedCount {
     when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
 
+    let decision = check_delegation_policy(parent_task, target_type)
+
     requires: parent_task.status = running
     requires: not parent_task.specialist_type.is_memory_provider
-    requires: target_type not in parent_task.ancestor_types
-    requires: parent_task.depth + 1 < config.max_specialist_depth
-    requires: parent_task.chain_delegation_count >= config.max_chain_delegations
+    requires: decision.outcome = rejected
+    requires: decision.rejection_kind = count_exceeded
 
     ensures: SpecialistTask.created(
         specialist_type: target_type,
@@ -315,7 +323,7 @@ rule SubTaskRejectedCount {
         delegated_at: now,
         closed_at: now,
         status: failed,
-        failure: { kind: count_exceeded, detail: "Maximum chain delegation count reached" }
+        failure: { kind: decision.rejection_kind, detail: decision.rejection_detail }
     )
 }
 
@@ -326,12 +334,12 @@ rule SubTaskRejectedCount {
 rule SubTaskRejectedSameTypeLimit {
     when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
 
+    let decision = check_delegation_policy(parent_task, target_type)
+
     requires: parent_task.status = running
     requires: not parent_task.specialist_type.is_memory_provider
-    requires: target_type not in parent_task.ancestor_types
-    requires: parent_task.depth + 1 < config.max_specialist_depth
-    requires: parent_task.chain_delegation_count < config.max_chain_delegations
-    requires: same_type_dispatch_count(parent_task, target_type) >= config.max_same_type_dispatches
+    requires: decision.outcome = rejected
+    requires: decision.rejection_kind = same_type_limit_exceeded
 
     ensures: SpecialistTask.created(
         specialist_type: target_type,
@@ -344,7 +352,7 @@ rule SubTaskRejectedSameTypeLimit {
         delegated_at: now,
         closed_at: now,
         status: failed,
-        failure: { kind: same_type_limit_exceeded, detail: "Maximum dispatches to this specialist type reached" }
+        failure: { kind: decision.rejection_kind, detail: decision.rejection_detail }
     )
 
     @guidance
@@ -948,11 +956,6 @@ invariant RunningTaskIsLeaf {
 ------------------------------------------------------------
 -- Deferred Specifications
 ------------------------------------------------------------
-
-deferred same_type_dispatch_count  -- see: delegation-policy.allium
-                                   -- counts non-policy-rejected dispatches from a given task
-                                   -- to a given specialist type (excludes failed tasks whose
-                                   -- failure kind is a policy rejection)
 
 deferred RecoveryDashboard         -- see: web-ui/recovery-dashboard.allium
                                    -- web UI surface for browsing specialist task history,

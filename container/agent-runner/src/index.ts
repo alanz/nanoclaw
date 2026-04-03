@@ -541,6 +541,9 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            ...(process.env.NANOCLAW_SPECIALIST_TYPE
+              ? { NANOCLAW_SPECIALIST_TYPE: process.env.NANOCLAW_SPECIALIST_TYPE }
+              : {}),
             ...(process.env.BRAVE_API_KEY ? { BRAVE_API_KEY: process.env.BRAVE_API_KEY } : {}),
           },
         },
@@ -570,6 +573,16 @@ async function runQuery(
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
       log(`Session initialized: ${newSessionId}`);
+      // Write session ID to a well-known file so MCP tools (e.g. specialist
+      // tools) can read it without needing a direct reference to the SDK state.
+      try {
+        fs.writeFileSync(
+          path.join('/workspace/ipc', 'current_session_id'),
+          newSessionId,
+        );
+      } catch {
+        // Not fatal — IPC dir may not exist in test environments.
+      }
     }
 
     if (

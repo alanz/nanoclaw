@@ -21,6 +21,34 @@ const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 const dispatchDepth = parseInt(process.env.NANOCLAW_DISPATCH_DEPTH || '0', 10);
 
+// Specialist context — only set when running inside a specialist container.
+const specialistType = process.env.NANOCLAW_SPECIALIST_TYPE || '';
+
+/**
+ * Extract a specialist task ID from a specialist JID.
+ * Returns null if the JID is not a specialist JID.
+ * Exported for testing.
+ */
+export function getTaskIdFromJid(jid: string): string | null {
+  const PREFIX = 'specialist:';
+  return jid.startsWith(PREFIX) ? jid.slice(PREFIX.length) : null;
+}
+
+const specialistTaskId = getTaskIdFromJid(chatJid ?? '');
+const isSpecialist = specialistTaskId !== null;
+
+/**
+ * Read the current conversation session ID written by the agent runner
+ * when the Claude SDK initialises the session.
+ */
+function readCurrentSessionId(): string {
+  try {
+    return fs.readFileSync(path.join(IPC_DIR, 'current_session_id'), 'utf-8').trim();
+  } catch {
+    return '';
+  }
+}
+
 // One-call guard: sub-groups may only call deliver_result once per container run
 let deliverResultUsed = false;
 
@@ -1429,6 +1457,170 @@ server.tool(
     };
   },
 );
+
+// ── Specialist tools (only registered for specialist containers) ──────────────
+
+if (isSpecialist) {
+  server.tool(
+    'dispatch_specialist',
+    `Delegate a sub-task to another specialist agent. The current container will be suspended until the sub-task completes, at which point the result is injected back into this conversation.
+
+Only callable from a running specialist container. The target type must be registered in the host's specialist configuration and must not be a memory-provider type (use query_memory for those).`,
+    {
+      target_type: z.string().describe('Specialist type name to delegate to (e.g. "researcher", "coder")'),
+      prompt: z.string().describe('Task description for the specialist'),
+    },
+    async (args) => {
+      const sessionId = readCurrentSessionId();
+      if (!sessionId) {
+        return {
+          content: [{ type: 'text' as const, text: 'dispatch_specialist: session not yet established. Retry after the conversation initialises.' }],
+          isError: true,
+        };
+      }
+
+      writeIpcFile(TASKS_DIR, {
+        type: 'dispatch_specialist',
+        parentTaskId: specialistTaskId,
+        parentTypeName: specialistType,
+        targetTypeName: args.target_type,
+        prompt: args.prompt,
+        sessionId,
+        sourceGroup: chatJid,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        content: [{ type: 'text' as const, text: `Sub-task dispatched to specialist "${args.target_type}". This container will be suspended until the result arrives.` }],
+      };
+    },
+  );
+
+  server.tool(
+    'query_memory',
+    `Query a memory-provider specialist. Unlike dispatch_specialist, memory queries bypass delegation-policy checks and target specialist types marked as memory providers.
+
+The container is suspended until the memory specialist responds, then the result is injected into this conversation.`,
+    {
+      target_type: z.string().describe('Memory-provider specialist type name'),
+      prompt: z.string().describe('Query to send to the memory specialist'),
+    },
+    async (args) => {
+      const sessionId = readCurrentSessionId();
+      if (!sessionId) {
+        return {
+          content: [{ type: 'text' as const, text: 'query_memory: session not yet established. Retry after the conversation initialises.' }],
+          isError: true,
+        };
+      }
+
+      writeIpcFile(TASKS_DIR, {
+        type: 'query_memory_specialist',
+        taskId: specialistTaskId,
+        targetTypeName: args.target_type,
+        prompt: args.prompt,
+        sessionId,
+        sourceGroup: chatJid,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        content: [{ type: 'text' as const, text: `Memory query dispatched to "${args.target_type}". This container will be suspended until the response arrives.` }],
+      };
+    },
+  );
+
+  server.tool(
+    'deliver_specialist_result',
+    `Deliver the completed result back to whoever requested this specialist task (the main group or a parent specialist).
+
+Call this when you have finished your work. The host will route the result and terminate this container run. Only one delivery per run is meaningful — subsequent calls are silently ignored by the host.`,
+    {
+      result_text: z.string().describe('Result or completion summary to deliver to the requester'),
+    },
+    async (args) => {
+      writeIpcFile(TASKS_DIR, {
+        type: 'deliver_specialist_result',
+        taskId: specialistTaskId,
+        resultText: args.result_text,
+        sourceGroup: chatJid,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        content: [{ type: 'text' as const, text: 'Result delivered to requester.' }],
+      };
+    },
+  );
+
+  server.tool(
+    'report_session',
+    `Report this container's current conversation session ID to the host so it can be saved for resumption after a sub-task completes.
+
+Call this at the start of your run (before dispatching any sub-tasks). The session ID is written automatically by the agent runner — this tool reads it and forwards it to the host.`,
+    {},
+    async () => {
+      const sessionId = readCurrentSessionId();
+      if (!sessionId) {
+        return {
+          content: [{ type: 'text' as const, text: 'report_session: no session ID available yet. The agent runner writes it on session init — call this after the session is established.' }],
+          isError: true,
+        };
+      }
+
+      writeIpcFile(TASKS_DIR, {
+        type: 'report_specialist_session',
+        taskId: specialistTaskId,
+        sessionId,
+        sourceGroup: chatJid,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        content: [{ type: 'text' as const, text: `Session ${sessionId} reported to host.` }],
+      };
+    },
+  );
+
+  server.tool(
+    'submit_raw_memory',
+    `Submit raw information to the main group's memory staging area for review and indexing.
+
+Write the content to a file under /workspace/ipc/ first, then pass its path here. The host will notify the main group agent, which can review and accept the submission. The specialist continues running after this call — it does not cause a suspension.`,
+    {
+      topic: z.string().describe('Short label describing the content (e.g. "research findings on X")'),
+      staging_path: z.string().describe('Absolute path to the content file — must be under /workspace/ipc/'),
+    },
+    async (args) => {
+      const IPC_PREFIX = '/workspace/ipc/';
+      if (!args.staging_path.startsWith(IPC_PREFIX)) {
+        return {
+          content: [{ type: 'text' as const, text: `staging_path must be under ${IPC_PREFIX}. Got: ${args.staging_path}` }],
+          isError: true,
+        };
+      }
+      if (args.staging_path.includes('..')) {
+        return {
+          content: [{ type: 'text' as const, text: 'staging_path must not contain ..' }],
+          isError: true,
+        };
+      }
+
+      writeIpcFile(TASKS_DIR, {
+        type: 'submit_raw_memory',
+        taskId: specialistTaskId,
+        topic: args.topic,
+        stagingPath: args.staging_path,
+        sourceGroup: chatJid,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        content: [{ type: 'text' as const, text: `Raw memory submitted (topic: "${args.topic}"). The main group has been notified for review.` }],
+      };
+    },
+  );
+}
 
 // Start the stdio transport
 const transport = new StdioServerTransport();

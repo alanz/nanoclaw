@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildDashboardUrl, parseDashboardUrl } from './ipc-mcp-stdio.js';
+import { buildDashboardUrl, parseDashboardUrl, getTaskIdFromJid } from './ipc-mcp-stdio.js';
 
 describe('buildDashboardUrl', () => {
   const BASE = 'https://nanoclaw.example.ts.net';
@@ -147,5 +147,33 @@ describe('parseDashboardUrl', () => {
     const result = parseDashboardUrl(url);
     expect(result?.filePath).toBe('/workspace/notes/todo.md');
     expect(result?.groupFolder).toBe(FOLDER);
+  });
+});
+
+describe('getTaskIdFromJid', () => {
+  it('extracts task ID from a specialist JID', () => {
+    expect(getTaskIdFromJid('specialist:abc-123')).toBe('abc-123');
+  });
+
+  it('extracts a UUID-style task ID', () => {
+    expect(getTaskIdFromJid('specialist:550e8400-e29b-41d4-a716-446655440000')).toBe(
+      '550e8400-e29b-41d4-a716-446655440000',
+    );
+  });
+
+  it('returns null for a non-specialist JID', () => {
+    expect(getTaskIdFromJid('120363336345536173@g.us')).toBeNull();
+  });
+
+  it('returns null for a regular telegram JID', () => {
+    expect(getTaskIdFromJid('tg:-1001234567890')).toBeNull();
+  });
+
+  it('returns null for the main group JID', () => {
+    expect(getTaskIdFromJid('main')).toBeNull();
+  });
+
+  it('returns empty string for bare specialist: prefix with no ID', () => {
+    expect(getTaskIdFromJid('specialist:')).toBe('');
   });
 });

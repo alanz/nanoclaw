@@ -275,7 +275,7 @@ definitions (see Phase 7).
 
 ---
 
-## Phase 7 — Container MCP tools
+## ~~Phase 7 — Container MCP tools~~ ✓ Done
 
 **Directory:** `container/agent-runner/src/` (MCP server inside containers)
 

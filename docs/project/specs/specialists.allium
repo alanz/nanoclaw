@@ -974,7 +974,7 @@ deferred AddSpecialistSkill        -- see: skills/add-specialist
                                    -- providers cannot delegate), and optionally runs a smoke test.
                                    -- Mirrors the /add-telegram, /add-slack pattern for channels.
 
-deferred NullChannel               -- see: src/channels/null-channel.ts (implementation note)
+deferred NullChannel               -- see: null-channel.allium
                                    --
                                    -- All specialist containers run under a single registered null
                                    -- channel group. The null channel has no messaging platform

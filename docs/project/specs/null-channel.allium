@@ -1,0 +1,112 @@
+-- allium: 3
+-- null-channel.allium
+--
+-- NullChannel: a registered channel type with no messaging platform backing.
+-- It exists solely to satisfy NanoClaw's channel contract so that specialist task
+-- containers can participate in the existing container management model (GroupQueue,
+-- channel registry, JID routing) without a real messaging platform.
+--
+-- Specialist tasks each receive a synthetic JID that routes through GroupQueue using
+-- the standard concurrency model. No new routing mechanism is introduced.
+--
+-- Scope: NullChannel registration, JID ownership, sendMessage no-op, GroupQueue integration
+-- Includes: channel registration, specialist JID prefix, synthetic JID format, no-op delivery
+-- Excludes:
+--   - Specialist task lifecycle (see specialists.allium)
+--   - IPC/MCP protocol (see ipc.allium)
+--   - Container runner mechanics
+--   - GroupQueue internals
+
+use "./nanoclaw.allium" as nanoclaw
+use "./specialists.allium" as specialists
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    jid_prefix: String = "specialist:"   -- NullChannel owns all JIDs with this prefix
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- NullChannel registers with the channel registry at startup.
+-- It returns whatever satisfies the NanoClaw Channel interface contract.
+-- No authentication, no connection lifecycle, no reconnect logic.
+rule NullChannelRegistered {
+    when: RegisterNullChannel()
+
+    ensures: ChannelRegistered(
+        channel_type: null_channel,
+        owns_jid_prefix: config.jid_prefix
+    )
+
+    @guidance
+        -- RegisterNullChannel is emitted once during the host startup sequence,
+        -- alongside the registration triggers for Telegram, DeltaChat, etc.
+        -- The channel registers itself in the same self-registration pattern,
+        -- advertising ownership of the "specialist:" JID prefix. The channel
+        -- registry routes outbound messages for matching JIDs to NullChannel's
+        -- sendMessage, which discards them.
+}
+
+-- Each specialist task receives a synthetic JID derived from its task ID.
+-- This JID is passed to GroupQueue as a normal groupJid, so specialist containers
+-- slot into the existing concurrency model with no routing changes.
+rule SyntheticJidAssigned {
+    when: task: specialists.SpecialistTask becomes queued
+
+    let synthetic_jid = config.jid_prefix + task_id(task)
+
+    ensures: task.group_jid = synthetic_jid
+
+    @guidance
+        -- The synthetic JID format is "specialist:{task-id}" where task-id is the
+        -- unique identifier assigned at dispatch time. This JID is ephemeral: it
+        -- exists only for the task's lifetime and is never persisted in the chat
+        -- or group registries. GroupQueue treats it as any other groupJid for
+        -- concurrency slot management.
+}
+
+-- Messages sent to a specialist JID are silently discarded.
+-- The sendMessage method exists only to satisfy the Channel interface.
+-- All specialist container communication goes through the IPC filesystem.
+rule SendMessageDiscarded {
+    when: SendMessage(chat_jid, content)
+
+    requires: starts_with(chat_jid, config.jid_prefix)
+
+    ensures: MessageDiscarded(chat_jid: chat_jid)
+
+    @guidance
+        -- This is the behavioural contract: any message routed to a specialist JID
+        -- via the channel layer produces no side effects. The message is not queued,
+        -- not logged, and not delivered. If implementation code inadvertently sends
+        -- a message to a specialist JID, it is harmlessly dropped rather than erroring.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- NullChannel never produces inbound messages.
+-- There is no platform to receive messages from.
+invariant NoInboundMessages {
+    for m in nanoclaw.Messages:
+        starts_with(m.chat.jid, config.jid_prefix) implies m.is_from_me
+}
+
+-- All JIDs owned by NullChannel use the configured prefix.
+invariant JidPrefixOwnership {
+    for jid in null_channel_owned_jids():
+        starts_with(jid, config.jid_prefix)
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "JID prefix routing is not yet formally documented in nanoclaw.allium — the channel registry's ownsJid dispatch model (prefix-based JID ownership) should be specified there. A separate todo exists to tend nanoclaw.allium; this gap should be addressed in that pass."
+open question "Should NullChannel enforce a concurrency limit for specialist containers independent of nanoclaw.config.max_concurrent_agents, or is the GroupQueue slot model sufficient as-is?"

@@ -1,0 +1,1024 @@
+-- allium: 3
+-- specialists.allium
+--
+-- Specialist orchestration: typed, ephemeral agent instances for domain-specific work.
+-- A specialist type defines a named capability (researcher, coder, code-reviewer, memory).
+-- A specialist task is one unit of work that may span multiple container invocations.
+--
+-- Delegation is async: when a specialist dispatches a sub-task its container exits cleanly,
+-- the sub-task runs in its own container, and the specialist is re-invoked with the result.
+-- The Claude conversation session is maintained across invocations so the specialist's
+-- chain of thought is preserved across async boundaries and host restarts.
+--
+-- This means max_concurrent_specialists = 1 is practical: at any moment at most one
+-- container is running per active task chain; containers are never blocked on each other.
+--
+-- Scope: SpecialistType registry, SpecialistTask lifecycle, async delegation,
+--        session continuity across restarts, delegation policy, memory specialist
+-- Includes: specialist registration, task dispatch (from main or specialist), result delivery,
+--           failure propagation, cycle detection, depth/count enforcement, memory queries,
+--           conversation session per task, graceful and kill recovery
+-- Excludes:
+--   - Container runtime mechanics (ephemeral container implementation)
+--   - IPC/MCP wire protocol (see ipc.allium)
+--   - Core group/session lifecycle (see nanoclaw.allium)
+--   - Base delegation mechanism (see orchestration.allium)
+--   - Memory indexing and A-MEM internals (see memory.allium)
+--   - Specialist-internal behaviour (researcher CLAUDE.md, coder constraints, etc.)
+
+use "./nanoclaw.allium" as nanoclaw
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum FailureKind {
+    cycle_detected | depth_exceeded | count_exceeded | same_type_limit_exceeded
+    | timeout | execution_error | host_restart
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value TaskFailure {
+    kind: FailureKind
+    detail: String
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A named capability that can be instantiated to execute tasks.
+-- Specialist types are declared in static config (not registered at runtime by agents).
+-- New types are added via the /add-specialist skill, which scaffolds the CLAUDE.md and
+-- config entry. The config is read at startup; adding a type requires a service restart.
+entity SpecialistType {
+    name: String                         -- unique: "researcher", "coder", "code_reviewer", "memory"
+    description: String
+    is_memory_provider: Boolean          -- memory providers have read-only access to main group space
+                                         -- and may not delegate to other specialists
+    last_turn_sub_notice: String?        -- injected into this type's prompt when it is invoked as the
+                                         -- last dispatch of its type from the parent; null = use default
+    last_turn_parent_notice: String?     -- injected into the parent's resumed context when this type
+                                         -- delivers its last result; null = use default
+                                         -- both notices are configured on the sub-task type because it
+                                         -- is the one that knows a loop is ending; the parent type
+                                         -- does not need its own last-turn configuration
+}
+
+-- The persistent Claude conversation state for a specialist task.
+-- Created after the first successful container invocation; maintained across all subsequent
+-- re-invocations. This is what preserves the specialist's chain of thought across the async
+-- dispatch/resume cycle and across host restarts.
+entity SpecialistConversationSession {
+    task: SpecialistTask
+    session_id: String                   -- Claude conversation ID; passed to each re-invocation
+    status: active | stale | cleared
+
+    transitions status {
+        active -> stale                  -- session file missing on re-invocation; agent starts fresh
+        stale -> active                  -- re-invocation succeeded; session restored
+        active -> cleared                -- task reached a terminal state
+        stale -> cleared
+        terminal: cleared
+    }
+}
+
+-- A unit of work dispatched to a specialist.
+-- Each invocation runs in a fresh ephemeral container. A task may span multiple invocations:
+-- one initial run, then one re-invocation per sub-task dispatched (async model).
+-- Between invocations the task is in awaiting_sub_task with no container running.
+entity SpecialistTask {
+    specialist_type: SpecialistType
+    prompt: String
+    requester_group: nanoclaw.Group?     -- non-null when dispatched by the main group
+    requester_task: SpecialistTask?      -- non-null when dispatched by another specialist
+    depth: Integer                       -- 0 = dispatched directly by main group
+    chain_delegation_count: Integer      -- total delegations in this chain so far, including this task;
+                                         -- set at creation: parent.chain_delegation_count + 1 (or 1 for root)
+    ancestor_types: Set<SpecialistType>  -- specialist types above this task in the chain
+    delegated_at: Timestamp
+    closed_at: Timestamp?
+    restart_attempt_count: Integer               -- incremented on each host-restart retry; starts at 0
+    status: queued | running | awaiting_sub_task | awaiting_restart | completed | failed
+
+    is_last_same_type_dispatch: Boolean  -- true when this task is the Nth dispatch of its type
+                                         -- from its parent; host injects last-turn signal to both sides
+
+    -- State-dependent fields
+    pending_sub_task: SpecialistTask when status = awaiting_sub_task
+    result: String when status = completed
+    failure: TaskFailure when status = failed
+
+    -- Relationships
+    conversation: SpecialistConversationSession with task = this
+
+    -- Derived
+    is_overdue: status in { queued, running, awaiting_sub_task, awaiting_restart }
+                and now - delegated_at > config.max_task_duration
+    has_cycle: specialist_type in ancestor_types
+
+    invariant ExactlyOneRequester {
+        (requester_group != null) != (requester_task != null)
+    }
+
+    invariant DepthMatchesAncestorCount {
+        depth = ancestor_types.count
+    }
+
+    transitions status {
+        queued -> running               -- first container invocation started
+        queued -> failed                -- rejected by delegation policy before dispatch
+        running -> awaiting_sub_task    -- specialist dispatched a sub-task; container exits cleanly
+        running -> completed            -- specialist delivered result; container exits
+        running -> awaiting_restart     -- host killed; retries remaining; will retry silently
+        running -> failed               -- container crashed, timed out, or retries exhausted
+        awaiting_sub_task -> running    -- sub-task completed; specialist re-invoked with result
+        awaiting_sub_task -> failed     -- overall task timeout while waiting for sub-task
+        awaiting_restart -> running     -- retry container started
+        awaiting_restart -> failed      -- overall task timeout or retries exhausted while waiting
+        terminal: completed
+        terminal: failed
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_specialist_depth: Integer = 5           -- maximum chain depth (0 = dispatched by main)
+                                                -- independent of nanoclaw.config.max_dispatch_depth, which
+                                                -- governs group-to-group orchestration (OrchestrationCycles).
+                                                -- A specialist chain always starts at depth 0 regardless of
+                                                -- the group dispatch_depth of the main agent that initiated it.
+    max_chain_delegations: Integer = 20         -- maximum total SpecialistTasks in one chain from a root
+    max_same_type_dispatches: Integer = 3       -- maximum dispatches from one task to the same specialist type;
+                                                -- caps producer-critic iteration loops
+    default_last_turn_sub_notice: String = "[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]"
+    default_last_turn_parent_notice: String = "[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]"
+    max_task_duration: Duration = 4.hours       -- wall-clock limit across all invocations of one task
+    container_timeout: Duration = 30.minutes    -- per-invocation timeout; does not reset between invocations
+    max_restart_retries: Integer = 2            -- silent retries on host_restart before propagating failure
+    max_staging_duration: Duration = 2.hours    -- alert if a raw memory submission remains staged beyond this
+
+    -- Concurrency note: specialist containers run under the null channel group
+    -- (see deferred NullChannel). Each specialist type is registered as a separate
+    -- sub-ID slot. nanoclaw.config.max_concurrent_agents bounds AgentSessions for
+    -- standard groups; specialist task slots are a parallel mechanism and do not
+    -- compete with regular group agents for the same pool. A dedicated concurrency
+    -- limit for specialists (if needed) belongs in the NullChannel implementation.
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Task Dispatch from Main ----
+
+-- The main group agent dispatches a task to a specialist type.
+rule MainDispatchesSpecialistTask {
+    when: AgentDispatchesSpecialistTask(main_group, specialist_type, prompt)
+
+    requires: main_group.is_main
+
+    ensures: SpecialistTask.created(
+        specialist_type: specialist_type,
+        prompt: prompt,
+        requester_group: main_group,
+        requester_task: null,
+        depth: 0,
+        chain_delegation_count: 1,
+        ancestor_types: {},
+        delegated_at: now,
+        status: queued
+    )
+}
+
+-- ---- Sub-task Dispatch from a Running Specialist ----
+
+-- A running specialist dispatches a sub-task and exits. The sub-task result will be injected
+-- into the specialist's Claude conversation when it is re-invoked.
+-- The current session_id is saved before the container exits to enable resumption.
+rule SpecialistDispatchesSubTask {
+    when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
+
+    requires: parent_task.status = running
+    requires: not parent_task.specialist_type.is_memory_provider
+    requires: target_type not in parent_task.ancestor_types
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count < config.max_chain_delegations
+    requires: same_type_dispatch_count(parent_task, target_type) < config.max_same_type_dispatches
+
+    let is_last = same_type_dispatch_count(parent_task, target_type) = config.max_same_type_dispatches - 1
+
+    ensures:
+        let sub_task = SpecialistTask.created(
+            specialist_type: target_type,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+            is_last_same_type_dispatch: is_last,
+            delegated_at: now,
+            status: queued
+        )
+        parent_task.pending_sub_task = sub_task
+        parent_task.status = awaiting_sub_task
+        if exists parent_task.conversation:
+            parent_task.conversation.session_id = session_id
+
+    @guidance
+        -- same_type_dispatch_count counts prior non-rejected dispatches from parent_task to
+        -- target_type (status not in { failed with kind = policy rejection }). This counts
+        -- each iteration of a producer-critic loop regardless of whether the sub-task succeeded.
+        -- The specialist emits SpecialistSubTaskRequested via IPC before its container exits.
+        -- The host records the session_id (the current Claude conversation ID) so the specialist
+        -- can resume its conversation when re-invoked after the sub-task completes.
+        -- No further output is expected from the current container invocation.
+}
+
+-- Delegation rejected: would form a cycle. Reported inline to the running container.
+rule SubTaskRejectedCycle {
+    when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
+
+    requires: parent_task.status = running
+    requires: not parent_task.specialist_type.is_memory_provider
+    requires: target_type in parent_task.ancestor_types
+
+    ensures: SpecialistTask.created(
+        specialist_type: target_type,
+        prompt: prompt,
+        requester_group: null,
+        requester_task: parent_task,
+        depth: parent_task.depth + 1,
+        chain_delegation_count: parent_task.chain_delegation_count + 1,
+        ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+        delegated_at: now,
+        closed_at: now,
+        status: failed,
+        failure: { kind: cycle_detected, detail: "Target type already in ancestor chain" }
+    )
+
+    @guidance
+        -- The parent task remains running; the rejection is returned as a tool call error.
+        -- The specialist can handle the error and continue or exit with a partial result.
+        -- No awaiting_sub_task transition occurs; the container is not expected to exit.
+}
+
+-- Delegation rejected: depth limit exceeded.
+rule SubTaskRejectedDepth {
+    when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
+
+    requires: parent_task.status = running
+    requires: not parent_task.specialist_type.is_memory_provider
+    requires: target_type not in parent_task.ancestor_types
+    requires: parent_task.depth + 1 >= config.max_specialist_depth
+
+    ensures: SpecialistTask.created(
+        specialist_type: target_type,
+        prompt: prompt,
+        requester_group: null,
+        requester_task: parent_task,
+        depth: parent_task.depth + 1,
+        chain_delegation_count: parent_task.chain_delegation_count + 1,
+        ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+        delegated_at: now,
+        closed_at: now,
+        status: failed,
+        failure: { kind: depth_exceeded, detail: "Maximum specialist chain depth reached" }
+    )
+}
+
+-- Delegation rejected: total chain delegation count exceeded.
+rule SubTaskRejectedCount {
+    when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
+
+    requires: parent_task.status = running
+    requires: not parent_task.specialist_type.is_memory_provider
+    requires: target_type not in parent_task.ancestor_types
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count >= config.max_chain_delegations
+
+    ensures: SpecialistTask.created(
+        specialist_type: target_type,
+        prompt: prompt,
+        requester_group: null,
+        requester_task: parent_task,
+        depth: parent_task.depth + 1,
+        chain_delegation_count: parent_task.chain_delegation_count + 1,
+        ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+        delegated_at: now,
+        closed_at: now,
+        status: failed,
+        failure: { kind: count_exceeded, detail: "Maximum chain delegation count reached" }
+    )
+}
+
+-- Delegation rejected: same-type dispatch limit exceeded.
+-- This bounds producer-critic iteration loops (e.g. coder → reviewer → coder → reviewer ...).
+-- The last permitted dispatch is flagged is_last_same_type_dispatch = true; this rule fires
+-- only when that limit has already been used.
+rule SubTaskRejectedSameTypeLimit {
+    when: SpecialistSubTaskRequested(parent_task, target_type, prompt, session_id)
+
+    requires: parent_task.status = running
+    requires: not parent_task.specialist_type.is_memory_provider
+    requires: target_type not in parent_task.ancestor_types
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count < config.max_chain_delegations
+    requires: same_type_dispatch_count(parent_task, target_type) >= config.max_same_type_dispatches
+
+    ensures: SpecialistTask.created(
+        specialist_type: target_type,
+        prompt: prompt,
+        requester_group: null,
+        requester_task: parent_task,
+        depth: parent_task.depth + 1,
+        ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+        is_last_same_type_dispatch: false,
+        delegated_at: now,
+        closed_at: now,
+        status: failed,
+        failure: { kind: same_type_limit_exceeded, detail: "Maximum dispatches to this specialist type reached" }
+    )
+
+    @guidance
+        -- Because the last valid dispatch was already flagged with is_last_same_type_dispatch = true,
+        -- both sides should have had the opportunity to conclude gracefully. This rejection is a
+        -- safety net for specialists that ignore the last-turn signal.
+}
+
+-- ---- Memory Queries ----
+
+-- A running specialist queries the memory specialist for prior results on a topic.
+-- Treated as an async sub-task dispatch: the specialist exits and is re-invoked with the result.
+-- Memory queries are exempt from cycle detection and depth enforcement because
+-- memory providers never delegate further.
+rule SpecialistQueriesMemory {
+    when: SpecialistSubTaskRequested(querying_task, target_type, prompt, session_id)
+
+    requires: querying_task.status = running
+    requires: target_type.is_memory_provider
+
+    ensures:
+        let memory_task = SpecialistTask.created(
+            specialist_type: target_type,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: querying_task,
+            depth: querying_task.depth + 1,
+            chain_delegation_count: querying_task.chain_delegation_count + 1,
+            ancestor_types: querying_task.ancestor_types + {querying_task.specialist_type},
+            delegated_at: now,
+            status: queued
+        )
+        querying_task.pending_sub_task = memory_task
+        querying_task.status = awaiting_sub_task
+        if exists querying_task.conversation:
+            querying_task.conversation.session_id = session_id
+
+    @guidance
+        -- The memory provider container mounts the main group workspace read-only
+        -- and searches the A-MEM memory store. It cannot delegate further, so it
+        -- completes in one container invocation and its result is injected into the
+        -- querying specialist's resumed conversation.
+}
+
+-- ---- Container Lifecycle ----
+
+-- SpecialistContainerRestarted is a command event: the host runtime creates a new
+-- container for the task and fires SpecialistContainerStarted once the container is
+-- confirmed running. SpecialistContainerRestarted carries an optional inject payload
+-- (a sub-task result or failure) that is passed into the container's initial prompt.
+-- inject: null signals a cold restart (e.g. host-restart retry).
+-- Rules that emit SpecialistContainerRestarted: SpecialistSubResultReady,
+-- SpecialistTaskScheduledForRetry, SpecialistOrphanedSubTaskRecovered,
+-- AwaitingRestartTaskRestarted.
+
+-- A queued task's container has started for the first time.
+rule SpecialistTaskStarted {
+    when: SpecialistContainerStarted(task)
+
+    requires: task.status = queued
+
+    ensures: task.status = running
+
+    @guidance
+        -- On first invocation, no session_id is passed to the container; it starts a fresh
+        -- Claude conversation. The session_id is captured by SpecialistSessionEstablished
+        -- once the first conversation turn completes.
+        -- If task.is_last_same_type_dispatch is true the host prepends a last-turn notice to the
+        -- prompt before passing it to the container, resolved as:
+        --   task.specialist_type.last_turn_sub_notice ?? config.default_last_turn_sub_notice
+}
+
+-- A task in awaiting_sub_task is re-invoked after its sub-task completed.
+-- The host passes the saved session_id so the specialist resumes its Claude conversation.
+rule SpecialistTaskResumed {
+    when: SpecialistContainerStarted(task)
+
+    requires: task.status = awaiting_sub_task
+
+    ensures: task.status = running
+    ensures: task.pending_sub_task = null    -- required: leaving awaiting_sub_task when set
+
+    @guidance
+        -- The host injects the sub-task result (or failure) into the resumed conversation
+        -- as a tool response before the next agent turn. The specialist's chain of thought
+        -- continues from where it left off when it dispatched the sub-task.
+        -- If task.conversation exists its session_id is passed to the container so the
+        -- specialist resumes the same Claude conversation thread.
+}
+
+-- The container reports its Claude conversation ID after the first turn completes.
+-- This session_id is stored and passed to the container on every subsequent re-invocation.
+rule SpecialistSessionEstablished {
+    when: SpecialistContainerReportedSession(task, session_id)
+
+    requires: task.status = running
+
+    ensures:
+        if not exists task.conversation:
+            SpecialistConversationSession.created(
+                task: task,
+                session_id: session_id,
+                status: active
+            )
+        if exists task.conversation:
+            task.conversation.session_id = session_id
+            task.conversation.status = active
+}
+
+-- ---- Result Delivery ----
+
+-- The specialist delivered a result. The result is stored on the task entity,
+-- the conversation session is cleared, and the requester is notified.
+-- The container is destroyed; no result remains in its workspace.
+rule SpecialistTaskCompleted {
+    when: SpecialistDeliveredResult(task, result_text)
+
+    requires: task.status = running
+
+    ensures: task.result = result_text
+    ensures: task.status = completed
+    ensures: task.closed_at = now
+    ensures:
+        if exists task.conversation:
+            task.conversation.status = cleared
+    ensures: SpecialistResultDelivered(
+        requester_group: task.requester_group,
+        requester_task: task.requester_task,
+        task: task
+    )
+
+    @guidance
+        -- SpecialistResultDelivered routes the result to the correct requester:
+        -- if requester_group is set the result is injected into the main group's session;
+        -- if requester_task is set the parent specialist is re-invoked (see ParentSpecialistResumed).
+}
+
+-- A completed sub-task re-invokes its parent specialist.
+rule ParentSpecialistResumed {
+    when: SpecialistResultDelivered(requester_group?, requester_task?, task)
+
+    requires: requester_task != null
+    requires: requester_task.status = awaiting_sub_task
+    requires: requester_task.pending_sub_task = task
+
+    ensures: SpecialistContainerRestarted(task: requester_task, inject: task)
+
+    @guidance
+        -- SpecialistContainerRestarted schedules a new container invocation for the parent task.
+        -- The sub-task result or failure is injected into the conversation as a tool response.
+        -- SpecialistTaskResumed fires when the container is confirmed started.
+        -- If task.is_last_same_type_dispatch is true the host appends a last-turn notice to the
+        -- injected result before the parent's next turn, resolved as:
+        --   task.specialist_type.last_turn_parent_notice ?? config.default_last_turn_parent_notice
+        -- Both sides receive the notice at the same boundary:
+        -- the sub-task sees it in its prompt; the parent sees it with the returned result.
+        -- The notice fields are on the sub-task's specialist type (task.specialist_type) because
+        -- it is the type that knows a loop is ending; the parent type needs no configuration.
+}
+
+-- ---- Failure ----
+
+-- A container invocation that exceeds the per-invocation timeout is killed and the task fails.
+rule SpecialistInvocationTimedOut {
+    when: SpecialistContainerTimedOut(task)
+
+    requires: task.status = running
+
+    ensures: task.status = failed
+    ensures: task.failure = { kind: timeout, detail: "Container invocation exceeded timeout" }
+    ensures: task.closed_at = now
+    ensures:
+        if exists task.conversation:
+            task.conversation.status = cleared
+    ensures: SpecialistResultDelivered(
+        requester_group: task.requester_group,
+        requester_task: task.requester_task,
+        task: task
+    )
+}
+
+-- A task whose wall-clock duration (across all invocations) exceeds max_task_duration fails.
+-- Applies in all live states including awaiting_sub_task.
+rule SpecialistTaskOverallTimeout {
+    when: task: SpecialistTask.is_overdue
+
+    requires: task.status in { queued, running, awaiting_sub_task }
+
+    ensures: task.status = failed
+    ensures: task.failure = { kind: timeout, detail: "Overall task duration exceeded" }
+    ensures: task.closed_at = now
+    ensures:
+        if exists task.conversation:
+            task.conversation.status = cleared
+    ensures: SpecialistResultDelivered(
+        requester_group: task.requester_group,
+        requester_task: task.requester_task,
+        task: task
+    )
+}
+
+-- A specialist container that exits unexpectedly fails the task.
+rule SpecialistTaskCrashed {
+    when: SpecialistContainerExited(task, exit_reason)
+
+    requires: task.status = running
+
+    ensures: task.status = failed
+    ensures: task.failure = { kind: execution_error, detail: exit_reason }
+    ensures: task.closed_at = now
+    ensures:
+        if exists task.conversation:
+            task.conversation.status = cleared
+    ensures: SpecialistResultDelivered(
+        requester_group: task.requester_group,
+        requester_task: task.requester_task,
+        task: task
+    )
+}
+
+-- ---- Recovery on Host Restart ----
+
+-- On startup, tasks that were running when the host was killed have lost their containers.
+-- By RunningTaskIsLeaf, running tasks are always the leaves of their delegation chains.
+-- Retrying the leaf is sufficient to recover the entire chain above it.
+--
+-- If retries remain, the task is silently rescheduled. The requester (main group or parent
+-- specialist) is not notified; it simply waits a little longer and eventually receives
+-- the result as if nothing happened. The failure_kind = host_restart tells any downstream
+-- handler that this was infrastructure, not logic.
+--
+-- If retries are exhausted, failure propagates normally.
+
+-- Retries remaining: transition to awaiting_restart and schedule a new container.
+rule SpecialistTaskScheduledForRetry {
+    when: NanoclawStarted
+    for task in SpecialistTasks where status = running:
+        requires: task.restart_attempt_count < config.max_restart_retries
+        ensures: task.restart_attempt_count = task.restart_attempt_count + 1
+        ensures: task.status = awaiting_restart
+        ensures:
+            if exists task.conversation:
+                task.conversation.status = stale
+        ensures: SpecialistContainerRestarted(task: task, inject: null)
+
+    @guidance
+        -- The stale session gives the retry container the opportunity to resume the prior
+        -- Claude conversation if the session file survived the restart. If it did not,
+        -- the agent starts fresh but has the full prompt to reconstruct its approach.
+        -- inject: null signals this is a cold restart, not a sub-task result delivery.
+}
+
+-- Retries exhausted: fail the task and propagate the failure to the requester.
+rule SpecialistTaskFailedAfterRetriesExhausted {
+    when: NanoclawStarted
+    for task in SpecialistTasks where status = running:
+        requires: task.restart_attempt_count >= config.max_restart_retries
+        ensures: task.status = failed
+        ensures: task.failure = {
+            kind: host_restart,
+            detail: "Container lost on host restart; retries exhausted"
+        }
+        ensures: task.closed_at = now
+        ensures:
+            if exists task.conversation:
+                task.conversation.status = cleared
+        ensures: SpecialistResultDelivered(
+            requester_group: task.requester_group,
+            requester_task: task.requester_task,
+            task: task
+        )
+}
+
+-- The retry container has started; the task resumes running.
+rule SpecialistTaskRetryStarted {
+    when: SpecialistContainerStarted(task)
+
+    requires: task.status = awaiting_restart
+
+    ensures: task.status = running
+
+    @guidance
+        -- The host passes task.conversation.session_id (stale) to the container.
+        -- If the session file survived the restart the agent resumes its prior context.
+        -- SpecialistSessionEstablished will update the session_id once the first turn completes.
+}
+
+-- On startup, tasks in awaiting_sub_task whose sub-task already reached a terminal state
+-- before the restart are ready to resume. Their parent conversation is intact; they just
+-- need the container re-invoked with the sub-task result.
+rule SpecialistTaskSubResultAvailableAfterRestart {
+    when: NanoclawStarted
+    for task in SpecialistTasks where status = awaiting_sub_task:
+        requires: task.pending_sub_task.status in { completed, failed }
+        ensures: SpecialistContainerRestarted(task: task, inject: task.pending_sub_task)
+
+    @guidance
+        -- Between a sub-task completing and the host restart, ParentSpecialistResumed may
+        -- not have fired (or may have fired but the container never started). This rule
+        -- re-triggers the restart so the parent is re-invoked cleanly.
+        -- The parent's session_id is intact on task.conversation; chain of thought is preserved.
+}
+
+------------------------------------------------------------
+-- Memory Write Path
+------------------------------------------------------------
+
+-- The main group's memory system has two layers:
+--   Layer 1 — raw information: source material written directly by specialists.
+--             Write-only from a specialist's perspective; never modified after filing.
+--   Layer 2 — analysis (A-MEM): zettelkasten summaries and linking notes generated
+--             by the main group in response to new raw material.
+--
+-- Specialists write to layer 1 only. The main group generates layer 2 in response.
+-- Embedding indexing is passive (file-watcher driven) but must not trigger until a
+-- file reaches its final home: chunks are indexed by file path, so premature indexing
+-- of a staging path would leave stale index entries if the file is later moved.
+-- The staging → accepted → final_path transition is therefore the indexing gate.
+
+-- A raw information submission from a completed specialist task.
+-- The specialist writes content to a staging path; the main group reviews it,
+-- generates A-MEM analysis, and moves the file to its permanent location.
+-- Embedding indexing is triggered only after final_path is set.
+entity RawMemorySubmission {
+    task: SpecialistTask
+    topic: String                        -- short label describing the submitted material
+    staging_path: String                 -- initial file location; not yet indexed
+    submitted_at: Timestamp
+    accepted_at: Timestamp?
+    final_path: String when status = accepted  -- permanent location; triggers embedding indexing
+
+    -- This entity models delivery only. What the memory processing layer does with the
+    -- file after acceptance (quality filtering, merging, discarding) is out of scope here.
+    status: staged | accepted
+
+    -- Derived
+    is_staging_overdue: status = staged and now - submitted_at > config.max_staging_duration
+
+    transitions status {
+        staged -> accepted               -- main group took delivery; file moved to permanent home
+        terminal: accepted
+    }
+}
+
+-- A running specialist submits raw information to the main group's memory store.
+-- The content lands in a staging area; the main group is notified to review and process it.
+rule SpecialistSubmitsRawMemory {
+    when: SpecialistMemorySubmission(task, topic, staging_path)
+
+    let main_group = nanoclaw.Groups where is_main .first
+
+    requires: task.status = running
+    requires: exists main_group
+
+    ensures: RawMemorySubmission.created(
+        task: task,
+        topic: topic,
+        staging_path: staging_path,
+        submitted_at: now,
+        status: staged
+    )
+    ensures: HostMessagePosted(
+        target_chat: main_group.chat,
+        text: memory_submission_notice(task, topic, staging_path)
+    )
+
+    @guidance
+        -- This is a synchronous IPC/MCP tool call: the specialist does not exit and task.status
+        -- remains running. Unlike sub-task dispatch (which transitions to awaiting_sub_task),
+        -- memory submission does not block the specialist — it receives a minimal ack and
+        -- continues working immediately. A specialist may make multiple submissions during a
+        -- single task; each produces an independent RawMemorySubmission. No per-task limit.
+        --
+        -- Acknowledgement semantics: the IPC call returns when the file write to staging_path
+        -- completes. The specialist receives success or an error code (infrastructure fault:
+        -- disk full, bad mount, permissions). It does not wait for the notification to be sent.
+        -- Notification is dispatched asynchronously by the host after the write succeeds.
+        -- This means the specialist cannot observe notification or processing failures —
+        -- those are tracked and recovered at the host infrastructure level.
+        --
+        -- memory_submission_notice includes the specialist type, task depth, topic label,
+        -- and staging path so the main group agent can locate and evaluate the material.
+        -- Example: "Specialist researcher (depth=1) submitted raw memory: 'GitHub spec-kit
+        -- analysis' at groups/main/memory/staging/2026-04-03-spec-kit-raw.md"
+}
+
+-- The main group agent has reviewed a staged submission, generated A-MEM analysis,
+-- and filed the raw file at its permanent location.
+-- Setting final_path signals the file watcher that this file is ready for embedding.
+rule MemorySubmissionAccepted {
+    when: MemorySubmissionFiled(submission, final_path)
+
+    requires: submission.status = staged
+
+    ensures: submission.final_path = final_path
+    ensures: submission.status = accepted
+    ensures: submission.accepted_at = now
+    ensures: RawMemoryFileReady(path: final_path)
+
+    @guidance
+        -- RawMemoryFileReady is consumed by the embedding layer (see memory.allium).
+        -- The file watcher may also fire independently on the final_path, but RawMemoryFileReady
+        -- is the authoritative signal that the file is in its permanent home and safe to index.
+        -- A-MEM analysis notes generated alongside this filing are also at stable paths and
+        -- will be picked up by the same embedding process.
+}
+
+-- On startup, re-notify the main group for any submissions that are still staged.
+-- This recovers from host crashes that occurred between the file write and the
+-- notification dispatch: the file exists in staging but the main group never knew.
+rule StagedSubmissionsRenotifiedOnRestart {
+    when: NanoclawStarted
+    for submission in RawMemorySubmissions where status = staged:
+        let main_group = nanoclaw.Groups where is_main .first
+        requires: exists main_group
+        ensures: HostMessagePosted(
+            target_chat: main_group.chat,
+            text: memory_submission_notice(submission.task, submission.topic, submission.staging_path)
+        )
+        ensures: HostLogRecorded(
+            level: warning,
+            text: memory_renotification_log(submission)
+        )
+
+    @guidance
+        -- Re-notification is idempotent from the main group's perspective: if it already
+        -- processed the submission (accepted or rejected) between the crash and restart,
+        -- the status would not be staged and this rule would not fire for it.
+        -- Duplicate notifications for genuinely unprocessed submissions are harmless:
+        -- the main group agent will see the same staging path and process it once.
+}
+
+-- Alert if a submission has been staged beyond the processing deadline without being
+-- accepted or rejected. Indicates the main group is not processing submissions.
+rule StagedSubmissionOverdue {
+    when: submission: RawMemorySubmission.is_staging_overdue
+
+    let main_group = nanoclaw.Groups where is_main .first
+
+    requires: submission.status = staged
+    requires: exists main_group
+
+    ensures: HostMessagePosted(
+        target_chat: main_group.chat,
+        text: staging_overdue_alert(submission)
+    )
+    ensures: HostLogRecorded(level: warning, text: staging_overdue_alert(submission))
+
+    @guidance
+        -- is_staging_overdue is a derived value: now - submission.submitted_at > config.max_staging_duration.
+        -- This fires once per overdue submission; requires: status = staged prevents re-firing
+        -- after the submission is processed.
+}
+
+------------------------------------------------------------
+-- Observability
+------------------------------------------------------------
+
+-- On startup, if any specialist tasks require recovery, post a single summary to the
+-- main group chat and record it in the host log. The human sees one consolidated message
+-- rather than one per task. Tasks are still in `running` state when this rule fires;
+-- the status transitions happen in the recovery rules on the same trigger.
+rule StartupRecoveryReported {
+    when: NanoclawStarted
+
+    let recovering = SpecialistTasks where status = running
+    let main_group = nanoclaw.Groups where is_main .first
+
+    requires: exists main_group
+    requires: recovering.count > 0
+
+    ensures: HostMessagePosted(
+        target_chat: main_group.chat,
+        text: startup_recovery_message(recovering)
+    )
+    ensures: HostLogRecorded(level: warning, text: startup_recovery_message(recovering))
+
+    @guidance
+        -- startup_recovery_message summarises by type and attempt count, e.g.:
+        -- "Host restarted. 2 specialist tasks are being retried silently:
+        --   researcher (attempt 1 of 2), coder (attempt 2 of 2).
+        -- Delegation chains will resume when tasks complete."
+        -- Tasks whose retries are already exhausted are also listed separately.
+        --
+        -- Shutdown behaviour follows the existing nanoclaw model: on SIGTERM/SIGINT
+        -- the host does not kill running specialist containers. They continue to run
+        -- to their natural completion or container timeout (--rm cleans them up on exit).
+        -- Any task still in `running` state when the host restarts is treated as orphaned
+        -- and recovered by the normal restart rules above. The robust recovery mechanism
+        -- makes it unnecessary to drain containers before exiting.
+}
+
+-- Each individual retry is recorded in the host log for later audit.
+-- No per-retry message is sent to the main group chat: the startup summary covers it.
+rule RestartRetryLogged {
+    when: task: SpecialistTask.status transitions_to awaiting_restart
+
+    ensures: HostLogRecorded(
+        level: warning,
+        text: restart_retry_log_message(task)
+    )
+
+    @guidance
+        -- restart_retry_log_message includes: specialist type, depth, ancestor chain,
+        -- and attempt number. Example:
+        -- "Specialist task researcher (depth=1) rescheduled after host restart (attempt 1 of 2)."
+}
+
+-- When retries are exhausted the human must be informed explicitly: the task has permanently
+-- failed and the delegation chain above it will receive a failure outcome. Unlike silent
+-- retries, exhaustion is always surfaced to the main group chat.
+rule RestartExhaustionReported {
+    when: task: SpecialistTask.status transitions_to failed
+
+    let main_group = nanoclaw.Groups where is_main .first
+
+    requires: task.failure.kind = host_restart
+    requires: exists main_group
+
+    ensures: HostMessagePosted(
+        target_chat: main_group.chat,
+        text: restart_exhaustion_message(task)
+    )
+    ensures: HostLogRecorded(level: error, text: restart_exhaustion_message(task))
+
+    @guidance
+        -- restart_exhaustion_message includes: specialist type, depth, ancestor chain, and
+        -- the number of retries attempted. Example:
+        -- "Specialist task researcher (depth=1, chain: main → researcher) failed permanently
+        -- after 2 restart retries. The requesting agent will receive a host_restart failure."
+        -- Future: this event can also be surfaced in the web UI recovery dashboard.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Specialist type names are unique.
+invariant UniqueSpecialistNames {
+    for a in SpecialistTypes:
+        for b in SpecialistTypes:
+            a != b implies a.name != b.name
+}
+
+-- No live task has a cycle in its ancestor chain.
+invariant NoCycleInLiveTask {
+    for t in SpecialistTasks:
+        t.status in { queued, running, awaiting_sub_task, awaiting_restart } implies not t.has_cycle
+}
+
+-- Memory providers do not appear as requesters of other specialist tasks.
+invariant MemoryProviderDoesNotDelegate {
+    for t in SpecialistTasks:
+        t.requester_task != null implies not t.requester_task.specialist_type.is_memory_provider
+}
+
+-- Task depth is bounded by configuration.
+invariant TaskDepthBounded {
+    for t in SpecialistTasks:
+        t.depth < config.max_specialist_depth
+}
+
+-- Closed timestamp present for terminal tasks, absent for live ones.
+invariant ClosedAtPresentWhenTerminal {
+    for t in SpecialistTasks:
+        t.status in { completed, failed } implies t.closed_at != null
+    for t in SpecialistTasks:
+        t.status in { queued, running, awaiting_sub_task, awaiting_restart } implies t.closed_at = null
+}
+
+-- Each task has at most one conversation session.
+invariant OneConversationPerTask {
+    for t in SpecialistTasks:
+        SpecialistConversationSessions where task = t .count <= 1
+}
+
+-- A conversation session exists only for tasks that have had at least one invocation.
+invariant NoConversationForUninvokedTask {
+    for t in SpecialistTasks:
+        t.status = queued implies not exists t.conversation
+}
+
+-- A task in awaiting_restart has been attempted at least once.
+invariant RestartCountPositiveWhenAwaiting {
+    for t in SpecialistTasks:
+        t.status = awaiting_restart implies t.restart_attempt_count > 0
+}
+
+-- In the async model, at most one task per delegation chain is running at any moment.
+-- A running task's direct children are never also running: the parent exits before the
+-- child starts, and is only re-invoked after the child completes.
+-- By structural induction this implies no running task has any running descendant —
+-- running tasks are always leaves of their delegation chains.
+invariant RunningTaskIsLeaf {
+    for parent in SpecialistTasks:
+        for child in SpecialistTasks:
+            parent.status = running and child.requester_task = parent
+                implies child.status != running
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred same_type_dispatch_count  -- see: delegation-policy.allium
+                                   -- counts non-policy-rejected dispatches from a given task
+                                   -- to a given specialist type (excludes failed tasks whose
+                                   -- failure kind is a policy rejection)
+
+deferred RecoveryDashboard         -- see: web-ui/recovery-dashboard.allium
+                                   -- web UI surface for browsing specialist task history,
+                                   -- retry events, and host restart incidents
+
+deferred RawMemoryFileReady        -- see: memory.allium
+                                   -- consumed by the embedding layer; triggers chunk extraction
+                                   -- and vector indexing for the file at the given path.
+                                   -- Only fires after final_path is set (MemorySubmissionAccepted),
+                                   -- ensuring chunks are indexed against their permanent path
+
+deferred AddSpecialistSkill        -- see: skills/add-specialist
+                                   -- operator-facing skill that scaffolds a new specialist type:
+                                   -- creates the specialist CLAUDE.md, adds the type entry to the
+                                   -- static config registry, validates consistency (e.g. memory
+                                   -- providers cannot delegate), and optionally runs a smoke test.
+                                   -- Mirrors the /add-telegram, /add-slack pattern for channels.
+
+deferred NullChannel               -- see: src/channels/null-channel.ts (implementation note)
+                                   --
+                                   -- All specialist containers run under a single registered null
+                                   -- channel group. The null channel has no messaging platform
+                                   -- backing; it exists solely as the registration anchor for the
+                                   -- specialist sub-ID space.
+                                   --
+                                   -- Directory layout
+                                   -- ----------------
+                                   -- Operator-managed content (checked into repo, persistent):
+                                   --   groups/specialists/{type}/
+                                   --     CLAUDE.md          -- behaviour definition; mounted read-only into each task container
+                                   --     logs/
+                                   --       container-{ts}-{task-id}.log  -- one file per container invocation, retained indefinitely
+                                   --
+                                   -- Runtime content (outside repo, managed by host):
+                                   --   DATA_DIR/specialists/{task-id}/
+                                   --                        -- ephemeral workspace; created fresh on first invocation,
+                                   --                        -- deleted on task completion or failure
+                                   --   DATA_DIR/ipc/specialists/{task-id}/
+                                   --                        -- per-task IPC namespace
+                                   --   DATA_DIR/sessions/specialists/{task-id}/.claude
+                                   --                        -- Claude conversation session; persisted across all
+                                   --                        -- re-invocations of the same task, deleted on task close
+                                   --
+                                   -- The type folder (groups/specialists/{type}/) follows the same
+                                   -- convention as other group folders: CLAUDE.md is operator-managed
+                                   -- and checked in; logs accumulate alongside it. The /add-specialist
+                                   -- skill scaffolds a new subdirectory here for each new type.
+                                   --
+                                   -- Log filenames include both timestamp and task ID so all invocations
+                                   -- of a single task (initial run, retries, async resumes) can be
+                                   -- correlated, while remaining sorted by time within the type's log dir.
+                                   --
+                                   -- Container output (conversational reasoning) is captured as the
+                                   -- task log rather than posted to any chat. Results are delivered
+                                   -- via the existing deliver_result IPC tool call.
+                                   --
+                                   -- Implementation dependency: GroupQueue and container-runner
+                                   -- need sub-ID routing support so the null channel can multiplex
+                                   -- many concurrent task slots under a single channel registration.
+                                   -- This is a targeted extension to the existing channel model,
+                                   -- not a new headless container mode.
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "IPC surface for specialist tools: this spec uses AgentDispatchesSpecialistTask, SpecialistSubTaskRequested, SpecialistMemorySubmission, and SpecialistDeliveredResult as trigger events, but the corresponding MCP tools are not yet defined in ipc.allium. ipc.allium needs: dispatch_specialist tool (main group → specialist), dispatch_sub_task tool (specialist → sub-specialist), submit_memory tool (specialist → staging), and clarification of whether deliver_result is reused for specialist result delivery or a parallel tool is added. This is the primary cross-spec gap."
+
+open question "WorkspaceIsolation and memory providers: nanoclaw.allium invariant WorkspaceIsolation states that non-main groups exclude project_root. Memory provider specialists need read-only access to groups/main/memory/ (not project_root itself). Confirm whether groups/main/memory/ is within or outside project_root in the mount configuration, and update WorkspaceIsolation or its guidance if the invariant needs a carve-out for memory provider specialist mounts."

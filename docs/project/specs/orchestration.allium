@@ -1,8 +1,12 @@
 -- allium: 3
 -- orchestration.allium
 --
--- Agent orchestration: the complete lifecycle of a main-group agent delegating work
--- to a sub-group agent and receiving the result back.
+-- Agent orchestration: the lifecycle of a main-group agent delegating work to a
+-- sub-group agent (a registered channel group) and receiving the result back.
+--
+-- This covers group-to-group delegation only. Specialist-to-specialist delegation
+-- (ephemeral task containers dispatched by the main group or by other specialists)
+-- is a parallel model defined in specialists.allium and does not create OrchestrationCycles.
 --
 -- Scope: OrchestrationCycle entity, delegation rules, result delivery, depth enforcement
 -- Includes: cycle creation, running, result delivery, abandonment (no-delivery, cancel, timeout)
@@ -10,6 +14,7 @@
 --   - Task scheduling mechanics (see scheduling.allium)
 --   - IPC/MCP wire protocol (see ipc.allium)
 --   - Core agent session lifecycle (see nanoclaw.allium)
+--   - Specialist task orchestration (see specialists.allium)
 
 use "./nanoclaw.allium" as nanoclaw
 use "./scheduling.allium" as scheduling
@@ -222,6 +227,13 @@ invariant ClosedAtPresentWhenTerminal {
 -- Open Questions
 ------------------------------------------------------------
 
-open question "Should a sub-group be able to open its own OrchestrationCycle by scheduling a task for yet another group? Currently only main can delegate (ipc.allium auth), but if that restriction is ever relaxed this spec would need a generalised delegating_group model."
-open question "Chained delegation: if the main group at depth 2 (re-invoked after a cycle) delegates again, should this be a new top-level cycle or a child cycle? The current model creates independent cycles; a parent-child relationship is not captured."
 open question "Should CycleAbandonedNoDelivery be a warning condition that the main group is notified of, or is silent abandonment always acceptable?"
+
+-- Resolved: sub-group delegation. Sub-groups do not open OrchestrationCycles directly.
+-- Specialist-to-specialist delegation is handled by specialists.allium as a separate
+-- model (SpecialistTask chain) that does not extend OrchestrationCycle.
+-- DelegationAlwaysFromMain remains correct: all OrchestrationCycles originate from main.
+
+-- Resolved: chained delegation. The current model creates independent cycles per
+-- delegation from main. A parent-child relationship between cycles is not needed;
+-- the specialist chain model in specialists.allium covers the multi-hop case.

@@ -296,7 +296,7 @@ After changes here, run `./container/build.sh` to rebuild the agent image.
 
 ---
 
-## Phase 8 — Specialist group folders
+## ~~Phase 8 — Specialist group folders~~ ✓ Done
 
 Each specialist type needs a group folder under `groups/specialists/{name}/` with:
 - `CLAUDE.md` — role description, constraints, available tools

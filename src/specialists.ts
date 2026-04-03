@@ -6,8 +6,10 @@
  * without a running container runtime.
  */
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
-import { SPECIALISTS_CONFIG } from './config.js';
+import { SPECIALIST_TEMPLATE_DIR, SPECIALISTS_CONFIG } from './config.js';
 import {
   checkDelegationPolicy,
   DelegationDecision,
@@ -26,9 +28,46 @@ import {
   updateSpecialistSession,
   updateSpecialistTask,
 } from './db.js';
+import { resolveSpecialistGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { getSpecialistType } from './specialist-types.js';
-import { FailureKind, SpecialistTask } from './types.js';
+import { FailureKind, SpecialistTask, SpecialistType } from './types.js';
+
+// ---------------------------------------------------------------------------
+// Group folder management
+// ---------------------------------------------------------------------------
+
+/**
+ * Ensure the specialist group folder exists for the given type.
+ * If it does not exist, create it by copying the specialist-template CLAUDE.md
+ * with the type name and description substituted in.
+ * Idempotent — safe to call on every dispatch.
+ */
+export function ensureSpecialistGroupFolder(type: SpecialistType): void {
+  const folderPath = resolveSpecialistGroupFolderPath(type.name);
+  if (fs.existsSync(folderPath)) return;
+
+  fs.mkdirSync(folderPath, { recursive: true });
+
+  const templatePath = path.join(SPECIALIST_TEMPLATE_DIR, 'CLAUDE.md');
+  if (fs.existsSync(templatePath)) {
+    const template = fs.readFileSync(templatePath, 'utf8');
+    const content = template
+      .replace('{{TYPE_NAME}}', type.name)
+      .replace('{{TYPE_DESCRIPTION}}', type.description);
+    fs.writeFileSync(path.join(folderPath, 'CLAUDE.md'), content, 'utf8');
+  } else {
+    logger.warn(
+      { templatePath, typeName: type.name },
+      'Specialist template CLAUDE.md not found — created empty group folder',
+    );
+  }
+
+  logger.info(
+    { typeName: type.name, folderPath },
+    'Created specialist group folder',
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Injectable dependencies
@@ -95,6 +134,8 @@ export async function dispatchSpecialist(
   if (!type) {
     throw new Error(`Unknown specialist type: "${typeName}"`);
   }
+
+  ensureSpecialistGroupFolder(type);
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -172,6 +213,8 @@ export async function dispatchSubTask(
       `Memory provider "${targetTypeName}" must be dispatched via handleMemoryQuery`,
     );
   }
+
+  ensureSpecialistGroupFolder(targetType);
 
   // Compute same-type count and evaluate policy
   const sameTypeCount = getSameTypeDispatchCount(parentTaskId, targetTypeName);
@@ -288,6 +331,8 @@ export async function handleMemoryQuery(
       `"${targetTypeName}" is not a memory provider — use dispatchSubTask instead`,
     );
   }
+
+  ensureSpecialistGroupFolder(targetType);
 
   const now = new Date().toISOString();
   const memId = crypto.randomUUID();

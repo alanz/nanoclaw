@@ -123,6 +123,14 @@ export const SPECIALISTS_JSON_PATH = path.resolve(
   'specialists.json',
 );
 
+// Template directory copied into new specialist group folders on first dispatch
+export const SPECIALIST_TEMPLATE_DIR = path.resolve(
+  PROJECT_ROOT,
+  'container',
+  'skills',
+  'specialist-template',
+);
+
 // Specialist task config — mirrors specialists.allium config block
 export const SPECIALISTS_CONFIG = {
   maxSpecialistDepth: 5,

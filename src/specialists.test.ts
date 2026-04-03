@@ -10,9 +10,13 @@
  * Implementation: src/specialists.ts
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
-import { SPECIALISTS_CONFIG } from './config.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { GROUPS_DIR, SPECIALISTS_CONFIG } from './config.js';
 import {
   _initTestDatabase,
   createSpecialistTask,
@@ -28,6 +32,7 @@ import {
   deliverResult,
   dispatchSpecialist,
   dispatchSubTask,
+  ensureSpecialistGroupFolder,
   failSpecialistTask,
   handleMemoryQuery,
   handleNanoclawStarted,
@@ -2672,5 +2677,73 @@ describe('scenario: raw memory submission + acceptance', () => {
       MAIN_JID,
       expect.stringContaining('restart topic'),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureSpecialistGroupFolder
+// ---------------------------------------------------------------------------
+
+describe('ensureSpecialistGroupFolder', () => {
+  // Use a unique type name per test to avoid cross-test pollution in the shared groups/ dir.
+  const TEST_TYPE_NAME = 'test_spec_phase8';
+  const folderPath = path.join(GROUPS_DIR, 'specialists', TEST_TYPE_NAME);
+
+  afterEach(() => {
+    fs.rmSync(folderPath, { recursive: true, force: true });
+  });
+
+  it('creates the group folder and writes CLAUDE.md with type details', () => {
+    const type: SpecialistType = {
+      name: TEST_TYPE_NAME,
+      description: 'Searches the web and synthesises findings.',
+      isMemoryProvider: false,
+    };
+
+    ensureSpecialistGroupFolder(type);
+
+    expect(fs.existsSync(folderPath)).toBe(true);
+    const claude = fs.readFileSync(path.join(folderPath, 'CLAUDE.md'), 'utf8');
+    expect(claude).toContain(TEST_TYPE_NAME);
+    expect(claude).toContain('Searches the web and synthesises findings.');
+  });
+
+  it('is idempotent — does not overwrite an existing folder', () => {
+    const type1: SpecialistType = {
+      name: TEST_TYPE_NAME,
+      description: 'First description.',
+      isMemoryProvider: false,
+    };
+    ensureSpecialistGroupFolder(type1);
+
+    const type2: SpecialistType = {
+      name: TEST_TYPE_NAME,
+      description: 'Second description — should not overwrite.',
+      isMemoryProvider: false,
+    };
+    ensureSpecialistGroupFolder(type2);
+
+    const claude = fs.readFileSync(path.join(folderPath, 'CLAUDE.md'), 'utf8');
+    expect(claude).toContain('First description.');
+    expect(claude).not.toContain('Second description');
+  });
+
+  it('creates parent directories if they do not exist', () => {
+    // The specialists/ subdirectory may not exist yet
+    const specialistsDir = path.join(GROUPS_DIR, 'specialists');
+    const existed = fs.existsSync(specialistsDir);
+
+    const type: SpecialistType = {
+      name: TEST_TYPE_NAME,
+      description: 'Test.',
+      isMemoryProvider: false,
+    };
+    ensureSpecialistGroupFolder(type);
+
+    expect(fs.existsSync(specialistsDir)).toBe(true);
+    if (!existed) {
+      // Clean up the whole specialists/ dir if we created it
+      fs.rmSync(specialistsDir, { recursive: true, force: true });
+    }
   });
 });

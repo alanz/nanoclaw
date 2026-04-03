@@ -8,6 +8,11 @@
 -- (ephemeral task containers dispatched by the main group or by other specialists)
 -- is a parallel model defined in specialists.allium and does not create OrchestrationCycles.
 --
+-- Migration note: specialists.allium is the intended long-term delegation model.
+-- Sub-group delegation (this spec) is expected to be superseded by specialists once
+-- the specialist model is fully implemented. The two models coexist during the
+-- transition. New delegation use cases should prefer specialists.
+--
 -- Scope: OrchestrationCycle entity, delegation rules, result delivery, depth enforcement
 -- Includes: cycle creation, running, result delivery, abandonment (no-delivery, cancel, timeout)
 -- Excludes:

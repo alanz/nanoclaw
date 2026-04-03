@@ -31,6 +31,7 @@ import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   deliverResult,
+  dispatchSpecialist,
   dispatchSubTask,
   handleMemoryQuery,
   reportSession,
@@ -322,6 +323,8 @@ export async function processTaskIpc(
     resultText?: string;
     topic?: string;
     stagingPath?: string;
+    // For dispatch_specialist_task (main group dispatches a top-level specialist)
+    typeName?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -1395,6 +1398,43 @@ export async function processTaskIpc(
         logger.info({ taskId, topic }, 'submit_raw_memory succeeded');
       } catch (err) {
         logger.error({ taskId, topic, err }, 'submit_raw_memory failed');
+      }
+      break;
+    }
+
+    case 'dispatch_specialist_task': {
+      // Only the main group can dispatch top-level specialists
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'dispatch_specialist_task: blocked — only main group may dispatch',
+        );
+        break;
+      }
+      const { typeName, prompt } = data;
+      if (!typeName || !prompt) {
+        logger.warn(
+          { data },
+          'dispatch_specialist_task: missing typeName or prompt',
+        );
+        break;
+      }
+      const mainEntry = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      );
+      if (!mainEntry) {
+        logger.warn('dispatch_specialist_task: no main group registered');
+        break;
+      }
+      const [mainJid] = mainEntry;
+      try {
+        const task = await dispatchSpecialist(mainJid, typeName, prompt);
+        logger.info(
+          { taskId: task.id, typeName },
+          'dispatch_specialist_task: specialist dispatched',
+        );
+      } catch (err) {
+        logger.error({ typeName, err }, 'dispatch_specialist_task failed');
       }
       break;
     }

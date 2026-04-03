@@ -310,7 +310,7 @@ Memory-provider specialists get read-only access to the main group workspace mou
 
 ---
 
-## Phase 9 — Wire-up in orchestrator
+## ~~Phase 9 — Wire-up in orchestrator~~ ✓ Done
 
 **File:** `src/index.ts`
 

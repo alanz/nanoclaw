@@ -178,9 +178,9 @@ describe('deliver_result', () => {
       setPendingDispatchDepth: setPending,
     });
 
-    // MAX_DISPATCH_DEPTH defaults to 3 in config; depth=3 should be blocked
+    // MAX_DISPATCH_DEPTH defaults to 5 in config; depth=5 should be blocked
     await processTaskIpc(
-      { type: 'deliver_result', text: 'done', dispatchDepth: 3 },
+      { type: 'deliver_result', text: 'done', dispatchDepth: 5 },
       'deltachat_intake',
       false,
       deps,

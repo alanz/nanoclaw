@@ -1458,6 +1458,39 @@ server.tool(
   },
 );
 
+// ── dispatch_specialist_task (main group only) ────────────────────────────────
+
+if (!isSpecialist) {
+  server.tool(
+    'dispatch_specialist_task',
+    `Dispatch a specialist agent to handle a task asynchronously.
+
+The specialist will run in its own isolated container and deliver its result back to this group as a message when complete. Only callable from the main group.`,
+    {
+      type_name: z.string().describe('Specialist type name (e.g. "researcher", "coder")'),
+      prompt: z.string().describe('Full task description for the specialist'),
+    },
+    async (args) => {
+      writeIpcFile(TASKS_DIR, {
+        type: 'dispatch_specialist_task',
+        typeName: args.type_name,
+        prompt: args.prompt,
+        sourceGroup: chatJid,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Specialist task dispatched (type: "${args.type_name}"). The result will be delivered to this group when the specialist completes.`,
+          },
+        ],
+      };
+    },
+  );
+}
+
 // ── Specialist tools (only registered for specialist containers) ──────────────
 
 if (isSpecialist) {

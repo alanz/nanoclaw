@@ -12,6 +12,7 @@ import {
   MAX_MESSAGES_PER_PROMPT,
   MEMORY_SEARCH_ENABLED,
   POLL_INTERVAL,
+  SPECIALISTS_CONFIG,
   STORE_DIR,
   TIMEZONE,
   TRIGGER_PATTERN,
@@ -19,6 +20,7 @@ import {
   WEB_UI_PORT,
 } from './config.js';
 import './channels/index.js';
+import { makeSpecialistJid } from './channels/null-channel.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
@@ -48,15 +50,21 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  getSpecialistSession,
+  getSpecialistTask,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
   setSession,
   storeChatMetadata,
   storeMessage,
+  updateSpecialistTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveSpecialistGroupFolderPath,
+} from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import {
   findChannel,
@@ -82,6 +90,12 @@ import {
   isSessionCommandAllowed,
 } from './session-commands.js';
 import { startRssMonitorLoop } from './rss-monitor.js';
+import {
+  failSpecialistTask,
+  handleNanoclawStarted,
+  initSpecialists,
+} from './specialists.js';
+import { getSpecialistType, initSpecialistTypes } from './specialist-types.js';
 import { startZoteroMonitorLoop } from './zotero-monitor.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
@@ -91,7 +105,12 @@ import {
 } from './memory/manager.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import { PROXY_BIND_HOST } from './container-runtime.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Channel,
+  NewMessage,
+  RegisteredGroup,
+  SpecialistTask,
+} from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -742,6 +761,7 @@ async function main(): Promise<void> {
   ensureContainerRuntimeRunning();
   initDatabase();
   logger.info('Database initialized');
+  initSpecialistTypes();
   loadState();
 
   // Eagerly initialize memory managers for groups with an existing index.
@@ -1105,6 +1125,155 @@ async function main(): Promise<void> {
       return channel?.setReaction?.(jid, emoji) ?? Promise.resolve();
     },
   });
+  // Wire up specialist container lifecycle
+  const mainGroupEntry = Object.entries(registeredGroups).find(
+    ([, g]) => g.isMain,
+  );
+  const mainGroupJid = mainGroupEntry?.[0];
+
+  initSpecialists({
+    startContainerFn: async (
+      task: SpecialistTask,
+      inject?: SpecialistTask | null,
+    ) => {
+      // Transition task to running
+      updateSpecialistTask(task.id, { status: 'running' });
+
+      // Retrieve session for continuity (resume previous conversation if present)
+      const session = getSpecialistSession(task.id);
+      const sessionId = session?.session_id;
+
+      // Build prompt with optional last-turn notice and inject result
+      const specialistTypeDef = getSpecialistType(task.specialist_type);
+      let prompt = task.prompt;
+      if (task.is_last_same_type_dispatch) {
+        const notice =
+          specialistTypeDef?.lastTurnSubNotice ??
+          SPECIALISTS_CONFIG.defaultLastTurnSubNotice;
+        prompt = `${notice}\n\n${prompt}`;
+      }
+      if (inject) {
+        const injectBody =
+          inject.status === 'completed'
+            ? `[Specialist ${inject.specialist_type} result]:\n${inject.result ?? ''}`
+            : `[Specialist ${inject.specialist_type} failed (${inject.failure_kind ?? 'unknown'})]`;
+        if (inject.is_last_same_type_dispatch) {
+          const parentNotice =
+            specialistTypeDef?.lastTurnParentNotice ??
+            SPECIALISTS_CONFIG.defaultLastTurnParentNotice;
+          prompt = `${parentNotice}\n\n${prompt}\n\n${injectBody}`;
+        } else {
+          prompt = `${prompt}\n\n${injectBody}`;
+        }
+      }
+
+      // Resolve specialist group folder (groups/specialists/{type})
+      const hostGroupDir = resolveSpecialistGroupFolderPath(
+        task.specialist_type,
+      );
+
+      // Flat folder name for IPC/session namespacing (must be a valid group folder)
+      const specFolder = `spec-${task.id}`;
+
+      // Build synthetic RegisteredGroup for the specialist container
+      const specGroup: RegisteredGroup = {
+        name: `specialist-${task.specialist_type}`,
+        folder: specFolder,
+        trigger: '',
+        added_at: new Date().toISOString(),
+        isMain: false,
+      };
+
+      // Extra readonly mounts for memory-provider specialists
+      const extraReadonlyMounts: Array<{
+        hostPath: string;
+        containerPath: string;
+      }> = [];
+      if (specialistTypeDef?.isMemoryProvider && mainGroupEntry) {
+        const mainGroupFolder = mainGroupEntry[1].folder;
+        try {
+          const mainFolderPath = resolveGroupFolderPath(mainGroupFolder);
+          extraReadonlyMounts.push({
+            hostPath: mainFolderPath,
+            containerPath: '/workspace/extra/main-memory',
+          });
+        } catch {
+          logger.warn(
+            { mainGroupFolder, taskId: task.id },
+            'Could not resolve main group folder for memory-provider mount',
+          );
+        }
+      }
+
+      // Fire-and-forget — result arrives via deliver_specialist_result IPC
+      runContainerAgent(
+        specGroup,
+        {
+          prompt,
+          sessionId,
+          groupFolder: specFolder,
+          chatJid: makeSpecialistJid(task.id),
+          isMain: false,
+          dispatchDepth: task.depth,
+          hostGroupDir,
+          specialistType: task.specialist_type,
+          extraReadonlyMounts,
+        },
+        (proc, containerName) =>
+          queue.registerProcess(
+            makeSpecialistJid(task.id),
+            proc,
+            containerName,
+            specFolder,
+          ),
+      )
+        .then(async (output) => {
+          if (output.status === 'error') {
+            // If task still active (result not already delivered via IPC), fail it
+            const current = getSpecialistTask(task.id);
+            if (
+              current &&
+              current.status !== 'completed' &&
+              current.status !== 'failed'
+            ) {
+              await failSpecialistTask(
+                task.id,
+                'execution_error',
+                output.error ?? 'Container exited with error',
+              );
+            }
+          }
+        })
+        .catch(async (err) => {
+          const current = getSpecialistTask(task.id);
+          if (
+            current &&
+            current.status !== 'completed' &&
+            current.status !== 'failed'
+          ) {
+            await failSpecialistTask(task.id, 'execution_error', String(err));
+          }
+        });
+    },
+
+    notifyMainGroupFn: async (groupJid: string, message: string) => {
+      storeMessage({
+        id: `spec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        chat_jid: groupJid,
+        sender: 'system:specialist',
+        sender_name: 'Specialist',
+        content: message,
+        timestamp: new Date().toISOString(),
+        is_from_me: false,
+        is_bot_message: false,
+      });
+      // The main message loop will pick this up on the next poll
+    },
+  });
+
+  // Recover specialist tasks that were live when the host was last killed
+  await handleNanoclawStarted(mainGroupJid);
+
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

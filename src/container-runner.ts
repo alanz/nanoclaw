@@ -52,6 +52,14 @@ export interface ContainerInput {
   script?: string;
   dispatchDepth?: number;
   evalSkipSkills?: string[];
+  /** Override the host-side group folder path (used for specialist containers
+   *  whose folders live under groups/specialists/ rather than groups/). */
+  hostGroupDir?: string;
+  /** Specialist type name — injected as NANOCLAW_SPECIALIST_TYPE env var. */
+  specialistType?: string;
+  /** Extra read-only mounts added after the standard ones (e.g. main-memory
+   *  for memory-provider specialists). */
+  extraReadonlyMounts?: Array<{ hostPath: string; containerPath: string }>;
 }
 
 export interface ContainerOutput {
@@ -72,10 +80,15 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  overrides?: {
+    hostGroupDir?: string;
+    extraReadonlyMounts?: Array<{ hostPath: string; containerPath: string }>;
+  },
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
-  const groupDir = resolveGroupFolderPath(group.folder);
+  const groupDir =
+    overrides?.hostGroupDir ?? resolveGroupFolderPath(group.folder);
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
@@ -240,6 +253,17 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  // Extra read-only mounts (e.g. main-memory for memory-provider specialists)
+  if (overrides?.extraReadonlyMounts) {
+    for (const m of overrides.extraReadonlyMounts) {
+      mounts.push({
+        hostPath: m.hostPath,
+        containerPath: m.containerPath,
+        readonly: true,
+      });
+    }
+  }
+
   return mounts;
 }
 
@@ -329,10 +353,13 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
-  const groupDir = resolveGroupFolderPath(group.folder);
+  const groupDir = input.hostGroupDir ?? resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, {
+    hostGroupDir: input.hostGroupDir,
+    extraReadonlyMounts: input.extraReadonlyMounts,
+  });
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, input.isMain);
@@ -342,6 +369,14 @@ export async function runContainerAgent(
     '-e',
     `NANOCLAW_DISPATCH_DEPTH=${input.dispatchDepth ?? 0}`,
   );
+  if (input.specialistType) {
+    containerArgs.splice(
+      containerArgs.length - 1,
+      0,
+      '-e',
+      `NANOCLAW_SPECIALIST_TYPE=${input.specialistType}`,
+    );
+  }
   if (input.evalSkipSkills && input.evalSkipSkills.length > 0) {
     containerArgs.splice(
       containerArgs.length - 1,

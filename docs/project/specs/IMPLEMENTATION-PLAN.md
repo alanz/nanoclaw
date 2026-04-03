@@ -177,7 +177,7 @@ lives in `src/specialists.ts` (does the DB query with the right exclusion logic)
 
 ---
 
-## Phase 5 — Specialist core (`src/specialists.ts`)
+## ~~Phase 5 — Specialist core (`src/specialists.ts`)~~ ✓ Done
 
 **New file:** `src/specialists.ts`
 

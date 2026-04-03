@@ -16,3 +16,6 @@ import './deltachat.js';
 
 // emacs
 import './emacs.js';
+
+// null-channel (specialist JID routing)
+import './null-channel.js';

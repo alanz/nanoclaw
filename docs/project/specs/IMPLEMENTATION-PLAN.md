@@ -115,7 +115,7 @@ requires a service restart (as per spec).
 
 ---
 
-## Phase 3 — NullChannel
+## ~~Phase 3 — NullChannel~~ ✓ Done
 
 **New file:** `src/channels/null-channel.ts`
 

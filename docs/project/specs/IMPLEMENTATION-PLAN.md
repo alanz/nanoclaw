@@ -5,7 +5,7 @@ Covers the three unimplemented specs: `null-channel.allium`, `specialists.allium
 
 ---
 
-## Phase 1 — Database schema
+## ~~Phase 1 — Database schema~~ ✓ Done (commit 5de15c4)
 
 **File:** `src/db.ts` (new tables added to `createSchema`)
 
@@ -47,7 +47,7 @@ Also add DB helper functions: `createSpecialistTask`, `getSpecialistTask`,
 
 ---
 
-## Phase 2 — Types and config
+## ~~Phase 2 — Types and config~~ ✓ Done
 
 **File:** `src/types.ts`
 

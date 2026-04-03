@@ -100,6 +100,16 @@ export interface TaskRunLog {
   total_tokens?: number;
 }
 
+// --- Specialist types ---
+
+export interface SpecialistType {
+  name: string;
+  description: string;
+  isMemoryProvider: boolean;
+  lastTurnSubNotice?: string;
+  lastTurnParentNotice?: string;
+}
+
 // --- Specialist task types ---
 
 export type SpecialistTaskStatus =

@@ -116,6 +116,27 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
 export const IPC_POLL_INTERVAL = 1000;
+
+// Path to the specialist type registry (checked-in JSON, not runtime data)
+export const SPECIALISTS_JSON_PATH = path.resolve(
+  PROJECT_ROOT,
+  'specialists.json',
+);
+
+// Specialist task config — mirrors specialists.allium config block
+export const SPECIALISTS_CONFIG = {
+  maxSpecialistDepth: 5,
+  maxChainDelegations: 20,
+  maxSameTypeDispatches: 3,
+  maxTaskDurationMs: 4 * 60 * 60 * 1000, // 4 hours
+  containerTimeoutMs: 30 * 60 * 1000, // 30 minutes
+  maxRestartRetries: 2,
+  maxStagingDurationMs: 2 * 60 * 60 * 1000, // 2 hours
+  defaultLastTurnSubNotice:
+    '[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]',
+  defaultLastTurnParentNotice:
+    '[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]',
+} as const;
 export const MAX_DISPATCH_DEPTH = parseInt(
   process.env.MAX_DISPATCH_DEPTH || '5',
   10,

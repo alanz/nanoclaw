@@ -1,0 +1,22 @@
+[
+  {
+    "name": "researcher",
+    "description": "Searches the web, reads URLs, and synthesises findings into structured research notes.",
+    "isMemoryProvider": false
+  },
+  {
+    "name": "coder",
+    "description": "Writes, edits, and debugs code. Has access to a sandboxed workspace.",
+    "isMemoryProvider": false
+  },
+  {
+    "name": "code_reviewer",
+    "description": "Reviews code for correctness, style, and security. Returns structured feedback.",
+    "isMemoryProvider": false
+  },
+  {
+    "name": "memory",
+    "description": "Queries the main group memory store. Read-only access to main group workspace. Never delegates further.",
+    "isMemoryProvider": true
+  }
+]

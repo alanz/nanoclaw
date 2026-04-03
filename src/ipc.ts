@@ -22,6 +22,7 @@ import {
   createTask,
   deleteRssFeed,
   deleteTask,
+  getRssFeedById,
   getTaskById,
   queryTranscript,
   storeMessage,
@@ -719,11 +720,30 @@ export async function processTaskIpc(
       break;
     }
 
-    case 'unsubscribe_rss':
+    case 'unsubscribe_rss': {
       if (!data.feedId) {
         logger.warn(
           { data },
           'Invalid unsubscribe_rss request — missing feedId',
+        );
+        break;
+      }
+      const feedToDelete = getRssFeedById(data.feedId);
+      if (!feedToDelete) {
+        logger.warn(
+          { feedId: data.feedId, sourceGroup },
+          'unsubscribe_rss — feed not found',
+        );
+        break;
+      }
+      if (!isMain && feedToDelete.group_folder !== sourceGroup) {
+        logger.warn(
+          {
+            feedId: data.feedId,
+            feedGroup: feedToDelete.group_folder,
+            sourceGroup,
+          },
+          'Unauthorized unsubscribe_rss attempt blocked',
         );
         break;
       }
@@ -733,6 +753,7 @@ export async function processTaskIpc(
         'RSS feed unsubscribed via IPC',
       );
       break;
+    }
 
     case 'query_transcript': {
       if (!data.requestId || !data.chatJid) {

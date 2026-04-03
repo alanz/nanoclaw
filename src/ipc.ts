@@ -21,7 +21,6 @@ import {
   createRssFeed,
   createTask,
   deleteRssFeed,
-  deleteTask,
   getRssFeedById,
   getTaskById,
   queryTranscript,
@@ -411,12 +410,19 @@ export async function processTaskIpc(
       if (data.taskId) {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'active' });
-          logger.info(
-            { taskId: data.taskId, sourceGroup },
-            'Task resumed via IPC',
-          );
-          deps.onTasksChanged();
+          if (task.status === 'cancelled') {
+            logger.warn(
+              { taskId: data.taskId, sourceGroup },
+              'Cannot resume a cancelled task',
+            );
+          } else {
+            updateTask(data.taskId, { status: 'active' });
+            logger.info(
+              { taskId: data.taskId, sourceGroup },
+              'Task resumed via IPC',
+            );
+            deps.onTasksChanged();
+          }
         } else {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
@@ -430,7 +436,7 @@ export async function processTaskIpc(
       if (data.taskId) {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
+          updateTask(data.taskId, { status: 'cancelled', next_run: null });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task cancelled via IPC',

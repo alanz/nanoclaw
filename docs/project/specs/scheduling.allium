@@ -32,7 +32,7 @@ enum ScheduleType { cron | interval | once }
 -- Whether a task uses the group's persisted conversation session or starts fresh each run.
 enum ContextMode { isolated | group }
 
-enum TaskStatus { active | paused | completed }
+enum TaskStatus { active | paused | completed | cancelled }
 
 ------------------------------------------------------------
 -- Entities
@@ -47,7 +47,7 @@ entity ScheduledTask {
     schedule: Schedule
     context_mode: ContextMode
     status: TaskStatus
-    next_run: Timestamp?                -- null when completed
+    next_run: Timestamp?                -- null when completed or cancelled
     last_run: Timestamp?
     last_result: String?
     dispatch_depth: Integer             -- nesting level; prevents agent-to-agent loops
@@ -61,7 +61,10 @@ entity ScheduledTask {
         paused -> active
         active -> completed
         paused -> completed
+        active -> cancelled
+        paused -> cancelled
         terminal: completed
+        terminal: cancelled
     }
 }
 
@@ -217,8 +220,10 @@ rule TaskCancelled {
     requires: requesting_group.is_main or task.group = requesting_group
     requires: task.status in { active, paused }
 
-    ensures: task.status = completed
+    ensures: task.status = cancelled
     ensures: task.next_run = null
+    -- Task record and run history are retained as a tombstone.
+    -- cancelled is terminal: resume_task is rejected for cancelled tasks.
 }
 
 rule TaskUpdated {

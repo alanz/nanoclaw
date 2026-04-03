@@ -8,6 +8,8 @@ import { logger } from './logger.js';
 import {
   FailureKind,
   NewMessage,
+  RawMemorySubmission,
+  RawMemorySubmissionStatus,
   RegisteredGroup,
   RssFeed,
   ScheduledTask,
@@ -127,6 +129,19 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_specialist_tasks_status ON specialist_tasks(status);
     CREATE INDEX IF NOT EXISTS idx_specialist_tasks_requester ON specialist_tasks(requester_task_id);
+
+    CREATE TABLE IF NOT EXISTS raw_memory_submissions (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES specialist_tasks(id),
+      topic TEXT NOT NULL,
+      staging_path TEXT NOT NULL,
+      submitted_at TEXT NOT NULL,
+      accepted_at TEXT,
+      final_path TEXT,
+      status TEXT NOT NULL DEFAULT 'staged'
+    );
+    CREATE INDEX IF NOT EXISTS idx_raw_memory_status ON raw_memory_submissions(status);
+    CREATE INDEX IF NOT EXISTS idx_raw_memory_task ON raw_memory_submissions(task_id);
 
     CREATE TABLE IF NOT EXISTS specialist_conversation_sessions (
       task_id TEXT PRIMARY KEY REFERENCES specialist_tasks(id),
@@ -1159,6 +1174,106 @@ export function updateSpecialistSession(
   db.prepare(
     `UPDATE specialist_conversation_sessions SET ${fields.join(', ')} WHERE task_id = ?`,
   ).run(...values);
+}
+
+// --- Raw memory submission accessors ---
+
+export function createRawMemorySubmission(
+  submission: RawMemorySubmission,
+): void {
+  db.prepare(
+    `INSERT INTO raw_memory_submissions
+       (id, task_id, topic, staging_path, submitted_at, accepted_at, final_path, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    submission.id,
+    submission.task_id,
+    submission.topic,
+    submission.staging_path,
+    submission.submitted_at,
+    submission.accepted_at ?? null,
+    submission.final_path ?? null,
+    submission.status,
+  );
+}
+
+export function getRawMemorySubmission(
+  id: string,
+): RawMemorySubmission | undefined {
+  return db
+    .prepare('SELECT * FROM raw_memory_submissions WHERE id = ?')
+    .get(id) as RawMemorySubmission | undefined;
+}
+
+export function updateRawMemorySubmission(
+  id: string,
+  updates: Partial<
+    Pick<RawMemorySubmission, 'status' | 'accepted_at' | 'final_path'>
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if ('accepted_at' in updates) {
+    fields.push('accepted_at = ?');
+    values.push(updates.accepted_at ?? null);
+  }
+  if ('final_path' in updates) {
+    fields.push('final_path = ?');
+    values.push(updates.final_path ?? null);
+  }
+
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE raw_memory_submissions SET ${fields.join(', ')} WHERE id = ?`,
+  ).run(...values);
+}
+
+export function getRawMemorySubmissionsByStatus(
+  status: RawMemorySubmissionStatus,
+): RawMemorySubmission[] {
+  return db
+    .prepare(
+      'SELECT * FROM raw_memory_submissions WHERE status = ? ORDER BY submitted_at',
+    )
+    .all(status) as RawMemorySubmission[];
+}
+
+// --- Specialist dispatch count query ---
+
+const POLICY_REJECTION_KINDS = [
+  'cycle_detected',
+  'depth_exceeded',
+  'count_exceeded',
+  'same_type_limit_exceeded',
+];
+
+/**
+ * Count prior dispatches from parentTaskId to targetTypeName, excluding tasks that
+ * failed due to a policy rejection (those never consumed a real dispatch slot).
+ * Non-policy failures (timeout, execution_error, host_restart) DO count.
+ */
+export function getSameTypeDispatchCount(
+  parentTaskId: string,
+  targetTypeName: string,
+): number {
+  const placeholders = POLICY_REJECTION_KINDS.map(() => '?').join(', ');
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as count FROM specialist_tasks
+       WHERE requester_task_id = ?
+         AND specialist_type = ?
+         AND NOT (status = 'failed' AND failure_kind IN (${placeholders}))`,
+    )
+    .get(parentTaskId, targetTypeName, ...POLICY_REJECTION_KINDS) as {
+    count: number;
+  };
+  return row.count;
 }
 
 // --- Database explorer ---

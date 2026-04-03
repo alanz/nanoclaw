@@ -255,7 +255,7 @@ Corresponds to `SpecialistTaskScheduledForRetry`, `SpecialistTaskFailedAfterRetr
 
 ---
 
-## Phase 6 — IPC integration
+## ~~Phase 6 — IPC integration~~ ✓ Done
 
 **File:** `src/ipc.ts`
 

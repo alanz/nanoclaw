@@ -29,6 +29,13 @@ import {
 } from './db.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+import {
+  deliverResult,
+  dispatchSubTask,
+  handleMemoryQuery,
+  reportSession,
+  submitRawMemory,
+} from './specialists.js';
 import { RegisteredGroup } from './types.js';
 
 type RemoteEnvResult = { ok: true; url: string } | { ok: false; error: string };
@@ -306,6 +313,15 @@ export async function processTaskIpc(
     source?: string;
     order_by?: string;
     parse_frontmatter?: boolean;
+    // For specialist IPC commands (dispatch_specialist, query_memory_specialist,
+    // deliver_specialist_result, report_specialist_session, submit_raw_memory)
+    parentTaskId?: string;
+    parentTypeName?: string;
+    targetTypeName?: string;
+    sessionId?: string;
+    resultText?: string;
+    topic?: string;
+    stagingPath?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -1221,6 +1237,164 @@ export async function processTaskIpc(
             'Unauthorized set_reaction attempt blocked',
           );
         }
+      }
+      break;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Specialist IPC commands — emitted by specialist containers
+    // ---------------------------------------------------------------------------
+
+    case 'dispatch_specialist': {
+      const {
+        parentTaskId,
+        parentTypeName,
+        targetTypeName,
+        prompt,
+        sessionId,
+      } = data;
+      if (
+        !parentTaskId ||
+        !parentTypeName ||
+        !targetTypeName ||
+        !prompt ||
+        !sessionId
+      ) {
+        logger.warn({ data }, 'dispatch_specialist: missing required fields');
+        break;
+      }
+      try {
+        const result = await dispatchSubTask(
+          parentTaskId,
+          parentTypeName,
+          targetTypeName,
+          prompt,
+          sessionId,
+        );
+        if (!result.ok) {
+          logger.warn(
+            {
+              parentTaskId,
+              targetTypeName,
+              rejectionKind: result.rejection.rejectionKind,
+            },
+            'dispatch_specialist rejected by delegation policy',
+          );
+        } else {
+          logger.info(
+            { parentTaskId, targetTypeName },
+            'dispatch_specialist succeeded',
+          );
+        }
+      } catch (err) {
+        logger.error(
+          { parentTaskId, targetTypeName, err },
+          'dispatch_specialist failed',
+        );
+      }
+      break;
+    }
+
+    case 'query_memory_specialist': {
+      const { taskId, targetTypeName, prompt, sessionId } = data;
+      if (!taskId || !targetTypeName || !prompt || !sessionId) {
+        logger.warn(
+          { data },
+          'query_memory_specialist: missing required fields',
+        );
+        break;
+      }
+      try {
+        await handleMemoryQuery(taskId, targetTypeName, prompt, sessionId);
+        logger.info(
+          { taskId, targetTypeName },
+          'query_memory_specialist dispatched',
+        );
+      } catch (err) {
+        logger.error(
+          { taskId, targetTypeName, err },
+          'query_memory_specialist failed',
+        );
+      }
+      break;
+    }
+
+    case 'deliver_specialist_result': {
+      const { taskId, resultText } = data;
+      if (!taskId || resultText == null) {
+        logger.warn(
+          { data },
+          'deliver_specialist_result: missing required fields',
+        );
+        break;
+      }
+      try {
+        await deliverResult(taskId, resultText);
+        logger.info({ taskId }, 'deliver_specialist_result succeeded');
+      } catch (err) {
+        logger.error({ taskId, err }, 'deliver_specialist_result failed');
+      }
+      break;
+    }
+
+    case 'report_specialist_session': {
+      const { taskId, sessionId } = data;
+      if (!taskId || !sessionId) {
+        logger.warn(
+          { data },
+          'report_specialist_session: missing required fields',
+        );
+        break;
+      }
+      try {
+        await reportSession(taskId, sessionId);
+        logger.info(
+          { taskId, sessionId },
+          'report_specialist_session recorded',
+        );
+      } catch (err) {
+        logger.error(
+          { taskId, sessionId, err },
+          'report_specialist_session failed',
+        );
+      }
+      break;
+    }
+
+    case 'submit_raw_memory': {
+      const { taskId, topic, stagingPath } = data;
+      if (!taskId || !topic || !stagingPath) {
+        logger.warn({ data }, 'submit_raw_memory: missing required fields');
+        break;
+      }
+      // Find main group JID — submissions are always routed to the main group
+      const mainMemEntry = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      );
+      if (!mainMemEntry) {
+        logger.warn(
+          { sourceGroup },
+          'submit_raw_memory: no main group registered',
+        );
+        break;
+      }
+      const [mainMemJid] = mainMemEntry;
+      // Resolve host path for the staging file; must remain within the IPC directory
+      const groupIpcDir = path.join(DATA_DIR, 'ipc', sourceGroup);
+      const hostStagingPath = path.resolve(groupIpcDir, stagingPath);
+      const rel = path.relative(groupIpcDir, hostStagingPath);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        logger.warn(
+          { stagingPath, sourceGroup },
+          'submit_raw_memory: staging path escapes IPC directory, blocked',
+        );
+        break;
+      }
+      try {
+        await submitRawMemory(taskId, topic, hostStagingPath, mainMemJid);
+        logger.info({ taskId, topic }, 'submit_raw_memory succeeded');
+      } catch (err) {
+        logger.error({ taskId, topic, err }, 'submit_raw_memory failed');
       }
       break;
     }

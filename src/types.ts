@@ -160,6 +160,19 @@ export interface SpecialistConversationSession {
   status: SpecialistConversationSessionStatus;
 }
 
+export type RawMemorySubmissionStatus = 'staged' | 'accepted';
+
+export interface RawMemorySubmission {
+  id: string;
+  task_id: string;
+  topic: string;
+  staging_path: string;
+  submitted_at: string;
+  accepted_at: string | null;
+  final_path: string | null;
+  status: RawMemorySubmissionStatus;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

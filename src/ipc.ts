@@ -675,14 +675,27 @@ export async function processTaskIpc(
         !data.feedId ||
         !data.feedUrl ||
         !data.feedScheduleType ||
-        !data.feedScheduleValue ||
-        !data.targetJid
+        !data.feedScheduleValue
       ) {
         logger.warn({ data }, 'Invalid subscribe_rss request — missing fields');
         break;
       }
 
-      const targetJid = data.targetJid;
+      // target_jid is optional; when omitted, default to the caller's own group JID
+      const targetJid =
+        data.targetJid ??
+        Object.entries(registeredGroups).find(
+          ([, g]) => g.folder === sourceGroup,
+        )?.[0];
+
+      if (!targetJid) {
+        logger.warn(
+          { sourceGroup },
+          'subscribe_rss: could not resolve target JID for source group',
+        );
+        break;
+      }
+
       const targetGroupEntry = registeredGroups[targetJid];
       if (!targetGroupEntry) {
         logger.warn(

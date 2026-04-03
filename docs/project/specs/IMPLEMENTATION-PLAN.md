@@ -141,7 +141,7 @@ This phase is self-contained and can be done before `specialists.ts` is written.
 
 ---
 
-## Phase 4 — Delegation policy
+## ~~Phase 4 — Delegation policy~~ ✓ Done
 
 **New file:** `src/delegation-policy.ts`
 

@@ -33,6 +33,38 @@ external entity Contact {
 enum ChannelType { telegram | deltachat | emacs }
 
 ------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+-- Every registered channel must implement JID ownership: given a JID string,
+-- the channel declares whether it owns that JID. The host routes outbound
+-- messages by finding the unique channel whose owns_jid returns true.
+--
+-- Most channels use a prefix convention: Telegram owns "tg:*", DeltaChat owns
+-- "dc:*", Emacs owns "emacs:*", NullChannel owns "specialist:*".
+-- WhatsApp is the exception: it uses platform-native JID formats (@g.us for
+-- groups, @s.whatsapp.net for contacts) and matches on suffix rather than prefix.
+--
+-- The contract requires that exactly one channel claims any given JID that
+-- the system routes to. Overlapping ownership is a configuration error.
+contract JidOwnership {
+    owns_jid: (jid: String) -> Boolean
+
+    @invariant ExactlyOneOwner
+        -- For every JID that the host attempts to route a message to,
+        -- exactly one registered channel's owns_jid returns true.
+
+    @guidance
+        -- Prefix-based ownership is a convention, not a requirement. A channel
+        -- may use any deterministic rule (suffix matching, regex, lookup table)
+        -- as long as no two channels claim the same JID.
+        -- Known prefix assignments: "tg:" (Telegram), "dc:" (DeltaChat),
+        -- "emacs:" (Emacs), "specialist:" (NullChannel).
+        -- WhatsApp uses platform-native formats: JIDs ending in "@g.us" (groups)
+        -- or "@s.whatsapp.net" (contacts).
+}
+
+------------------------------------------------------------
 -- Entities
 ------------------------------------------------------------
 
@@ -563,6 +595,29 @@ rule AgentPostedMessage {
     )
 }
 
+-- ---- Outbound Message Routing ----
+
+-- Outbound messages are routed to the channel that owns the target chat's JID.
+-- The host iterates registered channels and delivers to the one whose owns_jid
+-- returns true for the target JID. This is the dispatch mechanism that connects
+-- agent output and IPC posts to the correct messaging platform.
+rule OutboundMessageRouted {
+    when: OutboundMessage(target_chat, content)
+
+    let channel = registered_channel_owning(target_chat.jid)
+
+    requires: exists channel
+
+    ensures: ChannelDelivery(channel: channel, chat_jid: target_chat.jid, content: content)
+
+    @guidance
+        -- registered_channel_owning finds the unique channel whose owns_jid
+        -- returns true for the given JID. If no channel claims the JID, the
+        -- message cannot be delivered (the requires clause fails).
+        -- This rule captures the host-side routing contract; individual channel
+        -- specs (null-channel.allium, etc.) define what happens on delivery.
+}
+
 -- ---- Group Registration ----
 
 rule GroupRegistered {
@@ -647,6 +702,16 @@ invariant AtMostOneWaitingEntryPerGroup {
     for a in WaitingGroups:
         for b in WaitingGroups:
             a != b implies a.group != b.group
+}
+
+-- ---- JID Ownership Uniqueness ----
+-- No two registered channels may claim the same JID.
+-- This is the system-wide invariant backing the JidOwnership contract.
+invariant UniqueJidOwnership {
+    for c in Chats:
+        for a in RegisteredChannels:
+            for b in RegisteredChannels:
+                (a != b and a.owns_jid(c.jid)) implies not b.owns_jid(c.jid)
 }
 
 -- ---- Workspace Isolation ----

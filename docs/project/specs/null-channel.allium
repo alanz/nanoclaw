@@ -108,5 +108,8 @@ invariant JidPrefixOwnership {
 -- Open Questions
 ------------------------------------------------------------
 
-open question "JID prefix routing is not yet formally documented in nanoclaw.allium — the channel registry's ownsJid dispatch model (prefix-based JID ownership) should be specified there. A separate todo exists to tend nanoclaw.allium; this gap should be addressed in that pass."
+-- Resolved: JID prefix routing is now formally documented in nanoclaw.allium
+-- as the JidOwnership contract, the OutboundMessageRouted rule, and the
+-- UniqueJidOwnership invariant. NullChannel fulfils this contract via its
+-- owns_jid_prefix config and the starts_with check in SendMessageDiscarded.
 open question "Should NullChannel enforce a concurrency limit for specialist containers independent of nanoclaw.config.max_concurrent_agents, or is the GroupQueue slot model sufficient as-is?"

@@ -188,7 +188,6 @@ config {
     max_messages_per_prompt: Integer = 10
     max_agent_retries: Integer = 5
     max_dispatch_depth: Integer = 5     -- prevents infinite agent-to-agent loops
-    message_debounce_window: Duration = 1.5.seconds
     edit_rerender_window: Duration = 1.hour  -- edits outside this window are treated as new messages
 }
 
@@ -241,13 +240,16 @@ rule MessageEdited {
         -- The "[Message edited]" marker is appended at prompt assembly time.
 }
 
--- Rapid consecutive messages within the debounce window are coalesced: the second
--- (and subsequent) arrivals are stored normally but the agent invocation is deferred
--- until the window expires with no further messages.
+-- ---- Message Debouncing ----
+-- Rapid consecutive messages from the same chat are coalesced before delivery to the
+-- orchestrator. This is a channel-level concern, not an orchestrator-level gate:
+-- each channel adapter that needs it implements its own debounce timer and delivers
+-- a single InboundMessage event only after a quiet period.
 --
--- This is modelled as a constraint on AgentInvoked rather than a separate entity:
--- the requires clause below captures "no message arrived within the last debounce window".
--- The scheduling layer is responsible for re-checking NewMessagesAvailable after the window.
+-- Currently only DeltaChat implements debouncing (DEBOUNCE_MS = 1500ms, per-JID timers).
+-- Telegram and Emacs deliver messages immediately without coalescing.
+-- The debounce window is not system-wide config; it is a hardcoded constant within
+-- each channel adapter that needs it.
 
 -- ---- Trust Revocation ----
 
@@ -305,9 +307,10 @@ rule SessionCleared {
 
 -- New unprocessed messages in a registered group invoke the agent when:
 -- (a) no agent is currently active for the group,
--- (b) the trigger condition is satisfied (or the group triggers on all messages),
--- (c) a debounce window has elapsed since the last inbound message (no rapid follow-ups pending), and
--- (d) a concurrency slot is free.
+-- (b) the trigger condition is satisfied (or the group triggers on all messages), and
+-- (c) a concurrency slot is free.
+-- Debouncing (coalescing rapid follow-up messages) is handled by the channel adapter
+-- before InboundMessage is emitted, so it is not a condition here.
 rule AgentInvoked {
     when: NewMessagesAvailable(group)
 
@@ -321,7 +324,6 @@ rule AgentInvoked {
               or any_matches_trigger(new_messages, group.trigger_pattern)
     requires: not exists group.agent_session
     requires: depth < config.max_dispatch_depth
-    requires: now - new_messages.last(m => m.sent_at).sent_at >= config.message_debounce_window
     requires: AgentSessions where status = active .count < config.max_concurrent_agents
 
     ensures: AgentSession.created(

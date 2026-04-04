@@ -147,6 +147,33 @@ server.tool(
 );
 
 server.tool(
+  'set_reaction',
+  `Set a reaction emoji on the last incoming message in a chat. Use this to acknowledge a request, signal progress, or express a result without sending a full message.
+
+Examples: '👍' to confirm, '✅' when done, '🔍' while searching, '❌' on failure.
+
+Non-main groups can only react to their own chat's last message.`,
+  {
+    emoji: z.string().describe('The emoji to set as a reaction (e.g. "👍", "✅", "🔍")'),
+    target_jid: z
+      .string()
+      .optional()
+      .describe('(Main group only) JID of the chat to react in. Defaults to own chat.'),
+  },
+  async (args) => {
+    const targetJid = isMain && args.target_jid ? args.target_jid : chatJid;
+    writeIpcFile(TASKS_DIR, {
+      type: 'set_reaction',
+      jid: targetJid,
+      emoji: args.emoji,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'Reaction set.' }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

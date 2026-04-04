@@ -2299,6 +2299,7 @@ export function startWebUi(
   opts: {
     sendMessage?: (jid: string, text: string) => Promise<void>;
     groupQueue?: GroupQueue;
+    syncGroups?: () => Promise<void>;
   } = {},
 ): Server {
   const server = createServer(async (req, res) => {
@@ -2324,6 +2325,7 @@ export function startWebUi(
 
       // GET /api/groups
       if (req.method === 'GET' && pathname === '/api/groups') {
+        await opts.syncGroups?.();
         const groups = getAllRegisteredGroups();
         const chats = getAllChats();
         const chatNameByJid = new Map(chats.map((c) => [c.jid, c.name]));

@@ -912,6 +912,12 @@ async function main(): Promise<void> {
   const webUiServer = startWebUi(WEB_UI_PORT, undefined, {
     sendMessage: (jid, text) => routeOutbound(channels, jid, text),
     groupQueue: queue,
+    syncGroups: () =>
+      Promise.all(
+        channels
+          .filter((ch) => ch.syncGroups)
+          .map((ch) => ch.syncGroups!(true)),
+      ).then(() => undefined),
   });
 
   // Graceful shutdown handlers

@@ -140,6 +140,42 @@ rule AgentSentFile {
         -- container (MCP validation) and on the host (path.relative check).
 }
 
+-- An agent sets a reaction emoji on the last incoming message in a chat.
+-- Non-main groups can only react to their own chat.
+-- Channels that do not support reactions silently no-op.
+rule AgentSetReaction {
+    when: AgentMcpCall(author, "set_reaction", emoji, target_jid?)
+
+    let jid = target_jid ?? own_chat_jid(author)
+
+    requires: author.is_main or jid = own_chat_jid(author)
+
+    ensures: ReactionSet(chat: Chat{jid: jid}, emoji: emoji)
+
+    @guidance
+        -- The reaction is applied to the last incoming message tracked by the channel
+        -- adapter for that JID. Channels that do not implement setReaction silently
+        -- no-op. The agent can use this to acknowledge requests, signal progress, or
+        -- express outcomes without sending a full text message.
+}
+
+-- ---- Agent Lifecycle Reactions ----
+-- These reactions are set by the host and container runtime, not by the agent.
+-- They appear on the last incoming message and reflect processing state.
+--
+--   👀  Receipt:    set by the channel adapter when a message arrives from a registered chat.
+--   💭  Processing: set via setTyping(true) when the container starts processing,
+--                   and also restored after Claude SDK context compaction completes.
+--   ⏳  Compacting: set by the container runtime pre-compaction hook.
+--   ✅  Complete:   set via setTyping(false) when the agent turn succeeds.
+
+-- ---- Group Name Synchronisation ----
+-- Chat names are stored in the chats table by each channel adapter at connect time and
+-- when messages arrive. Because users can rename chats at any time, the web UI triggers
+-- a platform sync (syncGroups) immediately before serving GET /api/groups so that the
+-- groups page always reflects current names. This is a web UI concern, not an IPC
+-- concern — there is no agent-facing command for triggering a group name refresh.
+
 -- ---- Fire-and-Forget: Task Commands ----
 -- These rules share the same authorization model: non-main groups may only target tasks
 -- that belong to their own group. Authorisation is re-checked on the host from the

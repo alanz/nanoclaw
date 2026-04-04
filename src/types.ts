@@ -171,6 +171,7 @@ export interface RawMemorySubmission {
   accepted_at: string | null;
   final_path: string | null;
   status: RawMemorySubmissionStatus;
+  overdue_alerted_at: string | null;
 }
 
 // --- Channel abstraction ---

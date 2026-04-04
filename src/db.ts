@@ -256,6 +256,15 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Add overdue_alerted_at column to raw_memory_submissions if it doesn't exist
+  try {
+    database.exec(
+      `ALTER TABLE raw_memory_submissions ADD COLUMN overdue_alerted_at TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -1191,8 +1200,8 @@ export function createRawMemorySubmission(
 ): void {
   db.prepare(
     `INSERT INTO raw_memory_submissions
-       (id, task_id, topic, staging_path, submitted_at, accepted_at, final_path, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, task_id, topic, staging_path, submitted_at, accepted_at, final_path, status, overdue_alerted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     submission.id,
     submission.task_id,
@@ -1202,6 +1211,7 @@ export function createRawMemorySubmission(
     submission.accepted_at ?? null,
     submission.final_path ?? null,
     submission.status,
+    submission.overdue_alerted_at ?? null,
   );
 }
 
@@ -1250,6 +1260,15 @@ export function getRawMemorySubmissionsByStatus(
       'SELECT * FROM raw_memory_submissions WHERE status = ? ORDER BY submitted_at',
     )
     .all(status) as RawMemorySubmission[];
+}
+
+export function markRawMemorySubmissionOverdueAlerted(
+  id: string,
+  alertedAt: string,
+): void {
+  db.prepare(
+    `UPDATE raw_memory_submissions SET overdue_alerted_at = ? WHERE id = ?`,
+  ).run(alertedAt, id);
 }
 
 // --- Specialist dispatch count query ---

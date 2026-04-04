@@ -25,6 +25,7 @@ import {
   getSpecialistSession,
   getSpecialistTask,
   getSpecialistTasksByStatus,
+  markRawMemorySubmissionOverdueAlerted,
   updateRawMemorySubmission,
   updateSpecialistSession,
   updateSpecialistTask,
@@ -530,6 +531,7 @@ export async function submitRawMemory(
     accepted_at: null,
     final_path: null,
     status: 'staged',
+    overdue_alerted_at: null,
   });
 
   const notice = _memorySubmissionNotice(task, topic, stagingPath);
@@ -801,6 +803,72 @@ export function startOverdueSpecialistPoller(pollIntervalMs: number): void {
 /** @internal — for tests only. */
 export function _resetOverduePollerForTest(): void {
   _overduePollerRunning = false;
+}
+
+// ---------------------------------------------------------------------------
+// 5l — Staged submission overdue alert (StagedSubmissionOverdue)
+// ---------------------------------------------------------------------------
+
+/**
+ * Alert the main group for any staged memory submissions that have exceeded
+ * max_staging_duration without being accepted or rejected.
+ * Fires once per submission (tracked via overdue_alerted_at).
+ */
+export async function checkStagedSubmissionsOverdue(
+  mainGroupJid: string,
+): Promise<void> {
+  const staged = getRawMemorySubmissionsByStatus('staged');
+  const now = Date.now();
+  for (const submission of staged) {
+    if (submission.overdue_alerted_at) continue;
+    const age = now - new Date(submission.submitted_at).getTime();
+    if (age > SPECIALISTS_CONFIG.maxStagingDurationMs) {
+      const msg =
+        `Staged memory submission overdue: '${submission.topic}' ` +
+        `(id: ${submission.id}, submitted ${new Date(submission.submitted_at).toISOString()}, ` +
+        `staging path: ${submission.staging_path}). ` +
+        `It has been waiting longer than ${SPECIALISTS_CONFIG.maxStagingDurationMs / (60 * 60 * 1000)}h without being accepted.`;
+      logger.warn(
+        { submissionId: submission.id, ageMs: age },
+        'Staged memory submission overdue',
+      );
+      await _deps.notifyMainGroupFn(mainGroupJid, msg);
+      markRawMemorySubmissionOverdueAlerted(
+        submission.id,
+        new Date().toISOString(),
+      );
+    }
+  }
+}
+
+let _stagingOverduePollerRunning = false;
+
+/**
+ * Start the periodic poller that enforces StagedSubmissionOverdue.
+ * Runs every pollIntervalMs. Idempotent.
+ */
+export function startStagedSubmissionOverduePoller(
+  mainGroupJid: string,
+  pollIntervalMs: number,
+): void {
+  if (_stagingOverduePollerRunning) return;
+  _stagingOverduePollerRunning = true;
+
+  const loop = async () => {
+    try {
+      await checkStagedSubmissionsOverdue(mainGroupJid);
+    } catch (err) {
+      logger.error({ err }, 'Error in staged submission overdue poller');
+    }
+    setTimeout(loop, pollIntervalMs);
+  };
+
+  loop();
+}
+
+/** @internal — for tests only. */
+export function _resetStagingOverduePollerForTest(): void {
+  _stagingOverduePollerRunning = false;
 }
 
 // Re-export getSameTypeDispatchCount for use by IPC layer (Phase 6)

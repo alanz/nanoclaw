@@ -28,9 +28,11 @@ import {
 } from './db.js';
 import {
   _resetOverduePollerForTest,
+  _resetStagingOverduePollerForTest,
   _resetSpecialistDepsForTest,
   acceptMemorySubmission,
   checkOverdueSpecialistTasks,
+  checkStagedSubmissionsOverdue,
   deliverResult,
   dispatchSpecialist,
   dispatchSubTask,
@@ -890,6 +892,7 @@ describe('RawMemorySubmission', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     await acceptMemorySubmission(id, '/final/path.md');
     const sub = getRawMemorySubmission(id)!;
@@ -912,6 +915,7 @@ describe('RawMemorySubmission', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     const sub = getSubById(id)!;
     expect(sub.final_path).toBeNull();
@@ -954,6 +958,7 @@ describe('RawMemorySubmission', () => {
         accepted_at: null,
         final_path: null,
         status: 'staged',
+        overdue_alerted_at: null,
       });
       await acceptMemorySubmission(id, '/final/path2.md');
       const sub = getRawMemorySubmission(id)!;
@@ -976,6 +981,7 @@ describe('RawMemorySubmission', () => {
         accepted_at: null,
         final_path: null,
         status: 'staged',
+        overdue_alerted_at: null,
       });
       await acceptMemorySubmission(id, '/fp.md');
       await expect(acceptMemorySubmission(id, '/fp2.md')).rejects.toThrow(
@@ -997,6 +1003,7 @@ describe('RawMemorySubmission', () => {
         accepted_at: null,
         final_path: null,
         status: 'staged',
+        overdue_alerted_at: null,
       });
       await acceptMemorySubmission(id, '/fp.md');
       // Attempting to accept again should throw
@@ -1956,6 +1963,221 @@ describe('checkOverdueSpecialistTasks', () => {
   });
 });
 
+describe('checkStagedSubmissionsOverdue (rule StagedSubmissionOverdue)', () => {
+  const MAIN_JID_LOCAL = 'main@test';
+  let notifiedMessages: string[];
+
+  beforeEach(() => {
+    _resetStagingOverduePollerForTest();
+    notifiedMessages = [];
+    initSpecialists({
+      notifyMainGroupFn: async (_jid, msg) => {
+        notifiedMessages.push(msg);
+      },
+    });
+  });
+
+  afterEach(() => {
+    _resetSpecialistDepsForTest();
+  });
+
+  it('alerts main group for a staged submission older than max_staging_duration', async () => {
+    const { createRawMemorySubmission: crs } = await import('./db.js');
+    createSpecialistTask({
+      id: 'stask-1',
+      specialist_type: 'researcher',
+      prompt: 'p',
+      requester_group: MAIN_JID_LOCAL,
+      requester_task_id: null,
+      depth: 0,
+      chain_delegation_count: 0,
+      ancestor_types: '[]',
+      is_last_same_type_dispatch: false,
+      status: 'running',
+      pending_sub_task_id: null,
+      result: null,
+      failure_kind: null,
+      failure_detail: null,
+      restart_attempt_count: 0,
+      delegated_at: new Date().toISOString(),
+      closed_at: null,
+    });
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxStagingDurationMs - 1000,
+    );
+    crs({
+      id: 'sub-1',
+      task_id: 'stask-1',
+      topic: 'some-topic',
+      staging_path: '/tmp/sub-1.md',
+      submitted_at: old.toISOString(),
+      accepted_at: null,
+      final_path: null,
+      status: 'staged',
+      overdue_alerted_at: null,
+    });
+    await checkStagedSubmissionsOverdue(MAIN_JID_LOCAL);
+    expect(notifiedMessages.length).toBe(1);
+    expect(notifiedMessages[0]).toContain('some-topic');
+    expect(notifiedMessages[0]).toContain('overdue');
+  });
+
+  it('sets overdue_alerted_at after alerting', async () => {
+    const { createRawMemorySubmission: crs, getRawMemorySubmission: get } =
+      await import('./db.js');
+    createSpecialistTask({
+      id: 'stask-2',
+      specialist_type: 'researcher',
+      prompt: 'p',
+      requester_group: MAIN_JID_LOCAL,
+      requester_task_id: null,
+      depth: 0,
+      chain_delegation_count: 0,
+      ancestor_types: '[]',
+      is_last_same_type_dispatch: false,
+      status: 'running',
+      pending_sub_task_id: null,
+      result: null,
+      failure_kind: null,
+      failure_detail: null,
+      restart_attempt_count: 0,
+      delegated_at: new Date().toISOString(),
+      closed_at: null,
+    });
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxStagingDurationMs - 1000,
+    );
+    crs({
+      id: 'sub-2',
+      task_id: 'stask-2',
+      topic: 't',
+      staging_path: '/tmp/sub-2.md',
+      submitted_at: old.toISOString(),
+      accepted_at: null,
+      final_path: null,
+      status: 'staged',
+      overdue_alerted_at: null,
+    });
+    await checkStagedSubmissionsOverdue(MAIN_JID_LOCAL);
+    expect(get('sub-2')?.overdue_alerted_at).not.toBeNull();
+  });
+
+  it('does not alert twice for the same overdue submission', async () => {
+    const { createRawMemorySubmission: crs } = await import('./db.js');
+    createSpecialistTask({
+      id: 'stask-3',
+      specialist_type: 'researcher',
+      prompt: 'p',
+      requester_group: MAIN_JID_LOCAL,
+      requester_task_id: null,
+      depth: 0,
+      chain_delegation_count: 0,
+      ancestor_types: '[]',
+      is_last_same_type_dispatch: false,
+      status: 'running',
+      pending_sub_task_id: null,
+      result: null,
+      failure_kind: null,
+      failure_detail: null,
+      restart_attempt_count: 0,
+      delegated_at: new Date().toISOString(),
+      closed_at: null,
+    });
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxStagingDurationMs - 1000,
+    );
+    crs({
+      id: 'sub-3',
+      task_id: 'stask-3',
+      topic: 't',
+      staging_path: '/tmp/sub-3.md',
+      submitted_at: old.toISOString(),
+      accepted_at: null,
+      final_path: null,
+      status: 'staged',
+      overdue_alerted_at: null,
+    });
+    await checkStagedSubmissionsOverdue(MAIN_JID_LOCAL);
+    await checkStagedSubmissionsOverdue(MAIN_JID_LOCAL);
+    expect(notifiedMessages.length).toBe(1);
+  });
+
+  it('does not alert for a submission within max_staging_duration', async () => {
+    const { createRawMemorySubmission: crs } = await import('./db.js');
+    createSpecialistTask({
+      id: 'stask-4',
+      specialist_type: 'researcher',
+      prompt: 'p',
+      requester_group: MAIN_JID_LOCAL,
+      requester_task_id: null,
+      depth: 0,
+      chain_delegation_count: 0,
+      ancestor_types: '[]',
+      is_last_same_type_dispatch: false,
+      status: 'running',
+      pending_sub_task_id: null,
+      result: null,
+      failure_kind: null,
+      failure_detail: null,
+      restart_attempt_count: 0,
+      delegated_at: new Date().toISOString(),
+      closed_at: null,
+    });
+    crs({
+      id: 'sub-4',
+      task_id: 'stask-4',
+      topic: 't',
+      staging_path: '/tmp/sub-4.md',
+      submitted_at: new Date().toISOString(),
+      accepted_at: null,
+      final_path: null,
+      status: 'staged',
+      overdue_alerted_at: null,
+    });
+    await checkStagedSubmissionsOverdue(MAIN_JID_LOCAL);
+    expect(notifiedMessages.length).toBe(0);
+  });
+
+  it('does not alert for an accepted submission even if old', async () => {
+    const { createRawMemorySubmission: crs } = await import('./db.js');
+    createSpecialistTask({
+      id: 'stask-5',
+      specialist_type: 'researcher',
+      prompt: 'p',
+      requester_group: MAIN_JID_LOCAL,
+      requester_task_id: null,
+      depth: 0,
+      chain_delegation_count: 0,
+      ancestor_types: '[]',
+      is_last_same_type_dispatch: false,
+      status: 'running',
+      pending_sub_task_id: null,
+      result: null,
+      failure_kind: null,
+      failure_detail: null,
+      restart_attempt_count: 0,
+      delegated_at: new Date().toISOString(),
+      closed_at: null,
+    });
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxStagingDurationMs - 1000,
+    );
+    crs({
+      id: 'sub-5',
+      task_id: 'stask-5',
+      topic: 't',
+      staging_path: '/tmp/sub-5.md',
+      submitted_at: old.toISOString(),
+      accepted_at: new Date().toISOString(),
+      final_path: '/final/path.md',
+      status: 'accepted',
+      overdue_alerted_at: null,
+    });
+    await checkStagedSubmissionsOverdue(MAIN_JID_LOCAL);
+    expect(notifiedMessages.length).toBe(0);
+  });
+});
+
 describe('rule SpecialistTaskCrashed', () => {
   it('transitions running -> failed with kind=execution_error on unexpected container exit', async () => {
     const task = makeRunningTask({ id: 'crash-1' });
@@ -2228,6 +2450,7 @@ describe('rule MemorySubmissionAccepted', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     await acceptMemorySubmission(id, '/final/1.md');
     expect(getRawMemorySubmission(id)?.status).toBe('accepted');
@@ -2247,6 +2470,7 @@ describe('rule MemorySubmissionAccepted', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     await acceptMemorySubmission(id, '/final/2.md');
     const sub = getRawMemorySubmission(id)!;
@@ -2275,6 +2499,7 @@ describe('rule MemorySubmissionAccepted', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     await acceptMemorySubmission(id, '/fp.md');
     await expect(acceptMemorySubmission(id, '/fp2.md')).rejects.toThrow(
@@ -2301,6 +2526,7 @@ describe('rule StagedSubmissionsRenotifiedOnRestart', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     await handleNanoclawStarted(MAIN_JID);
     expect(notifyMainGroupFn).toHaveBeenCalledWith(
@@ -2326,6 +2552,7 @@ describe('rule StagedSubmissionsRenotifiedOnRestart', () => {
       accepted_at: now,
       final_path: '/final/d.md',
       status: 'accepted',
+      overdue_alerted_at: null,
     });
     await handleNanoclawStarted(MAIN_JID);
     expect(notifyMainGroupFn).not.toHaveBeenCalledWith(
@@ -2351,6 +2578,7 @@ describe('rule StagedSubmissionsRenotifiedOnRestart', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     await expect(handleNanoclawStarted(MAIN_JID)).resolves.not.toThrow();
     expect(notifyMainGroupFn).toHaveBeenCalled();
@@ -2748,6 +2976,7 @@ describe('scenario: raw memory submission + acceptance', () => {
       accepted_at: null,
       final_path: null,
       status: 'staged',
+      overdue_alerted_at: null,
     });
     await handleNanoclawStarted(MAIN_JID);
     expect(notifyMainGroupFn).toHaveBeenCalledWith(

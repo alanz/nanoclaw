@@ -96,6 +96,7 @@ import {
   handleNanoclawStarted,
   initSpecialists,
   startOverdueSpecialistPoller,
+  startStagedSubmissionOverduePoller,
 } from './specialists.js';
 import { getSpecialistType, initSpecialistTypes } from './specialist-types.js';
 import { startZoteroMonitorLoop } from './zotero-monitor.js';
@@ -1278,6 +1279,11 @@ async function main(): Promise<void> {
 
   // Start periodic check for specialist tasks exceeding overall duration limit
   startOverdueSpecialistPoller(SCHEDULER_POLL_INTERVAL);
+
+  // Start periodic check for staged memory submissions that have not been processed
+  if (mainGroupJid) {
+    startStagedSubmissionOverduePoller(mainGroupJid, SCHEDULER_POLL_INTERVAL);
+  }
 
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

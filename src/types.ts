@@ -41,6 +41,7 @@ export interface RegisteredGroup {
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
   trustedGroup?: boolean; // Session commands allowed from any sender (like isMain, but isolated workspace)
+  pendingDispatchDepth?: number; // Persisted dispatch depth to assign the next agent run (set by deliver_result)
 }
 
 export interface NewMessage {

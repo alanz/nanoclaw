@@ -20,6 +20,7 @@ import {
   logTaskRun,
   queryTranscript,
   setRegisteredGroup,
+  setPendingDispatchDepthDb,
   storeChatMetadata,
   storeMessage,
   updateSpecialistSession,
@@ -1231,5 +1232,49 @@ describe('specialist conversation sessions — updateSpecialistSession', () => {
     });
     updateSpecialistSession('task-1', {});
     expect(getSpecialistSession('task-1')!.session_id).toBe('sess-abc');
+  });
+});
+
+describe('pending_dispatch_depth persistence', () => {
+  const JID = 'group@g.us';
+  const base = {
+    name: 'Test Group',
+    folder: 'test-group',
+    trigger: '@bot',
+    added_at: '2024-01-01T00:00:00.000Z',
+  };
+
+  it('defaults to undefined when not set', () => {
+    setRegisteredGroup(JID, base);
+    const groups = getAllRegisteredGroups();
+    expect(groups[JID]?.pendingDispatchDepth).toBeUndefined();
+  });
+
+  it('setRegisteredGroup persists pendingDispatchDepth', () => {
+    setRegisteredGroup(JID, { ...base, pendingDispatchDepth: 3 });
+    const groups = getAllRegisteredGroups();
+    expect(groups[JID]?.pendingDispatchDepth).toBe(3);
+  });
+
+  it('setPendingDispatchDepthDb updates an existing group', () => {
+    setRegisteredGroup(JID, base);
+    setPendingDispatchDepthDb(JID, 5);
+    const groups = getAllRegisteredGroups();
+    expect(groups[JID]?.pendingDispatchDepth).toBe(5);
+  });
+
+  it('setPendingDispatchDepthDb clears depth when passed null', () => {
+    setRegisteredGroup(JID, { ...base, pendingDispatchDepth: 7 });
+    setPendingDispatchDepthDb(JID, null);
+    const groups = getAllRegisteredGroups();
+    expect(groups[JID]?.pendingDispatchDepth).toBeUndefined();
+  });
+
+  it('survives a simulated restart (re-read from DB)', () => {
+    setRegisteredGroup(JID, base);
+    setPendingDispatchDepthDb(JID, 2);
+    // Re-read simulates what happens on process restart
+    const groups = getAllRegisteredGroups();
+    expect(groups[JID]?.pendingDispatchDepth).toBe(2);
   });
 });

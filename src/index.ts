@@ -56,6 +56,7 @@ import {
   getSpecialistTask,
   initDatabase,
   setRegisteredGroup,
+  setPendingDispatchDepthDb,
   setRouterState,
   setSession,
   storeChatMetadata,
@@ -125,9 +126,8 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
-// Depth to assign the next container run for a given JID, set when a
-// deliver_result injection arrives from a sub-group.
-const pendingDispatchDepth: Record<string, number> = {};
+// pendingDispatchDepth is now persisted on registered_groups.pending_dispatch_depth.
+// The in-memory registeredGroups map is kept in sync so reads are cheap.
 
 // Active orchestration cycles: sub-group folder → {taskId, delegatedAt}.
 // Set when main schedules a task for a sub-group; cleared on deliver_result or timeout.
@@ -499,8 +499,14 @@ async function runAgent(
       }
     : undefined;
 
-  const dispatchDepth = pendingDispatchDepth[chatJid] ?? 0;
-  delete pendingDispatchDepth[chatJid];
+  const dispatchDepth = registeredGroups[chatJid]?.pendingDispatchDepth ?? 0;
+  if (registeredGroups[chatJid]?.pendingDispatchDepth != null) {
+    registeredGroups[chatJid] = {
+      ...registeredGroups[chatJid],
+      pendingDispatchDepth: undefined,
+    };
+    setPendingDispatchDepthDb(chatJid, null);
+  }
 
   try {
     const output = await runContainerAgent(
@@ -1195,7 +1201,13 @@ async function main(): Promise<void> {
       }
     },
     setPendingDispatchDepth: (jid, depth) => {
-      pendingDispatchDepth[jid] = depth;
+      if (registeredGroups[jid]) {
+        registeredGroups[jid] = {
+          ...registeredGroups[jid],
+          pendingDispatchDepth: depth,
+        };
+      }
+      setPendingDispatchDepthDb(jid, depth);
     },
     onCycleDelegated: (subGroupFolder, taskId) => {
       pendingCycles[subGroupFolder] = { taskId, delegatedAt: Date.now() };

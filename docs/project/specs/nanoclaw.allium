@@ -90,13 +90,20 @@ entity Chat {
 
 -- A message stored in a chat, either inbound from a contact or outbound from the agent.
 -- Bot messages are stored but excluded from the context sent to the agent.
--- The rendered_content field holds the enriched form delivered to the agent prompt.
+--
+-- Enrichment (quoted-reply prefix, media labels, edit marker) is applied at prompt
+-- assembly time, not at ingest. The raw fields below are sufficient to regenerate
+-- the enriched form for quoted replies and edit markers. Attachment/media enrichment
+-- cannot currently be regenerated because attachment metadata is not persisted
+-- (see open question below).
 entity Message {
     chat: Chat
     sender: Contact?                    -- null for agent-generated outbound messages
     sender_name: String?
     content: String
-    rendered_content: String            -- enriched form: quoted reply prefix + media labels + edit marker
+    reply_to_message_id: String?        -- ID of the quoted message, if any
+    reply_to_content: String?           -- text excerpt of the quoted message
+    reply_to_sender_name: String?       -- display name of the quoted message author
     sent_at: Timestamp
     is_from_me: Boolean
     is_bot_response: Boolean            -- true for agent-generated replies
@@ -192,21 +199,19 @@ config {
 -- ---- Message Ingestion ----
 
 -- Every inbound message is stored, regardless of whether the chat is registered.
--- rendered_content is built from content by applying enrichment rules:
---   • Quoted replies prepend "[Replying to {author}: "{excerpt}"]"
---   • Media / file attachments are labelled: "[Image: /workspace/ipc/attachments/{filename}]", etc.
---   • Edits within the edit_rerender_window are stored with an "[Message edited]" marker.
+-- Raw fields (content, reply_to_*) are stored; enrichment is applied later at
+-- prompt assembly time by formatMessages.
 rule MessageReceived {
     when: InboundMessage(chat, sender, sender_name, content, sent_at, quoted_message?, attachments?)
-
-    let rendered = render_message(content, quoted_message, attachments)
 
     ensures: Message.created(
         chat: chat,
         sender: sender,
         sender_name: sender_name,
         content: content,
-        rendered_content: rendered,
+        reply_to_message_id: quoted_message?.id,
+        reply_to_content: quoted_message?.content,
+        reply_to_sender_name: quoted_message?.sender_name,
         sent_at: sent_at,
         is_from_me: false,
         is_bot_response: false,
@@ -215,9 +220,9 @@ rule MessageReceived {
     ensures: chat.last_message_at = sent_at
 
     @guidance
-        -- render_message prepends a "[Replying to …]" prefix for quoted replies,
-        -- converts each attachment path to a labelled bracket token,
-        -- and passes plain text through unchanged.
+        -- Attachment metadata from the attachments? parameter is not currently
+        -- persisted. Media labels ("[Image: …]" etc.) are generated transiently
+        -- at prompt assembly from attachment paths available at delivery time only.
 }
 
 -- An edited message replaces an earlier stored message if the edit arrives within
@@ -227,15 +232,13 @@ rule MessageEdited {
 
     requires: sent_at - original_message.sent_at <= config.edit_rerender_window
 
-    let rendered = render_message(new_content, null, null)
-
     ensures: original_message.content = new_content
-    ensures: original_message.rendered_content = rendered + " [Message edited]"
     ensures: original_message.is_edit = true
 
     @guidance
-        -- Edits update the existing Message record in place so the agent sees
-        -- the corrected text in context rather than both versions.
+        -- Edits update the existing Message record in place (INSERT OR REPLACE) so
+        -- the agent sees the corrected text in context rather than both versions.
+        -- The "[Message edited]" marker is appended at prompt assembly time.
 }
 
 -- Rapid consecutive messages within the debounce window are coalesced: the second
@@ -667,6 +670,16 @@ invariant AtMostOneWaitingEntryPerGroup {
             a != b implies a.group != b.group
 }
 
+-- ---- Message Enrichment Regenerability ----
+-- The enriched prompt form for a message can be regenerated from stored fields alone,
+-- provided attachment metadata has been persisted. Currently only quoted-reply enrichment
+-- and the edit marker are regenerable; attachment/media labels are not (see open question).
+invariant MessageEnrichmentRegenerableFromStoredFields {
+    for m in Messages:
+        -- Quoted-reply prefix is fully derivable from reply_to_content and reply_to_sender_name
+        (m.reply_to_content != null) implies (m.reply_to_sender_name != null)
+}
+
 -- ---- JID Ownership Uniqueness ----
 -- No two registered channels may claim the same JID.
 -- This is the system-wide invariant backing the JidOwnership contract.
@@ -724,3 +737,4 @@ event HostLogRecorded(level: debug | info | warning | error, text: String)
 
 open question "Sender authorisation - exact rules for who is an authorised sender in non-trusted, non-main groups?"
 open question "Trigger matching - should trigger_pattern apply to sender name, message content, or both?"
+open question "Attachment persistence - attachment metadata (filename, mime type, local path) is not currently stored in the messages table. Until it is, media label enrichment ('[Image: …]', '[Audio: …]' etc.) cannot be regenerated from stored fields, violating the intent of MessageEnrichmentRegenerableFromStoredFields for messages with attachments. Should an attachments table or JSON column be added?"

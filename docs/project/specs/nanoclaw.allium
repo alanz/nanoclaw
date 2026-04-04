@@ -716,22 +716,22 @@ invariant WorkspaceIsolation {
 }
 
 ------------------------------------------------------------
--- System Events
+-- System Triggers
 ------------------------------------------------------------
 
--- The NanoClaw host process has started (or restarted).
--- Used by recovery rules across specialists.allium and scheduling.allium to
+-- NanoclawStarted(started_at: Timestamp)
+-- Emitted by the host process on startup/restart.
+-- Used by recovery rules in specialists.allium and scheduling.allium to
 -- detect tasks that were in-flight when the host was killed.
-event NanoclawStarted
 
--- The host process posts a message to a chat on behalf of itself (not an agent container).
--- Distinct from AgentPostedMessage, which is an agent-originated post via IPC.
--- Used for operational alerts, recovery summaries, and memory submission notices.
-event HostMessagePosted(target_chat: Chat, text: String)
+-- HostMessagePosted(target_chat: Chat, text: String)
+-- Emitted when the host process posts a message to a chat on behalf of itself
+-- (not an agent container). Used for operational alerts, recovery summaries,
+-- and memory submission notices. Distinct from AgentPostedMessage.
 
--- The host process writes a structured log entry.
+-- HostLogRecorded(level: debug | info | warning | error, text: String)
+-- Emitted when the host process writes a structured log entry.
 -- Used for audit trails, retry records, and observability.
-event HostLogRecorded(level: debug | info | warning | error, text: String)
 
 ------------------------------------------------------------
 -- Open Questions

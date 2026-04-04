@@ -485,11 +485,7 @@ rule SpecialistTaskCompleted {
     ensures:
         if exists task.conversation:
             task.conversation.status = cleared
-    ensures: SpecialistResultDelivered(
-        requester_group: task.requester_group,
-        requester_task: task.requester_task,
-        task: task
-    )
+    ensures: SpecialistResultDelivered(task: task)
 
     @guidance
         -- SpecialistResultDelivered routes the result to the correct requester:
@@ -499,13 +495,13 @@ rule SpecialistTaskCompleted {
 
 -- A completed sub-task re-invokes its parent specialist.
 rule ParentSpecialistResumed {
-    when: SpecialistResultDelivered(requester_group?, requester_task?, task)
+    when: SpecialistResultDelivered(task)
 
-    requires: requester_task != null
-    requires: requester_task.status = awaiting_sub_task
-    requires: requester_task.pending_sub_task = task
+    requires: task.requester_task != null
+    requires: task.requester_task.status = awaiting_sub_task
+    requires: task.requester_task.pending_sub_task = task
 
-    ensures: SpecialistContainerRestarted(task: requester_task, inject: task)
+    ensures: SpecialistContainerRestarted(task: task.requester_task, inject: task)
 
     @guidance
         -- SpecialistContainerRestarted schedules a new container invocation for the parent task.
@@ -534,11 +530,7 @@ rule SpecialistInvocationTimedOut {
     ensures:
         if exists task.conversation:
             task.conversation.status = cleared
-    ensures: SpecialistResultDelivered(
-        requester_group: task.requester_group,
-        requester_task: task.requester_task,
-        task: task
-    )
+    ensures: SpecialistResultDelivered(task: task)
 }
 
 -- A task whose wall-clock duration (across all invocations) exceeds max_task_duration fails.
@@ -554,11 +546,7 @@ rule SpecialistTaskOverallTimeout {
     ensures:
         if exists task.conversation:
             task.conversation.status = cleared
-    ensures: SpecialistResultDelivered(
-        requester_group: task.requester_group,
-        requester_task: task.requester_task,
-        task: task
-    )
+    ensures: SpecialistResultDelivered(task: task)
 }
 
 -- A specialist container that exits unexpectedly fails the task.
@@ -573,11 +561,7 @@ rule SpecialistTaskCrashed {
     ensures:
         if exists task.conversation:
             task.conversation.status = cleared
-    ensures: SpecialistResultDelivered(
-        requester_group: task.requester_group,
-        requester_task: task.requester_task,
-        task: task
-    )
+    ensures: SpecialistResultDelivered(task: task)
 }
 
 -- ---- Recovery on Host Restart ----
@@ -595,7 +579,7 @@ rule SpecialistTaskCrashed {
 
 -- Retries remaining: transition to awaiting_restart and schedule a new container.
 rule SpecialistTaskScheduledForRetry {
-    when: NanoclawStarted
+    when: NanoclawStarted(_)
     for task in SpecialistTasks where status = running:
         requires: task.restart_attempt_count < config.max_restart_retries
         ensures: task.restart_attempt_count = task.restart_attempt_count + 1
@@ -614,7 +598,7 @@ rule SpecialistTaskScheduledForRetry {
 
 -- Retries exhausted: fail the task and propagate the failure to the requester.
 rule SpecialistTaskFailedAfterRetriesExhausted {
-    when: NanoclawStarted
+    when: NanoclawStarted(_)
     for task in SpecialistTasks where status = running:
         requires: task.restart_attempt_count >= config.max_restart_retries
         ensures: task.status = failed
@@ -651,7 +635,7 @@ rule SpecialistTaskRetryStarted {
 -- before the restart are ready to resume. Their parent conversation is intact; they just
 -- need the container re-invoked with the sub-task result.
 rule SpecialistTaskSubResultAvailableAfterRestart {
-    when: NanoclawStarted
+    when: NanoclawStarted(_)
     for task in SpecialistTasks where status = awaiting_sub_task:
         requires: task.pending_sub_task.status in { completed, failed }
         ensures: SpecialistContainerRestarted(task: task, inject: task.pending_sub_task)
@@ -771,10 +755,12 @@ rule MemorySubmissionAccepted {
 -- This recovers from host crashes that occurred between the file write and the
 -- notification dispatch: the file exists in staging but the main group never knew.
 rule StagedSubmissionsRenotifiedOnRestart {
-    when: NanoclawStarted
+    when: NanoclawStarted(_)
+
+    let main_group = nanoclaw.Groups where is_main .first
+
+    requires: exists main_group
     for submission in RawMemorySubmissions where status = staged:
-        let main_group = nanoclaw.Groups where is_main .first
-        requires: exists main_group
         ensures: HostMessagePosted(
             target_chat: main_group.chat,
             text: memory_submission_notice(submission.task, submission.topic, submission.staging_path)
@@ -823,7 +809,7 @@ rule StagedSubmissionOverdue {
 -- rather than one per task. Tasks are still in `running` state when this rule fires;
 -- the status transitions happen in the recovery rules on the same trigger.
 rule StartupRecoveryReported {
-    when: NanoclawStarted
+    when: NanoclawStarted(_)
 
     let recovering = SpecialistTasks where status = running
     let main_group = nanoclaw.Groups where is_main .first

@@ -4,6 +4,9 @@ import {
   parseRssFeed,
   buildJudgmentPrompt,
   computeNextCheck,
+  diffNewItems,
+  mergeAndCapGuids,
+  parseSeenGuids,
   _resetRssMonitorLoopForTests,
 } from './rss-monitor.js';
 import { RssFeed } from './types.js';
@@ -251,5 +254,70 @@ describe('computeNextCheck', () => {
     });
     const next = computeNextCheck(feed);
     expect(new Date(next).getTime()).toBeGreaterThan(Date.now());
+  });
+});
+
+describe('seen GUID helpers', () => {
+  describe('parseSeenGuids', () => {
+    it('parses a valid JSON array', () => {
+      expect(parseSeenGuids('["a","b","c"]')).toEqual(['a', 'b', 'c']);
+    });
+
+    it('returns empty array for invalid JSON', () => {
+      expect(parseSeenGuids('not-json')).toEqual([]);
+    });
+
+    it('returns empty array for empty string', () => {
+      expect(parseSeenGuids('')).toEqual([]);
+    });
+  });
+
+  describe('diffNewItems', () => {
+    const items = [
+      { guid: 'a', title: 'A', link: '', description: '' },
+      { guid: 'b', title: 'B', link: '', description: '' },
+      { guid: 'c', title: 'C', link: '', description: '' },
+    ];
+
+    it('returns only items not in seenGuids', () => {
+      expect(diffNewItems(items, ['a', 'b'])).toEqual([items[2]]);
+    });
+
+    it('returns all items when seenGuids is empty', () => {
+      expect(diffNewItems(items, [])).toEqual(items);
+    });
+
+    it('returns nothing when all items are seen', () => {
+      expect(diffNewItems(items, ['a', 'b', 'c'])).toEqual([]);
+    });
+
+    it('excludes items with no guid', () => {
+      const withNull = [{ guid: '', title: 'X', link: '', description: '' }];
+      expect(diffNewItems(withNull, [])).toEqual([]);
+    });
+  });
+
+  describe('mergeAndCapGuids', () => {
+    it('merges existing and incoming', () => {
+      expect(mergeAndCapGuids(['a', 'b'], ['c'])).toEqual(['a', 'b', 'c']);
+    });
+
+    it('caps at 500, trimming from the oldest end', () => {
+      const existing = Array.from({ length: 498 }, (_, i) => `old-${i}`);
+      const incoming = ['new-1', 'new-2', 'new-3'];
+      const result = mergeAndCapGuids(existing, incoming);
+      expect(result).toHaveLength(500);
+      expect(result.at(-1)).toBe('new-3');
+      expect(result.at(-2)).toBe('new-2');
+      expect(result.at(-3)).toBe('new-1');
+      expect(result[0]).toBe('old-1'); // old-0 was trimmed
+    });
+
+    it('does not trim when total is exactly 500', () => {
+      const existing = Array.from({ length: 499 }, (_, i) => `g-${i}`);
+      const result = mergeAndCapGuids(existing, ['final']);
+      expect(result).toHaveLength(500);
+      expect(result[0]).toBe('g-0');
+    });
   });
 });

@@ -105,7 +105,7 @@ entity DeliveredFeedItem {
 
 config {
     task_poll_interval: Duration = 60.seconds
-    rss_poll_interval: Duration = 1.hour
+    rss_poll_interval: Duration = 60.seconds
     max_seen_guids: Integer = 500       -- cap on seen_item_ids per feed
     max_dispatch_depth: Integer = 5
 }

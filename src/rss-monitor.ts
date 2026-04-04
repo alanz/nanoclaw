@@ -217,6 +217,26 @@ export interface RssMonitorDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
+export function parseSeenGuids(raw: string): string[] {
+  try {
+    return JSON.parse(raw) as string[];
+  } catch {
+    return [];
+  }
+}
+
+export function diffNewItems(items: RssItem[], seenGuids: string[]): RssItem[] {
+  const seenSet = new Set(seenGuids);
+  return items.filter((item) => item.guid && !seenSet.has(item.guid));
+}
+
+export function mergeAndCapGuids(
+  existing: string[],
+  incoming: string[],
+): string[] {
+  return [...existing, ...incoming].slice(-MAX_SEEN_GUIDS);
+}
+
 async function checkFeed(feed: RssFeed, deps: RssMonitorDeps): Promise<void> {
   const startTime = Date.now();
   logger.info({ feedId: feed.id, url: feed.url }, 'Checking RSS feed');
@@ -247,21 +267,12 @@ async function checkFeed(feed: RssFeed, deps: RssMonitorDeps): Promise<void> {
   const { title, items } = parseRssFeed(xml);
 
   // Diff against seen GUIDs
-  let seenGuids: string[];
-  try {
-    seenGuids = JSON.parse(feed.seen_guids) as string[];
-  } catch {
-    seenGuids = [];
-  }
-  const seenSet = new Set(seenGuids);
-  const newItems = items.filter((item) => item.guid && !seenSet.has(item.guid));
-
-  // Merge seen GUIDs and cap at MAX_SEEN_GUIDS
-  const allGuids = [
-    ...seenGuids,
-    ...newItems.map((i) => i.guid).filter(Boolean),
-  ];
-  const updatedSeenGuids = allGuids.slice(-MAX_SEEN_GUIDS);
+  const seenGuids = parseSeenGuids(feed.seen_guids);
+  const newItems = diffNewItems(items, seenGuids);
+  const updatedSeenGuids = mergeAndCapGuids(
+    seenGuids,
+    newItems.map((i) => i.guid).filter(Boolean) as string[],
+  );
 
   // Compute next check time
   const nextCheck = computeNextCheck(feed);

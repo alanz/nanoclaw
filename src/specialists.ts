@@ -18,6 +18,7 @@ import {
   createRawMemorySubmission,
   createSpecialistSession,
   createSpecialistTask,
+  getLiveSpecialistTasks,
   getRawMemorySubmission,
   getRawMemorySubmissionsByStatus,
   getSameTypeDispatchCount,
@@ -742,6 +743,64 @@ function _memorySubmissionNotice(
     `Specialist ${task.specialist_type} (depth=${task.depth}) submitted raw memory: ` +
     `'${topic}' at ${stagingPath}`
   );
+}
+
+// ---------------------------------------------------------------------------
+// 5k — Overall task timeout poller (SpecialistTaskOverallTimeout)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check all live specialist tasks and fail any that have exceeded max_task_duration.
+ * Safe to call multiple times; skips tasks already in a terminal state.
+ */
+export async function checkOverdueSpecialistTasks(): Promise<void> {
+  const liveTasks = getLiveSpecialistTasks();
+  const now = Date.now();
+  for (const task of liveTasks) {
+    const durationMs = now - new Date(task.delegated_at).getTime();
+    if (durationMs > SPECIALISTS_CONFIG.maxTaskDurationMs) {
+      logger.warn(
+        {
+          taskId: task.id,
+          durationMs,
+          maxMs: SPECIALISTS_CONFIG.maxTaskDurationMs,
+        },
+        'Specialist task exceeded overall duration limit — failing',
+      );
+      await failSpecialistTask(
+        task.id,
+        'timeout',
+        'Overall task duration exceeded',
+      );
+    }
+  }
+}
+
+let _overduePollerRunning = false;
+
+/**
+ * Start the periodic poller that enforces SpecialistTaskOverallTimeout.
+ * Runs every SCHEDULER_POLL_INTERVAL ms. Idempotent.
+ */
+export function startOverdueSpecialistPoller(pollIntervalMs: number): void {
+  if (_overduePollerRunning) return;
+  _overduePollerRunning = true;
+
+  const loop = async () => {
+    try {
+      await checkOverdueSpecialistTasks();
+    } catch (err) {
+      logger.error({ err }, 'Error in overdue specialist poller');
+    }
+    setTimeout(loop, pollIntervalMs);
+  };
+
+  loop();
+}
+
+/** @internal — for tests only. */
+export function _resetOverduePollerForTest(): void {
+  _overduePollerRunning = false;
 }
 
 // Re-export getSameTypeDispatchCount for use by IPC layer (Phase 6)

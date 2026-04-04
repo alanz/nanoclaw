@@ -27,8 +27,10 @@ import {
   updateSpecialistTask,
 } from './db.js';
 import {
+  _resetOverduePollerForTest,
   _resetSpecialistDepsForTest,
   acceptMemorySubmission,
+  checkOverdueSpecialistTasks,
   deliverResult,
   dispatchSpecialist,
   dispatchSubTask,
@@ -1876,6 +1878,81 @@ describe('rule SpecialistTaskOverallTimeout (is_overdue)', () => {
     expect(getSpecialistTask(task.id)?.failure_detail).toContain(
       'Overall task duration exceeded',
     );
+  });
+});
+
+describe('checkOverdueSpecialistTasks', () => {
+  beforeEach(() => {
+    _resetOverduePollerForTest();
+  });
+
+  it('fails a running task whose delegated_at exceeds max_task_duration', async () => {
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxTaskDurationMs - 1000,
+    );
+    const task = makeRunningTask({
+      id: 'cot-1',
+      delegated_at: old.toISOString(),
+    });
+    await checkOverdueSpecialistTasks();
+    expect(getSpecialistTask(task.id)?.status).toBe('failed');
+    expect(getSpecialistTask(task.id)?.failure_kind).toBe('timeout');
+    expect(getSpecialistTask(task.id)?.failure_detail).toContain(
+      'Overall task duration exceeded',
+    );
+  });
+
+  it('fails a queued task whose delegated_at exceeds max_task_duration', async () => {
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxTaskDurationMs - 1000,
+    );
+    createSpecialistTask({
+      id: 'cot-2',
+      specialist_type: 'researcher',
+      prompt: 'p',
+      requester_group: MAIN_JID,
+      requester_task_id: null,
+      depth: 0,
+      chain_delegation_count: 0,
+      ancestor_types: '[]',
+      is_last_same_type_dispatch: false,
+      status: 'queued',
+      pending_sub_task_id: null,
+      result: null,
+      failure_kind: null,
+      failure_detail: null,
+      restart_attempt_count: 0,
+      delegated_at: old.toISOString(),
+      closed_at: null,
+    });
+    await checkOverdueSpecialistTasks();
+    expect(getSpecialistTask('cot-2')?.status).toBe('failed');
+  });
+
+  it('fails an awaiting_sub_task task whose delegated_at exceeds max_task_duration', async () => {
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxTaskDurationMs - 1000,
+    );
+    const parent = makeRunningTask({
+      id: 'cot-3',
+      delegated_at: old.toISOString(),
+    });
+    await dispatchSubTask(parent.id, 'researcher', 'coder', 'p', 's');
+    await checkOverdueSpecialistTasks();
+    expect(getSpecialistTask(parent.id)?.status).toBe('failed');
+  });
+
+  it('does not fail a task whose delegated_at is within max_task_duration', async () => {
+    const task = makeRunningTask({ id: 'cot-4' });
+    await checkOverdueSpecialistTasks();
+    expect(getSpecialistTask(task.id)?.status).toBe('running');
+  });
+
+  it('does not attempt to fail already-terminal tasks', async () => {
+    const task = makeRunningTask({ id: 'cot-5' });
+    await deliverResult(task.id, 'done');
+    await expect(checkOverdueSpecialistTasks()).resolves.not.toThrow();
+    expect(getSpecialistTask(task.id)?.status).toBe('completed');
   });
 });
 

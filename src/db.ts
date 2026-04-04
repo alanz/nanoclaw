@@ -1124,6 +1124,14 @@ export function getSpecialistTasksByStatus(
     .all(status) as SpecialistTask[];
 }
 
+export function getLiveSpecialistTasks(): SpecialistTask[] {
+  return db
+    .prepare(
+      "SELECT * FROM specialist_tasks WHERE status IN ('queued', 'running', 'awaiting_sub_task') ORDER BY delegated_at",
+    )
+    .all() as SpecialistTask[];
+}
+
 export function getSpecialistSubTasks(parentTaskId: string): SpecialistTask[] {
   return db
     .prepare(

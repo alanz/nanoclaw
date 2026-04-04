@@ -12,6 +12,7 @@ import {
   MAX_MESSAGES_PER_PROMPT,
   MEMORY_SEARCH_ENABLED,
   POLL_INTERVAL,
+  SCHEDULER_POLL_INTERVAL,
   SPECIALISTS_CONFIG,
   STORE_DIR,
   TIMEZONE,
@@ -94,6 +95,7 @@ import {
   failSpecialistTask,
   handleNanoclawStarted,
   initSpecialists,
+  startOverdueSpecialistPoller,
 } from './specialists.js';
 import { getSpecialistType, initSpecialistTypes } from './specialist-types.js';
 import { startZoteroMonitorLoop } from './zotero-monitor.js';
@@ -1273,6 +1275,9 @@ async function main(): Promise<void> {
 
   // Recover specialist tasks that were live when the host was last killed
   await handleNanoclawStarted(mainGroupJid);
+
+  // Start periodic check for specialist tasks exceeding overall duration limit
+  startOverdueSpecialistPoller(SCHEDULER_POLL_INTERVAL);
 
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

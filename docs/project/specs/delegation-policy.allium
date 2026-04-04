@@ -31,6 +31,8 @@ value DelegationDecision {
     outcome: allowed | rejected
     rejection_kind: specialists.FailureKind?    -- non-null when outcome = rejected
     rejection_detail: String?                   -- human-readable reason; non-null when outcome = rejected
+    same_type_count: Integer                    -- current dispatch count to this type in the chain;
+                                                -- caller uses this to set is_last_same_type_dispatch on the created task
 }
 
 ------------------------------------------------------------

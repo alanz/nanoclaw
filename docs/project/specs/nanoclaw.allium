@@ -30,7 +30,7 @@ external entity Contact {
 -- Enumerations
 ------------------------------------------------------------
 
-enum ChannelType { telegram | deltachat | emacs }
+enum ChannelType { whatsapp | telegram | deltachat | slack | emacs | null_channel }
 
 ------------------------------------------------------------
 -- Contracts

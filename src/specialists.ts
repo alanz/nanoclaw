@@ -590,7 +590,9 @@ export async function handleNanoclawStarted(
     );
   }
 
-  const retryingTaskIds: string[] = [];
+  type RetryEntry = { type: string; attempt: number; max: number };
+  const retrying: RetryEntry[] = [];
+  const exhausted: { type: string }[] = [];
 
   for (const task of runningTasks) {
     if (task.restart_attempt_count < SPECIALISTS_CONFIG.maxRestartRetries) {
@@ -605,16 +607,21 @@ export async function handleNanoclawStarted(
         updateSpecialistSession(task.id, { status: 'stale' });
       }
 
+      const attempt = task.restart_attempt_count + 1;
       logger.warn(
         {
           taskId: task.id,
-          attempt: task.restart_attempt_count + 1,
+          attempt,
           max: SPECIALISTS_CONFIG.maxRestartRetries,
         },
         'Specialist task scheduled for retry after host restart',
       );
 
-      retryingTaskIds.push(task.id);
+      retrying.push({
+        type: task.specialist_type,
+        attempt,
+        max: SPECIALISTS_CONFIG.maxRestartRetries,
+      });
       const updated = getSpecialistTask(task.id)!;
       await _deps.startContainerFn(updated, null);
     } else {
@@ -624,20 +631,35 @@ export async function handleNanoclawStarted(
         'host_restart',
         'Container lost on host restart; retries exhausted',
       );
-
-      if (mainGroupJid) {
-        await _deps.notifyMainGroupFn(
-          mainGroupJid,
-          `Specialist task ${task.id} (${task.specialist_type}) failed: retries exhausted after host restart.`,
-        );
-      }
+      exhausted.push({ type: task.specialist_type });
     }
   }
 
-  // Post a single consolidated summary when some tasks are being retried
-  if (retryingTaskIds.length > 0 && mainGroupJid) {
-    const summary = `Host restart detected: ${retryingTaskIds.length} specialist task(s) scheduled for retry: ${retryingTaskIds.join(', ')}.`;
-    logger.warn({ taskIds: retryingTaskIds }, summary);
+  // Post a single consolidated summary covering both retrying and exhausted tasks
+  if ((retrying.length > 0 || exhausted.length > 0) && mainGroupJid) {
+    const lines: string[] = ['Host restarted.'];
+
+    if (retrying.length > 0) {
+      lines.push(
+        `${retrying.length} specialist task(s) are being retried silently:`,
+      );
+      for (const e of retrying) {
+        lines.push(`  ${e.type} (attempt ${e.attempt} of ${e.max})`);
+      }
+      lines.push('Delegation chains will resume when tasks complete.');
+    }
+
+    if (exhausted.length > 0) {
+      lines.push(
+        `${exhausted.length} specialist task(s) failed — retries exhausted:`,
+      );
+      for (const e of exhausted) {
+        lines.push(`  ${e.type}`);
+      }
+    }
+
+    const summary = lines.join('\n');
+    logger.warn({ retrying, exhausted }, summary);
     await _deps.notifyMainGroupFn(mainGroupJid, summary);
   }
 

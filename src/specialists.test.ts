@@ -2320,20 +2320,54 @@ describe('host restart recovery (NanoclawStarted)', () => {
       makeRunningTask({ id: 'srr-1' });
       makeRunningTask({ id: 'srr-2' });
       await handleNanoclawStarted(MAIN_JID);
-      // notifyMainGroupFn may be called for each task or once; at minimum it's called
-      expect(notifyMainGroupFn.mock.calls.some((c) => c[0] === MAIN_JID)).toBe(
-        true,
-      );
+      expect(notifyMainGroupFn).toHaveBeenCalledTimes(1);
+      const msg = notifyMainGroupFn.mock.calls[0][1] as string;
+      expect(msg).toContain('Host restarted');
+      expect(msg).toContain('being retried silently');
+      expect(msg).toContain('attempt 1 of');
+    });
+
+    it('summary includes exhausted tasks separately from retrying tasks', async () => {
+      makeRunningTask({
+        id: 'srr-ex-1',
+        specialist_type: 'researcher',
+        restart_attempt_count: SPECIALISTS_CONFIG.maxRestartRetries,
+      });
+      makeRunningTask({
+        id: 'srr-rt-1',
+        specialist_type: 'coder',
+        restart_attempt_count: 0,
+      });
+      await handleNanoclawStarted(MAIN_JID);
+      // One consolidated summary + one _routeFailure notification for the exhausted task
+      const allMsgs = notifyMainGroupFn.mock.calls.map((c) => c[1] as string);
+      const summary = allMsgs.find((m) => m.includes('Host restarted'));
+      expect(summary).toBeDefined();
+      expect(summary).toContain('retried silently');
+      expect(summary).toContain('retries exhausted');
+      expect(summary).toContain('researcher');
+      expect(summary).toContain('coder');
+    });
+
+    it('summary includes type and attempt count, not raw task IDs', async () => {
+      makeRunningTask({
+        id: 'srr-fmt-1',
+        specialist_type: 'analyst',
+        restart_attempt_count: 1,
+      });
+      await handleNanoclawStarted(MAIN_JID);
+      const msg = notifyMainGroupFn.mock.calls[0][1] as string;
+      expect(msg).toContain('analyst');
+      expect(msg).toContain('attempt 2 of');
+      expect(msg).not.toContain('srr-fmt-1');
     });
 
     it('does not post when no tasks are in running state at startup', async () => {
-      // No running tasks in DB
       await handleNanoclawStarted(MAIN_JID);
       expect(notifyMainGroupFn).not.toHaveBeenCalled();
     });
 
     it('records the summary to the host log at warning level', async () => {
-      // Logger.warn is called internally; we verify indirectly by checking the task transitions
       makeRunningTask({ id: 'srr-3' });
       await expect(handleNanoclawStarted()).resolves.not.toThrow();
     });
@@ -2346,24 +2380,32 @@ describe('host restart recovery (NanoclawStarted)', () => {
       expect(getSpecialistTask(task.id)?.status).toBe('awaiting_restart');
     });
 
-    it('does NOT post to main group chat (silent retry)', async () => {
+    it('posts consolidated summary to main group chat (not silent when mainGroupJid given)', async () => {
       makeRunningTask({ id: 'rrl-2', restart_attempt_count: 0 });
+      await handleNanoclawStarted(MAIN_JID);
+      expect(notifyMainGroupFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT post to main group chat when no mainGroupJid', async () => {
+      makeRunningTask({ id: 'rrl-3', restart_attempt_count: 0 });
       await handleNanoclawStarted();
       expect(notifyMainGroupFn).not.toHaveBeenCalled();
     });
   });
 
   describe('rule RestartExhaustionReported', () => {
-    it('posts failure message to main group chat when host_restart retries exhausted', async () => {
+    it('posts consolidated summary including exhausted task type to main group chat', async () => {
       makeRunningTask({
         id: 'rer-1',
+        specialist_type: 'researcher',
         restart_attempt_count: SPECIALISTS_CONFIG.maxRestartRetries,
       });
       await handleNanoclawStarted(MAIN_JID);
-      expect(notifyMainGroupFn).toHaveBeenCalledWith(
-        MAIN_JID,
-        expect.stringContaining('rer-1'),
-      );
+      const allMsgs = notifyMainGroupFn.mock.calls.map((c) => c[1] as string);
+      const summary = allMsgs.find((m) => m.includes('Host restarted'));
+      expect(summary).toBeDefined();
+      expect(summary).toContain('retries exhausted');
+      expect(summary).toContain('researcher');
     });
 
     it('records the message to the host log at error level', async () => {
@@ -2898,14 +2940,16 @@ describe('scenario: host restart mid-task with retries', () => {
   it('on retries exhausted, failure with kind=host_restart propagated to requester', async () => {
     const task = makeRunningTask({
       id: 'hrm-3',
+      specialist_type: 'researcher',
       restart_attempt_count: SPECIALISTS_CONFIG.maxRestartRetries,
       requester_group: MAIN_JID,
     });
     await handleNanoclawStarted(MAIN_JID);
     expect(getSpecialistTask(task.id)?.failure_kind).toBe('host_restart');
+    // Both _routeFailure and the consolidated summary notify main group
     expect(notifyMainGroupFn).toHaveBeenCalledWith(
       MAIN_JID,
-      expect.stringContaining('hrm-3'),
+      expect.any(String),
     );
   });
 });

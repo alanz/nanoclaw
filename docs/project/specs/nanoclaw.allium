@@ -131,18 +131,14 @@ entity Group {
 
 -- Persistent conversation state enabling continuity across agent invocations.
 -- Stores the Claude conversation ID so the agent can resume prior context.
+-- Exists or does not exist — no status field. When the session file is missing
+-- (stale), the row is deleted immediately and recreated on the next successful run.
+-- Specialist tasks use a richer SpecialistConversationSession (see specialists.allium)
+-- that retains the session ID across the stale transition so it can be passed to
+-- the next container invocation.
 entity ConversationSession {
     group: Group
     session_id: String
-    status: active | stale | cleared
-
-    transitions status {
-        active -> stale             -- conversation file missing; agent started fresh
-        stale -> active             -- new run succeeded; session restored
-        active -> cleared           -- user issued /clear-session
-        stale -> cleared            -- user cleared a stale session
-        terminal: cleared
-    }
 }
 
 -- A group whose agent invocation is queued because the system is at capacity.
@@ -298,9 +294,8 @@ rule SessionCleared {
 
     requires: command = clear_session
     requires: exists cs
-    requires: cs.status in { active, stale }
 
-    ensures: cs.status = cleared
+    ensures: not exists cs
 }
 
 -- ---- Agent Invocation ----
@@ -488,64 +483,32 @@ rule AgentSessionCompletionDispatched {
     ensures: GroupAgentCompleted(group: agent_session.group, new_session_id: new_session_id)
 }
 
--- When an agent session fails because the conversation file is missing, emit a group-scoped event.
-rule AgentSessionStalenessDispatched {
-    when: AgentSessionFailed(agent_session, reason)
-
-    requires: reason = session_not_found
-
-    ensures: GroupSessionStale(group: agent_session.group)
-}
-
--- A stale conversation session is re-activated when the agent completes a new run.
-rule ConversationSessionReactivated {
+-- When an agent completes successfully, upsert the conversation session for the group.
+-- Creates on first successful run; updates session_id on subsequent runs.
+rule ConversationSessionUpserted {
     when: GroupAgentCompleted(group, new_session_id)
-
-    let cs = ConversationSession{group: group}
-
-    requires: exists cs
-    requires: cs.status = stale
-
-    ensures: cs.session_id = new_session_id
-    ensures: cs.status = active
-}
-
--- An active conversation session receives a refreshed session ID after each successful run.
-rule ConversationSessionRefreshed {
-    when: GroupAgentCompleted(group, new_session_id)
-
-    let cs = ConversationSession{group: group}
-
-    requires: exists cs
-    requires: cs.status = active
-
-    ensures: cs.session_id = new_session_id
-    -- status remains active; no transition needed
-}
-
--- A new conversation session is created the first time a group's agent completes successfully.
-rule ConversationSessionStarted {
-    when: GroupAgentCompleted(group, new_session_id)
-
-    requires: not exists ConversationSession{group: group}
 
     ensures: ConversationSession.created(
         group: group,
-        session_id: new_session_id,
-        status: active
+        session_id: new_session_id
     )
+    @guidance
+        -- In practice this is an INSERT OR REPLACE on (group_folder, session_id).
+        -- No separate create vs update distinction is needed.
 }
 
--- A conversation session becomes stale when the agent cannot find the conversation file on disk.
-rule ConversationSessionBecameStale {
-    when: GroupSessionStale(group)
+-- When the agent fails because the conversation file is missing, discard the session.
+-- The next successful run will recreate it via ConversationSessionUpserted.
+-- (Specialists handle this differently — see SpecialistConversationSession in specialists.allium.)
+rule ConversationSessionDiscardedOnStale {
+    when: AgentSessionFailed(agent_session, reason)
 
-    let cs = ConversationSession{group: group}
+    let cs = ConversationSession{group: agent_session.group}
 
+    requires: reason = session_not_found
     requires: exists cs
-    requires: cs.status = active
 
-    ensures: cs.status = stale
+    ensures: not exists cs
 }
 
 -- A failed agent session retries with exponential backoff, up to max_agent_retries.

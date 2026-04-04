@@ -73,6 +73,13 @@ entity SpecialistType {
 -- Created after the first successful container invocation; maintained across all subsequent
 -- re-invocations. This is what preserves the specialist's chain of thought across the async
 -- dispatch/resume cycle and across host restarts.
+--
+-- Distinct from ConversationSession (nanoclaw.allium), which covers regular group sessions.
+-- Regular group sessions use a simpler present/absent model: a stale session is deleted
+-- immediately and recreated on the next successful run. Specialist sessions retain the
+-- session_id across the stale transition because it must be passed to the next container
+-- invocation (the specialist may attempt to resume or recognise prior context), so an
+-- explicit status field is required here.
 entity SpecialistConversationSession {
     task: SpecialistTask
     session_id: String                   -- Claude conversation ID; passed to each re-invocation
@@ -161,7 +168,7 @@ config {
     default_last_turn_sub_notice: String = "[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]"
     default_last_turn_parent_notice: String = "[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]"
     max_task_duration: Duration = 4.hours       -- wall-clock limit across all invocations of one task
-    container_timeout: Duration = 30.minutes    -- per-invocation timeout; does not reset between invocations
+    container_timeout: Duration = 30.minutes    -- per-invocation timeout (SPECIALIST_CONTAINER_TIMEOUT env var); separate from the global CONTAINER_TIMEOUT used by regular group containers
     max_restart_retries: Integer = 2            -- silent retries on host_restart before propagating failure
     max_staging_duration: Duration = 2.hours    -- alert if a raw memory submission remains staged beyond this
 

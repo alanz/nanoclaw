@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CONTAINER_TIMEOUT,
+  SPECIALIST_CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DEFAULT_TRIGGER,
   CYCLE_TIMEOUT,
@@ -1288,6 +1289,7 @@ async function main(): Promise<void> {
         trigger: '',
         added_at: new Date().toISOString(),
         isMain: false,
+        containerConfig: { timeout: SPECIALIST_CONTAINER_TIMEOUT },
       };
 
       // Extra readonly mounts for memory-provider specialists

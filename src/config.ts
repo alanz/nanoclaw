@@ -95,6 +95,13 @@ export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '1800000',
   10,
 );
+// Specialist containers get a tighter per-invocation timeout (default 30 min).
+// Separate from CONTAINER_TIMEOUT so regular group containers can have a longer
+// idle window without affecting specialist task latency.
+export const SPECIALIST_CONTAINER_TIMEOUT = parseInt(
+  process.env.SPECIALIST_CONTAINER_TIMEOUT || '1800000',
+  10,
+);
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,

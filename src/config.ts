@@ -116,6 +116,7 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
 export const IPC_POLL_INTERVAL = 1000;
+export const CYCLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes — mirrors orchestration.allium cycle_timeout
 
 // Path to the specialist type registry (checked-in JSON, not runtime data)
 export const SPECIALISTS_JSON_PATH = path.resolve(

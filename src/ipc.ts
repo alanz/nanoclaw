@@ -88,6 +88,10 @@ export interface IpcDeps {
   ) => void;
   onTasksChanged: () => void;
   setPendingDispatchDepth: (jid: string, depth: number) => void;
+  /** Called when the main group schedules a task targeting a sub-group (cycle opened). */
+  onCycleDelegated?: (subGroupFolder: string, taskId: string) => void;
+  /** Called when a sub-group delivers a result back to main (cycle closed). */
+  onCycleDelivered?: (subGroupFolder: string) => void;
   setReaction?: (jid: string, emoji: string) => Promise<void>;
 }
 
@@ -426,6 +430,10 @@ export async function processTaskIpc(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',
         );
+        // Track orchestration cycle if main is delegating to a different (sub) group
+        if (isMain && targetFolder !== sourceGroup) {
+          deps.onCycleDelegated?.(targetFolder, taskId);
+        }
         deps.onTasksChanged();
       }
       break;
@@ -1124,6 +1132,7 @@ export async function processTaskIpc(
       });
 
       deps.setPendingDispatchDepth(mainJid, depth + 1);
+      deps.onCycleDelivered?.(sourceGroup);
 
       logger.info(
         { sourceGroup, mainJid, depth },

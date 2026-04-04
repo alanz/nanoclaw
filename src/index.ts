@@ -6,6 +6,7 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DEFAULT_TRIGGER,
+  CYCLE_TIMEOUT,
   getTriggerPattern,
   GROUPS_DIR,
   IDLE_TIMEOUT,
@@ -127,6 +128,11 @@ let messageLoopRunning = false;
 // Depth to assign the next container run for a given JID, set when a
 // deliver_result injection arrives from a sub-group.
 const pendingDispatchDepth: Record<string, number> = {};
+
+// Active orchestration cycles: sub-group folder → {taskId, delegatedAt}.
+// Set when main schedules a task for a sub-group; cleared on deliver_result or timeout.
+const pendingCycles: Record<string, { taskId: string; delegatedAt: number }> =
+  {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -760,6 +766,74 @@ function recoverPendingMessages(): void {
   }
 }
 
+let cycleTimeoutPollerRunning = false;
+
+/**
+ * Periodically checks pendingCycles for delegations that have exceeded CYCLE_TIMEOUT.
+ * On timeout: injects a notice into the main group's message queue so the agent knows
+ * the sub-group never delivered a result, then removes the entry.
+ * Implements rule CycleTimedOut from orchestration.allium.
+ */
+function startCycleTimeoutPoller(
+  mainGroupJid: string,
+  pollIntervalMs: number,
+): void {
+  if (cycleTimeoutPollerRunning) return;
+  cycleTimeoutPollerRunning = true;
+
+  const loop = () => {
+    try {
+      const now = Date.now();
+      for (const [subGroupFolder, cycle] of Object.entries(pendingCycles)) {
+        if (now - cycle.delegatedAt > CYCLE_TIMEOUT) {
+          logger.warn(
+            {
+              subGroupFolder,
+              taskId: cycle.taskId,
+              ageMs: now - cycle.delegatedAt,
+            },
+            'Orchestration cycle timed out — injecting notice into main group',
+          );
+          storeMessage({
+            id: `cycle-timeout-${subGroupFolder}-${now}`,
+            chat_jid: mainGroupJid,
+            sender: `system:${subGroupFolder}`,
+            sender_name: subGroupFolder,
+            content: `[Orchestration cycle timed out] Sub-group "${subGroupFolder}" (task ${cycle.taskId}) did not deliver a result within the allowed time.`,
+            timestamp: new Date().toISOString(),
+            is_from_me: false,
+            is_bot_message: false,
+          });
+          delete pendingCycles[subGroupFolder];
+        }
+      }
+    } catch (err) {
+      logger.error({ err }, 'Error in cycle timeout poller');
+    }
+    setTimeout(loop, pollIntervalMs);
+  };
+
+  loop();
+}
+
+export { startCycleTimeoutPoller };
+
+/** @internal — for tests only. */
+export function _resetCycleTimeoutPollerForTest(): void {
+  cycleTimeoutPollerRunning = false;
+  for (const key of Object.keys(pendingCycles)) {
+    delete pendingCycles[key];
+  }
+}
+
+/** @internal — for tests only. */
+export function _getPendingCyclesForTest(): Record<
+  string,
+  { taskId: string; delegatedAt: number }
+> {
+  return pendingCycles;
+}
+
 async function main(): Promise<void> {
   ensureContainerRuntimeRunning();
   initDatabase();
@@ -1123,6 +1197,17 @@ async function main(): Promise<void> {
     setPendingDispatchDepth: (jid, depth) => {
       pendingDispatchDepth[jid] = depth;
     },
+    onCycleDelegated: (subGroupFolder, taskId) => {
+      pendingCycles[subGroupFolder] = { taskId, delegatedAt: Date.now() };
+      logger.debug({ subGroupFolder, taskId }, 'Orchestration cycle opened');
+    },
+    onCycleDelivered: (subGroupFolder) => {
+      delete pendingCycles[subGroupFolder];
+      logger.debug(
+        { subGroupFolder },
+        'Orchestration cycle closed (delivered)',
+      );
+    },
     setReaction: (jid, emoji) => {
       const channel = findChannel(channels, jid);
       return channel?.setReaction?.(jid, emoji) ?? Promise.resolve();
@@ -1283,6 +1368,11 @@ async function main(): Promise<void> {
   // Start periodic check for staged memory submissions that have not been processed
   if (mainGroupJid) {
     startStagedSubmissionOverduePoller(mainGroupJid, SCHEDULER_POLL_INTERVAL);
+  }
+
+  // Start periodic check for orchestration cycles that have exceeded cycle_timeout
+  if (mainGroupJid) {
+    startCycleTimeoutPoller(mainGroupJid, SCHEDULER_POLL_INTERVAL);
   }
 
   queue.setProcessMessagesFn(processGroupMessages);

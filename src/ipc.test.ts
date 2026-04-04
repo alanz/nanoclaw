@@ -712,3 +712,128 @@ describe('submit_raw_memory', () => {
     expect(notifyMainGroupFn).not.toHaveBeenCalled();
   });
 });
+
+describe('OrchestrationCycle IPC hooks', () => {
+  const MAIN_FOLDER = 'main';
+  const SUB_FOLDER = 'sub-group';
+  const MAIN_JID_LOCAL = 'main@g.us';
+  const SUB_JID = 'sub@g.us';
+
+  beforeEach(() => {
+    storeChatMetadata(
+      MAIN_JID_LOCAL,
+      new Date().toISOString(),
+      'Main',
+      undefined,
+      true,
+    );
+  });
+
+  const registeredGroups = () => ({
+    [MAIN_JID_LOCAL]: {
+      name: 'Main',
+      folder: MAIN_FOLDER,
+      trigger: '',
+      added_at: '',
+      isMain: true,
+    },
+    [SUB_JID]: {
+      name: 'Sub',
+      folder: SUB_FOLDER,
+      trigger: '',
+      added_at: '',
+      isMain: false,
+    },
+  });
+
+  it('calls onCycleDelegated when main schedules a task for a sub-group', async () => {
+    const onCycleDelegated = vi.fn();
+    const deps = makeDeps({ registeredGroups, onCycleDelegated });
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        targetJid: SUB_JID,
+        prompt: 'do work',
+        schedule_type: 'once',
+        schedule_value: new Date(Date.now() + 1000).toISOString(),
+        taskId: 'cycle-task-1',
+      },
+      MAIN_FOLDER,
+      true, // isMain
+      deps,
+    );
+
+    expect(onCycleDelegated).toHaveBeenCalledWith(SUB_FOLDER, 'cycle-task-1');
+  });
+
+  it('does not call onCycleDelegated when main schedules a task for itself', async () => {
+    const onCycleDelegated = vi.fn();
+    const deps = makeDeps({ registeredGroups, onCycleDelegated });
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        targetJid: MAIN_JID_LOCAL,
+        prompt: 'self-schedule',
+        schedule_type: 'once',
+        schedule_value: new Date(Date.now() + 1000).toISOString(),
+        taskId: 'self-task-1',
+      },
+      MAIN_FOLDER,
+      true,
+      deps,
+    );
+
+    expect(onCycleDelegated).not.toHaveBeenCalled();
+  });
+
+  it('does not call onCycleDelegated when a non-main group schedules a task', async () => {
+    const onCycleDelegated = vi.fn();
+    const deps = makeDeps({ registeredGroups, onCycleDelegated });
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        targetJid: SUB_JID,
+        prompt: 'self task',
+        schedule_type: 'once',
+        schedule_value: new Date(Date.now() + 1000).toISOString(),
+        taskId: 'sub-self-task',
+      },
+      SUB_FOLDER,
+      false,
+      deps,
+    );
+
+    expect(onCycleDelegated).not.toHaveBeenCalled();
+  });
+
+  it('calls onCycleDelivered when a sub-group delivers a result', async () => {
+    const onCycleDelivered = vi.fn();
+    const deps = makeDeps({ registeredGroups, onCycleDelivered });
+
+    await processTaskIpc(
+      { type: 'deliver_result', text: 'done', dispatchDepth: 1 },
+      SUB_FOLDER,
+      false,
+      deps,
+    );
+
+    expect(onCycleDelivered).toHaveBeenCalledWith(SUB_FOLDER);
+  });
+
+  it('does not call onCycleDelivered when main attempts deliver_result (blocked)', async () => {
+    const onCycleDelivered = vi.fn();
+    const deps = makeDeps({ registeredGroups, onCycleDelivered });
+
+    await processTaskIpc(
+      { type: 'deliver_result', text: 'self-deliver', dispatchDepth: 1 },
+      MAIN_FOLDER,
+      true,
+      deps,
+    );
+
+    expect(onCycleDelivered).not.toHaveBeenCalled();
+  });
+});

@@ -990,12 +990,12 @@ deferred NullChannel               -- see: null-channel.allium
                                    --       container-{ts}-{task-id}.log  -- one file per container invocation, retained indefinitely
                                    --
                                    -- Runtime content (outside repo, managed by host):
-                                   --   DATA_DIR/specialists/{task-id}/
+                                   --   DATA_DIR/specialists/spec-{task-id}/
                                    --                        -- ephemeral workspace; created fresh on first invocation,
                                    --                        -- deleted on task completion or failure
-                                   --   DATA_DIR/ipc/specialists/{task-id}/
-                                   --                        -- per-task IPC namespace
-                                   --   DATA_DIR/sessions/specialists/{task-id}/.claude
+                                   --   DATA_DIR/ipc/spec-{task-id}/
+                                   --                        -- per-task IPC namespace (flat folder name, no slashes)
+                                   --   DATA_DIR/sessions/spec-{task-id}/.claude
                                    --                        -- Claude conversation session; persisted across all
                                    --                        -- re-invocations of the same task, deleted on task close
                                    --

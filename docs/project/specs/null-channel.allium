@@ -74,6 +74,7 @@ rule SyntheticJidAssigned {
 -- The sendMessage method exists only to satisfy the Channel interface.
 -- All specialist container communication goes through the IPC filesystem.
 rule SendMessageDiscarded {
+    -- allium-ignore allium.rule.unreachableTrigger
     when: SendMessage(chat_jid, content)
 
     requires: starts_with(chat_jid, config.jid_prefix)

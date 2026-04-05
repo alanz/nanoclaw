@@ -21,6 +21,10 @@
 ------------------------------------------------------------
 
 -- A contact in any messaging channel.
+-- Contact is governed by channel adapters (Telegram, DeltaChat, WhatsApp, etc.), none of which
+-- have an allium spec. There is no governing specification to import. Lift this suppression if a
+-- channels.allium or contacts.allium spec is introduced that formally governs this entity.
+-- allium-ignore allium.externalEntity.missingSourceHint
 external entity Contact {
     id: String
     name: String
@@ -165,6 +169,10 @@ entity AgentSession {
     last_output_at: Timestamp?
     retry_count: Integer
     dispatch_depth: Integer             -- nesting level from orchestration chain; 0 for user-initiated runs
+    -- 'active' is the initial status set via AgentSession.created(... status: active) in the
+    -- AgentStarted and AgentRetried rules. The checker only recognises ensures: x.status = value,
+    -- not .created() field assignments. Lift if the checker gains .created() status tracing.
+    -- allium-ignore allium.status.unreachableValue
     status: active | closing | closed
 
     -- Derived

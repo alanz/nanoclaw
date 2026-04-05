@@ -83,6 +83,12 @@ entity SpecialistType {
 entity SpecialistConversationSession {
     task: SpecialistTask
     session_id: String                   -- Claude conversation ID; passed to each re-invocation
+    -- The triggering rules fire on SpecialistContainerStarted, SpecialistContainerExited, and
+    -- NanoclawStarted — container runtime and process lifecycle events emitted by the host with
+    -- no governing allium spec. They will always be external triggers. The checker cascades
+    -- unreachable-trigger → unreachable-rule → unobserved status assignment. Lift if the checker
+    -- suppresses that cascade for external triggers.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
     status: active | stale | cleared
 
     transitions status {
@@ -110,6 +116,12 @@ entity SpecialistTask {
     delegated_at: Timestamp
     closed_at: Timestamp?
     restart_attempt_count: Integer               -- incremented on each host-restart retry; starts at 0
+    -- The triggering rules fire on SpecialistContainerStarted, SpecialistContainerExited, and
+    -- NanoclawStarted — container runtime and process lifecycle events emitted by the host with
+    -- no governing allium spec. They will always be external triggers. The checker cascades
+    -- unreachable-trigger → unreachable-rule → unobserved status assignment. Lift if the checker
+    -- suppresses that cascade for external triggers.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
     status: queued | running | awaiting_sub_task | awaiting_restart | completed | failed
 
     is_last_same_type_dispatch: Boolean  -- true when this task is the Nth dispatch of its type
@@ -677,6 +689,13 @@ entity RawMemorySubmission {
 
     -- This entity models delivery only. What the memory processing layer does with the
     -- file after acceptance (quality filtering, merging, discarding) is out of scope here.
+    -- The triggering rules fire on SpecialistMemorySubmission and MemorySubmissionFiled — IPC
+    -- events emitted by agents via MCP, which ipc.allium cannot import here without creating a
+    -- circular dependency (ipc.allium already imports specialists.allium). They will always be
+    -- external triggers from this spec's perspective. The checker cascades unreachable-trigger →
+    -- unreachable-rule → unobserved status assignment. Lift if the checker suppresses that cascade
+    -- for external triggers, or if the circular dependency is resolved via a shared events module.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
     status: staged | accepted
 
     -- Derived
@@ -950,16 +969,23 @@ invariant RunningTaskIsLeaf {
 -- Deferred Specifications
 ------------------------------------------------------------
 
+-- The `-- see: path` comment convention is the documented location hint syntax (allium language
+-- reference), but allium 3.0.3 does not recognise it as a formal location hint. Lift these
+-- suppressions once the checker documents and implements a formal location hint syntax for
+-- deferred specs (e.g. an @location annotation or a structured `at "path"` clause).
+-- allium-ignore allium.deferred.missingLocationHint
 deferred RecoveryDashboard         -- see: web-ui/recovery-dashboard.allium
                                    -- web UI surface for browsing specialist task history,
                                    -- retry events, and host restart incidents
 
+-- allium-ignore allium.deferred.missingLocationHint
 deferred RawMemoryFileReady        -- see: memory.allium
                                    -- consumed by the embedding layer; triggers chunk extraction
                                    -- and vector indexing for the file at the given path.
                                    -- Only fires after final_path is set (MemorySubmissionAccepted),
                                    -- ensuring chunks are indexed against their permanent path
 
+-- allium-ignore allium.deferred.missingLocationHint
 deferred AddSpecialistSkill        -- see: skills/add-specialist
                                    -- operator-facing skill that scaffolds a new specialist type:
                                    -- creates the specialist CLAUDE.md, adds the type entry to the
@@ -967,6 +993,7 @@ deferred AddSpecialistSkill        -- see: skills/add-specialist
                                    -- providers cannot delegate), and optionally runs a smoke test.
                                    -- Mirrors the /add-telegram, /add-slack pattern for channels.
 
+-- allium-ignore allium.deferred.missingLocationHint
 deferred NullChannel               -- see: null-channel.allium
                                    --
                                    -- All specialist containers run under a single registered null

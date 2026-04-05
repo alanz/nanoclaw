@@ -36,6 +36,11 @@ entity MemoryFile {
     path: String                        -- absolute path within the workspace
     content_hash: String
     indexed_at: Timestamp?              -- null until first successful index
+    -- The triggering rules fire on WorkspaceFileChanged and WorkspaceFileRemoved — file-system
+    -- watcher events emitted by the host process with no governing allium spec. They will always
+    -- be external triggers. The checker cascades unreachable-trigger → unreachable-rule →
+    -- unobserved status assignment. Lift if the checker suppresses that cascade for external triggers.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
     status: pending | indexed | removed
 
     -- Relationships

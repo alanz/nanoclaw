@@ -72,6 +72,11 @@ entity IpcQuery {
     kind: QueryKind
     request_id: String
     issued_at: Timestamp
+    -- 'pending' is set via IpcQuery.created(... status: pending). 'fulfilled' and 'timed_out' are
+    -- set via let-binding assignments (let q = IpcQuery{request_id}; ensures: q.status = fulfilled).
+    -- The checker traces neither .created() field values nor let-lookup assignments as status
+    -- assignments. Lift these suppressions if the checker gains .created() and let-binding tracing.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
     status: pending | fulfilled | timed_out
 
     transitions status {

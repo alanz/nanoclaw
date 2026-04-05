@@ -88,7 +88,6 @@ function createSchema(database: Database.Database): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_rss_next_check ON rss_feeds(next_check);
-    CREATE INDEX IF NOT EXISTS idx_rss_status ON rss_feeds(status);
 
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
@@ -255,6 +254,14 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* column already exists */
+  }
+  // Create idx_rss_status after ensuring the status column exists
+  try {
+    database.exec(
+      `CREATE INDEX IF NOT EXISTS idx_rss_status ON rss_feeds(status)`,
+    );
+  } catch {
+    /* index already exists */
   }
 
   // Add overdue_alerted_at column to raw_memory_submissions if it doesn't exist

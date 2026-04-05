@@ -103,6 +103,7 @@ import {
 } from './specialists.js';
 import { getSpecialistType, initSpecialistTypes } from './specialist-types.js';
 import { startZoteroMonitorLoop } from './zotero-monitor.js';
+import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
 import {
@@ -1395,6 +1396,7 @@ async function main(): Promise<void> {
     startCycleTimeoutPoller(mainGroupJid, SCHEDULER_POLL_INTERVAL);
   }
 
+  startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

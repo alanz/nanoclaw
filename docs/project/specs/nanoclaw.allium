@@ -133,7 +133,7 @@ entity Group {
     agent_session: AgentSession with group = this
 
     -- Derived
-    triggers_on_all_messages: not requires_trigger or is_main
+    triggers_on_all_messages: not requires_trigger or is_main or is_trusted
 
     invariant MainGroupHasNoTriggerRequirement {
         is_main implies not requires_trigger

@@ -595,7 +595,7 @@ export async function processTaskIpc(
           trigger: data.trigger,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
-          requiresTrigger: data.requiresTrigger,
+          requiresTrigger: data.requiresTrigger ?? true,
           isMain: existingGroup?.isMain,
         });
       } else {

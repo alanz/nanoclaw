@@ -16,7 +16,7 @@
 --   - Host-side session tracking (see nanoclaw.allium)
 --   - IPC task wire formats (see ipc.allium)
 --   - Container orchestration (see nanoclaw.allium)
---   - Credential proxy (infrastructure)
+--   - Credential proxy / backend routing (see credential-proxy.allium)
 --   - Implementation contract (see ContainerLlmImplementation contract below)
 
 ------------------------------------------------------------

@@ -14,7 +14,7 @@
 --   - Protocol-level rules (see container-protocol.allium)
 --   - Host-side session tracking (see nanoclaw.allium)
 --   - IPC task wire formats (see ipc.allium)
---   - Backend provider selection (credential proxy; ANTHROPIC_BASE_URL is infrastructure)
+--   - Backend provider selection (see credential-proxy.allium)
 --
 -- Satisfies: ContainerLlmImplementation
 --   supports_mid_turn_injection: true  (MessageStream async iterable)

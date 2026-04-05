@@ -1,0 +1,294 @@
+-- allium: 3
+-- container-claude-cli.allium
+--
+-- Claude CLI implementation of the container LLM protocol.
+-- The Claude CLI (`claude -p --output-format=stream-json --input-format=stream-json`)
+-- is a sibling implementation of the container LLM protocol. It is behaviorally
+-- equivalent to the SDK implementation but uses subprocess I/O instead of in-process
+-- SDK calls.
+--
+-- Key CLI capabilities:
+--   --output-format=stream-json: structured event stream (same event types as SDK)
+--   --input-format=stream-json:  real-time streaming input to stdin (equivalent to SDK MessageStream)
+--   --include-hook-events:       pre/post compact events appear in the output stream
+--   --mcp-config <json-string>:  MCP servers via JSON string
+--   --resume <session_id>:       session resumption
+--   --append-system-prompt <text>: append to default system prompt
+--   --allowed-tools <tools> and --permission-mode bypassPermissions
+--   --add-dir <dirs>:            additional directories
+--
+-- Scope: Claude CLI implementation of the container LLM protocol
+-- Includes: CLI subprocess invocation (flags, stream-json I/O), session resumption
+--           via --resume, compaction via --include-hook-events, MCP via --mcp-config,
+--           /compact slash command, real-time IPC injection via stdin stream-json
+-- Excludes:
+--   - Protocol-level rules (see container-protocol.allium)
+--   - SDK-specific mechanics (see container-claude-sdk.allium)
+--   - Host-side session tracking (see nanoclaw.allium)
+--   - IPC task wire formats (see ipc.allium)
+--
+-- Satisfies: ContainerLlmImplementation
+--   supports_mid_turn_injection: true  (stdin stream-json real-time input)
+--   supports_compaction_hooks:   true  (--include-hook-events stream events)
+--   supports_agent_teams:        true  (--agents flag)
+
+use "./container-protocol.allium" as protocol
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    model: String = "sonnet"    -- CLI model identifier; see open question on extended-context equivalent
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- The Claude conversation session established within a CLI QueryTurn.
+-- Created when the CLI emits an init event in the stream-json output.
+-- The session_id is also written to /workspace/ipc/current_session_id so MCP tools
+-- can read it without parsing the CLI output stream.
+entity CliQuerySession {
+    turn: protocol.QueryTurn
+    session_id: String
+}
+
+-- A reaction emoji written to the IPC task queue by the container runtime.
+-- Processed by the host IPC watcher, which applies it to the last incoming message in the chat.
+-- Used by compaction hooks to signal state to the user without going through the MCP tool surface.
+entity ReactionTask {
+    chat_jid: String
+    emoji: String
+    queued_at: Timestamp
+}
+
+-- An archived transcript produced before context compaction.
+-- Captures all user and assistant text turns up to the compaction point as Markdown.
+-- The filename is derived from the session summary index when available;
+-- a HHmm timestamp fallback is used otherwise.
+entity ArchivedTranscript {
+    session: CliQuerySession
+    path: String                    -- /workspace/group/conversations/{date}-{title}.md
+    title: String?                  -- from session summary index; null if unavailable
+    archived_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Query Lifecycle ----
+
+-- A pending QueryTurn is activated: the CLI subprocess is spawned.
+rule QueryTurnActivated {
+    when: QueryTurnStarted(turn)
+
+    requires: turn.status = pending
+
+    ensures: turn.status = active
+
+    @guidance
+        -- CLI flags applied to every QueryTurn:
+        --   claude -p
+        --     --output-format=stream-json
+        --     --input-format=stream-json
+        --     --model config.model
+        --     --permission-mode bypassPermissions
+        --     --include-hook-events
+        --     --allowed-tools Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch,
+        --                     Task,TaskOutput,TaskStop,TeamCreate,TeamDelete,
+        --                     SendMessage,TodoWrite,ToolSearch,Skill,NotebookEdit,
+        --                     mcp__nanoclaw__*
+        --     --mcp-config '{"mcpServers":{"nanoclaw":{"command":"...","args":[...],"env":{...}}}}'
+        --     --add-dir /workspace/extra/*  (if additional directories are mounted)
+        -- Resume options when turn.session_id_in is set:
+        --     --resume turn.session_id_in
+        -- System prompt (varies by context):
+        --   Non-main groups: --append-system-prompt with /workspace/global/CLAUDE.md content
+        --   Main group:      no --append-system-prompt (default system prompt only)
+        --   /compact command: no system prompt override
+        -- The prompt is written as the initial stream-json user message to stdin.
+        -- The MCP config JSON must include the server command, args, and env
+        -- (chat_jid, group_folder, is_main, specialist_type if set).
+}
+
+-- The CLI emits a stream-json init event at the start of each query.
+-- The session_id is captured and written to a well-known path for MCP tool access.
+rule SessionInitialized {
+    when: CliStreamInitEvent(turn, session_id)
+
+    requires: turn.status = active
+
+    ensures: CliQuerySession.created(turn: turn, session_id: session_id)
+    ensures: turn.session_id_out = session_id
+}
+
+-- The CLI emits a result event in the stream-json output for each completed agent response.
+-- Emitted immediately as a ContainerOutput to the host.
+-- Input and output tokens accumulate across all result events within the run.
+rule QueryTurnProducesResult {
+    when: CliStreamResultEvent(turn, text, input_tokens, output_tokens)
+
+    requires: turn.status = active
+
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: text,
+        new_session_id: turn.session_id_out
+    )
+}
+
+-- A QueryTurn finishes when the CLI stream-json output is exhausted.
+-- A session-update marker is emitted and the container enters the idle wait.
+rule QueryTurnCompleted {
+    when: CliStreamExhausted(turn, last_message_ref)
+
+    requires: turn.status = active
+
+    ensures: turn.status = completed
+    ensures: turn.last_message_ref = last_message_ref
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: null,
+        new_session_id: turn.session_id_out
+    )
+}
+
+-- ---- IPC Injection ----
+
+-- Follow-up messages arriving during an active query are injected into the CLI's
+-- stdin as stream-json user messages, extending the current turn without starting a new query.
+rule IpcMessageInjectedDuringQuery {
+    when: IpcMessageReceived(turn, text)
+
+    requires: turn.status = active
+
+    @guidance
+        -- The message is written as a stream-json user message to the CLI subprocess's
+        -- stdin. The CLI processes it as an additional user turn within the same query.
+        -- This lets users add context or corrections without interrupting the agent.
+}
+
+-- An interrupt signal ends the active query immediately.
+-- The interrupt text becomes the prompt for the next QueryTurn.
+rule QueryInterruptedByIpc {
+    when: IpcInterruptReceived(turn, text)
+
+    requires: turn.status = active
+
+    ensures: turn.status = interrupted
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: null,
+        new_session_id: turn.session_id_out
+    )
+    ensures: protocol.QueryTurn.created(
+        chat_jid: turn.chat_jid,
+        prompt: text,
+        session_id_in: turn.session_id_out,
+        resume_at: turn.last_message_ref,
+        status: pending
+    )
+
+    @guidance
+        -- An interrupt received between queries (during the idle wait) is treated as a
+        -- regular IpcMessageReceived rather than an interrupt, because there is no active
+        -- query to cut short. It becomes the prompt for the next QueryTurn normally.
+}
+
+-- ---- Slash Commands ----
+
+-- /compact compacts the conversation context by passing /compact as a stdin stream-json
+-- user message. Pre/PostCompact events fire via --include-hook-events.
+rule SlashCompactHandled {
+    when: SlashCommandReceived(input)
+
+    requires: input.prompt = "/compact"
+
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: "Conversation compacted.",
+        new_session_id: session_id_after_compact
+    )
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: null,
+        new_session_id: session_id_after_compact
+    )
+
+    @guidance
+        -- /compact is passed as a stdin stream-json user message to the CLI subprocess.
+        -- The session is resumed via --resume input.session_id.
+        -- Pre/PostCompact events fire via --include-hook-events (transcript archived, reactions set).
+        -- If no compact event is observed, a warning is logged and success is still returned.
+        -- No IPC polling occurs in the slash command path.
+        -- Leading/trailing whitespace is trimmed before matching the "/compact" literal.
+}
+
+-- Any slash command not recognised by this implementation is treated as a regular prompt.
+-- The command text is passed through unchanged as the prompt for a new QueryTurn.
+rule UnknownSlashCommandFallthrough {
+    when: SlashCommandReceived(input)
+
+    requires: input.prompt != "/compact"
+
+    ensures: protocol.QueryTurn.created(
+        chat_jid: input.chat_jid,
+        prompt: input.prompt,
+        session_id_in: input.session_id,
+        resume_at: null,
+        status: pending
+    )
+}
+
+-- ---- Compaction Lifecycle ----
+
+-- Before the CLI compacts the conversation, the full transcript is archived to disk
+-- and an hourglass reaction signals compaction is in progress.
+-- Requires --include-hook-events to surface the pre-compact event.
+rule PreCompactTriggered {
+    when: CliPreCompactEvent(turn)
+
+    requires: turn.status = active
+
+    ensures: ArchivedTranscript.created(
+        session: turn.session,
+        path: "/workspace/group/conversations/{date}-{title}.md",
+        title: session_summary_if_available(turn.session),
+        archived_at: now
+    )
+    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "⏳")
+
+    @guidance
+        -- The transcript is parsed from the CLI's output stream or session files.
+        -- Only user and assistant text turns are included; tool calls are omitted.
+        -- Long assistant turns are truncated at 2000 characters.
+        -- The session summary lookup reads sessions-index.json in the session's project dir;
+        -- a HHmm timestamp fallback name is used if no summary is available.
+        -- The reaction task is written to /workspace/ipc/tasks/ as a JSON file and
+        -- processed by the host IPC watcher asynchronously.
+}
+
+-- After the CLI completes context compaction, a thought-bubble reaction confirms success.
+-- Requires --include-hook-events to surface the post-compact event.
+rule PostCompactTriggered {
+    when: CliPostCompactEvent(turn)
+
+    requires: turn.status = active
+
+    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "💭")
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "The `[1m]` extended-context model shorthand is SDK-specific. What is the CLI equivalent for selecting the 1M context window? Does `--model sonnet` use the maximum available context, or is there a separate flag?"
+
+open question "`ReactionTask` and `ArchivedTranscript` are duplicated between container-claude-sdk.allium and container-claude-cli.allium. Should they be extracted to a container-claude-shared.allium that both import?"
+
+open question "The CLI subprocess must be found on PATH inside the container. Is `claude` installed in the container image, or does the CLI spec require a different container build?"
+
+open question "The nanoclaw MCP server is passed via `--mcp-config` as a JSON string. The JSON must include the server command, args, and env (chat_jid, group_folder, is_main). Should the MCP config construction be modelled explicitly or left to @guidance?"

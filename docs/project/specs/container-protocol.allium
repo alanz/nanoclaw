@@ -9,13 +9,15 @@
 --
 -- Scope: the abstract contract between the host process and agent containers
 -- Includes: ContainerInput/Output protocol, QueryTurn lifecycle, query loop,
---           IPC message injection, interrupt/close signals, script gating
+--           IPC message injection, interrupt/close signals, script gating,
+--           slash command dispatch (/ prefix convention)
 -- Excludes:
 --   - LLM implementation details (see container-claude-sdk.allium)
 --   - Host-side session tracking (see nanoclaw.allium)
 --   - IPC task wire formats (see ipc.allium)
 --   - Container orchestration (see nanoclaw.allium)
 --   - Credential proxy (infrastructure)
+--   - Implementation contract (see ContainerLlmImplementation contract below)
 
 ------------------------------------------------------------
 -- Config
@@ -24,6 +26,67 @@
 config {
     ipc_poll_interval: Duration = 500.ms   -- cadence for polling IPC input during and between queries
     script_timeout: Duration = 30.seconds  -- maximum runtime for a scheduled-task gate script
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+-- Any spec that implements the container LLM protocol must satisfy this contract.
+-- It declares a hard requirement (tool call support) and optional capability flags.
+contract ContainerLlmImplementation {
+    -- REQUIRED: the LLM must support tool/function calling.
+    -- This is not a capability flag — it is a hard prerequisite. The nanoclaw MCP
+    -- server (ipc-mcp-stdio) exposes tools the agent must be able to call
+    -- (send_message, schedule_task, deliver_result, etc.). Without tool call support
+    -- the agent cannot communicate with the host and cannot fulfil the protocol.
+    --
+    -- Tool calls and MCP: the MCP server is a stdio subprocess that speaks the MCP
+    -- protocol. Implementations using a non-Claude LLM act as a proxy:
+    --   1. Start the nanoclaw MCP server subprocess at query time.
+    --   2. Enumerate its tools via MCP tools/list.
+    --   3. Expose them in the LLM's native function-calling format
+    --      (OpenAI JSON schema, Gemini function declarations, etc.).
+    --   4. Route tool calls from the LLM to the MCP server via tools/call.
+    --   5. Return MCP responses as tool results to the LLM.
+    -- The tool call wire format is an implementation detail; the obligation is that
+    -- mcp__nanoclaw__* tools are available to the agent during every QueryTurn.
+
+    -- Whether this implementation supports real-time injection of IPC messages into
+    -- an active query. Both the Claude Agent SDK (via MessageStream) and the Claude
+    -- CLI (via --input-format=stream-json) support this. A stateless REST API wrapper
+    -- would set this to false; IPC messages arriving during an active query are then
+    -- buffered and prepended to the next QueryTurn's prompt instead.
+    supports_mid_turn_injection: Boolean
+
+    -- Whether this implementation surfaces compaction lifecycle events (pre/post).
+    -- The Claude Agent SDK exposes these as hook callbacks; the Claude CLI exposes
+    -- them via --include-hook-events in the stream-json output. Both set this to true.
+    -- An implementation that cannot surface compaction events sets this to false;
+    -- no transcript archiving or reactions occur.
+    supports_compaction_hooks: Boolean
+
+    -- Whether this implementation supports agent sub-tasks (TeamCreate/TeamDelete).
+    -- These are Claude Agent SDK features that spawn parallel subagents within a single
+    -- query call. The Claude CLI supports them via --agents. Non-Claude LLMs do not.
+    -- When false, any agent attempt to use TeamCreate/TeamDelete will fail silently
+    -- or be unavailable in the tool list.
+    supports_agent_teams: Boolean
+
+    @guidance
+        -- Mandatory behavioral obligations for all implementations regardless of flags:
+        --
+        -- 1. A pending QueryTurn must transition to active when the LLM call begins.
+        -- 2. A session_id must be established after activation and written to
+        --    /workspace/ipc/current_session_id so MCP tools can access it.
+        -- 3. Each LLM response turn must be emitted as ContainerOutput(status:success, result:text).
+        -- 4. When the LLM response stream is exhausted, the QueryTurn must reach
+        --    status=completed and emit ContainerOutput(result:null, new_session_id:...).
+        -- 5. An interrupt signal must end the current query; the interrupt text becomes
+        --    the prompt for the next QueryTurn.
+        -- 6. The close sentinel must end the query loop cleanly.
+        -- 7. When supports_compaction_hooks=true, pre-compact must archive the
+        --    transcript and emit a ⏳ reaction; post-compact must emit a 💭 reaction.
 }
 
 ------------------------------------------------------------
@@ -95,12 +158,30 @@ entity QueryTurn {
 
 -- ---- Startup ----
 
+-- A prompt beginning with "/" is a slash command: an implementation-specific session
+-- operation that bypasses the normal query loop. The protocol dispatches it to
+-- implementations via SlashCommandReceived; each implementation handles the commands
+-- it supports and falls through unrecognised ones as regular prompts.
+--
+-- is_slash_command(prompt): true if the prompt, after trimming whitespace, begins with "/".
+-- This is a user-facing convention shared across all container implementations.
+rule SlashCommandDispatched {
+    when: ContainerInvoked(input)
+
+    requires: is_slash_command(input.prompt)
+
+    ensures: SlashCommandReceived(input)
+}
+
 -- Container receives its input and creates the first QueryTurn.
 -- Scheduled tasks receive a preamble injected into the prompt so the agent knows
 -- it was not triggered by a live user. Any IPC messages queued at startup are
 -- appended to the initial prompt.
 rule ContainerBootstrapped {
     when: ContainerInvoked(input)
+
+    requires: not is_slash_command(input.prompt)
+    requires: not (input.is_scheduled_task and input.script != null)
 
     ensures: QueryTurn.created(
         chat_jid: input.chat_jid,
@@ -111,16 +192,10 @@ rule ContainerBootstrapped {
     )
 
     @guidance
-        -- Exclusions from this rule (handled by separate rules):
-        --   /compact prompt: intercepted by SlashCompactHandled before ContainerBootstrapped fires.
-        --   Scheduled task with script: intercepted by ScriptGatesScheduledTask.
         -- The scheduled-task preamble ("[SCHEDULED TASK - ...]") is prepended to input.prompt
         -- when input.is_scheduled_task is true.
         -- Pending IPC messages already in /workspace/ipc/input/ at startup are appended
         -- to the initial prompt before the first QueryTurn is created.
-        -- Implementations may define additional exclusive rules on `ContainerInvoked` that
-        -- take priority (e.g. the Claude SDK intercepts `/compact` before this rule creates
-        -- a `QueryTurn`).
 }
 
 -- For scheduled tasks that include a gate script, the script runs first.
@@ -129,6 +204,7 @@ rule ContainerBootstrapped {
 rule ScriptGatesScheduledTask {
     when: ContainerInvoked(input)
 
+    requires: not is_slash_command(input.prompt)
     requires: input.is_scheduled_task
     requires: input.script != null
 
@@ -237,8 +313,3 @@ rule QueryInterruptedByIpc {
 -- Open Questions
 ------------------------------------------------------------
 
-open question "Should the allowed tools set be modelled as a config field or enum so that additions are traceable through the spec?"
-
-open question "Should session continuity across QueryTurns (each turn's session_id_in = previous turn's session_id_out) be expressed as an entity-level invariant or a contract?"
-
-open question "Should `ContainerBootstrapped` carry a `requires:` guard that explicitly excludes implementation-intercepted prompts (e.g. slash commands), or is mutual exclusion via `requires:` on the implementation-side rule sufficient?"

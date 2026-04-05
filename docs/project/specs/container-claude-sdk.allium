@@ -15,6 +15,11 @@
 --   - Host-side session tracking (see nanoclaw.allium)
 --   - IPC task wire formats (see ipc.allium)
 --   - Backend provider selection (credential proxy; ANTHROPIC_BASE_URL is infrastructure)
+--
+-- Satisfies: ContainerLlmImplementation
+--   supports_mid_turn_injection: true  (MessageStream async iterable)
+--   supports_compaction_hooks:   true  (SDK hook callbacks: PreCompact, PostCompact)
+--   supports_agent_teams:        true  (TeamCreate/TeamDelete SDK tools)
 
 use "./container-protocol.allium" as protocol
 
@@ -92,9 +97,10 @@ rule QueryTurnActivated {
         -- Resume options when turn.session_id_in is set:
         --   resume:           turn.session_id_in
         --   resumeSessionAt:  turn.resume_at
-        -- System prompt:
-        --   Non-main groups:  claude_code preset with global CLAUDE.md appended
-        --   Main group:       claude_code preset only
+        -- System prompt (varies by context):
+        --   Non-main groups:  claude_code preset with /workspace/global/CLAUDE.md appended
+        --   Main group:       claude_code preset only (no global CLAUDE.md)
+        --   /compact command: undefined (SDK default; no preset override)
         -- Additional directories: any directories mounted at /workspace/extra/*
         -- The prompt is delivered as an async iterable (MessageStream) so
         -- isSingleUserTurn=false, allowing agent-teams subagents to run to completion.
@@ -142,13 +148,12 @@ rule QueryTurnCompleted {
     )
 }
 
--- ---- Slash Command: /compact ----
+-- ---- Slash Commands ----
 
--- /compact is the only recognised slash command.
--- It bypasses the normal query loop and issues a tool-less SDK call to compact the session.
+-- /compact compacts the conversation context using a tool-less SDK call.
 -- Pre/PostCompact hooks fire normally. A compact_boundary event confirms completion.
 rule SlashCompactHandled {
-    when: ContainerInvoked(input)
+    when: SlashCommandReceived(input)
 
     requires: input.prompt = "/compact"
 
@@ -170,6 +175,22 @@ rule SlashCompactHandled {
         -- If compact_boundary is not observed, a warning is logged and success is still returned.
         -- No IPC polling occurs in the slash command path.
         -- Leading/trailing whitespace is trimmed before matching the "/compact" literal.
+}
+
+-- Any slash command not recognised by this implementation is treated as a regular prompt.
+-- The command text is passed through unchanged as the prompt for a new QueryTurn.
+rule UnknownSlashCommandFallthrough {
+    when: SlashCommandReceived(input)
+
+    requires: input.prompt != "/compact"
+
+    ensures: protocol.QueryTurn.created(
+        chat_jid: input.chat_jid,
+        prompt: input.prompt,
+        session_id_in: input.session_id,
+        resume_at: null,
+        status: pending
+    )
 }
 
 -- ---- Compaction Lifecycle ----
@@ -212,14 +233,3 @@ rule PostCompactTriggered {
 -- Open Questions
 ------------------------------------------------------------
 
-open question "The global CLAUDE.md is appended to the system prompt for non-main groups but not for main groups — should this asymmetry be an explicit invariant or is the @guidance comment on QueryTurnActivated sufficient?"
-
-open question "evalSkipSkills isolation (removing named skills before the agent runs) is a test harness concern — worth speccing, or exclude as test infrastructure?"
-
-open question "The sessions-index.json summary lookup for transcript naming: should the sessions index be a spec entity, or is it an implementation detail of the archiving step?"
-
-open question "Scenario: Claude with a different backend provider (AWS Bedrock, Google Vertex AI). The credential proxy already handles this via ANTHROPIC_BASE_URL — is there any spec-level change needed, or is it purely infrastructure?"
-
-open question "Scenario: Claude via CLI only (spawning `claude` subprocess rather than using the Agent SDK). Key differences: no hooks API (compaction hooks unavailable), no MessageStream (IPC injection would require re-invocation), session resumption via --resume flag. Should container-claude-cli.allium be a sibling spec, and should container-protocol.allium grow a contract that both must satisfy?"
-
-open question "Scenario: Completely different LLM (OpenAI, Ollama, Gemini). MCP is not natively supported by most; agent teams (TeamCreate/TeamDelete) are SDK-only. What subset of the container-protocol contract is implementable without the Claude Agent SDK?"

@@ -289,6 +289,8 @@ open question "The `[1m]` extended-context model shorthand is SDK-specific. What
 
 open question "`ReactionTask` and `ArchivedTranscript` are duplicated between container-claude-sdk.allium and container-claude-cli.allium. Should they be extracted to a container-claude-shared.allium that both import?"
 
-open question "The CLI subprocess must be found on PATH inside the container. Is `claude` installed in the container image, or does the CLI spec require a different container build?"
+-- Resolved: `claude` is installed in the container image via
+-- `npm install -g @anthropic-ai/claude-code` in the Dockerfile.
+-- No separate container build is required for CLI mode.
 
 open question "The nanoclaw MCP server is passed via `--mcp-config` as a JSON string. The JSON must include the server command, args, and env (chat_jid, group_folder, is_main). Should the MCP config construction be modelled explicitly or left to @guidance?"

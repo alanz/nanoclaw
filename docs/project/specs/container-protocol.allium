@@ -1,0 +1,244 @@
+-- allium: 3
+-- container-protocol.allium
+--
+-- The abstract contract between the host process and agent containers.
+-- Models the input/output wire format, the QueryTurn lifecycle, the query loop,
+-- IPC message injection, interrupt/close signals, and script gating for
+-- scheduled tasks. LLM-agnostic: any implementation that honours the QueryTurn
+-- state machine and ContainerOutput protocol is a valid container.
+--
+-- Scope: the abstract contract between the host process and agent containers
+-- Includes: ContainerInput/Output protocol, QueryTurn lifecycle, query loop,
+--           IPC message injection, interrupt/close signals, script gating
+-- Excludes:
+--   - LLM implementation details (see container-claude-sdk.allium)
+--   - Host-side session tracking (see nanoclaw.allium)
+--   - IPC task wire formats (see ipc.allium)
+--   - Container orchestration (see nanoclaw.allium)
+--   - Credential proxy (infrastructure)
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    ipc_poll_interval: Duration = 500.ms   -- cadence for polling IPC input during and between queries
+    script_timeout: Duration = 30.seconds  -- maximum runtime for a scheduled-task gate script
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The configuration delivered to the container at startup (via stdin as JSON).
+-- allium-ignore allium.definition.unused
+value ContainerInput {
+    prompt: String                  -- initial user message or task instruction
+    session_id: String?             -- conversation ID to resume; null = new session
+    group_folder: String            -- workspace subdirectory name for this group
+    chat_jid: String                -- channel-qualified group identifier
+    is_main: Boolean                -- whether this is the main group (elevated trust)
+    is_scheduled_task: Boolean      -- whether this run was triggered by the scheduler
+    assistant_name: String?         -- display name used in archived transcripts
+    script: String?                 -- bash script to gate agent invocation (scheduled tasks only)
+}
+
+-- One result record emitted to the host during a container run.
+-- Multiple outputs may be produced per run: one per SDK result event plus
+-- session-update markers emitted between queries.
+value ContainerOutput {
+    status: success | error
+    result: String?                 -- agent text response; null for session-update markers
+    new_session_id: String?         -- conversation ID as of this output
+    total_tokens: Integer?          -- cumulative input+output tokens for the run so far
+    error: String?                  -- present when status = error
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- One call to the LLM within a container run.
+-- The first QueryTurn in a run uses the initial prompt and may resume a prior session.
+-- Subsequent QueryTurns are driven by IPC messages received while the container waits.
+-- All QueryTurns in the same run share the same evolving session thread.
+entity QueryTurn {
+    chat_jid: String                -- from ContainerInput; used for reactions and follow-up queries
+    prompt: String
+    session_id_in: String?          -- conversation ID passed to this call; null = new session
+    session_id_out: String?         -- conversation ID established or continued after init
+    resume_at: String?              -- reference to the last assistant message from the previous turn;
+                                    -- passed for precise transcript resumption
+    last_message_ref: String?       -- reference to the last assistant message from this turn;
+                                    -- becomes resume_at for the next QueryTurn in the run
+
+    -- The pending -> active and active -> completed transitions are observed only in
+    -- implementation specs (e.g. container-claude-sdk.allium); the checker cannot see
+    -- cross-spec rule coverage, so these suppressions are necessary.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: pending | active | completed | interrupted | aborted
+
+    transitions status {
+        pending -> active           -- LLM query call begins
+        active -> completed         -- LLM response stream exhausted normally
+        active -> interrupted       -- interrupt signal received; next turn uses interrupt text
+        active -> aborted           -- close sentinel received during active query
+        terminal: completed
+        terminal: interrupted
+        terminal: aborted
+    }
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Startup ----
+
+-- Container receives its input and creates the first QueryTurn.
+-- Scheduled tasks receive a preamble injected into the prompt so the agent knows
+-- it was not triggered by a live user. Any IPC messages queued at startup are
+-- appended to the initial prompt.
+rule ContainerBootstrapped {
+    when: ContainerInvoked(input)
+
+    ensures: QueryTurn.created(
+        chat_jid: input.chat_jid,
+        prompt: input.prompt,
+        session_id_in: input.session_id,
+        resume_at: null,
+        status: pending
+    )
+
+    @guidance
+        -- Exclusions from this rule (handled by separate rules):
+        --   /compact prompt: intercepted by SlashCompactHandled before ContainerBootstrapped fires.
+        --   Scheduled task with script: intercepted by ScriptGatesScheduledTask.
+        -- The scheduled-task preamble ("[SCHEDULED TASK - ...]") is prepended to input.prompt
+        -- when input.is_scheduled_task is true.
+        -- Pending IPC messages already in /workspace/ipc/input/ at startup are appended
+        -- to the initial prompt before the first QueryTurn is created.
+        -- Implementations may define additional exclusive rules on `ContainerInvoked` that
+        -- take priority (e.g. the Claude SDK intercepts `/compact` before this rule creates
+        -- a `QueryTurn`).
+}
+
+-- For scheduled tasks that include a gate script, the script runs first.
+-- wakeAgent=true enriches the prompt with script data and invokes the agent.
+-- wakeAgent=false or any script error suppresses agent invocation entirely.
+rule ScriptGatesScheduledTask {
+    when: ContainerInvoked(input)
+
+    requires: input.is_scheduled_task
+    requires: input.script != null
+
+    -- Outcome A: script succeeds with wakeAgent=true
+    --   ensures: QueryTurn.created(
+    --       chat_jid: input.chat_jid,
+    --       prompt: "[SCHEDULED TASK]\n\nScript output:\n{script_data}\n\nInstructions:\n{input.prompt}",
+    --       session_id_in: input.session_id,
+    --       resume_at: null,
+    --       status: pending
+    --   )
+    -- Outcome B: script returns wakeAgent=false or errors
+    --   ensures: ContainerOutput.emitted(status: success, result: null)
+    --   (container exits without invoking the LLM)
+
+    @guidance
+        -- The script runs as a bash process subject to config.script_timeout.
+        -- Its final stdout line must be valid JSON with a boolean wakeAgent field.
+        -- Any exit error, timeout, or non-JSON output is treated as wakeAgent=false.
+        -- When wakeAgent=true, additional JSON fields from the script output are
+        -- serialised into the prompt so the agent receives them as context.
+}
+
+-- ---- Query Loop ----
+
+-- After a QueryTurn completes, the next IPC message drives a new QueryTurn in the
+-- same session, resuming precisely from the last assistant message.
+rule QueryLoopContinues {
+    when: IpcMessageReceived(prev_turn, text)
+
+    requires: prev_turn.status = completed
+
+    ensures: QueryTurn.created(
+        chat_jid: prev_turn.chat_jid,
+        prompt: text,
+        session_id_in: prev_turn.session_id_out,
+        resume_at: prev_turn.last_message_ref,
+        status: pending
+    )
+}
+
+-- The _close sentinel between queries signals the container to exit cleanly.
+rule CloseSentinelReceivedBetweenQueries {
+    when: IpcCloseSentinelReceived(prev_turn)
+
+    requires: prev_turn.status = completed
+
+    @guidance
+        -- The container exits. No additional ContainerOutput is emitted beyond
+        -- what was already emitted by the implementation's turn-completion rule.
+}
+
+-- The _close sentinel during an active query ends the stream immediately.
+-- No session-update marker is emitted (to avoid resetting the host's idle timer).
+rule CloseSentinelReceivedDuringQuery {
+    when: IpcCloseSentinelReceived(turn)
+
+    requires: turn.status = active
+
+    ensures: turn.status = aborted
+}
+
+-- ---- IPC Injection ----
+
+-- Follow-up messages arriving during an active query are injected into the LLM's
+-- message stream, extending the current turn without starting a new query.
+rule IpcMessageInjectedDuringQuery {
+    when: IpcMessageReceived(turn, text)
+
+    requires: turn.status = active
+
+    @guidance
+        -- The message is enqueued into the turn's message stream and consumed by
+        -- the LLM as an additional user turn within the same query call.
+        -- This lets users add context or corrections without interrupting the agent.
+}
+
+-- An interrupt signal ends the active query immediately.
+-- The interrupt text becomes the prompt for the next QueryTurn.
+rule QueryInterruptedByIpc {
+    when: IpcInterruptReceived(turn, text)
+
+    requires: turn.status = active
+
+    ensures: turn.status = interrupted
+    ensures: ContainerOutput.emitted(
+        status: success,
+        result: null,
+        new_session_id: turn.session_id_out
+    )
+    ensures: QueryTurn.created(
+        chat_jid: turn.chat_jid,
+        prompt: text,
+        session_id_in: turn.session_id_out,
+        resume_at: turn.last_message_ref,
+        status: pending
+    )
+
+    @guidance
+        -- An interrupt received between queries (during the idle wait) is treated as a
+        -- regular IpcMessageReceived rather than an interrupt, because there is no active
+        -- query to cut short. It becomes the prompt for the next QueryTurn normally.
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Should the allowed tools set be modelled as a config field or enum so that additions are traceable through the spec?"
+
+open question "Should session continuity across QueryTurns (each turn's session_id_in = previous turn's session_id_out) be expressed as an entity-level invariant or a contract?"
+
+open question "Should `ContainerBootstrapped` carry a `requires:` guard that explicitly excludes implementation-intercepted prompts (e.g. slash commands), or is mutual exclusion via `requires:` on the implementation-side rule sufficient?"

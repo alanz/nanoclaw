@@ -1,0 +1,225 @@
+-- allium: 3
+-- container-claude-sdk.allium
+--
+-- Claude Agent SDK implementation of the container LLM protocol.
+-- Models the SDK query() configuration (model, tools, MCP server, permission mode,
+-- system prompt), session resumption via conversation ID, compaction lifecycle
+-- (transcript archiving + reactions), and the /compact slash command.
+--
+-- Scope: Claude Agent SDK implementation of the container LLM protocol
+-- Includes: SDK query() configuration (model, tools, MCP server, permission mode,
+--           system prompt), session resumption via conversation ID, compaction
+--           lifecycle (transcript archiving + reactions), /compact slash command
+-- Excludes:
+--   - Protocol-level rules (see container-protocol.allium)
+--   - Host-side session tracking (see nanoclaw.allium)
+--   - IPC task wire formats (see ipc.allium)
+--   - Backend provider selection (credential proxy; ANTHROPIC_BASE_URL is infrastructure)
+
+use "./container-protocol.allium" as protocol
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    model: String = "sonnet[1m]"           -- Claude Sonnet with 1M context window
+    auto_compact_window: Integer = 200000  -- token threshold triggering automatic context compaction
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- The Claude conversation session established within a QueryTurn.
+-- Created when the SDK emits a system/init event.
+-- The session_id is also written to /workspace/ipc/current_session_id so MCP tools
+-- can read it without holding a direct SDK reference.
+entity QuerySession {
+    turn: protocol.QueryTurn
+    session_id: String
+}
+
+-- A reaction emoji written to the IPC task queue by the container runtime.
+-- Processed by the host IPC watcher, which applies it to the last incoming message in the chat.
+-- Used by compaction hooks to signal state to the user without going through the MCP tool surface.
+entity ReactionTask {
+    chat_jid: String
+    emoji: String
+    queued_at: Timestamp
+}
+
+-- An archived transcript produced by the PreCompact hook before context compaction.
+-- Captures all user and assistant text turns up to the compaction point as Markdown.
+-- The filename is derived from the session summary index when available;
+-- a HHmm timestamp fallback is used otherwise.
+entity ArchivedTranscript {
+    session: QuerySession
+    path: String                    -- /workspace/group/conversations/{date}-{title}.md
+    title: String?                  -- from session summary index; null if unavailable
+    archived_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Query Lifecycle ----
+
+-- A pending QueryTurn is activated: the SDK query() call begins.
+rule QueryTurnActivated {
+    when: QueryTurnStarted(turn)
+
+    requires: turn.status = pending
+
+    ensures: turn.status = active
+
+    @guidance
+        -- SDK options applied to every QueryTurn:
+        --   model:            config.model  ("sonnet[1m]")
+        --   cwd:              /workspace/group
+        --   permissionMode:   bypassPermissions
+        --   settingSources:   [project, user]
+        --   allowedTools:     Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch,
+        --                     Task, TaskOutput, TaskStop, TeamCreate, TeamDelete,
+        --                     SendMessage, TodoWrite, ToolSearch, Skill, NotebookEdit,
+        --                     mcp__nanoclaw__*
+        --   mcpServers:       nanoclaw (ipc-mcp-stdio process; env carries chat_jid,
+        --                     group_folder, is_main, specialist_type if set)
+        --   hooks:            PreCompact: [archive transcript, set ⏳ reaction]
+        --                     PostCompact: [set 💭 reaction]
+        --   env:              host env + CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000
+        -- Resume options when turn.session_id_in is set:
+        --   resume:           turn.session_id_in
+        --   resumeSessionAt:  turn.resume_at
+        -- System prompt:
+        --   Non-main groups:  claude_code preset with global CLAUDE.md appended
+        --   Main group:       claude_code preset only
+        -- Additional directories: any directories mounted at /workspace/extra/*
+        -- The prompt is delivered as an async iterable (MessageStream) so
+        -- isSingleUserTurn=false, allowing agent-teams subagents to run to completion.
+}
+
+-- The SDK emits a system/init event at the start of each query.
+-- The session_id is captured and written to a well-known path for MCP tool access.
+rule SessionInitialized {
+    when: SdkSessionInitialized(turn, session_id)
+
+    requires: turn.status = active
+
+    ensures: QuerySession.created(turn: turn, session_id: session_id)
+    ensures: turn.session_id_out = session_id
+}
+
+-- The SDK emits a result event for each completed agent response.
+-- Emitted immediately as a ContainerOutput to the host.
+-- Input and output tokens accumulate across all result events within the run.
+rule QueryTurnProducesResult {
+    when: SdkResultEmitted(turn, text, input_tokens, output_tokens)
+
+    requires: turn.status = active
+
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: text,
+        new_session_id: turn.session_id_out
+    )
+}
+
+-- A QueryTurn finishes when the SDK async generator is exhausted.
+-- A session-update marker is emitted and the container enters the idle wait.
+rule QueryTurnCompleted {
+    when: SdkQueryExhausted(turn, last_assistant_uuid)
+
+    requires: turn.status = active
+
+    ensures: turn.status = completed
+    ensures: turn.last_message_ref = last_assistant_uuid
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: null,
+        new_session_id: turn.session_id_out
+    )
+}
+
+-- ---- Slash Command: /compact ----
+
+-- /compact is the only recognised slash command.
+-- It bypasses the normal query loop and issues a tool-less SDK call to compact the session.
+-- Pre/PostCompact hooks fire normally. A compact_boundary event confirms completion.
+rule SlashCompactHandled {
+    when: ContainerInvoked(input)
+
+    requires: input.prompt = "/compact"
+
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: "Conversation compacted.",
+        new_session_id: session_id_after_compact
+    )
+    ensures: protocol.ContainerOutput.emitted(
+        status: success,
+        result: null,
+        new_session_id: session_id_after_compact
+    )
+
+    @guidance
+        -- A single SDK query() is issued with no tools allowed and "/compact" as the prompt.
+        -- The session is resumed from input.session_id.
+        -- Pre/PostCompact hooks fire normally (transcript archived, reactions set).
+        -- If compact_boundary is not observed, a warning is logged and success is still returned.
+        -- No IPC polling occurs in the slash command path.
+        -- Leading/trailing whitespace is trimmed before matching the "/compact" literal.
+}
+
+-- ---- Compaction Lifecycle ----
+
+-- Before the SDK compacts the conversation, the full transcript is archived to disk
+-- and an hourglass reaction signals compaction is in progress.
+rule PreCompactTriggered {
+    when: SdkPreCompact(turn)
+
+    requires: turn.status = active
+
+    ensures: ArchivedTranscript.created(
+        session: turn.session,
+        path: "/workspace/group/conversations/{date}-{title}.md",
+        title: session_summary_if_available(turn.session),
+        archived_at: now
+    )
+    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "⏳")
+
+    @guidance
+        -- The transcript is parsed from the SDK's transcript_path (JSONL format).
+        -- Only user and assistant text turns are included; tool calls are omitted.
+        -- Long assistant turns are truncated at 2000 characters.
+        -- The session summary lookup reads sessions-index.json in the session's project dir;
+        -- a HHmm timestamp fallback name is used if no summary is available.
+        -- The reaction task is written to /workspace/ipc/tasks/ as a JSON file and
+        -- processed by the host IPC watcher asynchronously.
+}
+
+-- After the SDK completes context compaction, a thought-bubble reaction confirms success.
+rule PostCompactTriggered {
+    when: SdkPostCompact(turn)
+
+    requires: turn.status = active
+
+    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "💭")
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "The global CLAUDE.md is appended to the system prompt for non-main groups but not for main groups — should this asymmetry be an explicit invariant or is the @guidance comment on QueryTurnActivated sufficient?"
+
+open question "evalSkipSkills isolation (removing named skills before the agent runs) is a test harness concern — worth speccing, or exclude as test infrastructure?"
+
+open question "The sessions-index.json summary lookup for transcript naming: should the sessions index be a spec entity, or is it an implementation detail of the archiving step?"
+
+open question "Scenario: Claude with a different backend provider (AWS Bedrock, Google Vertex AI). The credential proxy already handles this via ANTHROPIC_BASE_URL — is there any spec-level change needed, or is it purely infrastructure?"
+
+open question "Scenario: Claude via CLI only (spawning `claude` subprocess rather than using the Agent SDK). Key differences: no hooks API (compaction hooks unavailable), no MessageStream (IPC injection would require re-invocation), session resumption via --resume flag. Should container-claude-cli.allium be a sibling spec, and should container-protocol.allium grow a contract that both must satisfy?"
+
+open question "Scenario: Completely different LLM (OpenAI, Ollama, Gemini). MCP is not natively supported by most; agent teams (TeamCreate/TeamDelete) are SDK-only. What subset of the container-protocol contract is implementable without the Claude Agent SDK?"

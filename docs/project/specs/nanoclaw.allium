@@ -35,6 +35,10 @@ external entity Contact {
 ------------------------------------------------------------
 
 enum ChannelType { whatsapp | telegram | deltachat | slack | emacs | null_channel }
+-- Note: src/text-styles.ts defines a same-named TypeScript type for text formatting only.
+-- That type lists channels by their markdown dialect (signal, discord, etc.) and is
+-- independent of this enum. Not all channels need a formatting entry; deltachat, emacs,
+-- and null_channel use passthrough formatting and are absent from the code type.
 
 ------------------------------------------------------------
 -- Contracts
@@ -95,11 +99,13 @@ entity Chat {
 -- A message stored in a chat, either inbound from a contact or outbound from the agent.
 -- Bot messages are stored but excluded from the context sent to the agent.
 --
--- Enrichment (quoted-reply prefix, media labels, edit marker) is applied at prompt
--- assembly time, not at ingest. The raw fields below are sufficient to regenerate
--- the enriched form for quoted replies and edit markers. Attachment/media enrichment
--- cannot currently be regenerated because attachment metadata is not persisted
--- (see open question below).
+-- Enrichment varies by type:
+--   • Quoted-reply prefix: applied at prompt assembly time from stored reply_to_* fields.
+--   • Edit marker: the "[Message edited]" prefix is baked into content at ingest time
+--     by the channel adapter. Edits are delivered as new messages (id = "edit-<original_id>").
+--   • Media labels: generated transiently at prompt assembly; not persisted.
+-- Attachment/media enrichment cannot currently be regenerated because attachment
+-- metadata is not persisted (see open question below).
 entity Message {
     chat: Chat
     sender: Contact?                    -- null for agent-generated outbound messages
@@ -111,7 +117,6 @@ entity Message {
     sent_at: Timestamp
     is_from_me: Boolean
     is_bot_response: Boolean            -- true for agent-generated replies
-    is_edit: Boolean                    -- true when message replaces an earlier message
 }
 
 -- A registered chat group with an isolated agent workspace.
@@ -196,7 +201,6 @@ config {
     max_messages_per_prompt: Integer = 10
     max_agent_retries: Integer = 5
     max_dispatch_depth: Integer = 5     -- prevents infinite agent-to-agent loops
-    edit_rerender_window: Duration = 1.hour  -- edits outside this window are treated as new messages
 }
 
 ------------------------------------------------------------
@@ -221,8 +225,7 @@ rule MessageReceived {
         reply_to_sender_name: quoted_message?.sender_name,
         sent_at: sent_at,
         is_from_me: false,
-        is_bot_response: false,
-        is_edit: false
+        is_bot_response: false
     )
     ensures: chat.last_message_at = sent_at
 
@@ -232,20 +235,29 @@ rule MessageReceived {
         -- at prompt assembly from attachment paths available at delivery time only.
 }
 
--- An edited message replaces an earlier stored message if the edit arrives within
--- edit_rerender_window of the original. Outside that window it is stored as a new message.
-rule MessageEdited {
-    when: InboundMessageEdit(chat, sender, original_message, new_content, sent_at)
+-- An inbound edit is delivered as a brand-new message whose content carries a
+-- "[Message edited]" prefix and whose id is "edit-<original_id>". No in-place
+-- update of the original message occurs. The agent receives it as a regular new
+-- message and gets another turn with the edited content.
+rule MessageEditDelivered {
+    when: InboundMessageEdit(chat, sender, sender_name, original_message_id, new_content, sent_at)
 
-    requires: sent_at - original_message.sent_at <= config.edit_rerender_window
-
-    ensures: original_message.content = new_content
-    ensures: original_message.is_edit = true
+    ensures: Message.created(
+        chat: chat,
+        sender: sender,
+        sender_name: sender_name,
+        content: "[Message edited]\n" + new_content,
+        sent_at: sent_at,
+        is_from_me: false,
+        is_bot_response: false
+    )
+    ensures: chat.last_message_at = sent_at
 
     @guidance
-        -- Edits update the existing Message record in place (INSERT OR REPLACE) so
-        -- the agent sees the corrected text in context rather than both versions.
-        -- The "[Message edited]" marker is appended at prompt assembly time.
+        -- The message id is set to "edit-<original_message_id>" by the channel adapter
+        -- so downstream code can correlate the edit with its original if needed.
+        -- The "[Message edited]" prefix is baked into content at ingest time, not
+        -- added later at prompt assembly. The agent simply sees a new inbound message.
 }
 
 -- ---- Message Debouncing ----
@@ -332,7 +344,7 @@ rule AgentInvoked {
               or any_matches_trigger(new_messages, group.trigger_pattern)
     requires: not exists group.agent_session
     requires: depth < config.max_dispatch_depth
-    requires: AgentSessions where status = active .count < config.max_concurrent_agents
+    requires: group.is_main or AgentSessions where status = active .count < config.max_concurrent_agents
 
     ensures: AgentSession.created(
         group: group,
@@ -350,6 +362,10 @@ rule AgentInvoked {
     )
 
     @guidance
+        -- The main group is the user's primary interface and must always remain
+        -- responsive. It bypasses the concurrency gate and does not consume a
+        -- concurrency slot, so it can never be queued behind specialist work.
+        --
         -- The conversation_session provides the Claude conversation ID so the
         -- agent can resume prior context. Absent or cleared sessions start fresh.
         -- The debounce_window check defers invocation until the user stops typing.
@@ -370,6 +386,7 @@ rule GroupQueued {
     requires: new_messages.count > 0
     requires: group.triggers_on_all_messages
               or any_matches_trigger(new_messages, group.trigger_pattern)
+    requires: not group.is_main
     requires: not exists group.agent_session
     requires: AgentSessions where status = active .count >= config.max_concurrent_agents
     requires: not exists WaitingGroup{group: group}
@@ -656,7 +673,7 @@ invariant OneActiveAgentSessionPerGroup {
 
 -- The total number of active agent sessions across all groups is bounded.
 invariant AgentConcurrencyLimit {
-    AgentSessions where status = active .count <= config.max_concurrent_agents
+    AgentSessions where status = active and not group.is_main .count <= config.max_concurrent_agents
 }
 
 -- A folder name is unique across all registered groups.
@@ -683,7 +700,8 @@ invariant AtMostOneWaitingEntryPerGroup {
 -- ---- Message Enrichment Regenerability ----
 -- The enriched prompt form for a message can be regenerated from stored fields alone,
 -- provided attachment metadata has been persisted. Currently only quoted-reply enrichment
--- and the edit marker are regenerable; attachment/media labels are not (see open question).
+-- is regenerable; attachment/media labels are not (see open question). Edit markers are
+-- baked into content at ingest time, so no regeneration is needed for edits.
 invariant MessageEnrichmentRegenerableFromStoredFields {
     for m in Messages:
         -- Quoted-reply prefix is fully derivable from reply_to_message_content and reply_to_sender_name

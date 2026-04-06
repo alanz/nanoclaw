@@ -687,6 +687,7 @@ entity RawMemorySubmission {
     topic: String                        -- short label describing the submitted material
     staging_path: String                 -- initial file location; not yet indexed
     submitted_at: Timestamp
+    overdue_alerted_at: Timestamp?
     accepted_at: Timestamp?
     final_path: String when status = accepted  -- permanent location; triggers embedding indexing
 
@@ -725,6 +726,7 @@ rule SpecialistSubmitsRawMemory {
         topic: topic,
         staging_path: staging_path,
         submitted_at: now,
+        overdue_alerted_at: null,
         status: staged
     )
     ensures: HostMessagePosted(
@@ -807,6 +809,7 @@ rule StagedSubmissionOverdue {
 
     let main_group = nanoclaw.Groups where is_main .first
 
+    requires: submission.overdue_alerted_at = null
     requires: submission.status = staged
     requires: exists main_group
 
@@ -815,11 +818,13 @@ rule StagedSubmissionOverdue {
         text: staging_overdue_alert(submission)
     )
     ensures: HostLogRecorded(level: warning, text: staging_overdue_alert(submission))
+    ensures: submission.overdue_alerted_at = now
 
     @guidance
         -- is_staging_overdue is a derived value: now - submission.submitted_at > config.max_staging_duration.
-        -- This fires once per overdue submission; requires: status = staged prevents re-firing
-        -- after the submission is processed.
+        -- The overdue_alerted_at guard prevents re-firing on subsequent poll cycles: once the
+        -- alert is sent, the timestamp is stamped and the rule will not match again.
+        -- requires: status = staged prevents firing after the submission is processed.
 }
 
 ------------------------------------------------------------

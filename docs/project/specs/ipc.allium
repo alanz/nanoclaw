@@ -92,7 +92,7 @@ entity IpcQuery {
 ------------------------------------------------------------
 
 config {
-    ipc_poll_interval: Duration = 1000.ms  -- host polling cadence for IPC directories
+    ipc_poll_interval: Integer = 1000      -- host polling cadence for IPC directories (milliseconds)
     query_timeout: Duration = 15.seconds   -- default timeout for transcript + memory queries
     eval_timeout: Duration = 180.seconds   -- timeout for skill_eval (longer: runs a full agent)
     file_path_prefix: String = "/workspace/ipc/"  -- send_file paths must be under this prefix

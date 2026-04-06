@@ -24,7 +24,7 @@
 ------------------------------------------------------------
 
 config {
-    ipc_poll_interval: Duration = 500.ms   -- cadence for polling IPC input during and between queries
+    ipc_poll_interval: Integer = 500       -- cadence for polling IPC input during and between queries (milliseconds)
     script_timeout: Duration = 30.seconds  -- maximum runtime for a scheduled-task gate script
 }
 

@@ -1,0 +1,282 @@
+-- allium: 3
+-- web-ui.allium
+--
+-- NanoClaw web dashboard: monitoring and interaction UI.
+-- A single-page application served over HTTP (localhost only).
+-- Provides read/write access to groups, messages, tasks, files, and system state.
+-- Access control is delegated to the network layer (e.g. Tailscale Serve for HTTPS);
+-- the dashboard itself has no authentication.
+--
+-- Scope: dashboard surfaces, message injection, file browsing,
+--        knowledge graph visualisation, system monitoring, database inspection
+-- Includes: surfaces (overview, groups, feeds, system, database),
+--           message injection with trigger prepending, file path safety,
+--           note graph construction for display, real-time status polling
+-- Excludes:
+--   - Core group/message/session lifecycle (see nanoclaw.allium)
+--   - Scheduled task execution and RSS feed logic (see scheduling.allium)
+--   - Memory indexing and search (see memory.allium)
+--   - Knowledge graph construction and note lifecycle (see memory-graph.allium)
+--   - Channel wire protocols (Telegram, WhatsApp, DeltaChat, etc.)
+--   - Credential and auth infrastructure
+
+use "./nanoclaw.allium" as nanoclaw
+use "./scheduling.allium" as scheduling
+use "./specialists.allium" as specialists
+use "./memory-graph.allium" as memgraph
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    port: Integer = 3002                    -- HTTP port; overridden by WEB_UI_PORT env var
+    status_poll_interval: Duration = 5.seconds   -- how often the overview surface refreshes
+    chat_poll_interval: Duration = 3.seconds     -- how often the group chat surface polls for new messages
+    messages_load_limit: Integer = 150      -- messages fetched when opening a group chat
+    task_log_limit: Integer = 50            -- task run logs shown per scheduled task
+    db_page_size: Integer = 50             -- rows per page in the database browser
+    db_page_max: Integer = 200             -- maximum rows returnable in a single db page request
+    org_id_cache_ttl: Duration = 60.seconds -- how long org-mode ID→URL mappings are cached
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- A node in the rendered knowledge graph.
+-- Derived at display time from MemoryNote frontmatter; not persisted.
+-- allium-ignore allium.definition.unused
+value NoteNode {
+    id: String                             -- MemoryNote.id
+    title: String
+    tags: Set<String>
+    keywords: Set<String>
+    created: Timestamp
+}
+
+-- A directed edge in the rendered knowledge graph.
+-- Source note links to target note.
+-- allium-ignore allium.definition.unused
+value NoteEdge {
+    source_id: String                      -- MemoryNote.id
+    target_id: String                      -- MemoryNote.id
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- The overview surface shows real-time system health: container queue depth,
+-- active and orphaned containers, IPC diagnostics, scheduled task summary,
+-- live specialist tasks with overdue counts, router state, and (when configured)
+-- embedding index status.
+-- Refreshes every config.status_poll_interval.
+surface Overview {
+    exposes:
+        nanoclaw.Group.folder
+        nanoclaw.Group.name
+        nanoclaw.ConversationSession.group
+        scheduling.ScheduledTask.status
+        scheduling.ScheduledTask.next_run
+        specialists.SpecialistTask.status
+        specialists.SpecialistTask.specialist_type
+        specialists.SpecialistTask.depth
+        specialists.SpecialistTask.delegated_at
+        specialists.SpecialistTask.prompt
+
+    @guidance
+        -- The overview surface is polled by the client at config.status_poll_interval.
+        -- It aggregates: active container count, queue depth, orphaned containers,
+        -- IPC error count, task status breakdown (active/paused/completed counts),
+        -- live specialist task count and overdue count, and the live task list
+        -- (queued | running | awaiting_sub_task | awaiting_restart).
+        -- A task is considered overdue when now - delegated_at > specialists/config.max_task_duration.
+        -- If the embedding index is configured, its document count is also shown.
+        -- The live specialist panel is hidden when no tasks are live.
+        -- The surface has no context binding; it is a single system-wide dashboard.
+}
+
+-- The groups surface shows all registered groups and provides per-group sub-views:
+--   chat      — message history and a send input; polls at config.chat_poll_interval
+--   tasks     — scheduled tasks with per-row run-log expansion
+--   files     — filesystem tree for the group workspace and any extra mounts
+--   notes     — interactive knowledge graph of linked MemoryNotes
+surface GroupDashboard {
+    context group: nanoclaw.Group
+
+    exposes:
+        group.name
+        group.folder
+        group.trigger
+        group.requiresTrigger
+        group.isMain
+        group.trustedGroup
+        group.channel
+
+    provides:
+        OperatorSendsMessage(group, text: String)
+        OperatorRequestsFile(group, path: String)
+        OperatorViewsNoteGraph(group)
+
+    @guidance
+        -- Chat sub-view loads the last config.messages_load_limit messages on open
+        -- and re-polls at config.chat_poll_interval while the tab is active.
+        -- Task sub-view shows scheduling.ScheduledTask instances for this group;
+        -- expanding a row loads up to config.task_log_limit scheduling.TaskRunLog entries.
+        -- Files sub-view renders a tree from the group workspace directory and any
+        -- extra mounts configured for the group container.
+        -- Notes sub-view calls OperatorViewsNoteGraph and renders the returned graph.
+}
+
+-- The feeds surface lists all RSS subscriptions with schedule and next check time.
+surface Feeds {
+    exposes:
+        scheduling.RssFeed.url
+        scheduling.RssFeed.schedule
+        scheduling.RssFeed.interest
+        scheduling.RssFeed.status
+
+    @guidance
+        -- Read-only view. No operator actions are provided on this surface.
+}
+
+-- The system surface shows active agent sessions and router state key-value pairs.
+surface System {
+    exposes:
+        nanoclaw.ConversationSession.group
+        nanoclaw.ConversationSession.session_id
+
+    @guidance
+        -- Also exposes router_state key-value pairs, which are not a typed entity
+        -- in nanoclaw.allium. These are shown as raw key-value pairs.
+}
+
+-- The specialists surface shows all live specialist tasks, recent completed/failed tasks,
+-- and staged raw memory submissions awaiting main agent acceptance.
+-- Live tasks are those in queued | running | awaiting_sub_task | awaiting_restart.
+-- Recent tasks are the last 50 completed or failed tasks ordered by closed_at descending.
+surface Specialists {
+    exposes:
+        specialists.SpecialistTask.status
+        specialists.SpecialistTask.specialist_type
+        specialists.SpecialistTask.prompt
+        specialists.SpecialistTask.depth
+        specialists.SpecialistTask.delegated_at
+        specialists.SpecialistTask.closed_at
+        specialists.SpecialistTask.failure_kind
+        specialists.SpecialistTask.failure_detail
+        specialists.RawMemorySubmission.topic
+        specialists.RawMemorySubmission.task
+        specialists.RawMemorySubmission.submitted_at
+        specialists.RawMemorySubmission.overdue_alerted_at
+
+    @guidance
+        -- Depth is rendered with visual indentation (└─ prefix) to indicate
+        -- sub-task nesting within a chain. Root tasks have depth 0.
+        -- Failed tasks expand inline to show failure_kind and failure_detail.
+        -- Staged memory submissions are those with status = staged.
+        -- No operator actions are provided; this is a read-only monitoring surface.
+}
+
+-- The database surface allows read-only browsing of any SQLite table
+-- with pagination and text search.
+-- Returns at most config.db_page_max rows per request; default page size is config.db_page_size.
+surface Database {
+    @guidance
+        -- No typed entity access: this surface reflects raw SQLite tables.
+        -- Provides table list, paginated row data, and a text search filter.
+        -- Read-only; no writes are supported.
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- When the operator sends a message through the web UI, the message is stored
+-- in the database under the group's JID and echoed to the native channel.
+-- This delivers the message to any agent session currently listening on that group,
+-- and makes it visible in the native channel (WhatsApp, Telegram, etc.).
+rule MessageInjected {
+    when: OperatorSendsMessage(group, text)
+
+    requires: group.status = registered
+
+    let effective_text =
+        if group.requiresTrigger: group.trigger + " " + text
+        else: text
+
+    ensures: nanoclaw.Message.created(
+        chat: group.chat,
+        content: effective_text,
+        is_from_me: true
+    )
+    ensures: MessageEchoedToChannel(group: group, text: effective_text)
+
+    @guidance
+        -- MessageEchoedToChannel calls the channel's sendMessage callback so the
+        -- message appears in the native app and is picked up by any listening agent.
+        -- The trigger is prepended unconditionally when requiresTrigger is set;
+        -- the operator's raw text is never stored or delivered without it.
+}
+
+-- The file browser serves any file within a group's allowed directories.
+-- Requests for paths that would resolve outside those boundaries are rejected.
+-- No partial content is served on rejection.
+rule FileRead {
+    when: OperatorRequestsFile(group, path)
+
+    requires: path_within_boundary(path, group)
+
+    ensures: FileContentDelivered(group: group, path: path)
+
+    @guidance
+        -- path_within_boundary is a black box: it resolves the path and checks that
+        -- the canonical absolute path begins with the group workspace root or one of
+        -- the group's extra mount host paths.
+        -- Path traversal sequences (../) that escape these roots are rejected
+        -- regardless of encoding. Rejection returns an error response; no content
+        -- is served.
+}
+
+-- Building a note graph for display: all active notes in the group are collected,
+-- their frontmatter link arrays become directed edges, and the result is returned
+-- as a set of nodes and edges for client-side visualisation.
+rule NoteGraphBuilt {
+    when: OperatorViewsNoteGraph(group)
+
+    ensures: NoteGraphDelivered(
+        group: group,
+        nodes: note_graph_nodes(group),
+        edges: note_graph_edges(group)
+    )
+
+    @guidance
+        -- note_graph_nodes(group) collects all active memgraph.MemoryNotes for the group
+        -- and maps each to a NoteNode (id, title, tags, keywords, created).
+        -- note_graph_edges(group) collects all directed edges from note.links across
+        -- active notes. These are black box functions.
+        -- Back-links are present because BackLinksWritten (memory-graph.allium) ensures
+        -- bidirectional consistency; the client renders edges as undirected.
+        -- Only active notes are included; superseded and archived notes do not appear.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Every file request is bounded to the group workspace and configured extra mounts.
+-- No request reads files outside these roots.
+invariant FileAccessWithinBoundary {
+    for request in FileReadRequests:
+        path_within_boundary(request.path, request.group)
+}
+
+-- Every message injected via the web UI is echoed to the group's native channel.
+-- The web UI is never a write-only sink; delivery to the channel is required so
+-- the message is visible in the native app and triggerable by listening agents.
+invariant InjectedMessageAlwaysEchoed {
+    for msg in nanoclaw.Messages where msg.is_from_me:
+        msg.injected_via_web_ui implies
+            exists MessageEchoedToChannel { group: msg.chat.group, text: msg.content }
+}

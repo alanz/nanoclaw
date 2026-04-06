@@ -52,6 +52,7 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  mainGroupJid: string | null = null;
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -88,7 +89,9 @@ export class GroupQueue {
       return;
     }
 
-    if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
+    const isMain = groupJid === this.mainGroupJid;
+
+    if (!isMain && this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingMessages = true;
       if (!this.waitingGroups.includes(groupJid)) {
         this.waitingGroups.push(groupJid);
@@ -236,6 +239,11 @@ export class GroupQueue {
     }
   }
 
+  /** Whether this JID counts against the concurrency limit. */
+  private countsAgainstLimit(groupJid: string): boolean {
+    return groupJid !== this.mainGroupJid;
+  }
+
   private async runForGroup(
     groupJid: string,
     reason: 'messages' | 'drain',
@@ -245,7 +253,7 @@ export class GroupQueue {
     state.idleWaiting = false;
     state.isTaskContainer = false;
     state.pendingMessages = false;
-    this.activeCount++;
+    if (this.countsAgainstLimit(groupJid)) this.activeCount++;
 
     logger.debug(
       { groupJid, reason, activeCount: this.activeCount },
@@ -269,7 +277,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
-      this.activeCount--;
+      if (this.countsAgainstLimit(groupJid)) this.activeCount--;
       this.drainGroup(groupJid);
     }
   }
@@ -280,7 +288,7 @@ export class GroupQueue {
     state.idleWaiting = false;
     state.isTaskContainer = true;
     state.runningTaskId = task.id;
-    this.activeCount++;
+    if (this.countsAgainstLimit(groupJid)) this.activeCount++;
 
     logger.debug(
       { groupJid, taskId: task.id, activeCount: this.activeCount },
@@ -298,7 +306,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
-      this.activeCount--;
+      if (this.countsAgainstLimit(groupJid)) this.activeCount--;
       this.drainGroup(groupJid);
     }
   }
@@ -359,6 +367,15 @@ export class GroupQueue {
   }
 
   private drainWaiting(): void {
+    // Prioritize the main group in the waiting list
+    if (this.mainGroupJid) {
+      const idx = this.waitingGroups.indexOf(this.mainGroupJid);
+      if (idx > 0) {
+        this.waitingGroups.splice(idx, 1);
+        this.waitingGroups.unshift(this.mainGroupJid);
+      }
+    }
+
     while (
       this.waitingGroups.length > 0 &&
       this.activeCount < MAX_CONCURRENT_CONTAINERS

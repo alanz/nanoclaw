@@ -196,6 +196,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
+  if (group.isMain) queue.mainGroupJid = jid;
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
@@ -848,6 +849,8 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   initSpecialistTypes();
   loadState();
+  queue.mainGroupJid =
+    Object.entries(registeredGroups).find(([, g]) => g.isMain)?.[0] ?? null;
 
   // Eagerly initialize memory managers for groups with an existing index.
   // This triggers the startup sync (including any forced re-index from config

@@ -75,7 +75,7 @@ entity RssFeed {
     group: nanoclaw.Group
     target_chat: nanoclaw.Chat
     url: String
-    schedule: Schedule
+    schedule: Schedule                  -- schedule.type must be cron or interval; once is not valid for feeds
     interest: String?                   -- optional focus prompt: "summarise posts about AI safety"
     status: RssFeedStatus
     next_check: Timestamp?              -- null when paused or cancelled

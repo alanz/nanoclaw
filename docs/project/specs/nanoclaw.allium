@@ -130,7 +130,6 @@ entity Group {
     requires_trigger: Boolean           -- when true, trigger_pattern must match to invoke agent
     added_at: Timestamp
     last_agent_at: Timestamp?           -- cursor: last time agent processed messages for this group
-    last_member_count: Integer          -- member count as of last trust check; used to detect new members
     pending_dispatch_depth: Integer?    -- set when a sub-group delivers a result; consumed at next agent run start
 
     -- Relationships
@@ -273,30 +272,24 @@ rule MessageEditDelivered {
 
 -- ---- Trust Revocation ----
 
--- When a group chat gains new members the is_trusted flag is revoked to prevent
--- an unknown member from issuing session commands.
+-- When a trusted group's membership is modified and contains more than the expected
+-- two members (self + owner), trust is revoked to prevent an unknown member from
+-- issuing session commands.
 rule TrustRevoked {
-    when: ChatMemberCountChanged(group, new_count)
+    when: ChatModified(group, new_count)
 
     requires: group.is_trusted
-    requires: new_count > group.last_member_count
+    requires: new_count > 2
 
     ensures: group.is_trusted = false
-    ensures: group.last_member_count = new_count
 
     @guidance
-        -- The channel adapter emits ChatMemberCountChanged whenever a member joins.
-        -- is_trusted can only be re-enabled through an explicit admin action outside
-        -- the scope of this spec.
-}
-
--- When member count decreases or stays the same, only the cursor is updated.
-rule MemberCountUpdated {
-    when: ChatMemberCountChanged(group, new_count)
-
-    requires: new_count <= group.last_member_count
-
-    ensures: group.last_member_count = new_count
+        -- DeltaChat groups are expected to have exactly 2 members:
+        -- DC_CONTACT_ID_SELF (the bot) + the owner. Any additional member
+        -- (new_count > 2) triggers immediate trust revocation.
+        -- The threshold is hardcoded; no member count is persisted.
+        -- is_trusted can only be re-enabled through an explicit admin action
+        -- outside the scope of this spec.
 }
 
 -- ---- Session Commands ----
@@ -614,7 +607,7 @@ rule OutboundMessageRouted {
 -- ---- Group Registration ----
 
 rule GroupRegistered {
-    when: GroupRegister(chat, folder, trigger_pattern, is_main, requires_trigger, initial_member_count?)
+    when: GroupRegister(chat, folder, trigger_pattern, is_main, requires_trigger)
 
     requires: not exists Group{chat: chat}
     requires: not exists Group{folder: folder}
@@ -627,7 +620,6 @@ rule GroupRegistered {
         is_main: is_main,
         is_trusted: false,
         requires_trigger: requires_trigger,
-        last_member_count: initial_member_count ?? 0,
         added_at: now
     )
 }

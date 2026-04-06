@@ -501,8 +501,11 @@ rule SpecialistTaskCompleted {
 
     @guidance
         -- SpecialistResultDelivered routes the result to the correct requester:
-        -- if requester_group is set the result is injected into the main group's session;
+        -- if requester_group is set the result is injected into the main group's session,
+        --   with a directive appended prompting the main agent to reply to the user with a summary;
         -- if requester_task is set the parent specialist is re-invoked (see ParentSpecialistResumed).
+        -- The reporting directive is only appended for requester_group deliveries; sub-task
+        -- results resume the parent specialist and carry no such directive.
 }
 
 -- A completed sub-task re-invokes its parent specialist.

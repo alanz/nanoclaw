@@ -178,6 +178,11 @@ rule ReportAndNoteCreated {
         sources: { NoteSource { kind: file, path: report_path, mtime: now } },
         status: active
     )
+    ensures: UserNotifiedOfResult(
+        group: group,
+        note_id: "MEM-" + task.delegated_at.date + "-" + slug,
+        report_path: report_path
+    )
 
     @guidance
         -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result.
@@ -187,6 +192,10 @@ rule ReportAndNoteCreated {
         -- Writing the report to memory/reports/ causes memory.allium's FileDiscovered
         -- rule to pick it up; it will be chunked and embedded for future searches.
         -- memory.hybrid_search is the same search used by AgentMemorySearch in memory.allium.
+        -- UserNotifiedOfResult is fulfilled by the main agent replying to the user with a
+        -- brief summary of what was found and a web UI link to the created note.
+        -- This is enforced by instruction (groups/main/CLAUDE.md) and by a directive
+        -- appended to the injected specialist result message.
 }
 
 -- The top back_link_limit linked notes are updated to reference the new note,

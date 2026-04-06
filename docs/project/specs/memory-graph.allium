@@ -1,0 +1,297 @@
+-- allium: 3
+-- memory-graph.allium
+--
+-- Research-driven knowledge graph construction.
+-- A researcher specialist investigates external sources in isolation and delivers
+-- a report; the main agent synthesises the report into a linked MemoryNote that
+-- integrates into the group's A-MEM knowledge graph.
+--
+-- Scope: MemoryNote entity and lifecycle, researcher SpecialistType isolation model,
+--        research dispatch, report writing, note creation, link generation,
+--        back-link propagation
+-- Includes: researcher access model (external internet + Zotero only, no group memory),
+--           result delivery via specialist pipeline, note creation from research result,
+--           link candidate selection and back-link propagation
+-- Excludes:
+--   - Specialist task lifecycle mechanics (see specialists.allium)
+--   - Memory file indexing, chunking, and hybrid search (see memory.allium)
+--   - Core group/session lifecycle (see nanoclaw.allium)
+--   - Zotero database sync, PDF scanning, and per-entry markdown generation (see zotero.allium)
+
+use "./nanoclaw.allium" as nanoclaw
+use "./specialists.allium" as specialists
+use "./memory.allium" as memory
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The origin of a MemoryNote's content.
+-- Always populated; records provenance for staleness detection.
+value NoteSource {
+    kind: file | url | conversation
+    path: String?          -- relative to group workspace; set when kind = file
+    url: String?           -- set when kind = url
+    mtime: Timestamp?      -- file mtime at note creation; used to detect source staleness
+    last_fetched: Timestamp?    -- set when kind = url
+    date: Timestamp?            -- set when kind = conversation
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A structured, linked knowledge note in a group's memory graph.
+-- Notes are the atomic units of the A-MEM knowledge graph.
+-- Each note captures a single insight with explicit graph edges (links) to
+-- related notes. Notes are created by the main agent after synthesising a
+-- researcher report; they are never created by the researcher itself.
+entity MemoryNote {
+    group: nanoclaw.Group
+    id: String                         -- MEM-YYYY-MM-DD-{slug}; unique within group
+    title: String
+    content: String
+    keywords: Set<String>
+    tags: Set<String>
+    links: Set<String>                 -- IDs of related MemoryNotes within this group
+    created: Timestamp
+    sources: Set<NoteSource>           -- always non-empty; records content provenance
+    supersedes: MemoryNote?            -- non-null when this note replaces an older one
+
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: active | superseded | archived
+
+    -- Relationships
+    superseded_by: MemoryNote? with supersedes = this
+
+    transitions status {
+        active -> superseded           -- a newer note supersedes this one
+        active -> archived
+        superseded -> archived
+        terminal: archived
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    link_candidates_limit: Integer = 10  -- max notes retrieved as link candidates per new note
+    back_link_limit: Integer = 3         -- max existing notes updated with a back-link
+    min_link_score: Decimal = 0.6        -- minimum hybrid search score for a link to form
+    duplicate_check_limit: Integer = 3   -- max existing notes returned in pre-dispatch duplicate check
+    duplicate_check_score: Decimal = 0.8 -- minimum score to surface a note as a potential duplicate
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Research Dispatch ----
+
+-- Before dispatching, the main agent checks for existing notes that may cover the
+-- same subject. If candidates are found above the duplicate check threshold, they
+-- are surfaced to the user before the task is submitted. The user decides whether
+-- to proceed (new information may be available) or rely on existing notes.
+-- This check is most useful for URL subjects, where exact duplication is likely;
+-- for search phrases, later queries on the same topic often warrant fresh investigation.
+rule DuplicateCheckPerformed {
+    when: MainAgentResearchRequest(group, subject)
+
+    let candidates = memory.hybrid_search(
+        group: group,
+        query: subject,
+        path_prefix: "memory/notes/",
+        limit: config.duplicate_check_limit,
+        min_score: config.duplicate_check_score
+    )
+
+    ensures: DuplicateCandidatesSurfaced(group: group, subject: subject, candidates: candidates)
+
+    @guidance
+        -- DuplicateCandidatesSurfaced is delivered to the user as a message listing the
+        -- candidate notes with their IDs and titles. If candidates is empty, no message
+        -- is sent and ResearchDispatched fires immediately.
+        -- For URL subjects, an exact path match in sources[].url is a strong duplicate
+        -- signal regardless of score.
+}
+
+-- The main agent dispatches a research task when the user provides a URL or
+-- search phrase to investigate. Fires after DuplicateCheckPerformed; the user
+-- may have already been shown existing notes and chosen to proceed.
+rule ResearchDispatched {
+    when: MainAgentResearchRequest(group, subject)
+
+    requires: exists specialists.SpecialistType { name: "researcher" }
+
+    ensures: specialists.SpecialistTask.created(
+        specialist_type: specialists.SpecialistType { name: "researcher" },
+        requester_group: group,
+        prompt: research_prompt(subject),
+        depth: 0
+    )
+
+    @guidance
+        -- research_prompt(subject) wraps the subject in a standard instruction to:
+        -- investigate from external sources, consult Zotero for prior art, and deliver
+        -- a structured report via deliver_result. The prompt must not reference any
+        -- existing NanoClaw memory notes, reports, or conversation history — the
+        -- researcher's isolation depends on this.
+        -- subject may be a URL (fetch and analyse), a search phrase (WebSearch),
+        -- or a Zotero key (look up locally, then investigate further if needed).
+}
+
+-- ---- Report and Note Creation ----
+
+-- When the researcher task completes, the main agent writes the report file and
+-- creates a linked MemoryNote in the same invocation.
+rule ReportAndNoteCreated {
+    when: task: specialists.SpecialistTask becomes completed
+
+    requires: task.specialist_type.name = "researcher"
+    requires: task.requester_group != null
+
+    let group = task.requester_group
+    let slug = topic_slug(task.prompt)
+    let report_path = "memory/reports/" + task.delegated_at.date + "-" + slug + ".md"
+
+    let candidates = memory.hybrid_search(
+        group: group,
+        query: task.result,
+        path_prefix: "memory/notes/",
+        limit: config.link_candidates_limit,
+        min_score: config.min_link_score
+    )
+    let links = extract_link_ids(candidates)
+
+    ensures: ReportFileWritten(group: group, path: report_path, content: task.result)
+    ensures: MemoryNote.created(
+        group: group,
+        id: "MEM-" + task.delegated_at.date + "-" + slug,
+        title: extract_title(task.result),
+        content: task.result,
+        keywords: extract_keywords(task.result),
+        tags: extract_tags(task.result),
+        links: links,
+        created: now,
+        sources: { NoteSource { kind: file, path: report_path, mtime: now } },
+        status: active
+    )
+
+    @guidance
+        -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result.
+        -- topic_slug derives a kebab-case slug from the research subject in task.prompt.
+        -- note_id_from_path extracts the MEM-... ID from a memory/notes/ file path.
+        -- The report file is written before the note so sources[0].mtime is valid.
+        -- Writing the report to memory/reports/ causes memory.allium's FileDiscovered
+        -- rule to pick it up; it will be chunked and embedded for future searches.
+        -- memory.hybrid_search is the same search used by AgentMemorySearch in memory.allium.
+}
+
+-- The top back_link_limit linked notes are updated to reference the new note,
+-- forming bidirectional edges in the graph.
+rule BackLinksWritten {
+    when: note: MemoryNote.created
+
+    requires: note.status = active
+
+    let back_link_targets = top_links(note.links, config.back_link_limit)
+
+    ensures:
+        for target_id in back_link_targets:
+            let target = MemoryNote { group: note.group, id: target_id }
+            target.links.add(note.id)
+
+    @guidance
+        -- top_links returns the first back_link_limit elements in insertion order, which
+        -- corresponds to descending score order from the memory_search that populated note.links.
+        -- The update is idempotent: if note.id is already in target.links, no change occurs.
+        -- Only active notes receive back-links; superseded notes are not updated.
+        -- Back-link targets must exist and be active; this is enforced by the
+        -- LinksWithinActiveGraph invariant.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Every ID in a MemoryNote's links array references a note in the same group
+-- that has not been archived.
+invariant LinksWithinActiveGraph {
+    for note in MemoryNotes where note.status = active:
+        for id in note.links:
+            exists MemoryNote { group: note.group, id: id, status: active | superseded }
+}
+
+-- MemoryNotes belong to the main group only. By design, the knowledge graph is a
+-- single shared resource — other registered groups do not maintain their own graphs.
+-- The researcher delivers raw findings; the main agent synthesises notes.
+invariant NotesCreatedByMainAgentOnly {
+    for note in MemoryNotes:
+        note.group = nanoclaw.Groups.main
+}
+
+-- The researcher specialist container has no access to any existing group memory,
+-- including previously generated reports. Isolation is total: the researcher must
+-- focus solely on the subject it is tasked with investigating, without synthesising
+-- comparisons to existing knowledge or prior research.
+-- Only the Zotero database (read-only) and the external internet are accessible.
+-- The Zotero database may also be mounted in other specialist containers; its
+-- sync and structure are governed by zotero.allium (deferred).
+--
+-- Enforcement: container configuration level in container-runner.ts.
+-- The researcher container MUST NOT be given any group workspace mount
+-- (memory/notes/, memory/reports/, CLAUDE.md, conversations/).
+-- The researcher container MUST mount the Zotero database read-only
+-- (see zotero.allium for canonical mount path).
+-- External internet access (WebSearch, WebFetch, agent-browser) is available.
+-- Violation of this invariant cannot be detected at runtime; it is prevented
+-- by the container configuration.
+invariant ResearcherKnowledgeIsolation {
+    for task in specialists.SpecialistTasks
+            where task.specialist_type.name = "researcher":
+        task.requester_group != null
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred RetroactiveLinking      -- see: memory-graph-retroactive.allium
+                                  -- When a new note is created, the context and tags of
+                                  -- its linked neighbors are updated to reflect the new
+                                  -- connection. Implements A-MEM's retroactive neighbor
+                                  -- update mechanism.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred Consolidation           -- see: memory-graph-consolidation.allium
+                                  -- A scheduled task identifies high-degree MemoryNotes
+                                  -- (many links) and synthesises hub notes summarising
+                                  -- each cluster. Implements A-MEM's sleep/consolidation
+                                  -- mechanism, which the original A-MEM code describes
+                                  -- but does not fully implement.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred OrphanDetection         -- see: memory-graph-consolidation.allium
+                                  -- Notes with no links after a grace period are flagged
+                                  -- for review, re-linking, or archival.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred NoteSupersession        -- see: memory-graph-supersession.allium
+                                  -- When source material changes significantly, a new note
+                                  -- supersedes the old one. The old note's links are
+                                  -- preserved and inherited by the superseding note.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred ZoteroSync              -- see: zotero.allium
+                                  -- The Zotero database is a directory of per-entry markdown
+                                  -- files generated from the Zotero API. Each file is populated
+                                  -- with abstract, DOI, summary, and other metadata, including
+                                  -- content extracted from associated PDFs. The directory is
+                                  -- indexed via the Gemini embedding process and mounted
+                                  -- read-only into the researcher container (and potentially
+                                  -- other specialist containers).
+
+

@@ -16,12 +16,50 @@ notes, or update any knowledge graph.
 
 - Summarise external content accurately and objectively
 - Note what the source claims, its key data points, and any links
+- Check the Zotero database (if mounted at `/workspace/zotero/`) for prior art on the subject
 
 ## What You Do NOT Do Here
 
 - Connect findings to existing memory notes or research topics
 - Apply A-MEM note-writing instructions — those apply only in the main group
 - Make judgements about relevance to ongoing work
+
+## Report Format
+
+Deliver your result as a structured report using this format:
+
+```
+# {Title}
+
+**Source:** {URL or description}
+**Date:** {YYYY-MM-DD}
+**Keywords:** {term1, term2, term3}
+**Tags:** {tag1, tag2}
+
+## Summary
+
+One paragraph summarising what the source says.
+
+## Key Findings
+
+- Finding 1
+- Finding 2
+- ...
+
+## Notable Details
+
+Any data points, quotes, caveats, or methodological notes worth preserving verbatim.
+
+## Zotero Prior Art
+
+List any Zotero entries found on this subject (key, title, year). "None found" if the database was checked and empty.
+
+## References
+
+- [Title](URL) — for any linked sources cited in the material
+```
+
+Use this structure even if some sections are sparse. The title, keywords, and tags fields are required — the main agent uses them to create the knowledge graph note.
 
 
 ## Workflow
@@ -84,9 +122,13 @@ mcp__nanoclaw__query_memory(
 )
 ```
 
-## Submitting Information to Main Memory
+## Submitting Incidental Findings to Main Memory
 
-If you discover information worth preserving in the main group's long-term memory:
+`submit_raw_memory` is for information you encounter that is NOT the subject of your current task — for example, a source that mentions something unrelated but worth preserving.
+
+Do NOT use this for your primary task result. Your report goes via `deliver_specialist_result`. The main agent synthesises notes from what you deliver.
+
+If you do find something incidental worth preserving:
 
 1. Write the content to a file under `/workspace/ipc/` first.
 2. Then submit it:

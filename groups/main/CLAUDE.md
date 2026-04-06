@@ -282,7 +282,7 @@ sqlite3 -json /workspace/project/store/messages.db "SELECT jid, name, folder, tr
 | dc:10 | main | main | Main control channel (this chat) |
 | dc:11 | NanoClaw Group | deltachat_nanoclaw-group | — |
 | dc:12 | NanoClaw #2 | deltachat_nanoclaw-2 | — |
-| dc:13 | Intake | deltachat_intake | **The Researcher** — use `target_group_jid: "dc:13"` when user says "ask the researcher to investigate..." |
+| dc:13 | Intake | deltachat_intake | Legacy intake group — superseded by the `researcher` specialist type (see Research Workflow below) |
 | emacs:default | emacs | emacs | Emacs integration |
 
 ---
@@ -366,6 +366,31 @@ Three MCP tools give you on-demand access to the embedding index (org notes, wor
 - **`memory_list`** — list indexed files without a query. Params: `path_prefix`, `source`, `limit` (default 50), `order_by` (`mtime` | `path` | `size`), `parse_frontmatter`.
 
 Use these proactively when the topic seems personal or knowledge-base-relevant. You do not need to announce that you're searching.
+
+### Research Workflow
+
+When the user asks to investigate a URL, search phrase, or Zotero entry:
+
+**1. Duplicate check**
+
+Run `memory_search({query: subject, path_prefix: "memory/notes/", limit: 3, min_score: 0.8})`. If candidates are found, list their IDs and titles to the user and ask whether to proceed — new information may have emerged, or the existing note may be sufficient. For URL subjects, also check whether any note's `sources[].url` is an exact match regardless of score. If no candidates are found, proceed immediately.
+
+**2. Dispatch**
+
+```
+mcp__nanoclaw__dispatch_specialist(
+  target_type="researcher",
+  prompt="Investigate: {subject}\n\nSummarise faithfully what the source says. Do not connect findings to existing knowledge, make comparisons to prior research, or update any knowledge graph — that is the main agent's job. Check the Zotero database for any prior art on this subject. Deliver a structured report."
+)
+```
+
+The prompt must NOT reference any existing NanoClaw memory notes, reports, or conversation history — researcher isolation depends on this.
+
+**3. On result return**
+
+Write the full report to `memory/reports/YYYY-MM-DD-{slug}.md`, then follow the A-MEM Note-Taking steps below to create a linked note from the report content.
+
+---
 
 ### A-MEM Note-Taking
 

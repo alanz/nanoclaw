@@ -20,6 +20,10 @@ import {
   getChatMessages,
   getDbTableData,
   getDbTables,
+  getLiveSpecialistTasks,
+  getRecentFinishedSpecialistTasks,
+  getSpecialistSessionsForTasks,
+  getRawMemorySubmissionsByStatus,
   getTaskRunLogs,
   storeMessage,
 } from './db.js';
@@ -181,6 +185,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
   <h1>NanoClaw</h1>
   <a id="nav-overview" href="#overview">Overview</a>
   <a id="nav-groups" href="#groups">Groups</a>
+  <a id="nav-specialists" href="#specialists">Specialists</a>
   <a id="nav-feeds" href="#feeds">Feeds</a>
   <a id="nav-system" href="#system">System</a>
   <a id="nav-database" href="#database">Database</a>
@@ -203,6 +208,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div id="overview-ipc" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Scheduled Tasks</div>
     <div id="overview-tasks" class="card" style="margin-bottom:20px"></div>
+    <div id="overview-specialists-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Live Specialist Tasks</div>
+    <div id="overview-specialists" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Router State</div>
     <div id="overview-routerstate" class="card" style="padding:0;overflow:hidden;margin-bottom:20px"></div>
     <div id="overview-indexing-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Embedding Index</div>
@@ -281,6 +288,29 @@ button:disabled{opacity:.4;cursor:not-allowed}
       </div>
     </div>
 
+  </div>
+
+  <!-- Specialists -->
+  <div id="section-specialists" class="section">
+    <div style="display:flex;gap:16px;height:calc(100vh - 80px)">
+      <!-- Left: lists -->
+      <div style="flex:1;overflow-y:auto;min-width:0">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <h2 style="margin-bottom:0">Specialist Tasks</h2>
+          <span id="specialists-refresh-status" class="dim" style="font-size:12px"></span>
+        </div>
+        <div id="specialists-live-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Live Tasks</div>
+        <div id="specialists-live" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
+        <div id="specialists-memory-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Staged Memory Submissions</div>
+        <div id="specialists-memory" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
+        <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Recent Tasks (last 50)</div>
+        <div id="specialists-recent" class="card" style="padding:0;overflow:hidden"></div>
+      </div>
+      <!-- Right: detail panel -->
+      <div id="specialists-detail" style="width:420px;flex-shrink:0;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;display:none">
+        <div id="specialists-detail-content"><div class="empty">Click a task to view details</div></div>
+      </div>
+    </div>
   </div>
 
   <!-- Feeds -->
@@ -389,6 +419,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var parts = hash.split('/');
     var section = parts[0] || 'groups';
     if (section === 'overview') return { section: 'overview' };
+    if (section === 'specialists') return { section: 'specialists' };
     if (section === 'feeds') return { section: 'feeds' };
     if (section === 'system') return { section: 'system' };
     if (section === 'database') return { section: 'database' };
@@ -407,6 +438,10 @@ document.addEventListener('DOMContentLoaded', function() {
         activateSection('overview'); clearInterval(pollTimer); pollTimer = null; startOverview(); return;
       }
       stopOverview();
+      stopSpecialists();
+      if (state.section === 'specialists') {
+        activateSection('specialists'); clearInterval(pollTimer); pollTimer = null; startSpecialists(); return;
+      }
       if (state.section === 'feeds') {
         activateSection('feeds'); clearInterval(pollTimer); pollTimer = null; loadFeeds(); return;
       }
@@ -473,8 +508,10 @@ document.addEventListener('DOMContentLoaded', function() {
     activateSection(name);
     clearInterval(pollTimer); pollTimer = null;
     stopOverview();
+    stopSpecialists();
     if (name === 'overview') startOverview();
     if (name === 'groups') showGroupListInternal();
+    if (name === 'specialists') startSpecialists();
     if (name === 'feeds') loadFeeds();
     if (name === 'system') loadSystem();
     if (name === 'database') loadDbTables();
@@ -1572,6 +1609,8 @@ document.addEventListener('DOMContentLoaded', function() {
         { label: 'Gemini Embeds', value: u.geminiEmbeds, color: '#8b949e' },
         { label: 'Active Tasks', value: data.tasks.active, color: '#3fb950' },
         { label: 'Due Now', value: data.tasks.dueSoon, color: data.tasks.dueSoon > 0 ? '#d29922' : '#8b949e' },
+        { label: 'Live Specialists', value: (data.specialists||{}).live||0, color: (data.specialists||{}).live > 0 ? '#58a6ff' : '#8b949e' },
+        { label: 'Overdue Specs', value: (data.specialists||{}).overdue||0, color: (data.specialists||{}).overdue > 0 ? '#f85149' : '#8b949e' },
       ].map(function(s) {
         return '<div class="card" style="padding:14px 16px;text-align:center">'
           +'<div style="font-size:24px;font-weight:700;color:'+s.color+';margin-bottom:4px;line-height:1">'+esc(String(s.value))+'</div>'
@@ -1693,6 +1732,37 @@ document.addEventListener('DOMContentLoaded', function() {
         +'<div><div style="font-size:28px;font-weight:700;color:'+(t.dueSoon>0?'#d29922':'#8b949e')+'">'+t.dueSoon+'</div><div class="dim" style="font-size:11px">Due Now</div></div>'
         +'</div>';
 
+      // Live specialist tasks
+      var specsEl = document.getElementById('overview-specialists');
+      var specsLabelEl = document.getElementById('overview-specialists-label');
+      var liveSpecs = (data.specialists || {}).tasks || [];
+      if (!liveSpecs.length) {
+        if (specsEl) specsEl.style.display = 'none';
+        if (specsLabelEl) specsLabelEl.style.display = 'none';
+      } else {
+        if (specsEl) specsEl.style.display = '';
+        if (specsLabelEl) specsLabelEl.style.display = '';
+        specsEl.innerHTML = '<table><thead><tr><th>Type</th><th>Status</th><th>Depth</th><th>Age</th><th>Prompt</th></tr></thead><tbody>'
+          + liveSpecs.map(function(t) {
+            var statusColors = { queued: 'bb', running: 'bg', awaiting_sub_task: 'by', awaiting_restart: 'br' };
+            var sc = statusColors[t.status] || 'bb';
+            var age = fmtDate(t.delegated_at);
+            var prompt = t.prompt.length > 80 ? t.prompt.slice(0, 80) + '\u2026' : t.prompt;
+            var depthStr = t.depth > 0 ? '\u2514\u2500'.repeat(t.depth) + ' ' : '';
+            var overdue = (Date.now() - new Date(t.delegated_at).getTime()) > SPECIALIST_OVERDUE_MS;
+            var rowStyle = overdue ? ' style="background:#1a0d0d"' : '';
+            var overdueTag = overdue ? ' <span class="badge br" style="font-size:9px">\u26A0</span>' : '';
+            return '<tr'+rowStyle+'>'
+              +'<td><span class="badge bb">'+esc(t.specialist_type)+'</span>'+overdueTag+'</td>'
+              +'<td><span class="badge b'+sc+'">'+esc(t.status.replace(/_/g,' '))+'</span></td>'
+              +'<td class="dim" style="font-size:11px;text-align:center">'+t.depth+'</td>'
+              +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(age)+'</td>'
+              +'<td class="dim" style="font-size:11px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(t.prompt)+'">'+esc(depthStr+prompt)+'</td>'
+              +'</tr>';
+          }).join('')
+          +'</tbody></table>';
+      }
+
       // Router state
       if (!data.routerState.length) {
         routerEl.innerHTML = '<div class="empty" style="padding:16px">No router state</div>';
@@ -1771,6 +1841,206 @@ document.addEventListener('DOMContentLoaded', function() {
           + '</tbody></table></div>';
       }
     } catch(e) { rsel.innerHTML = '<div class="empty">Error loading router state</div>'; }
+  }
+
+  // ── Specialists ────────────────────────────────────────────────────────────
+
+  var specialistsTimer = null;
+  var specialistDetailId = null;
+  var specialistAllTasksCache = [];   // live + recent, updated on each load
+  var specialistSessionsCache = {};   // task_id → session, updated on each load
+  var SPECIALIST_OVERDUE_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+  function stopSpecialists() {
+    if (specialistsTimer) { clearInterval(specialistsTimer); specialistsTimer = null; }
+  }
+
+  function startSpecialists() {
+    loadSpecialists();
+    specialistsTimer = setInterval(loadSpecialists, 5000);
+  }
+
+  function showSpecialistDetail(t) {
+    specialistDetailId = t.id;
+    var panel = document.getElementById('specialists-detail');
+    var content = document.getElementById('specialists-detail-content');
+    if (!panel || !content) return;
+    panel.style.display = '';
+
+    var statusColors = { queued: 'bb', running: 'bg', awaiting_sub_task: 'by', awaiting_restart: 'br', completed: 'bg', failed: 'br' };
+    var sc = statusColors[t.status] || 'bb';
+    var duration = t.closed_at
+      ? (function(){ var ms = new Date(t.closed_at)-new Date(t.delegated_at); return ms<60000 ? Math.round(ms/1000)+'s' : Math.round(ms/60000)+'m'; })()
+      : '\u2014';
+    var isOverdue = !t.closed_at && (Date.now() - new Date(t.delegated_at).getTime()) > SPECIALIST_OVERDUE_MS;
+    var session = specialistSessionsCache[t.id] || null;
+
+    // Parse ancestor_types JSON
+    var ancestors = [];
+    try { ancestors = JSON.parse(t.ancestor_types || '[]'); } catch(e) {}
+
+    // Resolve pending sub-task
+    var pendingSub = t.pending_sub_task_id
+      ? specialistAllTasksCache.find(function(x) { return x.id === t.pending_sub_task_id; })
+      : null;
+
+    var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">'
+      +'<span class="badge bb">'+esc(t.specialist_type)+'</span>'
+      +'<span class="badge b'+sc+'">'+esc(t.status.replace(/_/g,' '))+'</span>'
+      +(isOverdue ? '<span class="badge br">\u26A0 overdue</span>' : '')
+      +'<span class="dim" style="font-size:11px;margin-left:auto">depth '+t.depth+'</span>'
+      +'</div>';
+
+    html += '<div class="fm-card" style="margin-bottom:12px">'
+      +'<span class="fm-key">Started</span><span class="fm-val">'+esc(fmtDate(t.delegated_at))+'</span>'
+      +(t.closed_at ? '<span class="fm-key">Closed</span><span class="fm-val">'+esc(fmtDate(t.closed_at))+'</span>' : '')
+      +'<span class="fm-key">Duration</span><span class="fm-val">'+esc(duration)+'</span>'
+      +(t.status === 'awaiting_restart'
+        ? '<span class="fm-key">Retries</span><span class="fm-val" style="color:'+(t.restart_attempt_count >= 2 ? '#f85149' : '#d29922')+'">'+t.restart_attempt_count+' / 2</span>'
+        : (t.restart_attempt_count > 0 ? '<span class="fm-key">Retries</span><span class="fm-val">'+t.restart_attempt_count+'</span>' : ''))
+      +(session ? '<span class="fm-key">Session</span><span class="fm-val" style="color:'+(session.status==='stale'?'#d29922':session.status==='cleared'?'#8b949e':'#3fb950')+'">'+esc(session.status)+'</span>' : '')
+      +(ancestors.length ? '<span class="fm-key">Ancestors</span><span class="fm-val">'+ancestors.map(function(a){ return '<span class="badge bb" style="font-size:10px;margin-right:2px">'+esc(a)+'</span>'; }).join('')+'</span>' : '')
+      +(t.requester_group ? '<span class="fm-key">Group</span><span class="fm-val" style="font-family:monospace;font-size:11px">'+esc(t.requester_group)+'</span>' : '')
+      +(t.requester_task_id ? '<span class="fm-key">Parent</span><span class="fm-val" style="font-family:monospace;font-size:10px">'+esc(t.requester_task_id)+'</span>' : '')
+      +'<span class="fm-key">ID</span><span class="fm-val" style="font-family:monospace;font-size:10px">'+esc(t.id)+'</span>'
+      +'</div>';
+
+    // Pending sub-task block
+    if (pendingSub) {
+      var subSc = statusColors[pendingSub.status] || 'bb';
+      html += '<div style="margin-bottom:12px;padding:10px 12px;background:#161b22;border:1px solid #d2992266;border-radius:6px;font-size:12px">'
+        +'<div class="dim" style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Waiting on</div>'
+        +'<div style="display:flex;align-items:center;gap:6px">'
+        +'<span class="badge bb" style="font-size:10px">'+esc(pendingSub.specialist_type)+'</span>'
+        +'<span class="badge b'+subSc+'" style="font-size:10px">'+esc(pendingSub.status.replace(/_/g,' '))+'</span>'
+        +'<span class="dim" style="font-size:11px">started '+esc(fmtDate(pendingSub.delegated_at))+'</span>'
+        +'</div>'
+        +'<div class="dim" style="font-size:11px;margin-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(pendingSub.prompt)+'">'+esc(pendingSub.prompt.slice(0,100))+'</div>'
+        +'</div>';
+    }
+
+    if (t.failure_kind) {
+      html += '<div style="margin-bottom:12px;padding:10px 12px;background:#1a0d0d;border:1px solid #f8514966;border-radius:6px;font-size:12px">'
+        +'<div style="color:#f85149;font-weight:600;margin-bottom:4px">'+esc(t.failure_kind.replace(/_/g,' '))+'</div>'
+        +(t.failure_detail ? '<div class="dim">'+esc(t.failure_detail)+'</div>' : '')
+        +'</div>';
+    }
+
+    html += '<div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Prompt</div>'
+      +'<pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;margin:0 0 12px;max-height:240px;overflow-y:auto">'+esc(t.prompt)+'</pre>';
+
+    if (t.result) {
+      html += '<div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Result</div>'
+        +'<pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;margin:0;max-height:400px;overflow-y:auto">'+esc(t.result)+'</pre>';
+    }
+
+    content.innerHTML = html;
+  }
+
+  async function loadSpecialists() {
+    var liveEl = document.getElementById('specialists-live');
+    var memEl = document.getElementById('specialists-memory');
+    var recentEl = document.getElementById('specialists-recent');
+    var statusEl = document.getElementById('specialists-refresh-status');
+
+    function statusBadge(status) {
+      var c = { queued: 'bb', running: 'bg', awaiting_sub_task: 'by', awaiting_restart: 'br', completed: 'bg', failed: 'br' }[status] || 'bb';
+      return '<span class="badge b'+c+'">'+esc(status.replace(/_/g,' '))+'</span>';
+    }
+
+    function isOverdue(t) {
+      return !t.closed_at && (Date.now() - new Date(t.delegated_at).getTime()) > SPECIALIST_OVERDUE_MS;
+    }
+
+    function taskRow(t, isLive) {
+      var indent = t.depth > 0 ? '<span class="dim" style="font-size:10px;margin-right:2px">'+'&#x2514;&#x2500;'.repeat(t.depth)+'</span>' : '';
+      var age = fmtDate(t.delegated_at);
+      var duration = t.closed_at
+        ? (function(){ var ms = new Date(t.closed_at)-new Date(t.delegated_at); return ms<60000 ? Math.round(ms/1000)+'s' : Math.round(ms/60000)+'m'; })()
+        : '\u2014';
+      var prompt = t.prompt.length > 80 ? t.prompt.slice(0, 80)+'\u2026' : t.prompt;
+      var overdue = isLive && isOverdue(t);
+      var rowStyle = overdue ? ' style="background:#1a0d0d"' : (t.id === specialistDetailId ? ' style="background:#21262d"' : '');
+      var overdueTag = overdue ? ' <span class="badge br" style="font-size:9px">\u26A0</span>' : '';
+      var html = '<tr'+rowStyle+' style="cursor:pointer" data-task-id="'+esc(t.id)+'">'
+        +'<td>'+indent+'<span class="badge bb" style="font-size:10px">'+esc(t.specialist_type)+'</span>'+overdueTag+'</td>'
+        +'<td>'+statusBadge(t.status)+'</td>'
+        +'<td class="dim" style="font-size:11px;text-align:center">'+t.depth+'</td>'
+        +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(age)+'</td>'
+        +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(duration)+'</td>'
+        +'<td class="dim" style="font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(t.prompt)+'">'+esc(prompt)+'</td>'
+        +'</tr>';
+      return html;
+    }
+
+    function bindRowClicks(tableEl, tasks) {
+      if (!tableEl) return;
+      tableEl.querySelectorAll('tr[data-task-id]').forEach(function(row) {
+        row.addEventListener('click', function() {
+          var id = row.dataset.taskId;
+          var t = tasks.find(function(x) { return x.id === id; });
+          if (t) showSpecialistDetail(t);
+        });
+      });
+    }
+
+    try {
+      var data = await fetch('/api/specialists').then(function(r) { return r.json(); });
+      var allTasks = data.live.concat(data.recent);
+      specialistAllTasksCache = allTasks;
+      specialistSessionsCache = data.sessions || {};
+
+      // Live tasks table
+      if (!data.live.length) {
+        liveEl.innerHTML = '<div class="empty" style="padding:16px">No active specialist tasks</div>';
+      } else {
+        liveEl.innerHTML = '<table><thead><tr><th>Type</th><th>Status</th><th>Depth</th><th>Started</th><th>Running</th><th>Prompt</th></tr></thead><tbody>'
+          + data.live.map(function(t) { return taskRow(t, true); }).join('')
+          +'</tbody></table>';
+        bindRowClicks(liveEl, allTasks);
+      }
+
+      // Recent tasks table (last 50)
+      if (!data.recent.length) {
+        recentEl.innerHTML = '<div class="empty" style="padding:16px">No recent specialist tasks</div>';
+      } else {
+        recentEl.innerHTML = '<table><thead><tr><th>Type</th><th>Status</th><th>Depth</th><th>Started</th><th>Duration</th><th>Prompt</th></tr></thead><tbody>'
+          + data.recent.map(function(t) { return taskRow(t, false); }).join('')
+          +'</tbody></table>';
+        bindRowClicks(recentEl, allTasks);
+      }
+
+      // Refresh detail panel if it's open and the task data changed
+      if (specialistDetailId) {
+        var current = allTasks.find(function(x) { return x.id === specialistDetailId; });
+        if (current) showSpecialistDetail(current);
+      }
+
+      if (statusEl) statusEl.textContent = 'Updated '+new Date().toLocaleTimeString();
+    } catch(e) {
+      if (liveEl) liveEl.innerHTML = '<div class="empty">Error loading specialist tasks</div>';
+      if (recentEl) recentEl.innerHTML = '';
+    }
+
+    try {
+      var mems = await fetch('/api/memory-submissions').then(function(r) { return r.json(); });
+      if (!mems.length) {
+        memEl.innerHTML = '<div class="empty" style="padding:16px">No staged memory submissions</div>';
+      } else {
+        memEl.innerHTML = '<table><thead><tr><th>Topic</th><th>Task ID</th><th>Submitted</th><th>Overdue Alert</th></tr></thead><tbody>'
+          + mems.map(function(m) {
+            return '<tr>'
+              +'<td style="font-size:12px">'+esc(m.topic)+'</td>'
+              +'<td class="dim" style="font-family:monospace;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.task_id)+'">'+esc(m.task_id)+'</td>'
+              +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(fmtDate(m.submitted_at))+'</td>'
+              +'<td style="font-size:11px">'+(m.overdue_alerted_at ? '<span class="badge br">alerted '+esc(fmtDate(m.overdue_alerted_at))+'</span>' : '<span class="dim">\u2014</span>')+'</td>'
+              +'</tr>';
+          }).join('')
+          +'</tbody></table>';
+      }
+    } catch(e) {
+      if (memEl) memEl.innerHTML = '<div class="empty">Error loading memory submissions</div>';
+    }
   }
 
   // ── Feeds ──────────────────────────────────────────────────────────────────
@@ -1908,6 +2178,7 @@ document.addEventListener('DOMContentLoaded', function() {
 <div id="mobile-nav">
   <a id="mnav-overview" href="#overview">Overview</a>
   <a id="mnav-groups" href="#groups">Groups</a>
+  <a id="mnav-specialists" href="#specialists">Specialists</a>
   <a id="mnav-feeds" href="#feeds">Feeds</a>
   <a id="mnav-system" href="#system">System</a>
   <a id="mnav-database" href="#database">Database</a>
@@ -2616,6 +2887,23 @@ export function startWebUi(
         return;
       }
 
+      // GET /api/specialists — live + recent specialist tasks with conversation sessions
+      if (req.method === 'GET' && pathname === '/api/specialists') {
+        const live = getLiveSpecialistTasks();
+        const recent = getRecentFinishedSpecialistTasks(50);
+        const sessions = getSpecialistSessionsForTasks(
+          [...live, ...recent].map((t) => t.id),
+        );
+        sendJson(res, { live, recent, sessions });
+        return;
+      }
+
+      // GET /api/memory-submissions — staged raw memory submissions
+      if (req.method === 'GET' && pathname === '/api/memory-submissions') {
+        sendJson(res, getRawMemorySubmissionsByStatus('staged'));
+        return;
+      }
+
       // GET /api/status
       if (req.method === 'GET' && pathname === '/api/status') {
         const queueStatus: GroupQueueStatus = opts.groupQueue
@@ -2695,11 +2983,25 @@ export function startWebUi(
               .sort()
           : [];
 
+        // Specialist task summary
+        const liveSpecialistTasks = getLiveSpecialistTasks();
+        const maxTaskDurationMs = 4 * 60 * 60 * 1000; // 4 hours (specialists.allium default)
+        const nowMs = Date.now();
+        const overdueCount = liveSpecialistTasks.filter(
+          (t) => nowMs - new Date(t.delegated_at).getTime() > maxTaskDurationMs,
+        ).length;
+        const specialistSummary = {
+          live: liveSpecialistTasks.length,
+          overdue: overdueCount,
+          tasks: liveSpecialistTasks,
+        };
+
         sendJson(res, {
           uptime: Math.floor(process.uptime()),
           queue: queueStatus,
           ipc: ipcQueues,
           tasks: taskSummary,
+          specialists: specialistSummary,
           usage: {
             proxyRequests: stats.proxyRequests,
             claudeRequests: stats.claudeRequests,

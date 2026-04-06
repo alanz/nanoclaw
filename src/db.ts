@@ -1181,6 +1181,29 @@ export function getSpecialistSubTasks(parentTaskId: string): SpecialistTask[] {
     .all(parentTaskId) as SpecialistTask[];
 }
 
+export function getRecentFinishedSpecialistTasks(
+  limit: number,
+): SpecialistTask[] {
+  return db
+    .prepare(
+      "SELECT * FROM specialist_tasks WHERE status IN ('completed','failed') ORDER BY closed_at DESC LIMIT ?",
+    )
+    .all(limit) as SpecialistTask[];
+}
+
+export function getSpecialistSessionsForTasks(
+  taskIds: string[],
+): Record<string, SpecialistConversationSession> {
+  if (taskIds.length === 0) return {};
+  const placeholders = taskIds.map(() => '?').join(', ');
+  const rows = db
+    .prepare(
+      `SELECT * FROM specialist_conversation_sessions WHERE task_id IN (${placeholders})`,
+    )
+    .all(...taskIds) as SpecialistConversationSession[];
+  return Object.fromEntries(rows.map((r) => [r.task_id, r]));
+}
+
 // --- Specialist conversation session accessors ---
 
 export function createSpecialistSession(

@@ -3210,13 +3210,13 @@ export function startWebUi(
         };
 
         // Orphan containers: running nanoclaw-* or claw-* containers not
-        // tracked by the GroupQueue. These can steal IPC input messages.
+        // tracked by the GroupQueue. This includes specialist containers
+        // that register via registerProcess but bypass the queue's
+        // enqueue/run lifecycle.
         const allManagedContainers = listAllManagedContainers();
-        const trackedNames = new Set(
-          queueStatus.groups
-            .filter((g) => g.active && g.containerName)
-            .map((g) => g.containerName as string),
-        );
+        const trackedNames = opts.groupQueue
+          ? opts.groupQueue.getTrackedContainerNames()
+          : new Set<string>();
         const orphanContainers = allManagedContainers
           .filter((c) => !trackedNames.has(c.name))
           .map((c) => ({

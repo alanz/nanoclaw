@@ -511,6 +511,15 @@ export class GroupQueue {
     };
   }
 
+  /** All container names currently registered with the queue (active or not). */
+  getTrackedContainerNames(): Set<string> {
+    const names = new Set<string>();
+    for (const state of this.groups.values()) {
+      if (state.containerName) names.add(state.containerName);
+    }
+    return names;
+  }
+
   async shutdown(_gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
 

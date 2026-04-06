@@ -1317,55 +1317,46 @@ async function main(): Promise<void> {
         }
       }
 
-      // Fire-and-forget — result arrives via deliver_specialist_result IPC
-      runContainerAgent(
-        specGroup,
-        {
-          prompt,
-          sessionId,
-          groupFolder: specFolder,
-          chatJid: makeSpecialistJid(task.id),
-          isMain: false,
-          dispatchDepth: task.depth,
-          hostGroupDir,
-          specialistType: task.specialist_type,
-          extraReadonlyMounts,
-        },
-        (proc, containerName) =>
-          queue.registerProcess(
-            makeSpecialistJid(task.id),
-            proc,
-            containerName,
-            specFolder,
-          ),
-      )
-        .then(async (output) => {
-          if (output.status === 'error') {
-            // If task still active (result not already delivered via IPC), fail it
-            const current = getSpecialistTask(task.id);
-            if (
-              current &&
-              current.status !== 'completed' &&
-              current.status !== 'failed'
-            ) {
-              await failSpecialistTask(
-                task.id,
-                'execution_error',
-                output.error ?? 'Container exited with error',
-              );
-            }
-          }
-        })
-        .catch(async (err) => {
+      // Route through the queue so specialists count against the
+      // concurrency limit and appear in Active Containers.
+      const specialistJid = makeSpecialistJid(task.id);
+      queue.enqueueTask(specialistJid, task.id, async () => {
+        const output = await runContainerAgent(
+          specGroup,
+          {
+            prompt,
+            sessionId,
+            groupFolder: specFolder,
+            chatJid: specialistJid,
+            isMain: false,
+            dispatchDepth: task.depth,
+            hostGroupDir,
+            specialistType: task.specialist_type,
+            extraReadonlyMounts,
+          },
+          (proc, containerName) =>
+            queue.registerProcess(
+              specialistJid,
+              proc,
+              containerName,
+              specFolder,
+            ),
+        );
+        if (output.status === 'error') {
           const current = getSpecialistTask(task.id);
           if (
             current &&
             current.status !== 'completed' &&
             current.status !== 'failed'
           ) {
-            await failSpecialistTask(task.id, 'execution_error', String(err));
+            await failSpecialistTask(
+              task.id,
+              'execution_error',
+              output.error ?? 'Container exited with error',
+            );
           }
-        });
+        }
+      });
     },
 
     notifyMainGroupFn: async (groupJid: string, message: string) => {

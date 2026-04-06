@@ -9,11 +9,14 @@ store/
 data/
 logs/
 
-# Groups - only track global template CLAUDE.md
+# Groups - only track CLAUDE.md files
 groups/*
 !groups/global/
 groups/global/*
 !groups/global/CLAUDE.md
+!groups/main/
+groups/main/*
+!groups/main/CLAUDE.md
 
 # Secrets
 *.keys.json

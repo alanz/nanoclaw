@@ -388,7 +388,7 @@ The prompt must NOT reference any existing NanoClaw memory notes, reports, or co
 
 **3. On result return**
 
-Write the full report to `memory/reports/YYYY-MM-DD-{slug}.md`, then follow the A-MEM Note-Taking steps below to create a linked note from the report content.
+Write the full report to `memory/reports/YYYY-MM-DD-{slug}.md`, then follow the A-MEM Note-Taking steps below to create a linked note from the report content. After creating the note, always reply to the user with a brief summary of what was found and a link to the new note.
 
 ---
 

@@ -713,7 +713,7 @@ async function _routeResult(
     // Main group requested this task — deliver result as a notification
     await _deps.notifyMainGroupFn(
       task.requester_group,
-      `Specialist ${task.specialist_type} completed:\n\n${resultText}`,
+      `Specialist ${task.specialist_type} completed:\n\n${resultText}\n\n---\nPlease reply to the user with a brief summary of what you found and any notes or files you created.`,
     );
   } else if (task.requester_task_id) {
     // Parent specialist requested this task — resume it with the result

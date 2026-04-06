@@ -25,6 +25,8 @@ import {
   getSpecialistSessionsForTasks,
   getRecentAcceptedMemorySubmissions,
   getStagedMemorySubmissionsWithFolder,
+  getMemorySubmissionsForTasks,
+  getRegisteredGroup,
   getResearcherTaskIdsByDate,
   getTaskRunLogs,
   storeMessage,
@@ -1870,6 +1872,8 @@ document.addEventListener('DOMContentLoaded', function() {
   var specialistDetailId = null;
   var specialistAllTasksCache = [];   // live + recent, updated on each load
   var specialistSessionsCache = {};   // task_id → session, updated on each load
+  var specialistSubmissionsCache = {}; // task_id → [submissions], updated on each load
+  var specialistReportPathsCache = {}; // task_id → {path, folder}, updated on each load
   var submissionDetailId = null;
   var submissionAllCache = [];        // staged + accepted, updated on each load
   var SPECIALIST_OVERDUE_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -1960,6 +1964,25 @@ document.addEventListener('DOMContentLoaded', function() {
     if (t.result) {
       html += '<div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Result</div>'
         +'<pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;margin:0;max-height:400px;overflow-y:auto">'+esc(t.result)+'</pre>';
+    }
+
+    // Report link — from filesystem match or accepted memory submissions
+    var report = specialistReportPathsCache[t.id];
+    var taskSubs = (specialistSubmissionsCache[t.id] || []).filter(function(s) { return s.status === 'accepted' && s.final_path; });
+    if (report || taskSubs.length) {
+      html += '<div style="margin-top:12px;font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Report</div>'
+        +'<div style="display:flex;flex-direction:column;gap:4px">';
+      if (report) {
+        html += '<a href="#groups/'+esc(report.folder)+'/files/'+esc(report.path)+'" style="color:#58a6ff;text-decoration:none;font-family:monospace;font-size:11px">'
+          +esc(report.path)+'</a>';
+      }
+      html += taskSubs.map(function(s) {
+            var href = s.group_folder ? '#groups/'+s.group_folder+'/files/'+s.final_path : null;
+            return href
+              ? '<a href="'+esc(href)+'" style="color:#58a6ff;text-decoration:none;font-family:monospace;font-size:11px">'+esc(s.final_path)+'</a>'
+              : '<span style="font-family:monospace;font-size:11px;color:#8b949e">'+esc(s.final_path)+'</span>';
+          }).join('')
+        +'</div>';
     }
 
     content.innerHTML = html;
@@ -2063,6 +2086,8 @@ document.addEventListener('DOMContentLoaded', function() {
       var allTasks = data.live.concat(data.recent);
       specialistAllTasksCache = allTasks;
       specialistSessionsCache = data.sessions || {};
+      specialistSubmissionsCache = data.submissionsMap || {};
+      specialistReportPathsCache = data.reportPaths || {};
 
       // Live tasks table
       if (!data.live.length) {
@@ -3039,10 +3064,86 @@ export function startWebUi(
       if (req.method === 'GET' && pathname === '/api/specialists') {
         const live = getLiveSpecialistTasks();
         const recent = getRecentFinishedSpecialistTasks(50);
-        const sessions = getSpecialistSessionsForTasks(
-          [...live, ...recent].map((t) => t.id),
+        const allTaskIds = [...live, ...recent].map((t) => t.id);
+        const sessions = getSpecialistSessionsForTasks(allTaskIds);
+        const submissionsList = getMemorySubmissionsForTasks(allTaskIds);
+        const submissionsMap: Record<string, typeof submissionsList> = {};
+        for (const sub of submissionsList) {
+          if (!submissionsMap[sub.task_id]) submissionsMap[sub.task_id] = [];
+          submissionsMap[sub.task_id].push(sub);
+        }
+
+        // Match completed researcher tasks to report files on disk
+        const reportPaths: Record<string, { path: string; folder: string }> =
+          {};
+        const completedResearchers = [...live, ...recent].filter(
+          (t) =>
+            t.specialist_type === 'researcher' &&
+            t.status === 'completed' &&
+            t.result &&
+            t.requester_group,
         );
-        sendJson(res, { live, recent, sessions });
+        // Group by requester_group + close date to minimize FS scans
+        const groupDateTasks = new Map<
+          string,
+          { folder: string; date: string; tasks: typeof completedResearchers }
+        >();
+        for (const t of completedResearchers) {
+          const group = getRegisteredGroup(t.requester_group!);
+          if (!group?.folder || !t.closed_at) continue;
+          const date = t.closed_at.slice(0, 10); // YYYY-MM-DD
+          const key = `${group.folder}:${date}`;
+          if (!groupDateTasks.has(key)) {
+            groupDateTasks.set(key, {
+              folder: group.folder,
+              date,
+              tasks: [],
+            });
+          }
+          groupDateTasks.get(key)!.tasks.push(t);
+        }
+        for (const { folder, date, tasks } of groupDateTasks.values()) {
+          const reportsDir = path.join(GROUPS_DIR, folder, 'memory', 'reports');
+          let files: string[];
+          try {
+            files = fs
+              .readdirSync(reportsDir)
+              .filter((f) => f.startsWith(date) && f.endsWith('.md'));
+          } catch {
+            continue;
+          }
+          // Read first 200 chars of each candidate file
+          const candidates: { name: string; prefix: string }[] = [];
+          for (const f of files) {
+            try {
+              const buf = Buffer.alloc(200);
+              const fd = fs.openSync(path.join(reportsDir, f), 'r');
+              const bytesRead = fs.readSync(fd, buf, 0, 200, 0);
+              fs.closeSync(fd);
+              candidates.push({
+                name: f,
+                prefix: buf.toString('utf-8', 0, bytesRead),
+              });
+            } catch {
+              /* skip unreadable */
+            }
+          }
+          // Match each task's result prefix to a file
+          for (const t of tasks) {
+            const resultPrefix = t.result!.slice(0, 150);
+            const match = candidates.find(
+              (c) => c.prefix.slice(0, 150) === resultPrefix,
+            );
+            if (match) {
+              reportPaths[t.id] = {
+                path: `memory/reports/${match.name}`,
+                folder,
+              };
+            }
+          }
+        }
+
+        sendJson(res, { live, recent, sessions, submissionsMap, reportPaths });
         return;
       }
 

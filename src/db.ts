@@ -1348,6 +1348,25 @@ export function getRecentAcceptedMemorySubmissions(
     .all(limit) as (RawMemorySubmission & { group_folder: string | null })[];
 }
 
+export function getMemorySubmissionsForTasks(
+  taskIds: string[],
+): (RawMemorySubmission & { group_folder: string | null })[] {
+  if (!taskIds.length) return [];
+  const placeholders = taskIds.map(() => '?').join(',');
+  return db
+    .prepare(
+      `SELECT rms.*, rg.folder AS group_folder
+       FROM raw_memory_submissions rms
+       LEFT JOIN specialist_tasks st ON rms.task_id = st.id
+       LEFT JOIN registered_groups rg ON st.requester_group = rg.jid
+       WHERE rms.task_id IN (${placeholders})
+       ORDER BY rms.submitted_at`,
+    )
+    .all(...taskIds) as (RawMemorySubmission & {
+    group_folder: string | null;
+  })[];
+}
+
 export function markRawMemorySubmissionOverdueAlerted(
   id: string,
   alertedAt: string,

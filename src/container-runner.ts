@@ -517,6 +517,8 @@ export async function runContainerAgent(
 
     let timedOut = false;
     let hadStreamingOutput = false;
+    let apiErrorKilled = false;
+    let apiErrorMessage: string | null = null;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
@@ -547,9 +549,135 @@ export async function runContainerAgent(
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
 
+    // Poll the session JSONL for terminal API errors (policy violations, etc.)
+    // so we can kill the container early rather than waiting for the full timeout.
+    //
+    // On seeing an API error we start a grace timer: if new JSONL lines appear
+    // within the grace period the agent recovered and we leave it alone.
+    // Transient errors (overloaded, rate_limit) are skipped entirely.
+    const sessionProjectsDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+      'projects',
+      '-workspace-group',
+    );
+    const jsonlOffsets: Record<string, number> = {};
+    let apiErrorGrace: ReturnType<typeof setTimeout> | null = null;
+
+    const killOnApiError = () => {
+      if (timedOut || apiErrorKilled) return;
+      apiErrorKilled = true;
+      clearTimeout(timeout);
+      clearInterval(sessionPoll);
+      logger.warn(
+        { group: group.name, containerName, error: apiErrorMessage },
+        'API error in session log unrecovered after grace period, stopping container',
+      );
+      try {
+        stopContainer(containerName);
+      } catch {
+        container.kill('SIGKILL');
+      }
+    };
+
+    // Error types that are transient — skip the grace timer entirely.
+    const TRANSIENT_API_ERRORS = new Set(['overloaded', 'rate_limit_error']);
+    const API_ERROR_GRACE_MS = 2 * 60 * 1000; // 2 minutes
+
+    const sessionPoll = setInterval(() => {
+      if (timedOut || apiErrorKilled) return;
+      let files: string[];
+      try {
+        files = fs
+          .readdirSync(sessionProjectsDir)
+          .filter((f) => f.endsWith('.jsonl'));
+      } catch {
+        return; // directory not yet created
+      }
+      for (const file of files) {
+        const filePath = path.join(sessionProjectsDir, file);
+        const offset = jsonlOffsets[file] ?? 0;
+        let size: number;
+        try {
+          size = fs.statSync(filePath).size;
+        } catch {
+          continue;
+        }
+        if (size <= offset) continue;
+        let chunk: string;
+        try {
+          const fd = fs.openSync(filePath, 'r');
+          const buf = Buffer.alloc(size - offset);
+          fs.readSync(fd, buf, 0, buf.length, offset);
+          fs.closeSync(fd);
+          chunk = buf.toString('utf8');
+        } catch {
+          continue;
+        }
+        jsonlOffsets[file] = size;
+        for (const line of chunk.split('\n').filter(Boolean)) {
+          let entry: Record<string, unknown>;
+          try {
+            entry = JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          if (entry.isApiErrorMessage) {
+            // Skip transient errors — the agent can recover on its own.
+            const errorKind =
+              typeof entry.error === 'string' ? entry.error : '';
+            if (TRANSIENT_API_ERRORS.has(errorKind)) continue;
+
+            const msg = entry.message as Record<string, unknown> | undefined;
+            const blocks = msg?.content as
+              | Array<{ type: string; text?: string }>
+              | undefined;
+            const text =
+              blocks?.find((b) => b.type === 'text')?.text ??
+              'Unknown API error';
+            apiErrorMessage = text.replace(/\s+/g, ' ').slice(0, 300);
+
+            if (apiErrorGrace === null) {
+              logger.warn(
+                { group: group.name, containerName, error: apiErrorMessage },
+                'API error detected in session log, starting grace period',
+              );
+              apiErrorGrace = setTimeout(killOnApiError, API_ERROR_GRACE_MS);
+            }
+          } else if (apiErrorGrace !== null) {
+            // New activity after an API error — agent recovered, cancel kill.
+            logger.info(
+              { group: group.name, containerName },
+              'Agent recovered after API error, cancelling grace timer',
+            );
+            clearTimeout(apiErrorGrace);
+            apiErrorGrace = null;
+            apiErrorMessage = null;
+          }
+        }
+      }
+    }, 5_000);
+
     container.on('close', (code) => {
       clearTimeout(timeout);
+      clearInterval(sessionPoll);
+      if (apiErrorGrace !== null) clearTimeout(apiErrorGrace);
       const duration = Date.now() - startTime;
+
+      if (apiErrorKilled) {
+        logger.error(
+          { group: group.name, containerName, duration, code },
+          'Container stopped due to API error in session',
+        );
+        resolve({
+          status: 'error',
+          result: null,
+          error: `API error: ${apiErrorMessage}`,
+        });
+        return;
+      }
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');

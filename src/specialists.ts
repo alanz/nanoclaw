@@ -9,7 +9,11 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { SPECIALIST_TEMPLATE_DIR, SPECIALISTS_CONFIG } from './config.js';
+import {
+  DATA_DIR,
+  SPECIALIST_TEMPLATE_DIR,
+  SPECIALISTS_CONFIG,
+} from './config.js';
 import {
   checkDelegationPolicy,
   DelegationDecision,
@@ -732,17 +736,148 @@ async function _routeResult(
   }
 }
 
+/**
+ * Parse JSONL session log content and produce a short post-mortem summary.
+ * Exported for testing.
+ */
+export function _parseSessionPostMortem(
+  sessionId: string,
+  jsonlContent: string,
+): string {
+  const lines = jsonlContent.trim().split('\n').filter(Boolean);
+
+  let lastToolName: string | null = null;
+  let lastToolInput: string | null = null;
+  let lastToolResultSnippet: string | null = null;
+  let apiError: string | null = null;
+  let lastAssistantText: string | null = null;
+  let messageCount = 0;
+
+  for (const line of lines) {
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    if (entry.type === 'assistant') {
+      messageCount++;
+      const msg = entry.message as Record<string, unknown> | undefined;
+      if (!msg) continue;
+
+      if (entry.isApiErrorMessage) {
+        const content = msg.content as
+          | Array<{ type: string; text?: string }>
+          | undefined;
+        const text = content?.find((c) => c.type === 'text')?.text ?? '';
+        apiError = text.replace(/\s+/g, ' ').slice(0, 200);
+        continue;
+      }
+
+      const content = msg.content as
+        | Array<{
+            type: string;
+            text?: string;
+            name?: string;
+            input?: unknown;
+          }>
+        | undefined;
+      if (!content) continue;
+
+      for (const block of content) {
+        if (block.type === 'tool_use') {
+          lastToolName = block.name ?? null;
+          const inputStr = JSON.stringify(block.input ?? {});
+          lastToolInput =
+            inputStr.length > 120 ? inputStr.slice(0, 120) + '…' : inputStr;
+          lastToolResultSnippet = null; // reset; will be filled by next tool_result
+        }
+        if (block.type === 'text' && block.text) {
+          const t = block.text.replace(/\s+/g, ' ').trim();
+          if (t) lastAssistantText = t.slice(0, 150);
+        }
+      }
+    }
+
+    if (entry.type === 'user') {
+      const toolResult = entry.toolUseResult;
+      if (toolResult && typeof toolResult === 'object') {
+        const r = toolResult as Record<string, unknown>;
+        // Prefer HTTP status summary for web fetches, otherwise stdout snippet
+        if (typeof r.code === 'number') {
+          lastToolResultSnippet =
+            `${r.code} ${r.codeText ?? ''} (${r.bytes ?? '?'} bytes)`.trim();
+        } else if (typeof r.stdout === 'string') {
+          const s = r.stdout.replace(/\s+/g, ' ').trim();
+          lastToolResultSnippet = s.slice(0, 100) || null;
+        } else if (Array.isArray(toolResult)) {
+          const text =
+            (toolResult as Array<{ type: string; text?: string }>).find(
+              (c) => c.type === 'text',
+            )?.text ?? '';
+          const s = text.replace(/\s+/g, ' ').trim();
+          lastToolResultSnippet = s.slice(0, 100) || null;
+        }
+      }
+    }
+  }
+
+  const parts: string[] = [
+    `Post-mortem (session ${sessionId.slice(0, 8)}…, ${messageCount} turns):`,
+  ];
+  if (lastToolName) {
+    parts.push(`• Last tool: ${lastToolName}(${lastToolInput ?? ''})`);
+    if (lastToolResultSnippet) parts.push(`  → ${lastToolResultSnippet}`);
+  }
+  if (apiError) parts.push(`• API error: ${apiError}`);
+  if (!lastToolName && lastAssistantText)
+    parts.push(`• Last response: ${lastAssistantText}`);
+
+  return parts.join('\n');
+}
+
+/**
+ * Read the JSONL session log for a specialist task and produce a short
+ * post-mortem summary describing what the agent was doing when it failed.
+ */
+function _buildPostMortem(taskId: string, sessionId: string): string {
+  const jsonlPath = path.join(
+    DATA_DIR,
+    'sessions',
+    `spec-${taskId}`,
+    '.claude',
+    'projects',
+    '-workspace-group',
+    `${sessionId}.jsonl`,
+  );
+
+  let content: string;
+  try {
+    content = fs.readFileSync(jsonlPath, 'utf8');
+  } catch {
+    return `(session log unavailable)`;
+  }
+
+  return _parseSessionPostMortem(sessionId, content);
+}
+
 /** Route a failed task's failure to its requester. */
 async function _routeFailure(
   task: SpecialistTask,
   kind: FailureKind,
   detail: string,
 ): Promise<void> {
+  const session = getSpecialistSession(task.id);
+  const postMortem = session
+    ? _buildPostMortem(task.id, session.session_id)
+    : null;
+  const failureMessage =
+    `Specialist ${task.specialist_type} failed (${kind}): ${detail}` +
+    (postMortem ? `\n\n${postMortem}` : '');
+
   if (task.requester_group) {
-    await _deps.notifyMainGroupFn(
-      task.requester_group,
-      `Specialist ${task.specialist_type} failed (${kind}): ${detail}`,
-    );
+    await _deps.notifyMainGroupFn(task.requester_group, failureMessage);
   } else if (task.requester_task_id) {
     const parentTask = getSpecialistTask(task.requester_task_id);
     if (!parentTask) {

@@ -1317,6 +1317,37 @@ export function getRawMemorySubmissionsByStatus(
     .all(status) as RawMemorySubmission[];
 }
 
+export function getStagedMemorySubmissionsWithFolder(): (RawMemorySubmission & {
+  group_folder: string | null;
+})[] {
+  return db
+    .prepare(
+      `SELECT rms.*, rg.folder AS group_folder
+       FROM raw_memory_submissions rms
+       LEFT JOIN specialist_tasks st ON rms.task_id = st.id
+       LEFT JOIN registered_groups rg ON st.requester_group = rg.jid
+       WHERE rms.status = 'staged'
+       ORDER BY rms.submitted_at`,
+    )
+    .all() as (RawMemorySubmission & { group_folder: string | null })[];
+}
+
+export function getRecentAcceptedMemorySubmissions(
+  limit: number,
+): (RawMemorySubmission & { group_folder: string | null })[] {
+  return db
+    .prepare(
+      `SELECT rms.*, rg.folder AS group_folder
+       FROM raw_memory_submissions rms
+       LEFT JOIN specialist_tasks st ON rms.task_id = st.id
+       LEFT JOIN registered_groups rg ON st.requester_group = rg.jid
+       WHERE rms.status = 'accepted'
+       ORDER BY rms.accepted_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as (RawMemorySubmission & { group_folder: string | null })[];
+}
+
 export function markRawMemorySubmissionOverdueAlerted(
   id: string,
   alertedAt: string,
@@ -1324,6 +1355,25 @@ export function markRawMemorySubmissionOverdueAlerted(
   db.prepare(
     `UPDATE raw_memory_submissions SET overdue_alerted_at = ? WHERE id = ?`,
   ).run(alertedAt, id);
+}
+
+// --- Note provenance ---
+
+/**
+ * Find researcher tasks closed on a given date (YYYY-MM-DD).
+ * Used to link memory notes to their originating research task via the
+ * report path date embedded in the note's sources frontmatter.
+ */
+export function getResearcherTaskIdsByDate(date: string): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT id FROM specialist_tasks
+         WHERE specialist_type = 'researcher'
+         AND DATE(closed_at) = ?`,
+      )
+      .all(date) as { id: string }[]
+  ).map((r) => r.id);
 }
 
 // --- Specialist dispatch count query ---

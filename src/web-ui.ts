@@ -23,7 +23,9 @@ import {
   getLiveSpecialistTasks,
   getRecentFinishedSpecialistTasks,
   getSpecialistSessionsForTasks,
-  getRawMemorySubmissionsByStatus,
+  getRecentAcceptedMemorySubmissions,
+  getStagedMemorySubmissionsWithFolder,
+  getResearcherTaskIdsByDate,
   getTaskRunLogs,
   storeMessage,
 } from './db.js';
@@ -303,6 +305,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
         <div id="specialists-live" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
         <div id="specialists-memory-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Staged Memory Submissions</div>
         <div id="specialists-memory" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
+        <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Accepted Memory Submissions (last 50)</div>
+        <div id="specialists-memory-accepted" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
         <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Recent Tasks (last 50)</div>
         <div id="specialists-recent" class="card" style="padding:0;overflow:hidden"></div>
       </div>
@@ -1504,6 +1508,9 @@ document.addEventListener('DOMContentLoaded', function() {
         '<div class="fm-key">Created</div><div class="fm-val">'+esc(d.created)+'</div>'
         +(tagsHtml ? '<div class="fm-key">Tags</div><div class="fm-val">'+tagsHtml+'</div>' : '')
         +(kwHtml   ? '<div class="fm-key">Keywords</div><div class="fm-val">'+kwHtml+'</div>' : '')
+        +(d.source_task_id
+          ? '<div class="fm-key">Research Task</div><div class="fm-val"><a href="#specialists" id="graph-task-link" data-task-id="'+esc(d.source_task_id)+'" style="color:#58a6ff;font-family:monospace;font-size:10px">'+esc(d.source_task_id.slice(0,8))+'\u2026 \u2192</a></div>'
+          : '')
         +'<div class="fm-key">File</div><div class="fm-val"><a href="#" id="graph-open-link" style="color:#58a6ff;font-size:11px">Open in Files tab \u2192</a></div>';
       panel.style.display = 'block';
       document.getElementById('graph-open-link').onclick = function(e) {
@@ -1513,6 +1520,20 @@ document.addEventListener('DOMContentLoaded', function() {
           switchTab('files', rel);
         }
       };
+      var taskLinkEl = document.getElementById('graph-task-link');
+      if (taskLinkEl) {
+        taskLinkEl.onclick = function(e) {
+          e.preventDefault();
+          var tid = taskLinkEl.dataset.taskId;
+          pushHash('specialists');
+          // Pre-populate the detail panel once the specialists section loads
+          var waitForCache = setInterval(function() {
+            var t = specialistAllTasksCache.find(function(x) { return x.id === tid; });
+            if (t) { clearInterval(waitForCache); showSpecialistDetail(t); }
+          }, 200);
+          setTimeout(function() { clearInterval(waitForCache); }, 5000);
+        };
+      }
     });
 
     graphCy.on('mouseover', 'node', function(evt) {
@@ -1849,6 +1870,8 @@ document.addEventListener('DOMContentLoaded', function() {
   var specialistDetailId = null;
   var specialistAllTasksCache = [];   // live + recent, updated on each load
   var specialistSessionsCache = {};   // task_id → session, updated on each load
+  var submissionDetailId = null;
+  var submissionAllCache = [];        // staged + accepted, updated on each load
   var SPECIALIST_OVERDUE_MS = 4 * 60 * 60 * 1000; // 4 hours
 
   function stopSpecialists() {
@@ -1884,10 +1907,13 @@ document.addEventListener('DOMContentLoaded', function() {
       ? specialistAllTasksCache.find(function(x) { return x.id === t.pending_sub_task_id; })
       : null;
 
+    var isLastDispatch = t.is_last_same_type_dispatch === 1 || t.is_last_same_type_dispatch === true;
+
     var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">'
       +'<span class="badge bb">'+esc(t.specialist_type)+'</span>'
       +'<span class="badge b'+sc+'">'+esc(t.status.replace(/_/g,' '))+'</span>'
       +(isOverdue ? '<span class="badge br">\u26A0 overdue</span>' : '')
+      +(isLastDispatch ? '<span class="badge by" title="No further dispatches of this specialist type are permitted in this chain">\u26A0 last of type</span>' : '')
       +'<span class="dim" style="font-size:11px;margin-left:auto">depth '+t.depth+'</span>'
       +'</div>';
 
@@ -1895,10 +1921,12 @@ document.addEventListener('DOMContentLoaded', function() {
       +'<span class="fm-key">Started</span><span class="fm-val">'+esc(fmtDate(t.delegated_at))+'</span>'
       +(t.closed_at ? '<span class="fm-key">Closed</span><span class="fm-val">'+esc(fmtDate(t.closed_at))+'</span>' : '')
       +'<span class="fm-key">Duration</span><span class="fm-val">'+esc(duration)+'</span>'
+      +'<span class="fm-key">Chain</span><span class="fm-val">'+t.chain_delegation_count+' delegation'+(t.chain_delegation_count !== 1 ? 's' : '')+'</span>'
       +(t.status === 'awaiting_restart'
         ? '<span class="fm-key">Retries</span><span class="fm-val" style="color:'+(t.restart_attempt_count >= 2 ? '#f85149' : '#d29922')+'">'+t.restart_attempt_count+' / 2</span>'
         : (t.restart_attempt_count > 0 ? '<span class="fm-key">Retries</span><span class="fm-val">'+t.restart_attempt_count+'</span>' : ''))
       +(session ? '<span class="fm-key">Session</span><span class="fm-val" style="color:'+(session.status==='stale'?'#d29922':session.status==='cleared'?'#8b949e':'#3fb950')+'">'+esc(session.status)+'</span>' : '')
+      +(session ? '<span class="fm-key">Session ID</span><span class="fm-val" style="font-family:monospace;font-size:10px;color:#8b949e">'+esc(session.session_id)+'</span>' : '')
       +(ancestors.length ? '<span class="fm-key">Ancestors</span><span class="fm-val">'+ancestors.map(function(a){ return '<span class="badge bb" style="font-size:10px;margin-right:2px">'+esc(a)+'</span>'; }).join('')+'</span>' : '')
       +(t.requester_group ? '<span class="fm-key">Group</span><span class="fm-val" style="font-family:monospace;font-size:11px">'+esc(t.requester_group)+'</span>' : '')
       +(t.requester_task_id ? '<span class="fm-key">Parent</span><span class="fm-val" style="font-family:monospace;font-size:10px">'+esc(t.requester_task_id)+'</span>' : '')
@@ -1935,6 +1963,52 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     content.innerHTML = html;
+  }
+
+  function showSubmissionDetail(m) {
+    submissionDetailId = m.id;
+    specialistDetailId = null;
+    var panel = document.getElementById('specialists-detail');
+    var content = document.getElementById('specialists-detail-content');
+    if (!panel || !content) return;
+    panel.style.display = '';
+
+    var isStaged = m.status === 'staged';
+    var statusColor = isStaged ? '#d29922' : '#3fb950';
+
+    function fileLink(path, folder) {
+      if (!path) return '<span class="dim">\u2014</span>';
+      if (!folder) return '<span style="font-family:monospace;font-size:10px">'+esc(path)+'</span>';
+      return '<a href="#groups/'+esc(folder)+'/files/'+esc(path)+'" style="color:#58a6ff;text-decoration:none;font-family:monospace;font-size:10px">'+esc(path)+'</a>';
+    }
+
+    var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">'
+      +'<span class="badge bb">memory submission</span>'
+      +'<span class="badge" style="background:'+statusColor+'22;color:'+statusColor+';border:1px solid '+statusColor+'44;border-radius:4px;padding:2px 6px;font-size:11px">'+esc(m.status)+'</span>'
+      +'</div>';
+
+    html += '<div class="fm-card" style="margin-bottom:12px">'
+      +'<span class="fm-key">Topic</span><span class="fm-val">'+esc(m.topic)+'</span>'
+      +'<span class="fm-key">Task</span><span class="fm-val" style="font-family:monospace;font-size:10px;cursor:pointer;color:#58a6ff" data-jump-task-id="'+esc(m.task_id)+'">'+esc(m.task_id)+'</span>'
+      +'<span class="fm-key">Submitted</span><span class="fm-val">'+esc(fmtDate(m.submitted_at))+'</span>'
+      +(m.accepted_at ? '<span class="fm-key">Accepted</span><span class="fm-val">'+esc(fmtDate(m.accepted_at))+'</span>' : '')
+      +(m.overdue_alerted_at ? '<span class="fm-key">Overdue Alert</span><span class="fm-val" style="color:#f85149">'+esc(fmtDate(m.overdue_alerted_at))+'</span>' : '')
+      +'<span class="fm-key">Staging Path</span><span class="fm-val">'+fileLink(m.staging_path, m.group_folder)+'</span>'
+      +(m.final_path ? '<span class="fm-key">Final Path</span><span class="fm-val">'+fileLink(m.final_path, m.group_folder)+'</span>' : '')
+      +'<span class="fm-key">ID</span><span class="fm-val" style="font-family:monospace;font-size:10px">'+esc(m.id)+'</span>'
+      +'</div>';
+
+    content.innerHTML = html;
+
+    // Wire task jump link
+    var jumpEl = content.querySelector('[data-jump-task-id]');
+    if (jumpEl) {
+      jumpEl.addEventListener('click', function() {
+        var tid = jumpEl.dataset.jumpTaskId;
+        var t = specialistAllTasksCache.find(function(x) { return x.id === tid; });
+        if (t) showSpecialistDetail(t);
+      });
+    }
   }
 
   async function loadSpecialists() {
@@ -2022,24 +2096,71 @@ document.addEventListener('DOMContentLoaded', function() {
       if (recentEl) recentEl.innerHTML = '';
     }
 
+    var acceptedEl = document.getElementById('specialists-memory-accepted');
     try {
-      var mems = await fetch('/api/memory-submissions').then(function(r) { return r.json(); });
-      if (!mems.length) {
+      var memsData = await fetch('/api/memory-submissions').then(function(r) { return r.json(); });
+      var staged = memsData.staged || [];
+      var accepted = memsData.accepted || [];
+
+      submissionAllCache = staged.concat(accepted);
+
+      function submissionRow(m) {
+        var isSelected = m.id === submissionDetailId;
+        var rowStyle = isSelected ? ' style="background:#21262d;cursor:pointer"' : ' style="cursor:pointer"';
+        var stagingLink = (m.staging_path && m.group_folder)
+          ? '<a href="#groups/'+esc(m.group_folder)+'/files/'+esc(m.staging_path)+'" style="color:#58a6ff;text-decoration:none;font-family:monospace;font-size:10px" onclick="event.stopPropagation()">'+esc(m.staging_path)+'</a>'
+          : '<span class="dim" style="font-family:monospace;font-size:10px">'+esc(m.staging_path || '\u2014')+'</span>';
+        return '<tr'+rowStyle+' data-submission-id="'+esc(m.id)+'">'
+          +'<td style="font-size:12px">'+esc(m.topic)+'</td>'
+          +'<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+stagingLink+'</td>'
+          +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(fmtDate(m.submitted_at))+'</td>'
+          +'<td style="font-size:11px">'+(m.overdue_alerted_at ? '<span class="badge br">alerted '+esc(fmtDate(m.overdue_alerted_at))+'</span>' : '<span class="dim">\u2014</span>')+'</td>'
+          +'</tr>';
+      }
+
+      if (!staged.length) {
         memEl.innerHTML = '<div class="empty" style="padding:16px">No staged memory submissions</div>';
       } else {
-        memEl.innerHTML = '<table><thead><tr><th>Topic</th><th>Task ID</th><th>Submitted</th><th>Overdue Alert</th></tr></thead><tbody>'
-          + mems.map(function(m) {
-            return '<tr>'
-              +'<td style="font-size:12px">'+esc(m.topic)+'</td>'
-              +'<td class="dim" style="font-family:monospace;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.task_id)+'">'+esc(m.task_id)+'</td>'
-              +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(fmtDate(m.submitted_at))+'</td>'
-              +'<td style="font-size:11px">'+(m.overdue_alerted_at ? '<span class="badge br">alerted '+esc(fmtDate(m.overdue_alerted_at))+'</span>' : '<span class="dim">\u2014</span>')+'</td>'
-              +'</tr>';
-          }).join('')
-          +'</tbody></table>';
+        memEl.innerHTML = '<table><thead><tr><th>Topic</th><th>Staging Path</th><th>Submitted</th><th>Overdue Alert</th></tr></thead><tbody>'
+          + staged.map(submissionRow).join('') +'</tbody></table>';
       }
+
+      if (acceptedEl) {
+        if (!accepted.length) {
+          acceptedEl.innerHTML = '<div class="empty" style="padding:16px">No accepted memory submissions</div>';
+        } else {
+          acceptedEl.innerHTML = '<table><thead><tr><th>Topic</th><th>Submitted</th><th>Accepted</th><th>Filed At</th></tr></thead><tbody>'
+            + accepted.map(function(m) {
+              var isSelected = m.id === submissionDetailId;
+              var rowStyle = isSelected ? ' style="background:#21262d;cursor:pointer"' : ' style="cursor:pointer"';
+              var fileLink = (m.final_path && m.group_folder)
+                ? '<a href="#groups/'+esc(m.group_folder)+'/files/'+esc(m.final_path)+'" style="color:#58a6ff;text-decoration:none;font-family:monospace;font-size:10px" onclick="event.stopPropagation()">'+esc(m.final_path)+'</a>'
+                : (m.final_path ? '<span style="font-family:monospace;font-size:10px">'+esc(m.final_path)+'</span>' : '<span class="dim">\u2014</span>');
+              return '<tr'+rowStyle+' data-submission-id="'+esc(m.id)+'">'
+                +'<td style="font-size:12px">'+esc(m.topic)+'</td>'
+                +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(fmtDate(m.submitted_at))+'</td>'
+                +'<td class="dim" style="font-size:11px;white-space:nowrap">'+esc(fmtDate(m.accepted_at))+'</td>'
+                +'<td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+fileLink+'</td>'
+                +'</tr>';
+            }).join('')
+            +'</tbody></table>';
+        }
+      }
+
+      // Bind click handlers on submission rows
+      [memEl, acceptedEl].forEach(function(tableContainer) {
+        if (!tableContainer) return;
+        tableContainer.querySelectorAll('tr[data-submission-id]').forEach(function(row) {
+          row.addEventListener('click', function() {
+            var sid = row.dataset.submissionId;
+            var sub = submissionAllCache.find(function(x) { return x.id === sid; });
+            if (sub) showSubmissionDetail(sub);
+          });
+        });
+      });
     } catch(e) {
       if (memEl) memEl.innerHTML = '<div class="empty">Error loading memory submissions</div>';
+      if (acceptedEl) acceptedEl.innerHTML = '';
     }
   }
 
@@ -2457,6 +2578,7 @@ export function parseNoteFrontmatter(text: string): {
   keywords: string[];
   tags: string[];
   links: string[];
+  source_report_path: string | null;
 } | null {
   if (!text.startsWith('---')) return null;
   const nl = text.indexOf('\n');
@@ -2478,12 +2600,25 @@ export function parseNoteFrontmatter(text: string): {
       .filter(Boolean);
   };
   if (!fields['id']) return null;
+  // Extract the first file path under sources: that points to a report
+  let source_report_path: string | null = null;
+  for (const line of fmText.split('\n')) {
+    const m = line.match(/^\s+path:\s+(.+)$/);
+    if (m) {
+      const p = m[1].trim();
+      if (p.startsWith('memory/reports/')) {
+        source_report_path = p;
+        break;
+      }
+    }
+  }
   return {
     id: fields['id'],
     created: fields['created'] ?? '',
     keywords: parseList(fields['keywords']),
     tags: parseList(fields['tags']),
     links: parseList(fields['links']),
+    source_report_path,
   };
 }
 
@@ -2720,6 +2855,7 @@ export function startWebUi(
           keywords: string[];
           created: string;
           path: string;
+          source_task_id: string | null;
         };
         const nodes: NoteNode[] = [];
         const nodeIds = new Set<string>();
@@ -2738,6 +2874,17 @@ export function startWebUi(
           const fm = parseNoteFrontmatter(text);
           if (!fm) continue;
           fmMap.set(file, fm);
+          // Resolve provenance: match report date to a researcher task
+          let source_task_id: string | null = null;
+          if (fm.source_report_path) {
+            const dateMatch = fm.source_report_path.match(
+              /memory\/reports\/(\d{4}-\d{2}-\d{2})-/,
+            );
+            if (dateMatch) {
+              const ids = getResearcherTaskIdsByDate(dateMatch[1]);
+              if (ids.length === 1) source_task_id = ids[0];
+            }
+          }
           nodes.push({
             id: fm.id,
             label: fm.id
@@ -2747,6 +2894,7 @@ export function startWebUi(
             keywords: fm.keywords,
             created: fm.created,
             path: folder + '/memory/notes/' + file,
+            source_task_id,
           });
           nodeIds.add(fm.id);
         }
@@ -2900,7 +3048,10 @@ export function startWebUi(
 
       // GET /api/memory-submissions — staged raw memory submissions
       if (req.method === 'GET' && pathname === '/api/memory-submissions') {
-        sendJson(res, getRawMemorySubmissionsByStatus('staged'));
+        sendJson(res, {
+          staged: getStagedMemorySubmissionsWithFolder(),
+          accepted: getRecentAcceptedMemorySubmissions(50),
+        });
         return;
       }
 

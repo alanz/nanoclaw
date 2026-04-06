@@ -106,7 +106,7 @@ entity Message {
     sender_name: String?
     content: String
     reply_to_message_id: String?        -- ID of the quoted message, if any
-    reply_to_content: String?           -- text excerpt of the quoted message
+    reply_to_message_content: String?           -- text excerpt of the quoted message
     reply_to_sender_name: String?       -- display name of the quoted message author
     sent_at: Timestamp
     is_from_me: Boolean
@@ -217,7 +217,7 @@ rule MessageReceived {
         sender_name: sender_name,
         content: content,
         reply_to_message_id: quoted_message?.id,
-        reply_to_content: quoted_message?.content,
+        reply_to_message_content: quoted_message?.content,
         reply_to_sender_name: quoted_message?.sender_name,
         sent_at: sent_at,
         is_from_me: false,
@@ -686,8 +686,8 @@ invariant AtMostOneWaitingEntryPerGroup {
 -- and the edit marker are regenerable; attachment/media labels are not (see open question).
 invariant MessageEnrichmentRegenerableFromStoredFields {
     for m in Messages:
-        -- Quoted-reply prefix is fully derivable from reply_to_content and reply_to_sender_name
-        (m.reply_to_content != null) implies (m.reply_to_sender_name != null)
+        -- Quoted-reply prefix is fully derivable from reply_to_message_content and reply_to_sender_name
+        (m.reply_to_message_content != null) implies (m.reply_to_sender_name != null)
 }
 
 -- ---- JID Ownership Uniqueness ----

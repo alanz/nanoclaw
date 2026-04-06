@@ -384,6 +384,8 @@ mcp__nanoclaw__dispatch_specialist(
 )
 ```
 
+**Critical — keep `{subject}` verbatim:** Copy the user's exact words as `{subject}`. Strip only meta-language that addresses you ("ask the researcher to", "can you investigate", etc.) but do not interpret, expand, restructure, or add bullet points to the research question. The researcher decides what to cover — pre-structuring injects your own bias and defeats the purpose of an isolated specialist.
+
 The prompt must NOT reference any existing NanoClaw memory notes, reports, or conversation history — researcher isolation depends on this.
 
 **3. On result return**

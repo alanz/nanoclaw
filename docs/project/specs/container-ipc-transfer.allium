@@ -1,0 +1,409 @@
+-- allium: 3
+-- container-ipc-transfer.allium
+--
+-- Low-level file+message transfer mechanism for NanoClaw containers.
+-- Any container can send a message accompanied by zero or more files. The receiving
+-- side gets the message with file paths embedded and can read those files lazily —
+-- context cost is only incurred if the agent actually opens a file.
+--
+-- This is infrastructure ("rich IPC") that higher-level tools such as
+-- deliver_specialist_result, deliver_result, and send_file are built on.
+-- Routing — who the recipient is — is determined by each calling tool and is
+-- out of scope here.
+--
+-- Scope: file staging, ownership transfer, per-invocation isolation, file lifecycle
+-- Includes: IpcOutMount, IpcInMount, ContainerTransfer, TransferFile,
+--           isolation invariants, error recovery for missing files
+-- Excludes:
+--   - Routing policy (which container or user receives the transfer)
+--   - Higher-level tool definitions (see ipc.allium)
+--   - Specialist task lifecycle (see specialists.allium)
+--   - Channel wire protocols (WhatsApp, Telegram, DeltaChat)
+-- Dependencies: specialists.SpecialistTask (terminal state reference for file expiry)
+
+use "./specialists.allium" as specialists
+use "./nanoclaw.allium" as nanoclaw
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    ipc_out_container_path: String = "/workspace/ipc-out"  -- container-side mount for outbound staging
+    ipc_in_container_path:  String = "/workspace/ipc-in"   -- container-side mount for inbound files
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- One run of a container, uniquely identified by the host at start time.
+-- A specialist task may span multiple invocations (one initial run, then one
+-- re-invocation per sub-task result received). A group container run is also a
+-- single invocation. Invocations are the unit of isolation for ipc-in/ipc-out.
+value Invocation {
+    id: String              -- unique ID assigned by the host when the container starts
+    group_folder: String?   -- set when this is a group container run
+    task_id: String?        -- set when this is a specialist container run
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- The outbound staging area for one invocation.
+-- Created fresh by the host at invocation start; cleared at invocation end.
+-- Mounted read-write inside the container at config.ipc_out_container_path.
+-- Files written here are staged for transfer; the host removes them individually
+-- when a transfer send call is processed (ownership transfer). Files remaining in
+-- ipc-out at invocation end without having been sent are discarded.
+--
+-- ipc-out is intended as an immediate staging area only. Containers that need to
+-- accumulate work across a suspension should use their regular group workspace.
+-- Files should be written to ipc-out only immediately before a send call.
+entity IpcOutMount {
+    invocation: Invocation
+
+    -- active is set via .created(); cleared is set via let-binding assignment in InvocationEnded.
+    -- The checker does not trace .created() field values or let-binding status assignments.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: active | cleared
+
+    transitions status {
+        active -> cleared
+        terminal: cleared
+    }
+}
+
+-- The inbound staging area for one invocation.
+-- Created and populated by the host immediately before the container starts.
+-- Mounted read-only inside the container at config.ipc_in_container_path.
+-- Contains only the files explicitly associated with transfers targeting this
+-- invocation. No files from prior invocations or sibling containers are present.
+-- Cleared by the host when the invocation ends.
+entity IpcInMount {
+    invocation: Invocation
+
+    -- Same checker limitation as IpcOutMount: .created() and let-binding assignments not traced.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: active | cleared
+
+    transitions status {
+        active -> cleared
+        terminal: cleared
+    }
+}
+
+-- A message-plus-files transfer from one container to a recipient.
+-- The recipient is either another container (container-to-container) or a channel
+-- user (container-to-user). Routing is determined by the calling tool.
+--
+-- A transfer always carries a message (required). Files are optional (zero or more).
+-- When files are present, the host rewrites the message to embed the in-container
+-- paths at which the files will appear in the recipient's ipc-in mount.
+entity ContainerTransfer {
+    sender_invocation: Invocation
+    message: String         -- required; delivered to recipient, with host path-rewriting
+                            -- applied when files are present
+    file_count: Integer     -- 0..n; may be zero for file-free transfers
+    sent_at: Timestamp
+
+    -- pending:        host has taken ownership of files; awaiting recipient invocation
+    -- in_transit:     recipient invocation has started; files placed in its ipc-in
+    -- user_delivered: delivered to a channel user (terminal; no ipc-in involved)
+    -- expired:        recipient task reached terminal state; host may reclaim files
+    --
+    -- pending is set via .created(). in_transit, user_delivered, expired are set inside
+    -- for-loop rule bodies (TransferMovedToInTransit, UserFacingTransferDelivered,
+    -- ContainerTransferExpired). The checker does not trace status assignments made
+    -- inside for-loop bodies or via .created() field values.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: pending | in_transit | user_delivered | expired
+
+    transitions status {
+        pending -> in_transit
+        pending -> user_delivered
+        in_transit -> expired
+        terminal: user_delivered
+        terminal: expired
+    }
+
+    files: TransferFile with transfer = this
+}
+
+-- One file attached to a ContainerTransfer.
+-- The host takes ownership at send time: the file is removed from the sender's
+-- ipc-out mount and placed in host-managed storage. The host holds the file until
+-- the recipient task reaches a terminal state, so it remains available across all
+-- re-invocations of that task (e.g. if a receiving specialist is retried after a
+-- failure, the file is still present when the replacement invocation starts).
+entity TransferFile {
+    transfer: ContainerTransfer
+    original_name: String   -- filename as written by the sender to ipc-out
+    host_path: String       -- absolute path in host-managed storage after ownership transfer
+
+    -- staged:  written to ipc-out by the container, not yet sent
+    -- owned:   host has taken ownership; removed from ipc-out; in host-managed storage
+    -- placed:  in the recipient's ipc-in for the current invocation
+    -- expired: recipient task reached terminal state; host may reclaim storage
+    --
+    -- staged -> owned: performed inside ContainerInitiatedTransfer @guidance (no per-file event).
+    -- owned -> placed: set inside a for-loop body in TransferFilesPlaced.
+    -- placed -> expired: set inside for-loop bodies in ContainerTransferExpired / UserFacingTransferDelivered.
+    -- The checker does not trace status assignments made inside for-loop bodies,
+    -- via .created() field values, or via @guidance-only rules.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: staged | owned | placed | expired
+
+    transitions status {
+        staged -> owned
+        owned -> placed
+        placed -> expired
+        terminal: expired
+    }
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Invocation Lifecycle ----
+
+-- The host creates fresh ipc-out and ipc-in mounts when a container invocation starts.
+-- ipc-in is populated with any TransferFiles in status = owned that target this
+-- invocation before the container process begins.
+rule InvocationStarted {
+    when: ContainerInvocationStarted(invocation)
+
+    ensures: IpcOutMount.created(invocation: invocation, status: active)
+    ensures: IpcInMount.created(invocation: invocation, status: active)
+    ensures: IpcInPopulated(invocation: invocation)
+
+    @guidance
+        -- IpcInPopulated: the host places all TransferFiles with status = owned that
+        -- target this invocation into the ipc-in directory before the container starts.
+        -- Files are placed under per-transfer subdirectories keyed to the originating
+        -- transfer ID (e.g. {config.ipc_in_container_path}/{transfer_id}/{original_name})
+        -- to prevent name collisions when multiple transfers arrive for the same invocation.
+        -- The host rewrites the covering message to embed the in-container paths before
+        -- injecting it into the container's initial prompt.
+        --
+        -- Implementation preference: ipc-in and ipc-out should be separate filesystem
+        -- mounts (e.g. Apple Container volume mounts) rather than subdirectories of the
+        -- existing /workspace/ipc mount. Separate mounts make per-invocation isolation
+        -- structural: the host fully controls what appears at those paths without needing
+        -- to manage stale files within a shared directory.
+}
+
+-- The host clears both mounts when an invocation ends (container process exits).
+-- Files remaining in ipc-out that were never sent are discarded at this point.
+rule InvocationEnded {
+    when: ContainerInvocationEnded(invocation)
+
+    let out = IpcOutMount{invocation: invocation}
+    let in_ = IpcInMount{invocation: invocation}
+
+    requires: exists out
+    requires: exists in_
+
+    ensures: out.status = cleared
+    ensures: in_.status = cleared
+    ensures: IpcOutRemnantDiscarded(invocation: invocation)
+
+    @guidance
+        -- IpcOutRemnantDiscarded removes any files present in ipc-out that were not
+        -- consumed by a send call. These may be scratch files, intermediate work, or
+        -- files the container wrote and then chose not to send. Clearing ipc-out at
+        -- invocation end prevents stale files appearing in a future invocation of the
+        -- same task.
+}
+
+-- ---- Transfer Initiation ----
+
+-- A container initiates a transfer by calling the send primitive with a message
+-- and zero or more file paths within its ipc-out mount.
+-- The host validates that every named file exists in ipc-out, then takes ownership:
+-- copies each file to host-managed storage, creates a TransferFile record per file,
+-- removes each file from ipc-out, and records a ContainerTransfer as pending.
+-- The send call is synchronous: it returns only after ownership transfer is complete.
+-- Routing to the recipient is performed by the calling tool and is not modelled here.
+rule ContainerInitiatedTransfer {
+    when: ContainerSendCall(invocation, message, file_paths)
+
+    let out = IpcOutMount{invocation: invocation}
+
+    requires: out.status = active
+    requires: all_in_ipc_out(invocation, file_paths)
+
+    ensures: ContainerTransfer.created(
+        sender_invocation: invocation,
+        message: message,
+        file_count: ipc_out_file_count(invocation, file_paths),
+        sent_at: now,
+        status: pending
+    )
+    ensures: HostTookOwnership(invocation: invocation, file_paths: file_paths)
+
+    @guidance
+        -- all_in_ipc_out(invocation, file_paths) is true when every path in file_paths
+        -- names a file that currently exists in the invocation's ipc-out mount.
+        -- file_paths may be empty (zero-file transfer); all_in_ipc_out is vacuously true.
+        --
+        -- HostTookOwnership covers the per-file actions performed atomically by the host:
+        --   for each p in file_paths:
+        --     1. Copy file from ipc-out to host-managed storage at host_storage_path(invocation, p)
+        --     2. Create TransferFile(transfer: new transfer, original_name: basename(p),
+        --                           host_path: host_storage_path(invocation, p), status: owned)
+        --     3. Remove file from ipc-out
+        -- After this call the container may no longer access the sent files.
+        -- The call returns a transfer ID for reference.
+}
+
+-- A transfer send call is rejected if any named file does not exist in ipc-out.
+-- The host returns a structured error to encourage self-correction: the container
+-- agent is told which paths were not found and which files are currently present,
+-- so it can write the missing file and retry without abandoning the task.
+rule ContainerSendRejected {
+    when: ContainerSendCall(invocation, message, file_paths)
+
+    let out = IpcOutMount{invocation: invocation}
+
+    requires: out.status = active
+    requires: not all_in_ipc_out(invocation, file_paths)
+
+    ensures: TransferRejected(
+        invocation: invocation,
+        available_paths: files_in_ipc_out(invocation)
+    )
+
+    @guidance
+        -- The error response includes:
+        --   1. Which paths from file_paths were not found in ipc-out
+        --   2. A correctly-formatted list of all files currently present in ipc-out
+        -- ipc-out is not modified on rejection; the call is a pure no-op on the host.
+        -- The agent may correct the path, write the missing file, and retry the call.
+}
+
+-- ---- File Placement into Recipient ipc-in ----
+
+-- When the host starts a recipient invocation (IpcInPopulated), it places all
+-- TransferFiles in status = owned that target this invocation into its ipc-in mount.
+-- Files are placed under per-transfer subdirectories to prevent name collisions.
+-- The covering message is rewritten with the in-container paths before injection.
+rule TransferFilesPlaced {
+    when: IpcInPopulated(invocation)
+    for f in TransferFiles where f.status = owned and transfer_targets_invocation(f.transfer, invocation):
+        ensures: f.status = placed
+        ensures: FileInIpcIn(
+            invocation: invocation,
+            transfer: f.transfer,
+            file: f,
+            container_path: ipc_in_path(invocation, f)
+        )
+
+    @guidance
+        -- ipc_in_path is constructed as:
+        --   {config.ipc_in_container_path}/{transfer.id}/{f.original_name}
+        -- Using the transfer ID as a subdirectory guarantees no collisions even when
+        -- multiple transfers arrive for the same invocation (e.g. results from two
+        -- specialist sub-tasks both completing before the parent resumes).
+        -- The covering message is rewritten by the host to reference these constructed
+        -- paths rather than the original filenames from the sender's ipc-out.
+        --
+        -- transfer_targets_invocation(transfer, invocation) is true when the transfer's
+        -- intended recipient maps to this invocation: the recipient task is the task
+        -- associated with the invocation, or the recipient group is the group container
+        -- associated with the invocation.
+}
+
+-- ---- Transition: pending -> in_transit ----
+
+-- When the recipient invocation starts and files are placed, the transfer moves to in_transit.
+rule TransferMovedToInTransit {
+    when: IpcInPopulated(invocation)
+    for t in ContainerTransfers where t.status = pending and transfer_targets_invocation(t, invocation):
+        ensures: t.status = in_transit
+}
+
+-- ---- File Expiry ----
+
+-- For container-to-container transfers, files are retained until the recipient task
+-- reaches a terminal state. This ensures files remain available across all re-invocations
+-- of that task. Expiry is triggered by the task terminal transition; the host may then
+-- reclaim host-managed storage on its own schedule.
+-- Tasks that are abandoned without reaching a terminal state will eventually fail via
+-- the existing task timeout mechanism (specialists.allium), which triggers this rule.
+rule ContainerTransferExpired {
+    when: SpecialistTaskTerminated(task)
+    for t in ContainerTransfers where t.status = in_transit and recipient_task(t) = task:
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+}
+
+-- For user-facing transfers, the host deletes the file once successfully delivered
+-- to the channel. No retention is needed; the channel holds the delivered copy.
+rule UserFacingTransferDelivered {
+    when: ChannelDeliverySucceeded(transfer)
+
+    requires: transfer.status = pending
+
+    ensures: transfer.status = user_delivered
+    ensures:
+        for f in transfer.files:
+            f.status = expired
+
+    @guidance
+        -- ChannelDeliverySucceeded is determined by the channel adapter's send
+        -- confirmation (WhatsApp, Telegram, DeltaChat, etc.).
+        -- Files are reclaimed from host-managed storage immediately on confirmation.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- No two TransferFiles placed in the same ipc-in mount share a container path.
+invariant IpcInCollisionFree {
+    for f1 in TransferFiles:
+        for f2 in TransferFiles:
+            f1 != f2
+            and f1.status = placed
+            and f2.status = placed
+            and invocation_of(f1) = invocation_of(f2)
+            implies ipc_in_path(invocation_of(f1), f1) != ipc_in_path(invocation_of(f2), f2)
+}
+
+-- A container's ipc-out mount contains no files from any invocation other than its own.
+invariant IpcOutInvocationIsolation {
+    for f in IpcOutFiles:
+        f.invocation = current_invocation(f.container)
+}
+
+-- A container's ipc-in mount contains only files placed for its own invocation.
+invariant IpcInInvocationIsolation {
+    for entry in IpcInFiles:
+        entry.invocation = current_invocation(entry.container)
+}
+
+-- A TransferFile cannot exist in ipc-out once it has been sent.
+invariant SentFileRemovedFromIpcOut {
+    for f in TransferFiles:
+        f.status != staged implies not file_exists_in_ipc_out(f.transfer.sender_invocation, f.original_name)
+}
+
+-- Every TransferFile in status = placed has a corresponding FileInIpcIn record.
+invariant PlacedFileHasIpcInRecord {
+    for f in TransferFiles:
+        f.status = placed implies exists entry in FileInIpcIn where entry.file = f
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Should ContainerSendCall be modelled as a surface (with a named contract) rather than a bare trigger, given that multiple higher-level tools fulfil it? A surface would make the obligation explicit and allow ipc.allium to reference the contract by name."
+
+open question "For container-to-container transfers where the recipient is a group container (not a specialist task), what is the terminal condition for file expiry? Group containers do not have a SpecialistTask lifecycle — a shared lifecycle abstraction or a separate expiry rule may be needed."
+
+open question "ipc-out is cleared at invocation end, so a parent specialist suspended awaiting a sub-task result loses any files it wrote before the suspension. The intended authoring pattern is: write files to the group workspace, then copy to ipc-out immediately before the send call. Should the specialist template CLAUDE.md make this pattern explicit?"

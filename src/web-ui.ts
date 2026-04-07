@@ -664,8 +664,14 @@ document.addEventListener('DOMContentLoaded', function() {
     pollTimer = setInterval(loadMsgs, 3000);
   }
 
+  function hasActiveSelection() {
+    var sel = window.getSelection();
+    return sel && sel.toString().length > 0;
+  }
+
   async function loadMsgs() {
     if (!currentGroup || currentTab !== 'chat') return;
+    if (hasActiveSelection()) return;
     var el = document.getElementById('group-msgs');
     if (!el) return;
     try {
@@ -1605,6 +1611,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   async function loadOverview() {
+    if (hasActiveSelection()) return;
     var statsEl = document.getElementById('overview-stats');
     var containersEl = document.getElementById('overview-containers');
     var ipcEl = document.getElementById('overview-ipc');
@@ -2035,6 +2042,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   async function loadSpecialists() {
+    if (hasActiveSelection()) return;
     var liveEl = document.getElementById('specialists-live');
     var memEl = document.getElementById('specialists-memory');
     var recentEl = document.getElementById('specialists-recent');

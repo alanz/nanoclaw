@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ import {
   getSpecialistTask,
   storeChatMetadata,
 } from './db.js';
-import { processTaskIpc, IpcDeps } from './ipc.js';
+import { processTaskIpc, processMessageIpc, IpcDeps } from './ipc.js';
 import { _resetSpecialistDepsForTest, initSpecialists } from './specialists.js';
 import {
   _resetSpecialistTypesForTest,
@@ -835,5 +835,92 @@ describe('OrchestrationCycle IPC hooks', () => {
     );
 
     expect(onCycleDelivered).not.toHaveBeenCalled();
+  });
+});
+
+describe('processMessageIpc — specialist progress messages', () => {
+  const TASK_ID = 'f553c8f9-d8d5-4a70-92df-da66b3ba8330';
+  const SPECIALIST_FOLDER = `spec-${TASK_ID}`;
+  const SPECIALIST_JID = `specialist:${TASK_ID}`;
+  const REQUESTER_JID = 'main@g.us';
+
+  function makeMessage(overrides: Record<string, string> = {}) {
+    return {
+      type: 'message',
+      chatJid: SPECIALIST_JID,
+      text: 'On it — fetching the paper now.',
+      ...overrides,
+    };
+  }
+
+  it('forwards specialist progress message to the root requester group', async () => {
+    makeRunningSpecialistTask({ id: TASK_ID, requester_group: REQUESTER_JID });
+
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({ sendMessage });
+
+    await processMessageIpc(makeMessage(), SPECIALIST_FOLDER, false, deps);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      REQUESTER_JID,
+      'On it — fetching the paper now.',
+      undefined,
+    );
+  });
+
+  it('follows the requester chain to find the root group when dispatched by a parent specialist', async () => {
+    const PARENT_TASK_ID = 'aaaaaaaa-0000-0000-0000-000000000001';
+    makeRunningSpecialistTask({
+      id: PARENT_TASK_ID,
+      specialist_type: 'researcher',
+      requester_group: REQUESTER_JID,
+      requester_task_id: null,
+    });
+    makeRunningSpecialistTask({
+      id: TASK_ID,
+      specialist_type: 'researcher',
+      requester_group: null,
+      requester_task_id: PARENT_TASK_ID,
+      depth: 1,
+      chain_delegation_count: 2,
+      ancestor_types: '["researcher"]',
+    });
+
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({ sendMessage });
+
+    await processMessageIpc(makeMessage(), SPECIALIST_FOLDER, false, deps);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      REQUESTER_JID,
+      'On it — fetching the paper now.',
+      undefined,
+    );
+  });
+
+  it('blocks a specialist trying to send under a mismatched folder', async () => {
+    makeRunningSpecialistTask({ id: TASK_ID, requester_group: REQUESTER_JID });
+
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({ sendMessage });
+
+    // A different group tries to impersonate this specialist's JID
+    await processMessageIpc(makeMessage(), 'spec-other-group', false, deps);
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('blocks a non-specialist non-main group messaging a foreign chat', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({ sendMessage });
+
+    await processMessageIpc(
+      { type: 'message', chatJid: 'other@g.us', text: 'hello' },
+      'some-group',
+      false,
+      deps,
+    );
+
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });

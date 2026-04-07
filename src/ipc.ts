@@ -23,6 +23,7 @@ import {
   getRssFeedById,
   updateRssFeed,
   getTaskById,
+  getSpecialistTask,
   queryTranscript,
   storeMessage,
   updateTask,
@@ -97,6 +98,16 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 
+/** Follow the requester chain for a specialist task and return the root requester group JID, or null. */
+function findRequesterGroupJid(taskId: string): string | null {
+  const task = getSpecialistTask(taskId);
+  if (!task) return null;
+  if (task.requester_group) return task.requester_group;
+  if (task.requester_task_id)
+    return findRequesterGroupJid(task.requester_task_id);
+  return null;
+}
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -144,24 +155,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  await deps.sendMessage(data.chatJid, data.text, data.sender);
-                  logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'IPC message sent',
-                  );
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC message attempt blocked',
-                  );
-                }
+              if (data.type === 'message') {
+                await processMessageIpc(data, sourceGroup, isMain, deps);
               } else if (
                 data.type === 'file' &&
                 data.chatJid &&
@@ -263,6 +258,49 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
+}
+
+export async function processMessageIpc(
+  data: { type: string; chatJid?: string; text?: string; sender?: string },
+  sourceGroup: string,
+  isMain: boolean,
+  deps: IpcDeps,
+): Promise<void> {
+  const registeredGroups = deps.registeredGroups();
+  if (data.type === 'message' && data.chatJid && data.text) {
+    const targetGroup = registeredGroups[data.chatJid];
+    if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+      await deps.sendMessage(data.chatJid, data.text, data.sender);
+      logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC message sent');
+    } else if (data.chatJid.startsWith('specialist:')) {
+      const taskId = data.chatJid.slice('specialist:'.length);
+      if (sourceGroup === `spec-${taskId}`) {
+        const requesterJid = findRequesterGroupJid(taskId);
+        if (requesterJid) {
+          await deps.sendMessage(requesterJid, data.text, data.sender);
+          logger.info(
+            { chatJid: data.chatJid, sourceGroup, requesterJid },
+            'Specialist progress message forwarded to requester',
+          );
+        } else {
+          logger.warn(
+            { chatJid: data.chatJid, sourceGroup },
+            'Specialist progress message: no requester group found',
+          );
+        }
+      } else {
+        logger.warn(
+          { chatJid: data.chatJid, sourceGroup },
+          'Unauthorized specialist message attempt blocked',
+        );
+      }
+    } else {
+      logger.warn(
+        { chatJid: data.chatJid, sourceGroup },
+        'Unauthorized IPC message attempt blocked',
+      );
+    }
+  }
 }
 
 export async function processTaskIpc(

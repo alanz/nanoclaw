@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'fs';
 
 import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
+  runTask,
   startSchedulerLoop,
 } from './task-scheduler.js';
+
+vi.mock('./container-runner.js', () => ({
+  runContainerAgent: vi.fn(),
+  writeTasksSnapshot: vi.fn(),
+}));
 
 describe('task scheduler', () => {
   beforeEach(() => {
@@ -125,5 +132,73 @@ describe('task scheduler', () => {
     const offset =
       (new Date(nextRun!).getTime() - new Date(scheduledTime).getTime()) % ms;
     expect(offset).toBe(0);
+  });
+});
+
+// ── runTask sender ────────────────────────────────────────────────────────────
+
+describe('runTask sender', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+    vi.resetAllMocks();
+    vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined as any);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('passes Scheduler as sender when forwarding task result', async () => {
+    const { runContainerAgent } = await import('./container-runner.js');
+    vi.mocked(runContainerAgent).mockImplementation(
+      async (_group, _opts, _onProcess, onOutput) => {
+        await onOutput!({ result: 'task output', status: 'success' });
+        return { result: 'task output', status: 'success' } as any;
+      },
+    );
+
+    const task = {
+      id: 'sender-test',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'do something',
+      schedule_type: 'once' as const,
+      schedule_value: new Date(Date.now() - 1000).toISOString(),
+      context_mode: 'isolated' as const,
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: new Date().toISOString(),
+    };
+    createTask(task);
+
+    const sendMessage = vi.fn(async () => {});
+
+    await runTask(task, {
+      registeredGroups: () => ({
+        main: {
+          name: 'Main',
+          folder: 'main',
+          trigger: '',
+          added_at: '',
+          isMain: true,
+        },
+      }),
+      getSessions: () => ({}),
+      queue: {
+        enqueueTask: vi.fn(),
+        notifyIdle: vi.fn(),
+        closeStdin: vi.fn(),
+      } as any,
+      onProcess: vi.fn(),
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      'main@g.us',
+      'task output',
+      'Scheduler',
+    );
   });
 });

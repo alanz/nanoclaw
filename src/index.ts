@@ -1064,7 +1064,7 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
+    sendMessage: async (jid, rawText, sender) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
@@ -1072,12 +1072,12 @@ async function main(): Promise<void> {
       }
       const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) {
-        await channel.sendMessage(jid, text);
+        await channel.sendMessage(jid, text, sender);
         storeMessage({
           id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           chat_jid: jid,
-          sender: ASSISTANT_NAME,
-          sender_name: ASSISTANT_NAME,
+          sender: sender ?? ASSISTANT_NAME,
+          sender_name: sender ?? ASSISTANT_NAME,
           content: text,
           timestamp: new Date().toISOString(),
           is_from_me: true,
@@ -1092,7 +1092,7 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
+    sendMessage: async (jid, rawText, sender) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send RSS message');
@@ -1100,12 +1100,12 @@ async function main(): Promise<void> {
       }
       const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) {
-        await channel.sendMessage(jid, text);
+        await channel.sendMessage(jid, text, sender);
         storeMessage({
           id: `rss-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           chat_jid: jid,
-          sender: ASSISTANT_NAME,
-          sender_name: ASSISTANT_NAME,
+          sender: sender ?? ASSISTANT_NAME,
+          sender_name: sender ?? ASSISTANT_NAME,
           content: text,
           timestamp: new Date().toISOString(),
           is_from_me: true,
@@ -1119,7 +1119,7 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
+    sendMessage: async (jid, rawText, sender) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send Zotero message');
@@ -1127,12 +1127,12 @@ async function main(): Promise<void> {
       }
       const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) {
-        await channel.sendMessage(jid, text);
+        await channel.sendMessage(jid, text, sender);
         storeMessage({
           id: `zotero-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           chat_jid: jid,
-          sender: ASSISTANT_NAME,
-          sender_name: ASSISTANT_NAME,
+          sender: sender ?? ASSISTANT_NAME,
+          sender_name: sender ?? ASSISTANT_NAME,
           content: text,
           timestamp: new Date().toISOString(),
           is_from_me: true,

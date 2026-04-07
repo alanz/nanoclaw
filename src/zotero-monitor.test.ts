@@ -1,12 +1,27 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import fs from 'fs';
 
 import {
   buildZoteroSyncPrompt,
   computeNextZoteroCheck,
   hasNewZoteroItems,
+  runZoteroSync,
   ZoteroState,
   _resetZoteroMonitorLoopForTests,
 } from './zotero-monitor.js';
+
+vi.mock('./container-runner.js', () => ({
+  runContainerAgent: vi.fn(),
+}));
+
+vi.mock('./config.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    ZOTERO_GROUP_FOLDER: 'zotero-test',
+    ZOTERO_CHAT_JID: 'zotero@g.us',
+  };
+});
 
 const HOUR_MS = 3_600_000;
 
@@ -143,5 +158,64 @@ describe('buildZoteroSyncPrompt', () => {
   it('uses lastVersion 0 for first run', () => {
     const prompt = buildZoteroSyncPrompt(0, '/workspace/group/zotero-md');
     expect(prompt).toContain('--since 0');
+  });
+});
+
+// ── runZoteroSync sender ──────────────────────────────────────────────────────
+
+describe('runZoteroSync sender', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined as any);
+    vi.spyOn(fs, 'writeFileSync').mockReturnValue(undefined);
+    vi.spyOn(fs, 'appendFileSync').mockReturnValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('passes Zotero as sender when forwarding sync result', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      headers: {
+        get: (h: string) => (h === 'Last-Modified-Version' ? '9999' : null),
+      },
+    }));
+
+    const { runContainerAgent } = await import('./container-runner.js');
+    vi.mocked(runContainerAgent).mockImplementation(
+      async (_group, _opts, _onProcess, onOutput) => {
+        await onOutput!({ result: 'zotero summary', status: 'success' });
+        return { result: 'zotero summary', status: 'success' } as any;
+      },
+    );
+
+    const sendMessage = vi.fn(async () => {});
+
+    await runZoteroSync({
+      registeredGroups: () => ({
+        'zotero-test': {
+          name: 'Zotero',
+          folder: 'zotero-test',
+          trigger: '',
+          added_at: '',
+        },
+      }),
+      queue: {
+        enqueueTask: vi.fn(),
+        notifyIdle: vi.fn(),
+        closeStdin: vi.fn(),
+      } as any,
+      onProcess: vi.fn(),
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      'zotero@g.us',
+      'zotero summary',
+      'Zotero',
+    );
   });
 });

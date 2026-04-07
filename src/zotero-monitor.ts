@@ -176,10 +176,10 @@ export interface ZoteroMonitorDeps {
     containerName: string,
     groupFolder: string,
   ) => void;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
 }
 
-async function runZoteroSync(deps: ZoteroMonitorDeps): Promise<void> {
+export async function runZoteroSync(deps: ZoteroMonitorDeps): Promise<void> {
   const groupFolder = ZOTERO_GROUP_FOLDER!;
   const chatJid = ZOTERO_CHAT_JID!;
   const startTime = Date.now();
@@ -231,7 +231,7 @@ async function runZoteroSync(deps: ZoteroMonitorDeps): Promise<void> {
         deps.onProcess(chatJid, proc, containerName, groupFolder),
       async (streamedOutput) => {
         if (streamedOutput.result) {
-          await deps.sendMessage(chatJid, streamedOutput.result);
+          await deps.sendMessage(chatJid, streamedOutput.result, 'Zotero');
           const digestPath = path.join(
             resolveGroupFolderPath(groupFolder),
             'zotero-digest.md',

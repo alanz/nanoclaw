@@ -214,7 +214,7 @@ export interface RssMonitorDeps {
     containerName: string,
     groupFolder: string,
   ) => void;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
 }
 
 export function parseSeenGuids(raw: string): string[] {
@@ -237,7 +237,10 @@ export function mergeAndCapGuids(
   return [...existing, ...incoming].slice(-MAX_SEEN_GUIDS);
 }
 
-async function checkFeed(feed: RssFeed, deps: RssMonitorDeps): Promise<void> {
+export async function checkFeed(
+  feed: RssFeed,
+  deps: RssMonitorDeps,
+): Promise<void> {
   const startTime = Date.now();
   logger.info({ feedId: feed.id, url: feed.url }, 'Checking RSS feed');
 
@@ -337,7 +340,11 @@ async function checkFeed(feed: RssFeed, deps: RssMonitorDeps): Promise<void> {
         deps.onProcess(feed.chat_jid, proc, containerName, feed.group_folder),
       async (streamedOutput) => {
         if (streamedOutput.result) {
-          await deps.sendMessage(feed.chat_jid, streamedOutput.result);
+          await deps.sendMessage(
+            feed.chat_jid,
+            streamedOutput.result,
+            feed.title || 'RSS',
+          );
           const digestPath = path.join(
             resolveGroupFolderPath(feed.group_folder),
             'rss-digest.md',

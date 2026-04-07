@@ -1,15 +1,22 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 import {
   parseRssFeed,
   buildJudgmentPrompt,
+  checkFeed,
   computeNextCheck,
   diffNewItems,
   mergeAndCapGuids,
   parseSeenGuids,
   _resetRssMonitorLoopForTests,
 } from './rss-monitor.js';
+import { _initTestDatabase } from './db.js';
 import { RssFeed } from './types.js';
+
+vi.mock('./container-runner.js', () => ({
+  runContainerAgent: vi.fn(),
+  writeRssFeedsSnapshot: vi.fn(),
+}));
 
 function makeFeed(overrides: Partial<RssFeed> = {}): RssFeed {
   return {
@@ -319,5 +326,106 @@ describe('seen GUID helpers', () => {
       expect(result).toHaveLength(500);
       expect(result[0]).toBe('g-0');
     });
+  });
+});
+
+// ── checkFeed sender ─────────────────────────────────────────────────────────
+
+const MINIMAL_RSS_XML = `<rss version="2.0"><channel><title>Feed</title>
+  <item><title>New Item</title><link>https://example.com/1</link><guid>g-new</guid></item>
+</channel></rss>`;
+
+function makeGroup(folder: string, _jid: string) {
+  return {
+    name: 'Test Group',
+    folder,
+    trigger: 'test',
+    added_at: new Date().toISOString(),
+    isMain: true,
+  };
+}
+
+describe('checkFeed sender', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('passes feed title as sender when title is set', async () => {
+    const { runContainerAgent } = await import('./container-runner.js');
+    vi.mocked(runContainerAgent).mockImplementation(
+      async (_group, _opts, _onProcess, onOutput) => {
+        await onOutput!({ result: 'summary text', status: 'success' });
+        return { result: 'summary text', status: 'success' } as any;
+      },
+    );
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      text: async () => MINIMAL_RSS_XML,
+    }));
+
+    const feed = makeFeed({ title: 'Tech News', seen_guids: '[]' });
+    const sendMessage = vi.fn(async () => {});
+
+    await checkFeed(feed, {
+      registeredGroups: () => ({
+        [feed.group_folder]: makeGroup(feed.group_folder, feed.chat_jid) as any,
+      }),
+      getSessions: () => ({}),
+      queue: {
+        enqueueTask: vi.fn(),
+        notifyIdle: vi.fn(),
+        closeStdin: vi.fn(),
+      } as any,
+      onProcess: vi.fn(),
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      feed.chat_jid,
+      'summary text',
+      'Tech News',
+    );
+  });
+
+  it('falls back to RSS when feed title is null', async () => {
+    const { runContainerAgent } = await import('./container-runner.js');
+    vi.mocked(runContainerAgent).mockImplementation(
+      async (_group, _opts, _onProcess, onOutput) => {
+        await onOutput!({ result: 'summary text', status: 'success' });
+        return { result: 'summary text', status: 'success' } as any;
+      },
+    );
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      text: async () => MINIMAL_RSS_XML,
+    }));
+
+    const feed = makeFeed({ title: null, seen_guids: '[]' });
+    const sendMessage = vi.fn(async () => {});
+
+    await checkFeed(feed, {
+      registeredGroups: () => ({
+        [feed.group_folder]: makeGroup(feed.group_folder, feed.chat_jid) as any,
+      }),
+      getSessions: () => ({}),
+      queue: {
+        enqueueTask: vi.fn(),
+        notifyIdle: vi.fn(),
+        closeStdin: vi.fn(),
+      } as any,
+      onProcess: vi.fn(),
+      sendMessage,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      feed.chat_jid,
+      'summary text',
+      'RSS',
+    );
   });
 });

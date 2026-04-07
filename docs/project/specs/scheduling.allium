@@ -320,11 +320,25 @@ rule FeedItemsBatched {
     ensures: feed.group.rss_digest_appended(items, now)  -- appended to rss-digest.md
 
     @guidance
-        -- TODO: Clarify the isolated container behaviour for RSS judgment.
-        -- Questions: which container image? which mounts? does it have access to group memory?
-        -- what Claude model/system prompt does it use? is there a timeout? does it route through
-        -- the same GroupQueue as scheduled tasks, or bypass it?
-        -- See: rss-monitor.ts runContainerAgent() call with sessionId=undefined.
+        -- RSS judgment containers route through GroupQueue.enqueueTask, keyed on
+        -- feed.chat_jid (the same JID used by the main agent and scheduled tasks for
+        -- that group). This means RSS, Zotero, scheduled tasks, and the main agent
+        -- for a given group are all serialised: at most one container runs at a time.
+        --
+        -- The container uses the group's standard image and mounts (including group
+        -- memory), with sessionId=undefined (always isolated, no conversation history).
+        -- Timeout and close delay follow the scheduled task defaults.
+        --
+        -- SESSION DIRECTORY INVARIANT
+        -- RSS judgment containers share the group's session directory
+        -- (DATA_DIR/sessions/{group.folder}/...) with the main agent and other
+        -- scheduled-task containers. The API-error poller in container-runner.ts
+        -- watches all .jsonl files in that directory and attributes errors to the
+        -- currently running container. Correctness relies on the GroupQueue
+        -- serialisation guarantee above: if two containers for the same group ran
+        -- concurrently, each poller would see the other's session file and misattribute
+        -- errors. Specialist containers are exempt because they use per-task
+        -- spec-{id} session folders.
 }
 
 rule FeedPaused {
@@ -387,4 +401,21 @@ invariant ActiveTasksHaveNextRun {
 invariant CompletedTasksHaveNoNextRun {
     for t in ScheduledTasks:
         t.status = completed implies t.next_run = null
+}
+
+-- At most one agent container runs at a time per group JID.
+-- Scheduled tasks, RSS judgment containers, Zotero syncs, and the main agent
+-- for a given group all serialise on the same JID via GroupQueue.enqueueTask /
+-- enqueueMessageCheck. This is a load-bearing invariant: the API-error session
+-- poller in container-runner.ts watches a shared per-group session directory and
+-- relies on serial execution to correctly attribute errors to the running container.
+-- Specialist containers are exempt: they use per-task spec-{id} session folders
+-- and a distinct JID, so they never conflict with the group's session directory.
+--
+-- Enforced by GroupQueue.state.active per JID. If parallel execution within a
+-- group is ever introduced, session directories must move to a per-container
+-- model (following the specialist pattern) before this invariant can be relaxed.
+invariant OneActiveContainerPerGroupJid {
+    for g in nanoclaw.Groups:
+        nanoclaw.AgentSessions where group = g and status = active .count <= 1
 }

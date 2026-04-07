@@ -565,6 +565,24 @@ export async function runContainerAgent(
     // On seeing an API error we start a grace timer: if new JSONL lines appear
     // within the grace period the agent recovered and we leave it alone.
     // Transient errors (overloaded, rate_limit) are skipped entirely.
+    //
+    // SESSION DIRECTORY SHARING — SERIALISATION INVARIANT
+    // All containers for the same group share one session directory
+    // (DATA_DIR/sessions/{group.folder}/...). The poller watches every .jsonl
+    // in that directory, so if two containers for the same group were ever
+    // active simultaneously, each would see the other's session file and
+    // falsely attribute its errors to itself — potentially killing the wrong
+    // container.
+    //
+    // This is safe today because GroupQueue enforces at most one active
+    // container per group JID at a time: scheduled tasks, RSS judgment
+    // containers, and Zotero syncs all serialise on the same JID as the main
+    // agent. Specialist containers are already isolated (they use per-task
+    // spec-{id} folders).
+    //
+    // If GroupQueue ever allowed parallel execution within a group, session
+    // directories would need to be per-container (following the specialist
+    // model) rather than per-group.
     const sessionProjectsDir = path.join(
       DATA_DIR,
       'sessions',
@@ -573,7 +591,25 @@ export async function runContainerAgent(
       'projects',
       '-workspace-group',
     );
+    // Pre-seed offsets with current file sizes so the poller only reads content
+    // written after this container started — not errors from old session logs.
     const jsonlOffsets: Record<string, number> = {};
+    try {
+      const existingFiles = fs
+        .readdirSync(sessionProjectsDir)
+        .filter((f) => f.endsWith('.jsonl'));
+      for (const file of existingFiles) {
+        try {
+          jsonlOffsets[file] = fs.statSync(
+            path.join(sessionProjectsDir, file),
+          ).size;
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // directory may not exist yet — that's fine
+    }
     let apiErrorGrace: ReturnType<typeof setTimeout> | null = null;
 
     const killOnApiError = () => {
@@ -634,6 +670,7 @@ export async function runContainerAgent(
           } catch {
             continue;
           }
+          const entryTimestamp = entry.timestamp as string;
           if (entry.isApiErrorMessage) {
             // Skip transient errors — the agent can recover on its own.
             const errorKind =
@@ -651,7 +688,12 @@ export async function runContainerAgent(
 
             if (apiErrorGrace === null) {
               logger.warn(
-                { group: group.name, containerName, error: apiErrorMessage },
+                {
+                  group: group.name,
+                  containerName,
+                  error: apiErrorMessage,
+                  errorTimestamp: entryTimestamp,
+                },
                 'API error detected in session log, starting grace period',
               );
               apiErrorGrace = setTimeout(killOnApiError, API_ERROR_GRACE_MS);
@@ -659,7 +701,11 @@ export async function runContainerAgent(
           } else if (apiErrorGrace !== null) {
             // New activity after an API error — agent recovered, cancel kill.
             logger.info(
-              { group: group.name, containerName },
+              {
+                group: group.name,
+                containerName,
+                recoveredTimestamp: entryTimestamp,
+              },
               'Agent recovered after API error, cancelling grace timer',
             );
             clearTimeout(apiErrorGrace);

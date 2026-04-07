@@ -73,13 +73,14 @@ entity ScheduledTask {
 -- A subscribed RSS feed that delivers new items to a group's chat on a schedule.
 entity RssFeed {
     group: nanoclaw.Group
-    target_chat: nanoclaw.Chat
+    chat_jid: String                    -- JID of the chat to deliver to (denormalised from target group)
     url: String
+    title: String?                      -- feed title, extracted on first successful fetch
     schedule: Schedule                  -- schedule.type must be cron or interval; once is not valid for feeds
     interest: String?                   -- optional focus prompt: "summarise posts about AI safety"
     status: RssFeedStatus
     next_check: Timestamp?              -- null when paused or cancelled
-    seen_item_ids: Set<String>          -- GUIDs of already-delivered items (capped to prevent unbounded growth)
+    seen_guids: Set<String>             -- GUIDs of already-seen items; capped at max_seen_guids (hardcoded 500)
     created_at: Timestamp
 
     transitions status {
@@ -91,23 +92,19 @@ entity RssFeed {
     }
 }
 
--- A single item from an RSS feed that has been delivered to the target chat.
--- Recorded to prevent re-delivery.
-entity DeliveredFeedItem {
-    feed: RssFeed
-    guid: String
-    delivered_at: Timestamp
-}
+-- No DeliveredFeedItem table. Delivery history is tracked only via seen_guids on RssFeed.
+-- Individual delivery records are not persisted.
 
 ------------------------------------------------------------
 -- Config
 ------------------------------------------------------------
 
 config {
-    task_poll_interval: Duration = 60.seconds
-    rss_poll_interval: Duration = 60.seconds
-    max_seen_guids: Integer = 500       -- cap on seen_item_ids per feed
+    poll_interval: Duration = 60.seconds  -- shared between task and RSS polling loops
+    max_seen_guids: Integer = 500         -- cap on seen_guids per feed; hardcoded, not runtime-configurable
     max_dispatch_depth: Integer = 5
+    max_items_per_prompt: Integer = 20    -- max new items batched into a single judgment prompt
+    fetch_error_retry_delay: Duration = 15.minutes  -- next_check advance on fetch failure
 }
 
 ------------------------------------------------------------
@@ -253,57 +250,81 @@ rule TaskUpdated {
 -- ---- RSS Feed Lifecycle ----
 
 -- Non-main groups can only subscribe feeds targeting their own chat.
+-- Main groups may subscribe for any registered group via target_jid.
 rule FeedSubscribed {
-    when: SubscribeFeed(group, url, schedule, interest)
+    when: SubscribeFeed(group, url, schedule, interest, target_jid?)
 
-    requires: group.is_main or true     -- RSS feeds always target the subscribing group's chat
+    let chat_jid = target_jid ?? group.chat.jid
+
+    requires: group.is_main or chat_jid = group.chat.jid
+    requires: valid_schedule(schedule)
+    requires: schedule.type in { cron, interval }   -- once is not valid for feeds
 
     let next_check = compute_next_run(schedule, now)
 
     ensures: RssFeed.created(
         group: group,
-        target_chat: group.chat,
+        chat_jid: chat_jid,
         url: url,
         schedule: schedule,
         interest: interest,
         next_check: next_check,
-        seen_item_ids: {},
+        seen_guids: {},
         created_at: now
     )
 }
 
 -- When a feed is due for checking, its URL is fetched and new items are identified.
--- The ensures clause updates next_check to a future time, preventing immediate re-firing.
+-- All new items are batched into a single agent invocation (up to max_items_per_prompt).
+-- On fetch error, next_check is advanced by fetch_error_retry_delay rather than the normal schedule.
 rule FeedChecked {
     when: feed: RssFeed.next_check <= now
 
     requires: feed.status = active
 
-    let new_items = fetch_new_items(feed.url, feed.seen_item_ids)
-    let next_check = compute_next_run(feed.schedule, now)
+    let fetch_result = fetch_feed(feed.url)          -- 30-second HTTP timeout
 
-    ensures: feed.next_check = next_check
-    ensures:
-        for item in new_items:
-            FeedItemAvailable(feed: feed, item: item)
+    -- On fetch error: advance next_check by fetch_error_retry_delay; no agent invocation.
+    if fetch_result.error:
+        ensures: feed.next_check = now + config.fetch_error_retry_delay
+
+    -- On success: extract title, diff new items, cap seen_guids, deliver batch.
+    if not fetch_result.error:
+        let new_items = diff_new_items(fetch_result.items, feed.seen_guids)
+                            .take(config.max_items_per_prompt)
+        let next_check = compute_next_run(feed.schedule, now)
+
+        ensures: feed.title = fetch_result.title ?? feed.title
+        ensures: feed.next_check = next_check
+        ensures: feed.seen_guids = merge_and_cap(feed.seen_guids, new_items.guids, config.max_seen_guids)
+        ensures: if new_items.count > 0: FeedItemsBatched(feed: feed, items: new_items)
 
     @guidance
-        -- seen_item_ids is capped at max_seen_guids. Items beyond the cap
-        -- are trimmed from the oldest end to prevent unbounded growth.
+        -- seen_guids is a JSON-serialised array. Capping keeps the newest GUIDs and
+        -- trims from the oldest end (FIFO). Cap is hardcoded at 500.
+        -- Fetch timeout is 30 seconds.
 }
 
--- Each new feed item is delivered to the target chat by invoking the agent.
--- If an interest prompt is set, the agent uses it to filter or summarise the item.
-rule FeedItemDelivered {
-    when: FeedItemAvailable(feed, item)
+-- All new items for a feed check are delivered in a single isolated agent invocation.
+-- The agent is given a judgment prompt listing all items; interest filters if set.
+-- Result is sent to feed.chat_jid and appended to rss-digest.md in the group folder.
+rule FeedItemsBatched {
+    when: FeedItemsBatched(feed, items)
 
-    ensures: DeliveredFeedItem.created(
+    ensures: FeedAgentStarted(
         feed: feed,
-        guid: item.guid,
-        delivered_at: now
+        items: items,
+        session_id: null,               -- always isolated; no group session reused
+        is_scheduled_task: true
     )
-    ensures: feed.seen_item_ids.add(item.guid)
-    ensures: FeedAgentStarted(feed: feed, item: item)
+    ensures: feed.group.rss_digest_appended(items, now)  -- appended to rss-digest.md
+
+    @guidance
+        -- TODO: Clarify the isolated container behaviour for RSS judgment.
+        -- Questions: which container image? which mounts? does it have access to group memory?
+        -- what Claude model/system prompt does it use? is there a timeout? does it route through
+        -- the same GroupQueue as scheduled tasks, or bypass it?
+        -- See: rss-monitor.ts runContainerAgent() call with sessionId=undefined.
 }
 
 rule FeedPaused {
@@ -332,11 +353,11 @@ rule FeedCancelled {
     when: CancelFeed(requesting_group, feed)
 
     requires: requesting_group.is_main or feed.group = requesting_group
-    requires: feed.status in { active, paused }
+    -- Note: code does not enforce feed.status in { active, paused }; cancel is idempotent.
 
     ensures: feed.status = cancelled
     ensures: feed.next_check = null
-    -- Feed record and seen_item_ids history retained as a tombstone.
+    -- Feed record and seen_guids history retained as a tombstone.
     -- cancelled is terminal: resume is rejected for cancelled feeds.
 }
 

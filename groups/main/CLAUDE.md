@@ -289,7 +289,7 @@ sqlite3 -json /workspace/project/store/messages.db "SELECT jid, name, folder, tr
 
 ## Global Memory
 
-`/workspace/project/groups/global/CLAUDE.md` contains facts that apply to all groups. It is read-only inside the container — to update it, edit `~/nanoclaw/groups/global/CLAUDE.md` on the host. Only update global memory when explicitly asked to "remember this globally" or similar.
+You can read and write to `/workspace/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
 
 ---
 

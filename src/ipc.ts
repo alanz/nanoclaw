@@ -29,6 +29,7 @@ import {
   updateTask,
 } from './db.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
+import { takeFileOwnership } from './ipc-transfer.js';
 import { logger } from './logger.js';
 import {
   deliverResult,
@@ -363,6 +364,9 @@ export async function processTaskIpc(
     targetTypeName?: string;
     sessionId?: string;
     resultText?: string;
+    filePaths?: string; // JSON-encoded string[] from deliver_specialist_result
+    invocationId?: string;
+    sourceGroup?: string;
     topic?: string;
     stagingPath?: string;
     // For dispatch_specialist_task (main group dispatches a top-level specialist)
@@ -1346,7 +1350,12 @@ export async function processTaskIpc(
     }
 
     case 'deliver_specialist_result': {
-      const { taskId, resultText } = data;
+      const {
+        taskId,
+        resultText,
+        filePaths,
+        invocationId: srcInvocationId,
+      } = data;
       if (!taskId || resultText == null) {
         logger.warn(
           { data },
@@ -1355,7 +1364,48 @@ export async function processTaskIpc(
         break;
       }
       try {
-        await deliverResult(taskId, resultText);
+        let finalResultText: string = resultText;
+
+        // If the container staged files in ipc-out, take ownership before they
+        // are cleaned up on container exit.
+        const rawFilePaths: unknown = filePaths ? JSON.parse(filePaths) : [];
+        const parsedFilePaths = Array.isArray(rawFilePaths)
+          ? (rawFilePaths as string[])
+          : [];
+        if (parsedFilePaths.length > 0 && srcInvocationId) {
+          const result = takeFileOwnership({
+            invocationId: srcInvocationId,
+            filePaths: parsedFilePaths,
+            message: resultText,
+            recipientTaskId: taskId,
+            recipientGroupFolder: null,
+            senderGroupFolder: sourceGroup,
+          });
+          if (result.ok) {
+            const fileList = result.files
+              .map(
+                (f) =>
+                  `- /workspace/ipc-in/${result.transfer.id}/${f.original_name}`,
+              )
+              .join('\n');
+            finalResultText = `${resultText}\n\nFiles from this specialist are available at:\n${fileList}`;
+            logger.info(
+              {
+                taskId,
+                transferId: result.transfer.id,
+                fileCount: result.files.length,
+              },
+              'File ownership taken for specialist result',
+            );
+          } else {
+            logger.warn(
+              { taskId, error: result.error },
+              'File ownership failed for specialist result — delivering without files',
+            );
+          }
+        }
+
+        await deliverResult(taskId, finalResultText);
         logger.info({ taskId }, 'deliver_specialist_result succeeded');
       } catch (err) {
         logger.error({ taskId, err }, 'deliver_specialist_result failed');

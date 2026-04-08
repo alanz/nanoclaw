@@ -60,6 +60,9 @@ export interface ContainerInput {
   /** Extra read-only mounts added after the standard ones (e.g. main-memory
    *  for memory-provider specialists). */
   extraReadonlyMounts?: Array<{ hostPath: string; containerPath: string }>;
+  /** Called after mounts are created (including ipc-in) but before the
+   *  container spawns. Use this to populate ipc-in with pending transfer files. */
+  onInvocationReady?: (invocationId: string) => void;
 }
 
 export interface ContainerOutput {
@@ -403,6 +406,9 @@ export async function runContainerAgent(
     extraReadonlyMounts: input.extraReadonlyMounts,
     invocationId,
   });
+
+  // Allow callers to populate ipc-in before the container starts
+  input.onInvocationReady?.(invocationId);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, input.isMain);

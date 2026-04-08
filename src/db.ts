@@ -1620,6 +1620,17 @@ export function getContainerTransfer(
     .get(id) as ContainerTransfer | undefined;
 }
 
+export function getTransfersByRecipientTask(
+  taskId: string,
+): ContainerTransfer[] {
+  return db
+    .prepare(
+      `SELECT * FROM container_transfers
+       WHERE recipient_task_id = ? AND status IN ('pending', 'in_transit')`,
+    )
+    .all(taskId) as ContainerTransfer[];
+}
+
 export function updateContainerTransfer(
   id: string,
   updates: Partial<

@@ -70,6 +70,7 @@ import {
   resolveSpecialistGroupFolderPath,
 } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { placeFilesForInvocation } from './ipc-transfer.js';
 import {
   findChannel,
   formatMessages,
@@ -1333,6 +1334,9 @@ async function main(): Promise<void> {
             hostGroupDir,
             specialistType: task.specialist_type,
             extraReadonlyMounts,
+            onInvocationReady: (invocationId) => {
+              placeFilesForInvocation(task.id, invocationId);
+            },
           },
           (proc, containerName) =>
             queue.registerProcess(

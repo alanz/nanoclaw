@@ -83,6 +83,7 @@ function buildVolumeMounts(
   overrides?: {
     hostGroupDir?: string;
     extraReadonlyMounts?: Array<{ hostPath: string; containerPath: string }>;
+    invocationId?: string;
   },
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
@@ -283,6 +284,27 @@ function buildVolumeMounts(
     }
   }
 
+  // Per-invocation IPC staging mounts (spec: IpcOutMount / IpcInMount).
+  // ipc-out: container writes staged files here; host takes ownership after run.
+  // ipc-in:  host places inbound files here before the container starts; read-only.
+  if (overrides?.invocationId) {
+    const invDir = path.join(DATA_DIR, 'invocations', overrides.invocationId);
+    const ipcOutDir = path.join(invDir, 'ipc-out');
+    const ipcInDir = path.join(invDir, 'ipc-in');
+    fs.mkdirSync(ipcOutDir, { recursive: true });
+    fs.mkdirSync(ipcInDir, { recursive: true });
+    mounts.push({
+      hostPath: ipcOutDir,
+      containerPath: '/workspace/ipc-out',
+      readonly: false,
+    });
+    mounts.push({
+      hostPath: ipcInDir,
+      containerPath: '/workspace/ipc-in',
+      readonly: true,
+    });
+  }
+
   return mounts;
 }
 
@@ -379,6 +401,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain, {
     hostGroupDir: input.hostGroupDir,
     extraReadonlyMounts: input.extraReadonlyMounts,
+    invocationId,
   });
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
@@ -724,6 +747,18 @@ export async function runContainerAgent(
       clearTimeout(timeout);
       clearInterval(sessionPoll);
       if (apiErrorGrace !== null) clearTimeout(apiErrorGrace);
+
+      // Clean up per-invocation IPC directories (spec: InvocationEnded)
+      const invDir = path.join(DATA_DIR, 'invocations', invocationId);
+      try {
+        fs.rmSync(invDir, { recursive: true, force: true });
+      } catch (err) {
+        logger.warn(
+          { invocationId, err },
+          'Failed to clean up invocation IPC dirs',
+        );
+      }
+
       const duration = Date.now() - startTime;
 
       if (apiErrorKilled) {

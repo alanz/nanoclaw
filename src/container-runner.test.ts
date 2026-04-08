@@ -242,6 +242,23 @@ describe('container-runner timeout behavior', () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
   });
+
+  it('mounts ipc-out (rw) and ipc-in (ro) per-invocation directories', async () => {
+    runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+
+    const spawnArgs = vi.mocked(spawn).mock.calls[0][1] as string[];
+    const argStr = spawnArgs.join(' ');
+
+    // ipc-out should be a read-write bind mount
+    expect(argStr).toMatch(/-v [^ ]+\/ipc-out:\/workspace\/ipc-out/);
+    // ipc-in should be a read-only bind mount (ro suffix via readonlyMountArgs)
+    expect(argStr).toMatch(/[^ ]+\/ipc-in:\/workspace\/ipc-in:ro/);
+  });
 });
 
 import { writeNanoclawMetadata } from './container-runner.js';

@@ -15,6 +15,12 @@ const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
+// Per-invocation staging mounts (spec: IpcOutMount / IpcInMount).
+// ipc-out: container writes files here for the host to take ownership of.
+// ipc-in:  host places inbound files here before the container starts (read-only).
+const IPC_OUT_DIR = '/workspace/ipc-out';
+const IPC_IN_DIR = '/workspace/ipc-in';
+
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;

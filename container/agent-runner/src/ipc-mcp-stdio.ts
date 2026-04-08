@@ -108,47 +108,57 @@ server.tool(
 
 server.tool(
   'send_file',
-  `Send a file or image to the user. The file must exist at a path under /workspace/ipc/ (e.g. /workspace/ipc/outgoing/result.jpg). For images you generate or download, write them there first, then call this tool.`,
+  `Send a file or image to the user. Write the file to /workspace/ipc-out/ first, then call this tool with its path.`,
   {
     file_path: z
       .string()
       .describe(
-        'Absolute path to the file. Must be under /workspace/ipc/ (the only directory visible to both the container and the host).',
+        `Absolute path to the file. Must be under ${IPC_OUT_DIR}/ (the per-invocation staging area).`,
       ),
     caption: z.string().optional().describe('Optional caption text'),
   },
   async (args) => {
-    const IPC_PREFIX = '/workspace/ipc/';
-    if (!args.file_path.startsWith(IPC_PREFIX)) {
+    if (!args.file_path.startsWith(`${IPC_OUT_DIR}/`) || args.file_path.includes('..')) {
       return {
         content: [
           {
             type: 'text' as const,
-            text: `file_path must be under ${IPC_PREFIX}. Got: ${args.file_path}`,
+            text: `file_path must be under ${IPC_OUT_DIR}/ and must not contain .. Got: ${args.file_path}`,
           },
         ],
         isError: true,
       };
     }
-    const relativePath = args.file_path.slice(IPC_PREFIX.length);
-    // Reject path traversal
-    if (relativePath.includes('..')) {
+    if (!fs.existsSync(args.file_path)) {
+      let available: string[] = [];
+      try {
+        available = fs.readdirSync(IPC_OUT_DIR).map((f) => `${IPC_OUT_DIR}/${f}`);
+      } catch {
+        // ignore
+      }
       return {
         content: [
-          { type: 'text' as const, text: 'file_path must not contain ..' },
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              error: 'ContainerSendRejected',
+              missing_paths: [args.file_path],
+              available_paths: available,
+            }),
+          },
         ],
         isError: true,
       };
     }
-    const data: Record<string, string | undefined> = {
-      type: 'file',
+    writeIpcFile(TASKS_DIR, {
+      type: 'send_file',
       chatJid,
       groupFolder,
-      ipcRelativePath: relativePath,
+      filePath: args.file_path,
       caption: args.caption,
+      invocationId,
       timestamp: new Date().toISOString(),
-    };
-    writeIpcFile(MESSAGES_DIR, data);
+    });
     return { content: [{ type: 'text' as const, text: 'File queued for sending.' }] };
   },
 );
@@ -1627,6 +1637,35 @@ To include output files with the result, write them to /workspace/ipc-out/ first
             isError: true,
           };
         }
+      }
+
+      // Validate all files actually exist before writing the IPC task.
+      // Return a structured ContainerSendRejected error so the agent can
+      // self-correct (write the missing file and retry) rather than
+      // silently losing the send.
+      const missing = filePaths.filter((fp) => !fs.existsSync(fp));
+      if (missing.length > 0) {
+        let available: string[] = [];
+        try {
+          available = fs
+            .readdirSync(IPC_OUT_DIR)
+            .map((f) => `${IPC_OUT_DIR}/${f}`);
+        } catch {
+          // ipc-out may be empty or not yet created
+        }
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: 'ContainerSendRejected',
+                missing_paths: missing,
+                available_paths: available,
+              }),
+            },
+          ],
+          isError: true,
+        };
       }
 
       writeIpcFile(TASKS_DIR, {

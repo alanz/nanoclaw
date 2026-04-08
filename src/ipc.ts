@@ -26,7 +26,9 @@ import {
   getSpecialistTask,
   queryTranscript,
   storeMessage,
+  updateContainerTransfer,
   updateTask,
+  updateTransferFile,
 } from './db.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { takeFileOwnership } from './ipc-transfer.js';
@@ -365,7 +367,10 @@ export async function processTaskIpc(
     sessionId?: string;
     resultText?: string;
     filePaths?: string; // JSON-encoded string[] from deliver_specialist_result
+    filePath?: string; // single path from send_file
+    caption?: string;
     invocationId?: string;
+    _dataDir?: string; // override DATA_DIR in tests
     sourceGroup?: string;
     topic?: string;
     stagingPath?: string;
@@ -1252,6 +1257,55 @@ export async function processTaskIpc(
           cleanup();
         }
       })();
+      break;
+    }
+
+    case 'send_file': {
+      const {
+        filePath,
+        invocationId: srcInvocationId,
+        chatJid: targetJid,
+        caption,
+        _dataDir,
+      } = data;
+      if (!filePath || !srcInvocationId || !targetJid) {
+        logger.warn({ data }, 'send_file: missing required fields');
+        break;
+      }
+      const targetGroup = registeredGroups[targetJid];
+      if (!isMain && !(targetGroup && targetGroup.folder === sourceGroup)) {
+        logger.warn(
+          { targetJid, sourceGroup },
+          'Unauthorized send_file attempt blocked',
+        );
+        break;
+      }
+      try {
+        const result = takeFileOwnership({
+          invocationId: srcInvocationId,
+          filePaths: [filePath],
+          message: caption ?? '',
+          recipientTaskId: null,
+          recipientGroupFolder: null,
+          senderGroupFolder: sourceGroup,
+          _dataDir,
+        });
+        if (!result.ok) {
+          logger.warn(
+            { error: result.error, targetJid, sourceGroup },
+            'send_file: file ownership failed',
+          );
+          break;
+        }
+        await deps.sendFile(targetJid, result.files[0].host_path, caption);
+        updateContainerTransfer(result.transfer.id, {
+          status: 'user_delivered',
+        });
+        updateTransferFile(result.files[0].id, { status: 'expired' });
+        logger.info({ targetJid, sourceGroup }, 'IPC file sent');
+      } catch (err) {
+        logger.error({ targetJid, sourceGroup, err }, 'IPC send_file failed');
+      }
       break;
     }
 

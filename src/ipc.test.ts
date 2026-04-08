@@ -1,14 +1,16 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   _initTestDatabase,
   createSpecialistTask,
+  getContainerTransfer,
   getNewMessages,
   getSpecialistSession,
   getSpecialistTask,
+  getTransferFilesByTransfer,
   storeChatMetadata,
 } from './db.js';
 import { processTaskIpc, processMessageIpc, IpcDeps } from './ipc.js';
@@ -922,5 +924,154 @@ describe('processMessageIpc — specialist progress messages', () => {
     );
 
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// send_file
+// ---------------------------------------------------------------------------
+
+describe('send_file', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'ipc-send-file-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeIpcOut(invocationId: string, files: Record<string, string>) {
+    const dir = join(tmpDir, 'invocations', invocationId, 'ipc-out');
+    mkdirSync(dir, { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(dir, name), content);
+    }
+  }
+
+  it('takes ownership and delivers the file to the channel', async () => {
+    makeIpcOut('inv-1', { 'photo.jpg': 'JPEG_DATA' });
+
+    const sendFile = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      sendFile,
+      registeredGroups: () => ({
+        'user@g.us': {
+          folder: 'grp',
+          name: 'G',
+          trigger: '!',
+          added_at: '2024-01-01T00:00:00.000Z',
+        },
+      }),
+    });
+
+    await processTaskIpc(
+      {
+        type: 'send_file',
+        chatJid: 'user@g.us',
+        filePath: '/workspace/ipc-out/photo.jpg',
+        caption: 'Here is the photo',
+        invocationId: 'inv-1',
+        _dataDir: tmpDir,
+      },
+      'grp',
+      false,
+      deps,
+    );
+
+    expect(sendFile).toHaveBeenCalledWith(
+      'user@g.us',
+      expect.stringContaining('photo.jpg'),
+      'Here is the photo',
+    );
+
+    // Transfer marked user_delivered, file marked expired
+    const [transferId] = sendFile.mock.calls[0][1]
+      .split('transfers/')[1]
+      .split('/');
+    expect(getContainerTransfer(transferId)?.status).toBe('user_delivered');
+    expect(getTransferFilesByTransfer(transferId)[0].status).toBe('expired');
+  });
+
+  it('blocks unauthorized groups', async () => {
+    makeIpcOut('inv-2', { 'doc.pdf': 'PDF' });
+
+    const sendFile = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      sendFile,
+      registeredGroups: () => ({
+        'user@g.us': {
+          folder: 'other-group',
+          name: 'Other',
+          trigger: '!',
+          added_at: '2024-01-01T00:00:00.000Z',
+        },
+      }),
+    });
+
+    await processTaskIpc(
+      {
+        type: 'send_file',
+        chatJid: 'user@g.us',
+        filePath: '/workspace/ipc-out/doc.pdf',
+        invocationId: 'inv-2',
+        _dataDir: tmpDir,
+      },
+      'grp',
+      false,
+      deps,
+    );
+
+    expect(sendFile).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when required fields are missing', async () => {
+    const sendFile = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({ sendFile });
+
+    await processTaskIpc(
+      { type: 'send_file', chatJid: 'user@g.us' },
+      'grp',
+      false,
+      deps,
+    );
+
+    expect(sendFile).not.toHaveBeenCalled();
+  });
+
+  it('handles missing file gracefully', async () => {
+    // ipc-out exists but file is absent
+    mkdirSync(join(tmpDir, 'invocations', 'inv-3', 'ipc-out'), {
+      recursive: true,
+    });
+
+    const sendFile = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      sendFile,
+      registeredGroups: () => ({
+        'user@g.us': {
+          folder: 'grp',
+          name: 'G',
+          trigger: '!',
+          added_at: '2024-01-01T00:00:00.000Z',
+        },
+      }),
+    });
+
+    await processTaskIpc(
+      {
+        type: 'send_file',
+        chatJid: 'user@g.us',
+        filePath: '/workspace/ipc-out/missing.jpg',
+        invocationId: 'inv-3',
+        _dataDir: tmpDir,
+      },
+      'grp',
+      false,
+      deps,
+    );
+
+    expect(sendFile).not.toHaveBeenCalled();
   });
 });

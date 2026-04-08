@@ -552,6 +552,123 @@ describe('deliver_specialist_result', () => {
   });
 });
 
+describe('deliver_specialist_result with commit_to_memory', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'ipc-commit-memory-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeIpcOut(invocationId: string, files: Record<string, string>) {
+    const dir = join(tmpDir, 'invocations', invocationId, 'ipc-out');
+    mkdirSync(dir, { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(dir, name), content);
+    }
+    return dir;
+  }
+
+  it('copies files to memory/reports/ and rewrites the result message', async () => {
+    const reportsDir = join(tmpDir, 'groups', 'main', 'memory', 'reports');
+
+    const task = makeRunningSpecialistTask({
+      id: 'ctm-1',
+      requester_group: MAIN_JID,
+    });
+    makeIpcOut('inv-ctm-1', {
+      'result.md': '# Research Report\nContent here.',
+    });
+
+    const deps = makeDeps({
+      registeredGroups: () => ({
+        [MAIN_JID]: {
+          folder: 'main',
+          name: 'Main',
+          trigger: '!',
+          added_at: '2024-01-01T00:00:00.000Z',
+          isMain: true,
+        },
+      }),
+    });
+
+    await processTaskIpc(
+      {
+        type: 'deliver_specialist_result',
+        taskId: task.id,
+        resultText: 'Research summary.',
+        filePaths: JSON.stringify(['/workspace/ipc-out/result.md']),
+        commitToMemory: true,
+        invocationId: 'inv-ctm-1',
+        _dataDir: tmpDir,
+        _groupsDir: join(tmpDir, 'groups'),
+      },
+      'researcher-group',
+      false,
+      deps,
+    );
+
+    // File was copied to memory/reports/
+    const { readFileSync, existsSync } = await import('node:fs');
+    expect(existsSync(join(reportsDir, 'result.md'))).toBe(true);
+    expect(readFileSync(join(reportsDir, 'result.md'), 'utf-8')).toBe(
+      '# Research Report\nContent here.',
+    );
+
+    // Result message references committed path
+    expect(getSpecialistTask(task.id)?.result).toContain(
+      'memory/reports/result.md',
+    );
+    expect(notifyMainGroupFn).toHaveBeenCalledWith(
+      MAIN_JID,
+      expect.stringContaining('memory/reports/result.md'),
+    );
+  });
+
+  it('falls through to plain text when file_paths is empty', async () => {
+    const task = makeRunningSpecialistTask({
+      id: 'ctm-2',
+      requester_group: MAIN_JID,
+    });
+
+    const deps = makeDeps({
+      registeredGroups: () => ({
+        [MAIN_JID]: {
+          folder: 'main',
+          name: 'Main',
+          trigger: '!',
+          added_at: '2024-01-01T00:00:00.000Z',
+          isMain: true,
+        },
+      }),
+    });
+
+    await processTaskIpc(
+      {
+        type: 'deliver_specialist_result',
+        taskId: task.id,
+        resultText: 'Inline result text.',
+        filePaths: JSON.stringify([]),
+        commitToMemory: true,
+        invocationId: 'inv-ctm-2',
+        _dataDir: tmpDir,
+      },
+      'researcher-group',
+      false,
+      deps,
+    );
+
+    expect(getSpecialistTask(task.id)?.result).toBe('Inline result text.');
+    expect(notifyMainGroupFn).toHaveBeenCalledWith(
+      MAIN_JID,
+      expect.stringContaining('Inline result text.'),
+    );
+  });
+});
+
 describe('report_specialist_session', () => {
   it('creates a session record for the task', async () => {
     const task = makeRunningSpecialistTask({ id: 'rss-1' });

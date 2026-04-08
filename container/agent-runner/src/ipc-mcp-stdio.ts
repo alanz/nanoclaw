@@ -1627,6 +1627,10 @@ To include output files with the result, write them to /workspace/ipc-out/ first
         .array(z.string())
         .optional()
         .describe('Absolute paths under /workspace/ipc-out/ to include with the result'),
+      commit_to_memory: z
+        .boolean()
+        .optional()
+        .describe('When true, the host commits the files directly to the group memory/reports/ directory instead of placing them in ipc-in. Use for research reports that should always be persisted.'),
     },
     async (args) => {
       const filePaths = args.file_paths ?? [];
@@ -1673,6 +1677,7 @@ To include output files with the result, write them to /workspace/ipc-out/ first
         taskId: specialistTaskId,
         resultText: args.result_text,
         filePaths: JSON.stringify(filePaths),
+        commitToMemory: args.commit_to_memory ?? false,
         invocationId,
         sourceGroup: chatJid,
         timestamp: new Date().toISOString(),

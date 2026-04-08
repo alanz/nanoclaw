@@ -5,6 +5,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAX_DISPATCH_DEPTH,
   MEMORY_SEARCH_ENABLED,
@@ -367,10 +368,12 @@ export async function processTaskIpc(
     sessionId?: string;
     resultText?: string;
     filePaths?: string; // JSON-encoded string[] from deliver_specialist_result
+    commitToMemory?: boolean;
     filePath?: string; // single path from send_file
     caption?: string;
     invocationId?: string;
     _dataDir?: string; // override DATA_DIR in tests
+    _groupsDir?: string; // override GROUPS_DIR in tests
     sourceGroup?: string;
     topic?: string;
     stagingPath?: string;
@@ -1408,7 +1411,10 @@ export async function processTaskIpc(
         taskId,
         resultText,
         filePaths,
+        commitToMemory,
         invocationId: srcInvocationId,
+        _dataDir: dataDir,
+        _groupsDir: groupsDir,
       } = data;
       if (!taskId || resultText == null) {
         logger.warn(
@@ -1426,36 +1432,75 @@ export async function processTaskIpc(
         const parsedFilePaths = Array.isArray(rawFilePaths)
           ? (rawFilePaths as string[])
           : [];
+
         if (parsedFilePaths.length > 0 && srcInvocationId) {
-          const result = takeFileOwnership({
-            invocationId: srcInvocationId,
-            filePaths: parsedFilePaths,
-            message: resultText,
-            recipientTaskId: taskId,
-            recipientGroupFolder: null,
-            senderGroupFolder: sourceGroup,
-          });
-          if (result.ok) {
-            const fileList = result.files
-              .map(
-                (f) =>
-                  `- /workspace/ipc-in/${result.transfer.id}/${f.original_name}`,
-              )
+          if (commitToMemory) {
+            // Commit files directly to the main group's memory/reports/ directory.
+            const mainGroup = Object.values(deps.registeredGroups()).find(
+              (g) => g.isMain,
+            );
+            const mainFolder = mainGroup?.folder ?? 'main';
+            const reportsDir = path.join(
+              groupsDir ?? GROUPS_DIR,
+              mainFolder,
+              'memory',
+              'reports',
+            );
+            fs.mkdirSync(reportsDir, { recursive: true });
+            const committedPaths: string[] = [];
+            for (const fp of parsedFilePaths) {
+              const fileName = path.basename(fp);
+              // Source: ipc-out dir on host (invocation-specific)
+              const srcPath = path.join(
+                dataDir ?? DATA_DIR,
+                'invocations',
+                srcInvocationId,
+                'ipc-out',
+                fileName,
+              );
+              const destPath = path.join(reportsDir, fileName);
+              fs.copyFileSync(srcPath, destPath);
+              committedPaths.push(`memory/reports/${fileName}`);
+            }
+            const fileList = committedPaths
+              .map((p) => `- /workspace/group/${p}`)
               .join('\n');
-            finalResultText = `${resultText}\n\nFiles from this specialist are available at:\n${fileList}`;
+            finalResultText = `${resultText}\n\nResearch report committed to memory:\n${fileList}`;
             logger.info(
-              {
-                taskId,
-                transferId: result.transfer.id,
-                fileCount: result.files.length,
-              },
-              'File ownership taken for specialist result',
+              { taskId, committedPaths },
+              'Research report committed to memory/reports',
             );
           } else {
-            logger.warn(
-              { taskId, error: result.error },
-              'File ownership failed for specialist result — delivering without files',
-            );
+            const result = takeFileOwnership({
+              invocationId: srcInvocationId,
+              filePaths: parsedFilePaths,
+              message: resultText,
+              recipientTaskId: taskId,
+              recipientGroupFolder: null,
+              senderGroupFolder: sourceGroup,
+            });
+            if (result.ok) {
+              const fileList = result.files
+                .map(
+                  (f) =>
+                    `- /workspace/ipc-in/${result.transfer.id}/${f.original_name}`,
+                )
+                .join('\n');
+              finalResultText = `${resultText}\n\nFiles from this specialist are available at:\n${fileList}`;
+              logger.info(
+                {
+                  taskId,
+                  transferId: result.transfer.id,
+                  fileCount: result.files.length,
+                },
+                'File ownership taken for specialist result',
+              );
+            } else {
+              logger.warn(
+                { taskId, error: result.error },
+                'File ownership failed for specialist result — delivering without files',
+              );
+            }
           }
         }
 

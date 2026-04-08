@@ -38,6 +38,17 @@ When finished, deliver your result:
 mcp__nanoclaw__deliver_specialist_result(result_text="...")
 ```
 
+If your task produced files (PDFs, images, data, code), write them to `/workspace/ipc-out/` first and include them:
+
+```
+mcp__nanoclaw__deliver_specialist_result(
+  result_text="Summary of findings...",
+  file_paths=["/workspace/ipc-out/report.pdf", "/workspace/ipc-out/data.csv"]
+)
+```
+
+The host takes ownership of the files and makes them available to the parent container under `/workspace/ipc-in/{transfer_id}/`.
+
 The result is routed to whoever requested you (the main group or a parent specialist).
 
 ## Delegating Sub-Tasks

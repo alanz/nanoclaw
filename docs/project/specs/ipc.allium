@@ -546,13 +546,20 @@ rule SpecialistSubmittedMemory {
 -- specialists run under the null channel group with per-task IPC directories, not regular
 -- group IPC directories. A parallel tool keeps the two delivery mechanisms cleanly separated.
 rule SpecialistDeliveredResultViaIpc {
-    when: SpecialistMcpCall(spec_author, "deliver_specialist_result", result_text)
+    when: SpecialistMcpCall(
+        spec_author,
+        "deliver_specialist_result",
+        result_text,
+        file_paths: List<String>?,
+        commit_to_memory: Boolean?
+    )
 
     requires: spec_author.task.status = running
 
     ensures: SpecialistDeliveredResult(
         task: spec_author.task,
-        result_text: result_text
+        result_text: result_text,
+        file_paths: resolve_delivery_paths(spec_author.task, file_paths, commit_to_memory)
     )
 
     @guidance
@@ -561,6 +568,18 @@ rule SpecialistDeliveredResultViaIpc {
         -- (main group or parent specialist) as defined by specialists.SpecialistTaskCompleted.
         -- Each specialist container may call deliver_specialist_result at most once,
         -- enforced in the container MCP server (in-memory flag, same pattern as deliver_result).
+        --
+        -- commit_to_memory flag:
+        -- When commit_to_memory = true and file_paths is non-empty, the host copies the listed
+        -- files from the specialist's ipc-out directory into the main group's memory/reports/
+        -- directory before routing the result. commit_files_to_memory returns the committed
+        -- paths (relative to the main group workspace, e.g. "memory/reports/2026-04-08-slug.md").
+        -- The result message delivered to the requester references these committed paths
+        -- instead of the original ipc-out paths, so the requester can read them directly.
+        -- When commit_to_memory = true but file_paths is null or empty, the flag is silently
+        -- ignored and the result is delivered as plain text.
+        -- When commit_to_memory is false or absent, file_paths are placed under
+        -- /workspace/ipc-in/{transfer_id}/ in the requester's container as usual.
 }
 
 -- ---- Request-Response Queries ----

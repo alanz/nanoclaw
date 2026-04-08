@@ -88,33 +88,27 @@ Wrap internal reasoning in `<internal>` tags so it is not sent to the requester:
 
 ### 3. Deliver the result
 
-When finished, deliver your result:
-
-```
-mcp__nanoclaw__deliver_specialist_result(result_text="...")
-```
-
-**If the result is longer than 50 lines**, write it to `/workspace/ipc-out/result.md` instead and pass a brief 1–2 sentence summary in `result_text`:
+**Always** write your report to `/workspace/ipc-out/result.md` and deliver it with `commit_to_memory: true`. This commits the report directly to the group's memory store before the main agent is notified:
 
 ```
 mcp__nanoclaw__deliver_specialist_result(
   result_text="One-sentence summary of findings.",
-  file_paths=["/workspace/ipc-out/result.md"]
+  file_paths=["/workspace/ipc-out/result.md"],
+  commit_to_memory=true
 )
 ```
 
-If your task also produced other files (PDFs, downloaded papers, data), include those in `file_paths` too:
+If you also produced supplementary files (downloaded PDFs, raw data), include them too:
 
 ```
 mcp__nanoclaw__deliver_specialist_result(
   result_text="Summary of findings...",
-  file_paths=["/workspace/ipc-out/result.md", "/workspace/ipc-out/paper.pdf"]
+  file_paths=["/workspace/ipc-out/result.md", "/workspace/ipc-out/paper.pdf"],
+  commit_to_memory=true
 )
 ```
 
-The host takes ownership of the files and makes them available to the parent container under `/workspace/ipc-in/{transfer_id}/`.
-
-The result is routed to whoever requested you (the main group or a parent specialist).
+The host commits the files to the group's `memory/reports/` directory and notifies the main agent with the committed paths. The result is routed to whoever requested you.
 
 ## Delegating Sub-Tasks
 
@@ -165,6 +159,6 @@ The main group agent will be notified and can review and accept the submission.
 ## Guidelines
 
 - Complete your task fully before delivering the result.
-- If the result is longer than 50 lines, write it to `/workspace/ipc-out/result.md` and send a brief summary in `result_text` with `file_paths=["/workspace/ipc-out/result.md"]`.
+- Always write your report to `/workspace/ipc-out/result.md` and use `commit_to_memory=true`. The brief summary goes in `result_text`.
 - Do not hold back partial results; deliver everything in a single `deliver_specialist_result` call.
 - If you cannot complete the task, deliver an explanation of what you attempted and why it failed.

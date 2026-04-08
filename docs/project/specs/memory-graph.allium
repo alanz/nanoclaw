@@ -17,10 +17,13 @@
 --   - Memory file indexing, chunking, and hybrid search (see memory.allium)
 --   - Core group/session lifecycle (see nanoclaw.allium)
 --   - Zotero database sync, PDF scanning, and per-entry markdown generation (see zotero.allium)
+--   - IPC transfer mechanics, file ownership, ipc-in/ipc-out lifecycle (see container-ipc-transfer.allium)
+-- Dependencies: container-ipc-transfer.allium (researcher delivers report file via transfer substrate)
 
 use "./nanoclaw.allium" as nanoclaw
 use "./specialists.allium" as specialists
 use "./memory.allium" as memory
+use "./container-ipc-transfer.allium" as ipc_transfer
 
 ------------------------------------------------------------
 -- Value Types
@@ -144,17 +147,19 @@ rule ResearchDispatched {
 
 -- ---- Report and Note Creation ----
 
--- When the researcher task completes, the main agent writes the report file and
--- creates a linked MemoryNote in the same invocation.
+-- When the researcher task completes, the host has already committed the report
+-- file to memory/reports/ (via the commit_to_memory flag on deliver_specialist_result).
+-- The main agent creates a linked MemoryNote using the committed report as its source.
 rule ReportAndNoteCreated {
     when: task: specialists.SpecialistTask becomes completed
 
     requires: task.specialist_type.name = "researcher"
     requires: task.requester_group != null
+    requires: task.file_paths != null and task.file_paths.length > 0
 
     let group = task.requester_group
-    let slug = topic_slug(task.prompt)
-    let report_path = "memory/reports/" + task.delegated_at.date + "-" + slug + ".md"
+    let report_path = first(task.file_paths)    -- committed path in memory/reports/
+    let slug = slug_from_path(report_path)
 
     let candidates = memory.hybrid_search(
         group: group,
@@ -165,7 +170,6 @@ rule ReportAndNoteCreated {
     )
     let links = extract_link_ids(candidates)
 
-    ensures: ReportFileWritten(group: group, path: report_path, content: task.result)
     ensures: MemoryNote.created(
         group: group,
         id: "MEM-" + task.delegated_at.date + "-" + slug,
@@ -185,10 +189,13 @@ rule ReportAndNoteCreated {
     )
 
     @guidance
-        -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result.
-        -- topic_slug derives a kebab-case slug from the research subject in task.prompt.
-        -- note_id_from_path extracts the MEM-... ID from a memory/notes/ file path.
-        -- The report file is written before the note so sources[0].mtime is valid.
+        -- The report file is committed to memory/reports/ by the host before this rule fires,
+        -- as a result of the researcher calling deliver_specialist_result with commit_to_memory = true.
+        -- task.file_paths[0] holds the committed path (e.g. "memory/reports/2026-04-08-slug.md").
+        -- The main agent does NOT write the report — it reads it from the committed path.
+        -- slug_from_path extracts the date-slug portion from the report filename.
+        -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result
+        -- (the inline summary) or over the report file content if task.result is a brief summary.
         -- Writing the report to memory/reports/ causes memory.allium's FileDiscovered
         -- rule to pick it up; it will be chunked and embedded for future searches.
         -- memory.hybrid_search is the same search used by AgentMemorySearch in memory.allium.
@@ -196,6 +203,8 @@ rule ReportAndNoteCreated {
         -- brief summary of what was found and a web UI link to the created note.
         -- This is enforced by instruction (groups/main/CLAUDE.md) and by a directive
         -- appended to the injected specialist result message.
+        -- If task.file_paths is null or empty (researcher sent result_text only), this rule
+        -- does not fire; the main agent may still create a note organically from the inline result.
 }
 
 -- The top back_link_limit linked notes are updated to reference the new note,

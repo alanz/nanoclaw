@@ -19,7 +19,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GROUPS_DIR, SPECIALISTS_CONFIG } from './config.js';
 import {
   _initTestDatabase,
+  createContainerTransfer,
   createSpecialistTask,
+  createTransferFile,
+  getContainerTransfer,
+  getTransferFilesByTransfer,
   getRawMemorySubmission,
   getSpecialistSession,
   getSpecialistTask,
@@ -3095,5 +3099,56 @@ describe('ensureSpecialistGroupFolder', () => {
       // Clean up the whole specialists/ dir if we created it
       fs.rmSync(specialistsDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ContainerTransferExpired — file expiry on task terminal state
+// ---------------------------------------------------------------------------
+
+describe('ContainerTransferExpired', () => {
+  function makeInTransitTransfer(taskId: string) {
+    createContainerTransfer({
+      id: `xfer-${taskId}`,
+      sender_invocation_id: 'inv-src',
+      sender_group_folder: 'spec-src',
+      message: 'result attached',
+      file_count: 1,
+      sent_at: '2024-01-01T00:00:00.000Z',
+      status: 'in_transit',
+      recipient_task_id: taskId,
+      recipient_group_folder: null,
+    });
+    createTransferFile({
+      id: `file-${taskId}`,
+      transfer_id: `xfer-${taskId}`,
+      original_name: 'report.md',
+      host_path: `/data/transfers/xfer-${taskId}/report.md`,
+      status: 'placed',
+    });
+  }
+
+  it('expires in_transit transfers when deliverResult is called', async () => {
+    const task = makeRunningTask({ id: 'exp-1' });
+    makeInTransitTransfer(task.id);
+
+    await deliverResult(task.id, 'all done');
+
+    expect(getContainerTransfer(`xfer-${task.id}`)!.status).toBe('expired');
+    expect(getTransferFilesByTransfer(`xfer-${task.id}`)[0].status).toBe(
+      'expired',
+    );
+  });
+
+  it('expires in_transit transfers when failSpecialistTask is called', async () => {
+    const task = makeRunningTask({ id: 'exp-2' });
+    makeInTransitTransfer(task.id);
+
+    await failSpecialistTask(task.id, 'timeout', 'ran out of time');
+
+    expect(getContainerTransfer(`xfer-${task.id}`)!.status).toBe('expired');
+    expect(getTransferFilesByTransfer(`xfer-${task.id}`)[0].status).toBe(
+      'expired',
+    );
   });
 });

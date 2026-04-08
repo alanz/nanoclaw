@@ -35,6 +35,7 @@ import {
   updateSpecialistTask,
 } from './db.js';
 import { resolveSpecialistGroupFolderPath } from './group-folder.js';
+import { expireTransfersForTask } from './ipc-transfer.js';
 import { logger } from './logger.js';
 import { getSpecialistType } from './specialist-types.js';
 import { FailureKind, SpecialistTask, SpecialistType } from './types.js';
@@ -417,6 +418,7 @@ export async function deliverResult(
     updateSpecialistSession(taskId, { status: 'cleared' });
   }
 
+  expireTransfersForTask(taskId);
   logger.info({ taskId }, 'Specialist task completed');
 
   await _routeResult(task, resultText);
@@ -455,6 +457,7 @@ export async function failSpecialistTask(
     updateSpecialistSession(taskId, { status: 'cleared' });
   }
 
+  expireTransfersForTask(taskId);
   logger.warn({ taskId, kind, detail }, 'Specialist task failed');
 
   await _routeFailure(task, kind, detail);

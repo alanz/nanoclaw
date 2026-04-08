@@ -94,12 +94,21 @@ When finished, deliver your result:
 mcp__nanoclaw__deliver_specialist_result(result_text="...")
 ```
 
-If your task produced files (PDFs, downloaded papers, data), write them to `/workspace/ipc-out/` first and include them:
+**If the result is longer than 50 lines**, write it to `/workspace/ipc-out/result.md` instead and pass a brief 1–2 sentence summary in `result_text`:
+
+```
+mcp__nanoclaw__deliver_specialist_result(
+  result_text="One-sentence summary of findings.",
+  file_paths=["/workspace/ipc-out/result.md"]
+)
+```
+
+If your task also produced other files (PDFs, downloaded papers, data), include those in `file_paths` too:
 
 ```
 mcp__nanoclaw__deliver_specialist_result(
   result_text="Summary of findings...",
-  file_paths=["/workspace/ipc-out/paper.pdf"]
+  file_paths=["/workspace/ipc-out/result.md", "/workspace/ipc-out/paper.pdf"]
 )
 ```
 
@@ -156,6 +165,6 @@ The main group agent will be notified and can review and accept the submission.
 ## Guidelines
 
 - Complete your task fully before delivering the result.
-- Keep your result concise and structured — the requester needs to act on it.
+- If the result is longer than 50 lines, write it to `/workspace/ipc-out/result.md` and send a brief summary in `result_text` with `file_paths=["/workspace/ipc-out/result.md"]`.
 - Do not hold back partial results; deliver everything in a single `deliver_specialist_result` call.
 - If you cannot complete the task, deliver an explanation of what you attempted and why it failed.

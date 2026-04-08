@@ -175,6 +175,36 @@ export interface RawMemorySubmission {
   overdue_alerted_at: string | null;
 }
 
+// --- Container IPC transfer types ---
+
+export type ContainerTransferStatus =
+  | 'pending'
+  | 'in_transit'
+  | 'user_delivered'
+  | 'expired';
+
+export type TransferFileStatus = 'owned' | 'placed' | 'expired';
+
+export interface ContainerTransfer {
+  id: string;
+  sender_invocation_id: string;
+  sender_group_folder: string;
+  message: string;
+  file_count: number;
+  sent_at: string;
+  status: ContainerTransferStatus;
+  recipient_task_id: string | null;
+  recipient_group_folder: string | null;
+}
+
+export interface TransferFile {
+  id: string;
+  transfer_id: string;
+  original_name: string;
+  host_path: string;
+  status: TransferFileStatus;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

@@ -6,6 +6,8 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  ContainerTransfer,
+  ContainerTransferStatus,
   FailureKind,
   NewMessage,
   RawMemorySubmission,
@@ -18,6 +20,8 @@ import {
   SpecialistTask,
   SpecialistTaskStatus,
   TaskRunLog,
+  TransferFile,
+  TransferFileStatus,
 } from './types.js';
 
 let db: Database.Database;
@@ -147,6 +151,30 @@ function createSchema(database: Database.Database): void {
       session_id TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active'
     );
+
+    CREATE TABLE IF NOT EXISTS container_transfers (
+      id TEXT PRIMARY KEY,
+      sender_invocation_id TEXT NOT NULL,
+      sender_group_folder TEXT NOT NULL,
+      message TEXT NOT NULL,
+      file_count INTEGER NOT NULL DEFAULT 0,
+      sent_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      recipient_task_id TEXT,
+      recipient_group_folder TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_container_transfers_status ON container_transfers(status);
+    CREATE INDEX IF NOT EXISTS idx_container_transfers_task ON container_transfers(recipient_task_id);
+
+    CREATE TABLE IF NOT EXISTS transfer_files (
+      id TEXT PRIMARY KEY,
+      transfer_id TEXT NOT NULL REFERENCES container_transfers(id),
+      original_name TEXT NOT NULL,
+      host_path TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'owned'
+    );
+    CREATE INDEX IF NOT EXISTS idx_transfer_files_transfer ON transfer_files(transfer_id);
+    CREATE INDEX IF NOT EXISTS idx_transfer_files_status ON transfer_files(status);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -1561,4 +1589,136 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// --- Container transfer accessors ---
+
+export function createContainerTransfer(transfer: ContainerTransfer): void {
+  db.prepare(
+    `INSERT INTO container_transfers
+       (id, sender_invocation_id, sender_group_folder, message, file_count,
+        sent_at, status, recipient_task_id, recipient_group_folder)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    transfer.id,
+    transfer.sender_invocation_id,
+    transfer.sender_group_folder,
+    transfer.message,
+    transfer.file_count,
+    transfer.sent_at,
+    transfer.status,
+    transfer.recipient_task_id ?? null,
+    transfer.recipient_group_folder ?? null,
+  );
+}
+
+export function getContainerTransfer(
+  id: string,
+): ContainerTransfer | undefined {
+  return db
+    .prepare('SELECT * FROM container_transfers WHERE id = ?')
+    .get(id) as ContainerTransfer | undefined;
+}
+
+export function updateContainerTransfer(
+  id: string,
+  updates: Partial<
+    Pick<
+      ContainerTransfer,
+      'status' | 'recipient_task_id' | 'recipient_group_folder'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if ('recipient_task_id' in updates) {
+    fields.push('recipient_task_id = ?');
+    values.push(updates.recipient_task_id ?? null);
+  }
+  if ('recipient_group_folder' in updates) {
+    fields.push('recipient_group_folder = ?');
+    values.push(updates.recipient_group_folder ?? null);
+  }
+
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE container_transfers SET ${fields.join(', ')} WHERE id = ?`,
+  ).run(...values);
+}
+
+export function createTransferFile(file: TransferFile): void {
+  db.prepare(
+    `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    file.id,
+    file.transfer_id,
+    file.original_name,
+    file.host_path,
+    file.status,
+  );
+}
+
+export function getTransferFilesByTransfer(transferId: string): TransferFile[] {
+  return db
+    .prepare('SELECT * FROM transfer_files WHERE transfer_id = ?')
+    .all(transferId) as TransferFile[];
+}
+
+export function updateTransferFile(
+  id: string,
+  updates: Partial<Pick<TransferFile, 'status' | 'host_path'>>,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if (updates.host_path !== undefined) {
+    fields.push('host_path = ?');
+    values.push(updates.host_path);
+  }
+
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE transfer_files SET ${fields.join(', ')} WHERE id = ?`).run(
+    ...values,
+  );
+}
+
+/**
+ * Mark all in_transit transfers for a specialist task as expired,
+ * along with their associated files.  Called when a task reaches a
+ * terminal state (completed or failed).
+ */
+export function expireTransfersForTask(taskId: string): void {
+  const expiredStatus: ContainerTransferStatus = 'expired';
+  const expiredFileStatus: TransferFileStatus = 'expired';
+  const inTransit: ContainerTransferStatus = 'in_transit';
+
+  // Find all in_transit transfers for this task
+  const transfers = db
+    .prepare(
+      `SELECT id FROM container_transfers
+       WHERE recipient_task_id = ? AND status = ?`,
+    )
+    .all(taskId, inTransit) as Array<{ id: string }>;
+
+  for (const { id } of transfers) {
+    db.prepare(
+      `UPDATE transfer_files SET status = ? WHERE transfer_id = ?`,
+    ).run(expiredFileStatus, id);
+  }
+
+  db.prepare(
+    `UPDATE container_transfers SET status = ? WHERE recipient_task_id = ? AND status = ?`,
+  ).run(expiredStatus, taskId, inTransit);
 }

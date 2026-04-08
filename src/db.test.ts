@@ -2,12 +2,16 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  createContainerTransfer,
   createTask,
   createSpecialistTask,
   createSpecialistSession,
+  createTransferFile,
   deleteTask,
+  expireTransfersForTask,
   getAllChats,
   getAllRegisteredGroups,
+  getContainerTransfer,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
@@ -17,15 +21,18 @@ import {
   getSpecialistTasksByStatus,
   getTaskById,
   getTaskRunLogs,
+  getTransferFilesByTransfer,
   logTaskRun,
   queryTranscript,
   setRegisteredGroup,
   setPendingDispatchDepthDb,
   storeChatMetadata,
   storeMessage,
+  updateContainerTransfer,
   updateSpecialistSession,
   updateSpecialistTask,
   updateTask,
+  updateTransferFile,
 } from './db.js';
 import { formatMessages } from './router.js';
 
@@ -1276,5 +1283,152 @@ describe('pending_dispatch_depth persistence', () => {
     // Re-read simulates what happens on process restart
     const groups = getAllRegisteredGroups();
     expect(groups[JID]?.pendingDispatchDepth).toBe(2);
+  });
+});
+
+// --- container_transfers ---
+
+function makeTransfer(overrides?: object) {
+  return {
+    id: 'xfer-1',
+    sender_invocation_id: 'inv-abc',
+    sender_group_folder: 'main',
+    message: 'here are the files',
+    file_count: 1,
+    sent_at: '2024-01-01T00:00:00.000Z',
+    status: 'pending' as const,
+    recipient_task_id: null,
+    recipient_group_folder: null,
+    ...overrides,
+  };
+}
+
+function makeTransferFile(overrides?: object) {
+  return {
+    id: 'file-1',
+    transfer_id: 'xfer-1',
+    original_name: 'report.md',
+    host_path: '/data/transfers/xfer-1/report.md',
+    status: 'owned' as const,
+    ...overrides,
+  };
+}
+
+describe('createContainerTransfer / getContainerTransfer', () => {
+  it('stores and retrieves a transfer', () => {
+    createContainerTransfer(makeTransfer());
+    const t = getContainerTransfer('xfer-1');
+    expect(t).toBeDefined();
+    expect(t!.sender_invocation_id).toBe('inv-abc');
+    expect(t!.status).toBe('pending');
+    expect(t!.recipient_task_id).toBeNull();
+  });
+
+  it('returns undefined for unknown id', () => {
+    expect(getContainerTransfer('nope')).toBeUndefined();
+  });
+});
+
+describe('updateContainerTransfer', () => {
+  it('updates status', () => {
+    createContainerTransfer(makeTransfer());
+    updateContainerTransfer('xfer-1', { status: 'in_transit' });
+    expect(getContainerTransfer('xfer-1')!.status).toBe('in_transit');
+  });
+
+  it('sets recipient_task_id', () => {
+    createContainerTransfer(makeTransfer());
+    updateContainerTransfer('xfer-1', { recipient_task_id: 'task-99' });
+    expect(getContainerTransfer('xfer-1')!.recipient_task_id).toBe('task-99');
+  });
+
+  it('clears recipient_task_id to null', () => {
+    createContainerTransfer(makeTransfer({ recipient_task_id: 'task-99' }));
+    updateContainerTransfer('xfer-1', { recipient_task_id: null });
+    expect(getContainerTransfer('xfer-1')!.recipient_task_id).toBeNull();
+  });
+
+  it('is a no-op when called with empty updates', () => {
+    createContainerTransfer(makeTransfer());
+    updateContainerTransfer('xfer-1', {});
+    expect(getContainerTransfer('xfer-1')!.status).toBe('pending');
+  });
+});
+
+describe('createTransferFile / getTransferFilesByTransfer', () => {
+  it('stores and retrieves files for a transfer', () => {
+    createContainerTransfer(makeTransfer());
+    createTransferFile(makeTransferFile());
+    const files = getTransferFilesByTransfer('xfer-1');
+    expect(files).toHaveLength(1);
+    expect(files[0].original_name).toBe('report.md');
+    expect(files[0].status).toBe('owned');
+  });
+
+  it('returns empty array when no files exist', () => {
+    expect(getTransferFilesByTransfer('xfer-none')).toHaveLength(0);
+  });
+
+  it('returns multiple files for the same transfer', () => {
+    createContainerTransfer(makeTransfer());
+    createTransferFile(
+      makeTransferFile({ id: 'file-1', original_name: 'a.md' }),
+    );
+    createTransferFile(
+      makeTransferFile({ id: 'file-2', original_name: 'b.md' }),
+    );
+    expect(getTransferFilesByTransfer('xfer-1')).toHaveLength(2);
+  });
+});
+
+describe('updateTransferFile', () => {
+  it('updates status to placed', () => {
+    createContainerTransfer(makeTransfer());
+    createTransferFile(makeTransferFile());
+    updateTransferFile('file-1', { status: 'placed' });
+    expect(getTransferFilesByTransfer('xfer-1')[0].status).toBe('placed');
+  });
+
+  it('updates host_path', () => {
+    createContainerTransfer(makeTransfer());
+    createTransferFile(makeTransferFile());
+    updateTransferFile('file-1', { host_path: '/new/path/report.md' });
+    expect(getTransferFilesByTransfer('xfer-1')[0].host_path).toBe(
+      '/new/path/report.md',
+    );
+  });
+});
+
+describe('expireTransfersForTask', () => {
+  it('marks in_transit transfers and their files as expired', () => {
+    createContainerTransfer(
+      makeTransfer({ status: 'in_transit', recipient_task_id: 'task-1' }),
+    );
+    createTransferFile(makeTransferFile({ status: 'placed' }));
+
+    expireTransfersForTask('task-1');
+
+    expect(getContainerTransfer('xfer-1')!.status).toBe('expired');
+    expect(getTransferFilesByTransfer('xfer-1')[0].status).toBe('expired');
+  });
+
+  it('ignores transfers with other statuses', () => {
+    createContainerTransfer(
+      makeTransfer({ status: 'pending', recipient_task_id: 'task-1' }),
+    );
+    expireTransfersForTask('task-1');
+    expect(getContainerTransfer('xfer-1')!.status).toBe('pending');
+  });
+
+  it('ignores transfers for other tasks', () => {
+    createContainerTransfer(
+      makeTransfer({ status: 'in_transit', recipient_task_id: 'task-other' }),
+    );
+    expireTransfersForTask('task-1');
+    expect(getContainerTransfer('xfer-1')!.status).toBe('in_transit');
+  });
+
+  it('is a no-op when no matching transfers exist', () => {
+    expireTransfersForTask('task-nobody');
   });
 });

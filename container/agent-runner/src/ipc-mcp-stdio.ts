@@ -1608,15 +1608,33 @@ The container is suspended until the memory specialist responds, then the result
     'deliver_specialist_result',
     `Deliver the completed result back to whoever requested this specialist task (the main group or a parent specialist).
 
-Call this when you have finished your work. The host will route the result and terminate this container run. Only one delivery per run is meaningful — subsequent calls are silently ignored by the host.`,
+Call this when you have finished your work. The host will route the result and terminate this container run. Only one delivery per run is meaningful — subsequent calls are silently ignored by the host.
+
+To include output files with the result, write them to /workspace/ipc-out/ first, then pass their paths in file_paths. The host will take ownership and make them available to the parent container under /workspace/ipc-in/.`,
     {
       result_text: z.string().describe('Result or completion summary to deliver to the requester'),
+      file_paths: z
+        .array(z.string())
+        .optional()
+        .describe('Absolute paths under /workspace/ipc-out/ to include with the result'),
     },
     async (args) => {
+      const filePaths = args.file_paths ?? [];
+      for (const fp of filePaths) {
+        if (!fp.startsWith(`${IPC_OUT_DIR}/`) || fp.includes('..')) {
+          return {
+            content: [{ type: 'text' as const, text: `Invalid file_path: ${fp}. All paths must be under ${IPC_OUT_DIR}/ and must not contain ..` }],
+            isError: true,
+          };
+        }
+      }
+
       writeIpcFile(TASKS_DIR, {
         type: 'deliver_specialist_result',
         taskId: specialistTaskId,
         resultText: args.result_text,
+        filePaths: JSON.stringify(filePaths),
+        invocationId,
         sourceGroup: chatJid,
         timestamp: new Date().toISOString(),
       });

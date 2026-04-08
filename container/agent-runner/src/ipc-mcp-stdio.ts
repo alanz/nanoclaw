@@ -20,6 +20,7 @@ const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 const dispatchDepth = parseInt(process.env.NANOCLAW_DISPATCH_DEPTH || '0', 10);
+const invocationId = process.env.NANOCLAW_INVOCATION_ID ?? '';
 
 // Specialist context — only set when running inside a specialist container.
 const specialistType = process.env.NANOCLAW_SPECIALIST_TYPE || '';

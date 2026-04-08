@@ -371,6 +371,7 @@ export async function runContainerAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  const invocationId = crypto.randomUUID();
 
   const groupDir = input.hostGroupDir ?? resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
@@ -385,6 +386,8 @@ export async function runContainerAgent(
   containerArgs.splice(
     containerArgs.length - 1,
     0,
+    '-e',
+    `NANOCLAW_INVOCATION_ID=${invocationId}`,
     '-e',
     `NANOCLAW_DISPATCH_DEPTH=${input.dispatchDepth ?? 0}`,
   );
@@ -422,6 +425,7 @@ export async function runContainerAgent(
     {
       group: group.name,
       containerName,
+      invocationId,
       mountCount: mounts.length,
       isMain: input.isMain,
     },

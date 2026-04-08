@@ -101,6 +101,7 @@ vi.mock('child_process', async () => {
   };
 });
 
+import { spawn } from 'child_process';
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -221,6 +222,25 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('passes NANOCLAW_INVOCATION_ID env var to the container', async () => {
+    runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+
+    const spawnArgs = vi.mocked(spawn).mock.calls[0][1] as string[];
+    const envEntry = spawnArgs.find((a) =>
+      a.startsWith('NANOCLAW_INVOCATION_ID='),
+    );
+    expect(envEntry).toBeDefined();
+    const uuid = envEntry!.split('=')[1];
+    expect(uuid).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
   });
 });
 

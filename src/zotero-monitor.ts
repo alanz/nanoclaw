@@ -195,7 +195,7 @@ export async function runZoteroSync(deps: ZoteroMonitorDeps): Promise<void> {
   // Cheap pre-check: skip container spawn if library hasn't changed
   const newItems = await hasNewZoteroItems(state.lastVersion);
   if (!newItems) {
-    logger.debug(
+    logger.info(
       { lastVersion: state.lastVersion },
       'Zotero pre-check: no new items, skipping sync',
     );

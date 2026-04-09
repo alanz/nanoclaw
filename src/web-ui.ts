@@ -1332,7 +1332,7 @@ document.addEventListener('DOMContentLoaded', function() {
           var node = graphCy.getElementById(targetId);
           if (node.length) {
             node.select();
-            graphCy.animate({ center: { eles: node }, duration: 400 });
+            graphCy.animate({ fit: { eles: node.union(node.neighborhood()), padding: 60 }, duration: 400 });
           }
         }, 900);
       }
@@ -1434,6 +1434,7 @@ document.addEventListener('DOMContentLoaded', function() {
         { selector:'edge.highlighted', style:{ width:2, 'line-color':'#58a6ff', opacity:0.8 } },
         { selector:'node.hover-neighbor', style:{ 'text-opacity':1, 'border-color':'rgba(88,166,255,0.5)', 'border-width':2, opacity:1 } },
         { selector:'edge.hover-highlighted', style:{ width:1.5, 'line-color':'rgba(88,166,255,0.5)', opacity:0.6 } },
+        { selector:'node.filter-match', style:{ 'text-opacity':1 } },
       ],
       maxZoom: 1.5,
       minZoom: 0.1,
@@ -1577,7 +1578,13 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     graphCy.nodes().forEach(function(node) {
       var faded = hasFilter && !hits.has(node.id());
-      if (faded) node.addClass('faded'); else node.removeClass('faded');
+      if (faded) {
+        node.addClass('faded');
+        node.removeClass('filter-match');
+      } else {
+        node.removeClass('faded');
+        if (hasFilter) node.addClass('filter-match'); else node.removeClass('filter-match');
+      }
     });
     var status = document.getElementById('graph-status');
     if (status) {

@@ -1935,23 +1935,6 @@ function writeSummaryPlaceholder(
 }
 
 /** Parse session_id and is_placeholder from a markdown file's YAML frontmatter. */
-function parseFrontmatter(content: string): {
-  session_id?: string;
-  is_placeholder?: boolean;
-} {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return {};
-  const result: { session_id?: string; is_placeholder?: boolean } = {};
-  for (const line of match[1].split('\n')) {
-    const [key, ...rest] = line.split(':');
-    const val = rest.join(':').trim();
-    if (key?.trim() === 'session_id') result.session_id = val;
-    if (key?.trim() === 'is_placeholder')
-      result.is_placeholder = val === 'true';
-  }
-  return result;
-}
-
 /**
  * Spawn a throwaway agent container to produce a SessionSummary from a JSONL transcript.
  * Non-blocking: caller should .catch() the returned promise.
@@ -2053,6 +2036,7 @@ export async function spawnThrowaway(
     writeSummaryPlaceholder(sessionsDir, sessionId, date, timeStr, 'failed');
   }
 
-  // 💭 signals the group is ready for a new session (success or failure)
-  if (deps.setReaction) await deps.setReaction(chatJid, '💭');
+  // ✅ = summary written; 💭 = failed (session still needs summarising)
+  const reaction = summaryExists ? '✅' : '💭';
+  if (deps.setReaction) await deps.setReaction(chatJid, reaction);
 }

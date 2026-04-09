@@ -1,0 +1,342 @@
+-- allium: 3
+-- session-archiving.allium
+--
+-- Unified session archiving and summarisation for NanoClaw conversation groups.
+-- Every session end — whether by auto-compact or explicit /reset — produces a
+-- ConversationArchive (raw transcript, written programmatically) and a
+-- SessionSummary (AI-generated, written by a throwaway agent session).
+--
+-- Scope: Session end archiving and summarisation
+-- Includes:
+--   - ConversationArchive creation on both auto-compact and /reset paths
+--   - SessionSummary creation via throwaway agent session
+--   - Reaction signalling during archiving and summarising phases
+--   - Failure handling (failed throwaway, missing JSONL, empty session)
+--   - Startup recovery for orphaned archives
+-- Excludes:
+--   - Session lifecycle management (see nanoclaw.allium)
+--   - SDK compaction mechanics (see container-claude-sdk.allium)
+--   - IPC task wire formats (see ipc.allium)
+--   - Content and structure of the SessionSummary (agent's discretion)
+
+use "./nanoclaw.allium" as core
+use "./container-claude-sdk.allium" as sdk
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A raw conversation transcript archived at session end.
+-- Written programmatically from the session JSONL — no agent is involved.
+-- Produced on both auto-compact and /reset paths.
+-- is_placeholder is true when the source JSONL was missing or the session was empty;
+-- a placeholder marks the gap visibly rather than silently dropping it.
+entity ConversationArchive {
+    session_id: String
+    group: core.Group
+    path: String              -- /workspace/group/conversations/{date}-{name}.md
+    archived_at: Timestamp
+    source_jsonl: String      -- JSONL file read to produce this archive
+    is_placeholder: Boolean   -- true when JSONL was missing or session had no messages
+}
+
+-- An AI-generated summary of a completed session.
+-- Written by a ThrowawaySession after the session ends.
+-- Produced on both auto-compact and /reset paths.
+-- is_placeholder is true when the throwaway failed or the JSONL was missing.
+entity SessionSummary {
+    session_id: String
+    group: core.Group
+    path: String              -- /workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}.md
+    created_at: Timestamp
+    is_placeholder: Boolean   -- true when summary could not be generated
+}
+
+-- A short-lived agent session whose sole purpose is to write a SessionSummary
+-- from a completed session's JSONL. Discarded after completion.
+-- Idempotent: safe to re-run if a previous attempt was interrupted.
+entity ThrowawaySession {
+    for_session_id: String    -- ID of the session being summarised
+    group: core.Group
+    source_jsonl: String      -- JSONL file the throwaway reads for summarisation
+    -- ThrowawayContainerExited is an external trigger with no local surface provider.
+    -- The checker cascades unreachable-trigger → unreachable-rule → unobserved status assignment.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: running | completed | failed
+    started_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Auto-compact path ----
+
+-- When the SDK PreCompact hook fires and the source JSONL is present, archive the
+-- raw transcript immediately, before the context is discarded.
+-- Reaction ⏳ signals that archiving is in progress.
+rule ArchiveOnPreCompact {
+    when: sdk.SdkPreCompact(session_id, group, jsonl_path)
+
+    requires: file_exists(jsonl_path)
+
+    ensures: ConversationArchive.created(
+        session_id: session_id,
+        group: group,
+        path: "/workspace/group/conversations/{date}-{name}.md",
+        archived_at: now,
+        source_jsonl: jsonl_path,
+        is_placeholder: false
+    )
+    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
+
+    @guidance
+        -- Same archiving logic as the existing PreCompact hook in container-claude-sdk.allium.
+        -- Only user and assistant text turns are included; tool calls are omitted.
+        -- The reaction ⏳ replaces the existing PreCompact ⏳ — no change in user-visible behaviour.
+}
+
+-- If the JSONL is missing at PreCompact time, write a placeholder archive and log.
+rule ArchiveOnPreCompactJonlMissing {
+    when: sdk.SdkPreCompact(session_id, group, jsonl_path)
+
+    requires: not file_exists(jsonl_path)
+
+    ensures: ConversationArchive.created(
+        session_id: session_id,
+        group: group,
+        path: "/workspace/group/conversations/{date}-missing.md",
+        archived_at: now,
+        source_jsonl: jsonl_path,
+        is_placeholder: true
+    )
+    ensures: core.HostLogRecorded(
+        level: error,
+        text: "Session JSONL missing at PreCompact for session {session_id}: {jsonl_path}"
+    )
+    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
+}
+
+-- After compaction completes, start a throwaway session to produce the SessionSummary.
+-- Reaction 📝 signals that summarisation is in progress.
+-- The 💭 reaction moves to ThrowawaySessionSucceeded — it fires when the summary is
+-- done, not when compaction finishes.
+rule StartThrowawayOnPostCompact {
+    when: sdk.SdkPostCompact(session_id, group, jsonl_path)
+
+    ensures: ThrowawaySession.created(
+        for_session_id: session_id,
+        group: group,
+        source_jsonl: jsonl_path,
+        status: queued,
+        started_at: now
+    )
+    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "📝")
+}
+
+-- ---- /reset path ----
+
+-- When /reset is issued on a session with messages and the JSONL is present,
+-- archive the transcript programmatically (same code as PreCompact), then start
+-- a throwaway session. The ConversationSession is cleared.
+rule ArchiveAndStartThrowawayOnReset {
+    when: core.SessionCommandApplied(group, command: reset)
+
+    let cs = core.ConversationSession{ group: group }
+
+    requires: exists cs
+    requires: cs.message_count > 0
+    requires: file_exists(session_jsonl_path(cs))
+
+    ensures: ConversationArchive.created(
+        session_id: cs.session_id,
+        group: group,
+        path: "/workspace/group/conversations/{date}-{name}.md",
+        archived_at: now,
+        source_jsonl: session_jsonl_path(cs),
+        is_placeholder: false
+    )
+    ensures: ThrowawaySession.created(
+        for_session_id: cs.session_id,
+        group: group,
+        source_jsonl: session_jsonl_path(cs),
+        status: queued,
+        started_at: now
+    )
+    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
+    ensures: not exists cs
+}
+
+-- If /reset is issued on a session with messages but the JSONL is missing,
+-- write placeholder files, log the error, and still clear the session.
+rule ResetJonlMissing {
+    when: core.SessionCommandApplied(group, command: reset)
+
+    let cs = core.ConversationSession{ group: group }
+
+    requires: exists cs
+    requires: cs.message_count > 0
+    requires: not file_exists(session_jsonl_path(cs))
+
+    ensures: ConversationArchive.created(
+        session_id: cs.session_id,
+        group: group,
+        path: "/workspace/group/conversations/{date}-missing.md",
+        archived_at: now,
+        source_jsonl: session_jsonl_path(cs),
+        is_placeholder: true
+    )
+    ensures: SessionSummary.created(
+        session_id: cs.session_id,
+        group: group,
+        path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-missing.md",
+        created_at: now,
+        is_placeholder: true
+    )
+    ensures: core.HostLogRecorded(
+        level: error,
+        text: "Session JSONL missing at /reset for session {cs.session_id}"
+    )
+    ensures: not exists cs
+}
+
+-- If /reset is issued on an empty session (no messages), write placeholder files
+-- and log. The user issued a command — it must not disappear silently.
+rule ResetOnEmptySession {
+    when: core.SessionCommandApplied(group, command: reset)
+
+    let cs = core.ConversationSession{ group: group }
+
+    requires: exists cs
+    requires: cs.message_count = 0
+
+    ensures: ConversationArchive.created(
+        session_id: cs.session_id,
+        group: group,
+        path: "/workspace/group/conversations/{date}-empty.md",
+        archived_at: now,
+        source_jsonl: session_jsonl_path(cs),
+        is_placeholder: true
+    )
+    ensures: SessionSummary.created(
+        session_id: cs.session_id,
+        group: group,
+        path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-empty.md",
+        created_at: now,
+        is_placeholder: true
+    )
+    ensures: core.HostLogRecorded(
+        level: warning,
+        text: "Reset issued on empty session for group {group.folder}"
+    )
+    ensures: not exists cs
+}
+
+-- ---- Throwaway session lifecycle ----
+
+-- The throwaway container exits successfully: SessionSummary is written and
+-- a 💭 reaction signals the group is ready for a new session.
+rule ThrowawaySessionSucceeded {
+    when: ThrowawayContainerExited(exited_session_id, success: true)
+    for throwaway in ThrowawaySession where for_session_id = exited_session_id and status = running:
+
+        ensures: throwaway.status = completed
+        ensures: SessionSummary.created(
+            session_id: throwaway.for_session_id,
+            group: throwaway.group,
+            path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}.md",
+            created_at: now,
+            is_placeholder: false
+        )
+        ensures: sdk.ReactionTask.created(chat_jid: throwaway.group.chat_jid, emoji: "💭")
+
+    @guidance
+        -- The throwaway is a fresh agent invocation: no session_id, not resumed.
+        -- Its prompt instructs Andy to read source_jsonl and write a structured
+        -- SessionSummary with YAML frontmatter to memory/sessions/.
+        -- Only one session may be active per group at a time; user messages queue
+        -- behind the throwaway automatically.
+}
+
+-- If the throwaway container fails, the group still proceeds to a fresh session.
+-- A placeholder SessionSummary marks the gap visibly; an error is logged.
+-- The 💭 reaction fires so the user is not left in the 📝 state indefinitely.
+rule ThrowawaySessionFailed {
+    when: ThrowawayContainerExited(exited_session_id, success: false)
+    for throwaway in ThrowawaySession where for_session_id = exited_session_id and status = running:
+
+        ensures: throwaway.status = failed
+        ensures: SessionSummary.created(
+            session_id: throwaway.for_session_id,
+            group: throwaway.group,
+            path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-failed.md",
+            created_at: now,
+            is_placeholder: true
+        )
+        ensures: sdk.ReactionTask.created(chat_jid: throwaway.group.chat_jid, emoji: "💭")
+        ensures: core.HostLogRecorded(
+            level: error,
+            text: "Throwaway summarisation failed for session {throwaway.for_session_id}"
+        )
+
+    @guidance
+        -- A fresh user session starts after this rule fires — failure is non-blocking.
+        -- The placeholder file records session_id and failure timestamp so the gap
+        -- is visible in the dashboard and can be retried if needed.
+}
+
+-- ---- Startup recovery ----
+
+-- On startup, any non-placeholder ConversationArchive without a corresponding
+-- SessionSummary gets a new ThrowawaySession to produce the missing summary.
+-- Safe because the throwaway is idempotent — the only output is the SessionSummary file.
+rule RecoverOrphanedArchives {
+    when: NanoclawStarted(_)
+    for archive in ConversationArchive where
+        not archive.is_placeholder
+        and not exists SessionSummary{ session_id: archive.session_id }:
+
+        ensures: ThrowawaySession.created(
+            for_session_id: archive.session_id,
+            group: archive.group,
+            source_jsonl: archive.source_jsonl,
+            status: queued,
+            started_at: now
+        )
+
+    @guidance
+        -- Recovery runs before the group accepts user messages.
+        -- An archive is orphaned if no SessionSummary — not even a placeholder — exists
+        -- for its session_id. Placeholder archives are excluded: they indicate the JSONL
+        -- was missing and there is nothing to summarise.
+}
+
+------------------------------------------------------------
+-- System Triggers
+------------------------------------------------------------
+
+-- ThrowawayContainerExited(for_session_id: String, success: Boolean)
+-- Emitted by the host when a throwaway agent container terminates.
+-- success=true if the container exited cleanly (exit code 0, SessionSummary written).
+-- success=false on error exit, timeout, or missing SessionSummary after exit.
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Every non-placeholder ConversationArchive eventually has a corresponding SessionSummary.
+-- The disjunction with a running ThrowawaySession captures the "eventually" — the summary
+-- is in-flight rather than missing.
+invariant ArchiveEventuallyHasSummary {
+    for archive in ConversationArchive where not archive.is_placeholder:
+        exists SessionSummary{ session_id: archive.session_id }
+        or exists ThrowawaySession{ for_session_id: archive.session_id }
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Should the throwaway session have a restricted tool set to prevent side-effects beyond writing the SessionSummary? Deferred — monitor in practice first."
+
+open question "Should placeholder files carry a frontmatter flag so the dashboard can render them differently from normal summaries?"

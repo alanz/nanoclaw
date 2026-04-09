@@ -98,6 +98,9 @@ function makeDeps(
     formatMessages: vi.fn().mockReturnValue('<formatted>'),
     clearSession: vi.fn(),
     canSenderInteract: vi.fn().mockReturnValue(true),
+    chatJid: 'group@test',
+    groupFolder: 'test-group',
+    writeIpcTask: vi.fn(),
     ...overrides,
   } as SessionCommandDeps;
 }
@@ -258,18 +261,8 @@ describe('handleSessionCommand', () => {
     );
   });
 
-  it('/reset: summarises session, clears session, advances cursor', async () => {
-    const deps = makeDeps({
-      runAgent: vi.fn().mockImplementation(async (_prompt, onOutput) => {
-        await onOutput({
-          status: 'success',
-          result:
-            'Saved summary to memory/notes/MEM-2026-03-31-session-reset-1200.md',
-        });
-        await onOutput({ status: 'success', result: null });
-        return 'success';
-      }),
-    });
+  it('/reset: writes IPC task, clears session, advances cursor immediately', async () => {
+    const deps = makeDeps({ sessionId: 'sess-abc123' });
     const result = await handleSessionCommand({
       missedMessages: [makeMsg('/reset', { timestamp: '200' })],
       isMainGroup: true,
@@ -279,91 +272,22 @@ describe('handleSessionCommand', () => {
       deps,
     });
     expect(result).toEqual({ handled: true, success: true });
-    expect(deps.runAgent).toHaveBeenCalledOnce();
+    expect(deps.runAgent).not.toHaveBeenCalled();
     expect(deps.clearSession).toHaveBeenCalledOnce();
     expect(deps.advanceCursor).toHaveBeenCalledWith('200');
-    // Summary text forwarded to user, no extra "Session cleared" message
-    expect(deps.sendMessage).toHaveBeenCalledWith(
-      expect.stringContaining('Saved summary'),
+    expect(deps.sendMessage).not.toHaveBeenCalled();
+    expect(deps.writeIpcTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'request_session_archive',
+        jid: 'group@test',
+        sessionId: 'sess-abc123',
+        groupFolder: 'test-group',
+      }),
     );
   });
 
-  it('/reset: aborts and does not clear session when summarisation fails', async () => {
-    const deps = makeDeps({ runAgent: vi.fn().mockResolvedValue('error') });
-    const result = await handleSessionCommand({
-      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
-      isMainGroup: true,
-      groupName: 'test',
-      triggerPattern: trigger,
-      timezone: 'UTC',
-      deps,
-    });
-    expect(result).toEqual({ handled: true, success: false });
-    expect(deps.clearSession).not.toHaveBeenCalled();
-    expect(deps.advanceCursor).not.toHaveBeenCalled();
-    expect(deps.sendMessage).toHaveBeenCalledWith(
-      expect.stringContaining('Could not save session summary'),
-    );
-  });
-
-  it('/reset: includes session metadata in prompt when sessionId provided', async () => {
-    let capturedPrompt = '';
-    const deps = makeDeps({
-      sessionId: 'abc123',
-      runAgent: vi.fn().mockImplementation(async (prompt, onOutput) => {
-        capturedPrompt = prompt;
-        await onOutput({ status: 'success', result: null });
-        return 'success';
-      }),
-    });
-    await handleSessionCommand({
-      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
-      isMainGroup: true,
-      groupName: 'test',
-      triggerPattern: trigger,
-      timezone: 'UTC',
-      deps,
-    });
-    expect(capturedPrompt).toContain('abc123');
-    expect(capturedPrompt).toContain(
-      '/home/node/.claude/projects/-workspace-group/abc123.jsonl',
-    );
-    expect(capturedPrompt).toContain('abc123.jsonl');
-    expect(capturedPrompt).not.toContain('~/.claude/projects/');
-    expect(capturedPrompt).toContain('Session ended at:');
-  });
-
-  it('/reset: uses custom resetPrompt when provided', async () => {
-    let capturedPrompt = '';
-    const deps = makeDeps({
-      resetPrompt: 'Only record code decisions.',
-      runAgent: vi.fn().mockImplementation(async (prompt, onOutput) => {
-        capturedPrompt = prompt;
-        await onOutput({ status: 'success', result: null });
-        return 'success';
-      }),
-    });
-    await handleSessionCommand({
-      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
-      isMainGroup: true,
-      groupName: 'test',
-      triggerPattern: trigger,
-      timezone: 'UTC',
-      deps,
-    });
-    expect(capturedPrompt).toContain('Only record code decisions.');
-    expect(capturedPrompt).not.toContain('key decisions made');
-    // sessionMeta still appended
-    expect(capturedPrompt).toContain('Session ended at:');
-  });
-
-  it('/reset: sends fallback confirmation when agent returns no text', async () => {
-    const deps = makeDeps({
-      runAgent: vi.fn().mockImplementation(async (_prompt, onOutput) => {
-        await onOutput({ status: 'success', result: null });
-        return 'success';
-      }),
-    });
+  it('/reset: clears session even when no sessionId is present', async () => {
+    const deps = makeDeps({ sessionId: undefined });
     const result = await handleSessionCommand({
       missedMessages: [makeMsg('/reset', { timestamp: '200' })],
       isMainGroup: true,
@@ -374,8 +298,21 @@ describe('handleSessionCommand', () => {
     });
     expect(result).toEqual({ handled: true, success: true });
     expect(deps.clearSession).toHaveBeenCalledOnce();
-    expect(deps.sendMessage).toHaveBeenCalledWith(
-      'Session cleared. Next message starts fresh.',
-    );
+    expect(deps.advanceCursor).toHaveBeenCalledWith('200');
+    // No IPC task written without a sessionId
+    expect(deps.writeIpcTask).not.toHaveBeenCalled();
+  });
+
+  it('/reset: does not call runAgent under any circumstances', async () => {
+    const deps = makeDeps({ sessionId: 'any-session' });
+    await handleSessionCommand({
+      missedMessages: [makeMsg('/reset', { timestamp: '200' })],
+      isMainGroup: true,
+      groupName: 'test',
+      triggerPattern: trigger,
+      timezone: 'UTC',
+      deps,
+    });
+    expect(deps.runAgent).not.toHaveBeenCalled();
   });
 });

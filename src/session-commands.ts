@@ -52,6 +52,12 @@ export interface SessionCommandDeps {
   resetPrompt?: string;
   /** Whether the denied sender would normally be allowed to interact (for denial messages). */
   canSenderInteract: (msg: NewMessage) => boolean;
+  /** Chat JID of the group — passed to throwaway session spawner via IPC. */
+  chatJid: string;
+  /** Group folder name — used to identify the group in the IPC task. */
+  groupFolder: string;
+  /** Write an IPC task file to the group's host-side tasks directory. */
+  writeIpcTask: (task: object) => void;
 }
 
 function resultToText(result: string | object | null | undefined): string {
@@ -115,71 +121,28 @@ export async function handleSessionCommand(opts: {
   // AUTHORIZED: process pre-compact messages first, then run the command
   logger.info({ group: groupName, command }, 'Session command');
 
-  // Handle /reset: summarise session to memory, then clear session ID.
-  // No agent invocation for the reset itself — just summarise then clear.
+  // Handle /reset: archive the transcript and clear the session immediately.
+  // A throwaway agent session is spawned asynchronously by the host via IPC
+  // to generate the SessionSummary (memory/sessions/). The ⏳ reaction is
+  // emitted by the host when it processes the request_session_archive task.
   if (command === '/reset') {
-    await deps.setTyping(true);
-
-    const DEFAULT_RESET_PROMPT =
-      'The session is about to be reset and the conversation history will be ' +
-      'cleared. Before that happens, write a summary of this session to memory. ' +
-      'Include: key decisions made, important facts learned, open questions or ' +
-      'threads left unresolved, and any tasks completed or started. ' +
-      'Write it as an A-MEM note (memory/notes/MEM-YYYY-MM-DD-session-reset-HHmm.md) ' +
-      'or append to the daily log (memory/YYYY-MM-DD.md) if one already exists today. ' +
-      'After writing, reply with a one-line confirmation: what you saved and where. ' +
-      'Do not do anything else.';
-
-    const basePrompt = deps.resetPrompt ?? DEFAULT_RESET_PROMPT;
-
-    const now = new Date().toISOString();
-    const sessionMeta = deps.sessionId
-      ? '\n\nSession metadata:\n' +
-        `- Session ID: ${deps.sessionId}\n` +
-        `- Session ended at: ${now}\n` +
-        `- Read-path (for reading start time only, do not record in note): /home/node/.claude/projects/-workspace-group/${deps.sessionId}.jsonl\n` +
-        `- Log filename (use in note frontmatter "log" field): ${deps.sessionId}.jsonl\n` +
-        'Read the first line of the file at the read-path above and extract its ' +
-        '"timestamp" field to determine when the session started.'
-      : `\n\nSession ended at: ${now}.`;
-
-    const RESET_SUMMARY_PROMPT = basePrompt + sessionMeta;
-
-    let summariseFailed = false;
-    let summariseOutputSent = false;
-
-    const summariseResult = await deps.runAgent(
-      RESET_SUMMARY_PROMPT,
-      async (result) => {
-        if (result.status === 'error') summariseFailed = true;
-        const text = resultToText(result.result);
-        if (text) {
-          await deps.sendMessage(text);
-          summariseOutputSent = true;
-        }
-        if (result.status === 'success' && result.result === null) {
-          deps.closeStdin();
-        }
-      },
-    );
-
-    if (summariseResult === 'error' || summariseFailed) {
-      logger.warn({ group: groupName }, 'Pre-reset summarisation failed');
-      await deps.sendMessage(
-        'Could not save session summary. Session was NOT reset. Try again or ' +
-          'use /compact first to reduce context.',
+    if (deps.sessionId) {
+      deps.writeIpcTask({
+        type: 'request_session_archive',
+        jid: deps.chatJid,
+        sessionId: deps.sessionId,
+        groupFolder: deps.groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+      logger.info(
+        { group: groupName, sessionId: deps.sessionId },
+        'Requested session archive via IPC',
       );
-      await deps.setTyping(false);
-      // Don't advance cursor — leave /reset pending so user can retry.
-      return { handled: true, success: false };
+    } else {
+      logger.warn({ group: groupName }, '/reset issued with no active session');
     }
 
-    // Summarisation succeeded — now clear the session.
     deps.clearSession();
-    if (!summariseOutputSent) {
-      await deps.sendMessage('Session cleared. Next message starts fresh.');
-    }
-    await deps.setTyping(false);
     deps.advanceCursor(cmdMsg.timestamp);
     return { handled: true, success: true };
   }

@@ -6,6 +6,7 @@ import {
   CONTAINER_TIMEOUT,
   SPECIALIST_CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   CYCLE_TIMEOUT,
   getTriggerPattern,
@@ -69,7 +70,7 @@ import {
   resolveGroupFolderPath,
   resolveSpecialistGroupFolderPath,
 } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import { startIpcWatcher, getSessionJsonlPath, spawnThrowaway } from './ipc.js';
 import { placeFilesForInvocation } from './ipc-transfer.js';
 import {
   findChannel,
@@ -320,6 +321,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       },
       sessionId: sessions[group.folder],
       formatMessages,
+      chatJid,
+      groupFolder: group.folder,
+      writeIpcTask: (task) => {
+        const ipcTaskDir = path.join(DATA_DIR, 'ipc', group.folder, 'tasks');
+        fs.mkdirSync(ipcTaskDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(ipcTaskDir, `${Date.now()}-session-archive.json`),
+          JSON.stringify(task),
+        );
+      },
       canSenderInteract: (msg) => {
         const hasTrigger = TRIGGER_PATTERN.test(msg.content.trim());
         const reqTrigger = requiresTrigger;
@@ -844,6 +855,101 @@ export function _getPendingCyclesForTest(): Record<
   return pendingCycles;
 }
 
+/**
+ * On startup, scan all registered groups for non-placeholder ConversationArchives
+ * that lack a corresponding SessionSummary. Spawn a throwaway agent for each to
+ * produce the missing summary (RecoverOrphanedArchives spec rule).
+ */
+async function recoverOrphanedArchives(
+  setReaction: (jid: string, emoji: string) => Promise<void>,
+): Promise<void> {
+  for (const [groupJid, group] of Object.entries(registeredGroups)) {
+    const groupDir = path.join(GROUPS_DIR, group.folder);
+    const conversationsDir = path.join(groupDir, 'conversations');
+    const sessionsDir = path.join(groupDir, 'memory', 'sessions');
+
+    if (!fs.existsSync(conversationsDir)) continue;
+
+    // Collect session_ids that already have summaries
+    const summarisedSessionIds = new Set<string>();
+    if (fs.existsSync(sessionsDir)) {
+      for (const file of fs.readdirSync(sessionsDir)) {
+        if (!file.endsWith('.md')) continue;
+        try {
+          const content = fs.readFileSync(
+            path.join(sessionsDir, file),
+            'utf-8',
+          );
+          const fm = parseFrontmatterField(content, 'session_id');
+          if (fm) summarisedSessionIds.add(fm);
+        } catch {
+          // skip unreadable files
+        }
+      }
+    }
+
+    // Find non-placeholder archives without a summary
+    for (const file of fs.readdirSync(conversationsDir)) {
+      if (!file.endsWith('.md')) continue;
+      try {
+        const content = fs.readFileSync(
+          path.join(conversationsDir, file),
+          'utf-8',
+        );
+        const isPlaceholder =
+          parseFrontmatterField(content, 'is_placeholder') === 'true';
+        if (isPlaceholder) continue;
+
+        const sessionId = parseFrontmatterField(content, 'session_id');
+        if (!sessionId) continue;
+        if (summarisedSessionIds.has(sessionId)) continue;
+
+        const jsonlPath = getSessionJsonlPath(group.folder, sessionId);
+        logger.info(
+          { groupFolder: group.folder, sessionId, file },
+          'Recovering orphaned archive — spawning throwaway',
+        );
+        spawnThrowaway(group, groupJid, sessionId, jsonlPath, {
+          sendMessage: async () => {},
+          sendFile: async () => {},
+          registeredGroups: () => ({}),
+          registerGroup: () => {},
+          setGroupTrusted: () => {},
+          syncGroups: async () => {},
+          startRemoteControl: async () => ({ ok: false, error: 'recovery' }),
+          stopRemoteControl: async () => {},
+          getAvailableGroups: () => [],
+          writeGroupsSnapshot: () => {},
+          onTasksChanged: () => {},
+          setPendingDispatchDepth: () => {},
+          setReaction,
+        }).catch((err) =>
+          logger.error({ err, sessionId }, 'Orphan recovery throwaway failed'),
+        );
+      } catch {
+        // skip unreadable files
+      }
+    }
+  }
+}
+
+/** Extract a single YAML frontmatter field value from a markdown file's content. */
+function parseFrontmatterField(
+  content: string,
+  field: string,
+): string | undefined {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return undefined;
+  for (const line of match[1].split('\n')) {
+    const colon = line.indexOf(':');
+    if (colon === -1) continue;
+    if (line.slice(0, colon).trim() === field) {
+      return line.slice(colon + 1).trim();
+    }
+  }
+  return undefined;
+}
+
 async function main(): Promise<void> {
   ensureContainerRuntimeRunning();
   initDatabase();
@@ -1142,6 +1248,11 @@ async function main(): Promise<void> {
       }
     },
   });
+  const setReactionFn = (jid: string, emoji: string): Promise<void> => {
+    const channel = findChannel(channels, jid);
+    return channel?.setReaction?.(jid, emoji) ?? Promise.resolve();
+  };
+
   startIpcWatcher({
     sendMessage: async (jid, rawText, sender) => {
       const channel = findChannel(channels, jid);
@@ -1232,10 +1343,7 @@ async function main(): Promise<void> {
         'Orchestration cycle closed (delivered)',
       );
     },
-    setReaction: (jid, emoji) => {
-      const channel = findChannel(channels, jid);
-      return channel?.setReaction?.(jid, emoji) ?? Promise.resolve();
-    },
+    setReaction: setReactionFn,
   });
   // Wire up specialist container lifecycle
   const mainGroupEntry = Object.entries(registeredGroups).find(
@@ -1380,6 +1488,11 @@ async function main(): Promise<void> {
 
   // Recover specialist tasks that were live when the host was last killed
   await handleNanoclawStarted(mainGroupJid);
+
+  // Recover orphaned archives (archives without a SessionSummary)
+  recoverOrphanedArchives(setReactionFn).catch((err) =>
+    logger.error({ err }, 'Orphaned archive recovery failed'),
+  );
 
   // Start periodic check for specialist tasks exceeding overall duration limit
   startOverdueSpecialistPoller(SCHEDULER_POLL_INTERVAL);

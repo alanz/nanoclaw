@@ -21,6 +21,7 @@ import {
   query,
   HookCallback,
   PreCompactHookInput,
+  PostCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
@@ -167,8 +168,27 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     const transcriptPath = preCompact.transcript_path;
     const sessionId = preCompact.session_id;
 
+    const conversationsDir = '/workspace/group/conversations';
+
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      log('No transcript found for archiving');
+      log(`No transcript found for archiving — writing placeholder`);
+      try {
+        fs.mkdirSync(conversationsDir, { recursive: true });
+        const date = new Date().toISOString().split('T')[0];
+        const filePath = path.join(conversationsDir, `${date}-missing.md`);
+        const markdown = formatTranscriptMarkdown(
+          [],
+          'Missing',
+          assistantName,
+          sessionId,
+          transcriptPath,
+          true,
+        );
+        fs.writeFileSync(filePath, markdown);
+        log(`Wrote missing-JSONL placeholder to ${filePath}`);
+      } catch (err) {
+        log(`Failed to write missing placeholder: ${err instanceof Error ? err.message : String(err)}`);
+      }
       return {};
     }
 
@@ -177,14 +197,26 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const messages = parseTranscript(content);
 
       if (messages.length === 0) {
-        log('No messages to archive');
+        log('No messages to archive — writing empty placeholder');
+        fs.mkdirSync(conversationsDir, { recursive: true });
+        const date = new Date().toISOString().split('T')[0];
+        const filePath = path.join(conversationsDir, `${date}-empty.md`);
+        const markdown = formatTranscriptMarkdown(
+          [],
+          'Empty Session',
+          assistantName,
+          sessionId,
+          transcriptPath,
+          true,
+        );
+        fs.writeFileSync(filePath, markdown);
+        log(`Wrote empty-session placeholder to ${filePath}`);
         return {};
       }
 
       const summary = getSessionSummary(sessionId, transcriptPath);
       const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      const conversationsDir = '/workspace/group/conversations';
       fs.mkdirSync(conversationsDir, { recursive: true });
 
       const date = new Date().toISOString().split('T')[0];
@@ -195,6 +227,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
         messages,
         summary,
         assistantName,
+        sessionId,
+        transcriptPath,
+        false,
       );
       fs.writeFileSync(filePath, markdown);
 
@@ -237,9 +272,36 @@ function createPreCompactReactionHook(chatJid: string): HookCallback {
   };
 }
 
-function createPostCompactReactionHook(chatJid: string): HookCallback {
-  return async (_input, _toolUseId, _context) => {
-    writeReactionTask(chatJid, '💭');
+function createPostCompactHook(chatJid: string, groupFolder: string): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const postCompact = input as PostCompactHookInput;
+    const sessionId = postCompact.session_id;
+    const transcriptPath = postCompact.transcript_path;
+
+    // 📝 signals summarisation is in progress; 💭 will follow when throwaway completes
+    writeReactionTask(chatJid, '📝');
+
+    // Request throwaway session via IPC so the host can summarise the completed session
+    const ipcTaskDir = '/workspace/ipc/tasks';
+    try {
+      fs.mkdirSync(ipcTaskDir, { recursive: true });
+      const filename = `${Date.now()}-spawn-throwaway.json`;
+      fs.writeFileSync(
+        path.join(ipcTaskDir, filename),
+        JSON.stringify({
+          type: 'spawn_throwaway_session',
+          jid: chatJid,
+          sessionId,
+          jsonlPath: transcriptPath,
+          groupFolder,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+      log(`Requested throwaway session for session ${sessionId}`);
+    } catch (err) {
+      log(`Failed to write spawn_throwaway_session task: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     return {};
   };
 }
@@ -294,6 +356,9 @@ function formatTranscriptMarkdown(
   messages: ParsedMessage[],
   title?: string | null,
   assistantName?: string,
+  sessionId?: string,
+  transcriptPath?: string,
+  isPlaceholder = false,
 ): string {
   const now = new Date();
   const formatDateTime = (d: Date) =>
@@ -306,6 +371,16 @@ function formatTranscriptMarkdown(
     });
 
   const lines: string[] = [];
+
+  // YAML frontmatter for session tracking and startup recovery
+  lines.push('---');
+  if (sessionId) lines.push(`session_id: ${sessionId}`);
+  lines.push(`archived_at: ${now.toISOString()}`);
+  if (transcriptPath) lines.push(`source_jsonl: ${transcriptPath}`);
+  lines.push(`is_placeholder: ${isPlaceholder}`);
+  lines.push('---');
+  lines.push('');
+
   lines.push(`# ${title || 'Conversation'}`);
   lines.push('');
   lines.push(`Archived: ${formatDateTime(now)}`);
@@ -554,7 +629,7 @@ async function runQuery(
           { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
         ],
         PostCompact: [
-          { hooks: [createPostCompactReactionHook(containerInput.chatJid)] },
+          { hooks: [createPostCompactHook(containerInput.chatJid, containerInput.groupFolder)] },
         ],
       },
     },
@@ -783,7 +858,7 @@ async function main(): Promise<void> {
               { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
             ],
             PostCompact: [
-              { hooks: [createPostCompactReactionHook(containerInput.chatJid)] },
+              { hooks: [createPostCompactHook(containerInput.chatJid, containerInput.groupFolder)] },
             ],
           },
         },

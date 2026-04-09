@@ -31,7 +31,11 @@ import {
   updateTask,
   updateTransferFile,
 } from './db.js';
-import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
+import {
+  isValidGroupFolder,
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+} from './group-folder.js';
 import { takeFileOwnership } from './ipc-transfer.js';
 import { logger } from './logger.js';
 import {
@@ -351,6 +355,8 @@ export async function processTaskIpc(
     includeBotMessages?: boolean;
     // For set_reaction
     emoji?: string;
+    // For spawn_throwaway_session / request_session_archive
+    jsonlPath?: string;
     // For memory_search / memory_get / memory_list
     query?: string;
     path?: string;
@@ -1611,7 +1617,397 @@ export async function processTaskIpc(
       break;
     }
 
+    case 'spawn_throwaway_session': {
+      // Emitted by the container's PostCompact hook.
+      // Fields: jid (chatJid), sessionId, jsonlPath, groupFolder
+      const { jid, sessionId, jsonlPath, groupFolder } = data;
+      if (!jid || !sessionId || !groupFolder) {
+        logger.warn(
+          { data },
+          'spawn_throwaway_session: missing required fields',
+        );
+        break;
+      }
+      const tsGroup = Object.values(registeredGroups).find(
+        (g) => g.folder === groupFolder,
+      );
+      if (!tsGroup) {
+        logger.warn(
+          { groupFolder },
+          'spawn_throwaway_session: group not registered',
+        );
+        break;
+      }
+      spawnThrowaway(tsGroup, jid, sessionId, jsonlPath, deps).catch((err) =>
+        logger.error(
+          { err, sessionId },
+          'Throwaway session failed unexpectedly',
+        ),
+      );
+      break;
+    }
+
+    case 'request_session_archive': {
+      // Emitted by the host-side /reset handler (written by session-commands.ts via deps.writeIpcTask).
+      // Fields: jid (chatJid), sessionId, groupFolder
+      const { jid, sessionId, groupFolder } = data;
+      if (!jid || !sessionId || !groupFolder) {
+        logger.warn(
+          { data },
+          'request_session_archive: missing required fields',
+        );
+        break;
+      }
+      const raGroup = Object.values(registeredGroups).find(
+        (g) => g.folder === groupFolder,
+      );
+      if (!raGroup) {
+        logger.warn(
+          { groupFolder },
+          'request_session_archive: group not registered',
+        );
+        break;
+      }
+
+      // ⏳ signals archiving is in progress (same as PreCompact)
+      if (deps.setReaction) await deps.setReaction(jid, '⏳');
+
+      const jsonlPath = getSessionJsonlPath(groupFolder, sessionId);
+      const groupDir = resolveGroupFolderPath(groupFolder);
+      const conversationsDir = path.join(groupDir, 'conversations');
+      const sessionsDir = path.join(groupDir, 'memory', 'sessions');
+      const now = new Date();
+      const date = now.toISOString().split('T')[0];
+      const timestamp = now.toISOString().slice(11, 16).replace(':', '');
+
+      if (!fs.existsSync(jsonlPath)) {
+        // ResetJonlMissing: write placeholder archive + placeholder summary
+        logger.error(
+          { sessionId, jsonlPath },
+          'Session JSONL missing at /reset',
+        );
+        writeArchivePlaceholder(conversationsDir, sessionId, date, 'missing');
+        writeSummaryPlaceholder(
+          sessionsDir,
+          sessionId,
+          date,
+          timestamp,
+          'missing',
+        );
+        if (deps.setReaction) await deps.setReaction(jid, '💭');
+        break;
+      }
+
+      let messages: SessionParsedMessage[];
+      try {
+        messages = parseSessionJsonl(fs.readFileSync(jsonlPath, 'utf-8'));
+      } catch (err) {
+        logger.error(
+          { sessionId, jsonlPath, err },
+          'Failed to read session JSONL at /reset',
+        );
+        writeArchivePlaceholder(conversationsDir, sessionId, date, 'missing');
+        writeSummaryPlaceholder(
+          sessionsDir,
+          sessionId,
+          date,
+          timestamp,
+          'missing',
+        );
+        if (deps.setReaction) await deps.setReaction(jid, '💭');
+        break;
+      }
+
+      if (messages.length === 0) {
+        // ResetOnEmptySession: write placeholder archive + placeholder summary
+        logger.warn(
+          { sessionId, groupFolder },
+          'Reset issued on empty session',
+        );
+        writeArchivePlaceholder(conversationsDir, sessionId, date, 'empty');
+        writeSummaryPlaceholder(
+          sessionsDir,
+          sessionId,
+          date,
+          timestamp,
+          'empty',
+        );
+        if (deps.setReaction) await deps.setReaction(jid, '💭');
+        break;
+      }
+
+      // ArchiveAndStartThrowawayOnReset: write real archive and spawn throwaway
+      writeConversationArchive(
+        conversationsDir,
+        sessionId,
+        jsonlPath,
+        messages,
+        date,
+      );
+      spawnThrowaway(raGroup, jid, sessionId, jsonlPath, deps).catch((err) =>
+        logger.error({ err, sessionId }, 'Throwaway session failed on reset'),
+      );
+      break;
+    }
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Session archiving helpers
+// ---------------------------------------------------------------------------
+
+/** Compute the host-side JSONL path for a session. */
+export function getSessionJsonlPath(
+  groupFolder: string,
+  sessionId: string,
+): string {
+  return path.join(
+    DATA_DIR,
+    'sessions',
+    groupFolder,
+    '.claude',
+    'projects',
+    '-workspace-group',
+    `${sessionId}.jsonl`,
+  );
+}
+
+interface SessionParsedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/** Parse a JSONL transcript into messages (same logic as container parseTranscript). */
+function parseSessionJsonl(content: string): SessionParsedMessage[] {
+  const messages: SessionParsedMessage[] = [];
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'user' && entry.message?.content) {
+        const text =
+          typeof entry.message.content === 'string'
+            ? entry.message.content
+            : entry.message.content
+                .map((c: { text?: string }) => c.text || '')
+                .join('');
+        if (text) messages.push({ role: 'user', content: text });
+      } else if (entry.type === 'assistant' && entry.message?.content) {
+        const textParts = (
+          entry.message.content as Array<{ type: string; text?: string }>
+        )
+          .filter((c) => c.type === 'text')
+          .map((c) => c.text ?? '');
+        const text = textParts.join('');
+        if (text) messages.push({ role: 'assistant', content: text });
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return messages;
+}
+
+/** Write a real conversation archive from parsed messages. */
+function writeConversationArchive(
+  conversationsDir: string,
+  sessionId: string,
+  jsonlPath: string,
+  messages: SessionParsedMessage[],
+  date: string,
+): void {
+  fs.mkdirSync(conversationsDir, { recursive: true });
+  const filename = `${date}-reset.md`;
+  const now = new Date();
+  const lines: string[] = [
+    '---',
+    `session_id: ${sessionId}`,
+    `archived_at: ${now.toISOString()}`,
+    `source_jsonl: ${jsonlPath}`,
+    'is_placeholder: false',
+    '---',
+    '',
+    '# Conversation',
+    '',
+    `Archived: ${now.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}`,
+    '',
+    '---',
+    '',
+  ];
+  for (const msg of messages) {
+    const sender = msg.role === 'user' ? 'User' : 'Assistant';
+    const content =
+      msg.content.length > 2000
+        ? msg.content.slice(0, 2000) + '...'
+        : msg.content;
+    lines.push(`**${sender}**: ${content}`, '');
+  }
+  fs.writeFileSync(path.join(conversationsDir, filename), lines.join('\n'));
+  logger.info({ sessionId, filename }, 'Conversation archive written on reset');
+}
+
+/** Write a placeholder archive (missing or empty JSONL). */
+function writeArchivePlaceholder(
+  conversationsDir: string,
+  sessionId: string,
+  date: string,
+  suffix: 'missing' | 'empty',
+): void {
+  fs.mkdirSync(conversationsDir, { recursive: true });
+  const filename = `${date}-${suffix}.md`;
+  const now = new Date();
+  const content = [
+    '---',
+    `session_id: ${sessionId}`,
+    `archived_at: ${now.toISOString()}`,
+    'is_placeholder: true',
+    '---',
+    '',
+    `# ${suffix === 'missing' ? 'Missing JSONL' : 'Empty Session'}`,
+    '',
+    suffix === 'missing'
+      ? `Session JSONL was not found at reset time.`
+      : `No messages were recorded in this session.`,
+  ].join('\n');
+  fs.writeFileSync(path.join(conversationsDir, filename), content);
+  logger.info(
+    { sessionId, filename },
+    `Archive placeholder written (${suffix})`,
+  );
+}
+
+/** Write a placeholder session summary. */
+function writeSummaryPlaceholder(
+  sessionsDir: string,
+  sessionId: string,
+  date: string,
+  timestamp: string,
+  suffix: 'missing' | 'empty' | 'failed',
+): void {
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const filename = `${date}-${timestamp}-${suffix}.md`;
+  const now = new Date();
+  const content = [
+    '---',
+    `session_id: ${sessionId}`,
+    `created_at: ${now.toISOString()}`,
+    'is_placeholder: true',
+    '---',
+    '',
+    `# Summary Unavailable (${suffix})`,
+    '',
+    suffix === 'missing'
+      ? 'Session JSONL was not found — no summary could be generated.'
+      : suffix === 'empty'
+        ? 'Session had no messages — no summary was needed.'
+        : 'Throwaway summarisation failed. Retry by running the throwaway manually.',
+  ].join('\n');
+  fs.writeFileSync(path.join(sessionsDir, filename), content);
+  logger.info(
+    { sessionId, filename },
+    `Summary placeholder written (${suffix})`,
+  );
+}
+
+/** Parse session_id and is_placeholder from a markdown file's YAML frontmatter. */
+function parseFrontmatter(content: string): {
+  session_id?: string;
+  is_placeholder?: boolean;
+} {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return {};
+  const result: { session_id?: string; is_placeholder?: boolean } = {};
+  for (const line of match[1].split('\n')) {
+    const [key, ...rest] = line.split(':');
+    const val = rest.join(':').trim();
+    if (key?.trim() === 'session_id') result.session_id = val;
+    if (key?.trim() === 'is_placeholder')
+      result.is_placeholder = val === 'true';
+  }
+  return result;
+}
+
+/**
+ * Spawn a throwaway agent container to produce a SessionSummary from a JSONL transcript.
+ * Non-blocking: caller should .catch() the returned promise.
+ */
+export async function spawnThrowaway(
+  group: RegisteredGroup,
+  chatJid: string,
+  sessionId: string,
+  jsonlPath: string | undefined,
+  deps: IpcDeps,
+): Promise<void> {
+  const now = new Date();
+  const date = now.toISOString().split('T')[0];
+  const timeStr = now.toISOString().slice(11, 16).replace(':', '');
+  const summaryFilename = `${date}-${timeStr}.md`;
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const summaryFullPath = path.join(
+    groupDir,
+    'memory',
+    'sessions',
+    summaryFilename,
+  );
+
+  // Container-internal JSONL path (via the .claude sessions mount)
+  const containerJsonlPath = jsonlPath
+    ? `/home/node/.claude/projects/-workspace-group/${path.basename(jsonlPath)}`
+    : undefined;
+
+  const prompt =
+    `You are writing a session summary. Do nothing except what is described here.\n\n` +
+    (containerJsonlPath
+      ? `Read the session transcript at: ${containerJsonlPath}\n`
+      : `The session transcript path is unknown. Write a placeholder summary.\n`) +
+    `Write a structured summary to: /workspace/group/memory/sessions/${summaryFilename}\n\n` +
+    `The file must start with this YAML frontmatter:\n` +
+    `---\nsession_id: ${sessionId}\ncreated_at: ${now.toISOString()}\nis_placeholder: false\n---\n\n` +
+    `After the frontmatter, include: key decisions made, important facts learned, ` +
+    `open questions, and tasks completed or started. Write in markdown. ` +
+    `After writing the file, stop immediately without doing anything else.`;
+
+  const containerInput: ContainerInput = {
+    prompt,
+    sessionId: undefined, // fresh session — no resume
+    groupFolder: group.folder,
+    chatJid,
+    isMain: false,
+  };
+
+  try {
+    const output = await runContainerAgent(group, containerInput, () => {
+      // no-op — throwaway containers are not tracked in the group queue
+    });
+
+    if (output.status === 'success' && fs.existsSync(summaryFullPath)) {
+      // ThrowawaySessionSucceeded
+      logger.info(
+        { sessionId, summaryFilename },
+        'Throwaway session succeeded',
+      );
+    } else {
+      // ThrowawaySessionFailed
+      logger.error(
+        {
+          sessionId,
+          status: output.status,
+          summaryExists: fs.existsSync(summaryFullPath),
+        },
+        'Throwaway session failed',
+      );
+      const sessionsDir = path.join(groupDir, 'memory', 'sessions');
+      writeSummaryPlaceholder(sessionsDir, sessionId, date, timeStr, 'failed');
+    }
+  } catch (err) {
+    logger.error({ sessionId, err }, 'Throwaway session threw');
+    const sessionsDir = path.join(groupDir, 'memory', 'sessions');
+    writeSummaryPlaceholder(sessionsDir, sessionId, date, timeStr, 'failed');
+  }
+
+  // 💭 signals the group is ready for a new session (success or failure)
+  if (deps.setReaction) await deps.setReaction(chatJid, '💭');
 }

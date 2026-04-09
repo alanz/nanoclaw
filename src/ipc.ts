@@ -17,6 +17,7 @@ import {
   runContainerAgent,
   ContainerInput,
 } from './container-runner.js';
+import { stopContainer } from './container-runtime.js';
 import { snapshotGroup, gradeAssertions } from './eval-utils.js';
 import {
   createRssFeed,
@@ -2000,32 +2001,54 @@ export async function spawnThrowaway(
     isThrowaway: true, // prevents PreCompact/PostCompact hooks from spawning more throwaways
   };
 
-  try {
-    const output = await runContainerAgent(group, containerInput, () => {
-      // no-op — throwaway containers are not tracked in the group queue
-    });
+  let throwawayContainerName: string | null = null;
+  let summaryPoller: ReturnType<typeof setInterval> | null = null;
 
-    if (output.status === 'success' && fs.existsSync(summaryFullPath)) {
-      // ThrowawaySessionSucceeded
-      logger.info(
-        { sessionId, summaryFilename },
-        'Throwaway session succeeded',
-      );
-    } else {
-      // ThrowawaySessionFailed
-      logger.error(
-        {
-          sessionId,
-          status: output.status,
-          summaryExists: fs.existsSync(summaryFullPath),
-        },
-        'Throwaway session failed',
-      );
-      const sessionsDir = path.join(groupDir, 'memory', 'sessions');
-      writeSummaryPlaceholder(sessionsDir, sessionId, date, timeStr, 'failed');
-    }
+  // Kill the container as soon as the summary file appears — Claude often
+  // continues generating verification text after writing the file, which
+  // would otherwise block the host event loop until the 30-min hard timeout.
+  const startSummaryPoller = () => {
+    summaryPoller = setInterval(() => {
+      if (fs.existsSync(summaryFullPath) && throwawayContainerName) {
+        clearInterval(summaryPoller!);
+        summaryPoller = null;
+        logger.info(
+          { sessionId, summaryFilename },
+          'Summary file detected — stopping throwaway container early',
+        );
+        try {
+          stopContainer(throwawayContainerName);
+        } catch {
+          // container may have already exited
+        }
+      }
+    }, 5_000);
+  };
+
+  try {
+    await runContainerAgent(group, containerInput, (_proc, name) => {
+      throwawayContainerName = name;
+      startSummaryPoller();
+    });
   } catch (err) {
-    logger.error({ sessionId, err }, 'Throwaway session threw');
+    logger.debug(
+      { sessionId, err },
+      'Throwaway container exited (expected on early stop)',
+    );
+  } finally {
+    if (summaryPoller) {
+      clearInterval(summaryPoller);
+      summaryPoller = null;
+    }
+  }
+
+  const summaryExists = fs.existsSync(summaryFullPath);
+  if (summaryExists) {
+    // ThrowawaySessionSucceeded (container may have been stopped early)
+    logger.info({ sessionId, summaryFilename }, 'Throwaway session succeeded');
+  } else {
+    // ThrowawaySessionFailed
+    logger.error({ sessionId, summaryExists }, 'Throwaway session failed');
     const sessionsDir = path.join(groupDir, 'memory', 'sessions');
     writeSummaryPlaceholder(sessionsDir, sessionId, date, timeStr, 'failed');
   }

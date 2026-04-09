@@ -1390,6 +1390,43 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     });
 
+    // Find connected components via BFS.
+    // Each non-main component is placed at its own position in a ring around
+    // the main cluster so islands stay separate rather than merging into it.
+    var adj = simNodes.map(function() { return []; });
+    simLinks.forEach(function(l) { adj[l.source].push(l.target); adj[l.target].push(l.source); });
+    var compOf = new Array(simNodes.length).fill(-1);
+    var compSize = [];
+    for (var si = 0; si < simNodes.length; si++) {
+      if (compOf[si] !== -1) continue;
+      var cid = compSize.length;
+      var queue = [si]; compOf[si] = cid; var sz = 0;
+      while (queue.length) {
+        var cur = queue.shift(); sz++;
+        adj[cur].forEach(function(nb) { if (compOf[nb] === -1) { compOf[nb] = cid; queue.push(nb); } });
+      }
+      compSize.push(sz);
+    }
+    var mainCompSize = compSize.length ? Math.max.apply(null, compSize) : 0;
+    var mainCompId = compSize.indexOf(mainCompSize);
+    // Assign a ring position (anchor) to each non-main component.
+    var nonMainIds = compSize.map(function(_, i) { return i; }).filter(function(i) { return i !== mainCompId; });
+    var ringRadius = 700;
+    var compAnchor = {}; // compId -> {x, y}
+    nonMainIds.forEach(function(id, idx) {
+      var angle = (2 * Math.PI * idx) / Math.max(nonMainIds.length, 1);
+      compAnchor[id] = { x: Math.cos(angle) * ringRadius, y: Math.sin(angle) * ringRadius };
+    });
+    // Seed non-main nodes near their anchor so they settle there from the start.
+    simNodes.forEach(function(n, i) {
+      var anchor = compAnchor[compOf[i]];
+      if (anchor) { n.x = anchor.x + (Math.random() - 0.5) * 80; n.y = anchor.y + (Math.random() - 0.5) * 80; }
+    });
+    // forceX/Y targets: non-main nodes pulled to their anchor, main nodes gently to origin.
+    function nodeTargetX(n, i) { var a = compAnchor[compOf[i]]; return a ? a.x : 0; }
+    function nodeTargetY(n, i) { var a = compAnchor[compOf[i]]; return a ? a.y : 0; }
+    function centerStrength(n, i) { return compAnchor[compOf[i]] ? 0.12 : 0.02; }
+
     // Build cytoscape elements with initial positions
     var elements = [];
     simNodes.forEach(function(n) {
@@ -1423,18 +1460,18 @@ document.addEventListener('DOMContentLoaded', function() {
       elements: elements,
       style: [
         { selector:'node', style:{ shape:'ellipse', width:18, height:18, 'background-color':'data(color)', 'border-width':1, 'border-color':'rgba(255,255,255,0.15)', 'text-opacity':0, label:'data(label)', color:'#e6edf3', 'font-size':11, 'text-valign':'bottom', 'text-halign':'center', 'text-margin-y':4, 'text-wrap':'wrap', 'text-max-width':120 } },
-        { selector:'node.faded', style:{ opacity:0.12 } },
+        { selector:'node.faded', style:{ opacity:0.25 } },
         { selector:'node.hovered', style:{ 'text-opacity':1, width:22, height:22, 'border-color':'#8b949e', 'border-width':2, opacity:1 } },
         { selector:'node:selected', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#f0f6fc', width:24, height:24 } },
         { selector:'node.dimmed', style:{ opacity:0.12 } },
         { selector:'node.dimmed.hovered', style:{ opacity:1, 'text-opacity':1 } },
         { selector:'node.neighbor', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#58a6ff', width:22, height:22 } },
-        { selector:'edge', style:{ width:0.5, 'line-color':'#484f58', 'curve-style':'bezier', opacity:0.35 } },
+        { selector:'edge', style:{ width:1, 'line-color':'#6e7681', 'curve-style':'bezier', opacity:0.6 } },
         { selector:'edge.dimmed', style:{ opacity:0.06 } },
         { selector:'edge.highlighted', style:{ width:2, 'line-color':'#58a6ff', opacity:0.8 } },
         { selector:'node.hover-neighbor', style:{ 'text-opacity':1, 'border-color':'rgba(88,166,255,0.5)', 'border-width':2, opacity:1 } },
         { selector:'edge.hover-highlighted', style:{ width:1.5, 'line-color':'rgba(88,166,255,0.5)', opacity:0.6 } },
-        { selector:'node.filter-match', style:{ 'text-opacity':1 } },
+        { selector:'node.filter-match', style:{ 'text-opacity':1, width:26, height:26, 'border-width':2, 'border-color':'#f0f6fc' } },
       ],
       maxZoom: 1.5,
       minZoom: 0.1,
@@ -1450,6 +1487,8 @@ document.addEventListener('DOMContentLoaded', function() {
       .force('charge', d3.forceManyBody().strength(-200))
       .force('center', d3.forceCenter(0, 0).strength(0.05))
       .force('collide', d3.forceCollide(14))
+      .force('x', d3.forceX(nodeTargetX).strength(centerStrength))
+      .force('y', d3.forceY(nodeTargetY).strength(centerStrength))
       .on('tick', function() {
         // Push d3 positions into cytoscape
         simNodes.forEach(function(sn) {
@@ -1591,6 +1630,12 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!hasFilter) status.textContent = '';
       else if (hits.size === 0) status.textContent = 'No matches';
       else status.textContent = hits.size + ' / ' + graphData.nodes.length;
+    }
+    // Fit viewport to matching nodes so they're always visible, even if they
+    // ended up in a distant island.
+    if (hasFilter && hits.size > 0) {
+      var matchEles = graphCy.nodes('.filter-match');
+      if (matchEles.length) graphCy.animate({ fit: { eles: matchEles, padding: 80 }, duration: 300 });
     }
   }
 

@@ -945,6 +945,14 @@ async function main(): Promise<void> {
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });
 
+      // Throwaway containers are one-shot: exit immediately after the query
+      // rather than waiting for a _close sentinel (which never comes, since
+      // they are not registered in the group queue).
+      if (containerInput.isThrowaway) {
+        log('Throwaway container: exiting after first query');
+        break;
+      }
+
       log('Query ended, waiting for next IPC message...');
 
       // Wait for the next message or _close sentinel

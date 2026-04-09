@@ -434,6 +434,17 @@ File location: `memory/notes/MEM-YYYY-MM-DD-{slug}.md` in your workspace. Chokid
 
 *Sources field* — always populate `sources:` with the origin of the note material. For `type: file`, record the `mtime` at the time of note creation so a future sweep can detect when source material has changed and the note needs revisiting. For `type: url`, record `last_fetched`. For `type: conversation`, record the `date`. A sweep cron can stat `type: file` entries and flag any where current mtime differs from recorded mtime.
 
+### Grow-only constraint
+
+The A-MEM note space is a grow-only medium, modelled on Zettelkasten. This is a hard constraint:
+
+- **Never edit the body of an existing note.** If content is wrong, incomplete, or superseded, write a *new* note that references the old one. Set `supersedes: [old-id]` on the new note. Do not correct the old note in place.
+- **The only mutable frontmatter fields are `links:` and `superseded_by:`.** These may be updated as new related notes are created or the note is superseded.
+- **Never delete a note.** Supersession is the only retirement mechanism.
+- **Corrections are new notes.** Example: if a fact in `MEM-2026-04-06-wheat` turns out to be wrong, create `MEM-2026-04-09-wheat-correction-claim-types` with `supersedes: [MEM-2026-04-06-wheat-technical-decision-framework]` and the corrected content.
+
+This constraint exists because: (1) the note space will grow to 50k+ notes and edits become impossible to audit; (2) superseded notes preserve the history of understanding — what was believed and when; (3) the embedding index is eventually consistent and edits create stale vectors.
+
 ### Note quality conventions
 
 *Original sources* — every note must link to its original source (paper, article, podcast, URL) in the References section. Never omit the source, even for informal references like podcasts.

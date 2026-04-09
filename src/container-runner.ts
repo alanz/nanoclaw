@@ -63,6 +63,9 @@ export interface ContainerInput {
   /** Called after mounts are created (including ipc-in) but before the
    *  container spawns. Use this to populate ipc-in with pending transfer files. */
   onInvocationReady?: (invocationId: string) => void;
+  /** When true, the container skips PreCompact/PostCompact hook registration.
+   *  Set for throwaway summarisation sessions to prevent recursive spawning. */
+  isThrowaway?: boolean;
 }
 
 export interface ContainerOutput {

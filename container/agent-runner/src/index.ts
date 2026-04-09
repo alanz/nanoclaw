@@ -35,6 +35,8 @@ interface ContainerInput {
   assistantName?: string;
   script?: string;
   evalSkipSkills?: string[];
+  /** When true, skip PreCompact/PostCompact hooks to prevent recursive throwaway spawning. */
+  isThrowaway?: boolean;
 }
 
 interface ContainerOutput {
@@ -45,16 +47,6 @@ interface ContainerOutput {
   totalTokens?: number;
 }
 
-interface SessionEntry {
-  sessionId: string;
-  fullPath: string;
-  summary: string;
-  firstPrompt: string;
-}
-
-interface SessionsIndex {
-  entries: SessionEntry[];
-}
 
 interface SDKUserMessage {
   type: 'user';
@@ -130,34 +122,6 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
-function getSessionSummary(
-  sessionId: string,
-  transcriptPath: string,
-): string | null {
-  const projectDir = path.dirname(transcriptPath);
-  const indexPath = path.join(projectDir, 'sessions-index.json');
-
-  if (!fs.existsSync(indexPath)) {
-    log(`Sessions index not found at ${indexPath}`);
-    return null;
-  }
-
-  try {
-    const index: SessionsIndex = JSON.parse(
-      fs.readFileSync(indexPath, 'utf-8'),
-    );
-    const entry = index.entries.find((e) => e.sessionId === sessionId);
-    if (entry?.summary) {
-      return entry.summary;
-    }
-  } catch (err) {
-    log(
-      `Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  return null;
-}
 
 /**
  * Archive the full transcript to conversations/ before compaction.
@@ -169,13 +133,15 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     const sessionId = preCompact.session_id;
 
     const conversationsDir = '/workspace/group/conversations';
+    const now = new Date();
+    const date = now.toISOString().split('T')[0];
+    const time = `${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}`;
 
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
       log(`No transcript found for archiving — writing placeholder`);
       try {
         fs.mkdirSync(conversationsDir, { recursive: true });
-        const date = new Date().toISOString().split('T')[0];
-        const filePath = path.join(conversationsDir, `${date}-missing.md`);
+        const filePath = path.join(conversationsDir, `${date}-${time}-missing.md`);
         const markdown = formatTranscriptMarkdown(
           [],
           'Missing',
@@ -199,8 +165,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       if (messages.length === 0) {
         log('No messages to archive — writing empty placeholder');
         fs.mkdirSync(conversationsDir, { recursive: true });
-        const date = new Date().toISOString().split('T')[0];
-        const filePath = path.join(conversationsDir, `${date}-empty.md`);
+        const filePath = path.join(conversationsDir, `${date}-${time}-empty.md`);
         const markdown = formatTranscriptMarkdown(
           [],
           'Empty Session',
@@ -214,18 +179,14 @@ function createPreCompactHook(assistantName?: string): HookCallback {
         return {};
       }
 
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
-
       fs.mkdirSync(conversationsDir, { recursive: true });
 
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
+      const filename = `${date}-${time}-compact.md`;
       const filePath = path.join(conversationsDir, filename);
 
       const markdown = formatTranscriptMarkdown(
         messages,
-        summary,
+        null,
         assistantName,
         sessionId,
         transcriptPath,
@@ -306,18 +267,6 @@ function createPostCompactHook(chatJid: string, groupFolder: string): HookCallba
   };
 }
 
-function sanitizeFilename(summary: string): string {
-  return summary
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 50);
-}
-
-function generateFallbackName(): string {
-  const time = new Date();
-  return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
-}
 
 interface ParsedMessage {
   role: 'user' | 'assistant';
@@ -623,7 +572,7 @@ async function runQuery(
           },
         },
       },
-      hooks: {
+      hooks: containerInput.isThrowaway ? undefined : {
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
           { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
@@ -852,7 +801,7 @@ async function main(): Promise<void> {
           permissionMode: 'bypassPermissions' as const,
           allowDangerouslySkipPermissions: true,
           settingSources: ['project', 'user'] as const,
-          hooks: {
+          hooks: containerInput.isThrowaway ? undefined : {
             PreCompact: [
               { hooks: [createPreCompactHook(containerInput.assistantName)] },
               { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },

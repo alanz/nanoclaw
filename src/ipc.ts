@@ -1686,7 +1686,13 @@ export async function processTaskIpc(
           { sessionId, jsonlPath },
           'Session JSONL missing at /reset',
         );
-        writeArchivePlaceholder(conversationsDir, sessionId, date, 'missing');
+        writeArchivePlaceholder(
+          conversationsDir,
+          sessionId,
+          date,
+          timestamp,
+          'missing',
+        );
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
@@ -1706,7 +1712,13 @@ export async function processTaskIpc(
           { sessionId, jsonlPath, err },
           'Failed to read session JSONL at /reset',
         );
-        writeArchivePlaceholder(conversationsDir, sessionId, date, 'missing');
+        writeArchivePlaceholder(
+          conversationsDir,
+          sessionId,
+          date,
+          timestamp,
+          'missing',
+        );
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
@@ -1724,7 +1736,13 @@ export async function processTaskIpc(
           { sessionId, groupFolder },
           'Reset issued on empty session',
         );
-        writeArchivePlaceholder(conversationsDir, sessionId, date, 'empty');
+        writeArchivePlaceholder(
+          conversationsDir,
+          sessionId,
+          date,
+          timestamp,
+          'empty',
+        );
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
@@ -1743,6 +1761,7 @@ export async function processTaskIpc(
         jsonlPath,
         messages,
         date,
+        timestamp,
       );
       spawnThrowaway(raGroup, jid, sessionId, jsonlPath, deps).catch((err) =>
         logger.error({ err, sessionId }, 'Throwaway session failed on reset'),
@@ -1818,9 +1837,10 @@ function writeConversationArchive(
   jsonlPath: string,
   messages: SessionParsedMessage[],
   date: string,
+  timestamp: string,
 ): void {
   fs.mkdirSync(conversationsDir, { recursive: true });
-  const filename = `${date}-reset.md`;
+  const filename = `${date}-${timestamp}-reset.md`;
   const now = new Date();
   const lines: string[] = [
     '---',
@@ -1854,10 +1874,11 @@ function writeArchivePlaceholder(
   conversationsDir: string,
   sessionId: string,
   date: string,
+  timestamp: string,
   suffix: 'missing' | 'empty',
 ): void {
   fs.mkdirSync(conversationsDir, { recursive: true });
-  const filename = `${date}-${suffix}.md`;
+  const filename = `${date}-${timestamp}-${suffix}.md`;
   const now = new Date();
   const content = [
     '---',
@@ -1976,6 +1997,7 @@ export async function spawnThrowaway(
     groupFolder: group.folder,
     chatJid,
     isMain: false,
+    isThrowaway: true, // prevents PreCompact/PostCompact hooks from spawning more throwaways
   };
 
   try {

@@ -181,6 +181,7 @@ export function listOrphanedContainers(): OrphanedContainer[] {
     const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
+      timeout: 10_000,
     });
     const containers: {
       status: string;
@@ -230,6 +231,7 @@ export function listAllManagedContainers(): ManagedContainer[] {
     const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
+      timeout: 10_000,
     });
     const containers: {
       status: string;
@@ -267,6 +269,7 @@ export function isContainerRunning(name: string): boolean {
     const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
+      timeout: 10_000,
     });
     const containers: { status: string; configuration: { id: string } }[] =
       JSON.parse(output || '[]');
@@ -284,8 +287,11 @@ export function killContainer(name: string): void {
     throw new Error(`Invalid container name: ${name}`);
   }
   try {
-    execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+    execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, {
+      stdio: 'pipe',
+      timeout: 15_000,
+    });
   } catch {
-    /* already stopped */
+    /* already stopped or timed out */
   }
 }

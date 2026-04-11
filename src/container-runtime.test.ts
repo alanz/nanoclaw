@@ -208,7 +208,7 @@ describe('killContainer', () => {
     killContainer('nanoclaw-main-123');
     expect(mockExecSync).toHaveBeenCalledWith(
       `${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-main-123`,
-      { stdio: 'pipe' },
+      { stdio: 'pipe', timeout: 15_000 },
     );
   });
 

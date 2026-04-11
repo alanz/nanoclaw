@@ -420,7 +420,6 @@ export class GroupQueue {
     groupJid: string,
     containerName: string,
     groupFolder: string,
-    remainingMs: number,
     isRunning: (name: string) => boolean,
     forceKill: (name: string) => void,
   ): void {
@@ -440,13 +439,18 @@ export class GroupQueue {
       /* ignore — orphan may already have exited */
     }
 
+    // Give the orphan a grace window to flush state and exit naturally after
+    // receiving _close. Apple Container VMs can linger in "running" state after
+    // the entrypoint exits, so we cap this rather than waiting for the full
+    // remaining timeout. 20 minutes is enough for any in-flight agent work.
+    const GRACE_MS = 2 * 60_000;
     logger.info(
-      { groupJid, containerName, remainingMs },
+      { groupJid, containerName, graceMs: GRACE_MS },
       'Adopting orphaned container — waiting for natural exit',
     );
 
     const POLL_MS = 5_000;
-    const deadline = Date.now() + remainingMs;
+    const deadline = Date.now() + GRACE_MS;
 
     const release = () => {
       state.active = false;

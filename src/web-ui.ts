@@ -1198,7 +1198,8 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!r.ok) { view.innerHTML = '<div class="empty">Could not read file</div>'; return; }
       var text = await r.text();
       var isNote = filePath.indexOf('/memory/notes/MEM-') !== -1;
-      var graphBtn = isNote ? ' <a href="#" class="graph-file-btn" data-path="'+esc(filePath)+'" style="color:#58a6ff;font-size:11px;margin-left:8px;text-decoration:none">\u29BF Show in Graph</a>' : '';
+      var graphBtnHash = (currentGroup ? '#groups/'+currentGroup.folder+'/notes' : '#');
+      var graphBtn = isNote ? ' <a href="'+graphBtnHash+'" class="graph-file-btn" data-path="'+esc(filePath)+'" style="color:#58a6ff;font-size:11px;margin-left:8px;text-decoration:none">\u29BF Show in Graph</a>' : '';
       var header = '<div class="dim" style="margin-bottom:12px">'+esc(filePath)+graphBtn+'</div>';
       var ext = name.split('.').pop();
       if (ext === 'md' && window.marked) {
@@ -1552,6 +1553,8 @@ document.addEventListener('DOMContentLoaded', function() {
       document.getElementById('graph-node-id').textContent = d.id;
       var tagsHtml = (d.tags||[]).map(function(t){ return '<span class="fm-tag" style="background:'+tagColor(t)+';color:#0d1117;border-color:transparent">'+esc(t)+'</span>'; }).join(' ');
       var kwHtml = (d.keywords||[]).map(function(k){ return '<span class="fm-tag">'+esc(k)+'</span>'; }).join(' ');
+      var fileRel = (d.path && currentGroup && d.path.startsWith(currentGroup.folder+'/')) ? d.path.slice(currentGroup.folder.length+1) : d.path;
+      var fileHash = (fileRel && currentGroup) ? '#groups/'+currentGroup.folder+'/files/'+fileRel : '#';
       document.getElementById('graph-node-meta').innerHTML =
         '<div class="fm-key">Created</div><div class="fm-val">'+esc(d.created)+'</div>'
         +(tagsHtml ? '<div class="fm-key">Tags</div><div class="fm-val">'+tagsHtml+'</div>' : '')
@@ -1559,14 +1562,11 @@ document.addEventListener('DOMContentLoaded', function() {
         +(d.source_task_id
           ? '<div class="fm-key">Research Task</div><div class="fm-val"><a href="#specialists" id="graph-task-link" data-task-id="'+esc(d.source_task_id)+'" style="color:#58a6ff;font-family:monospace;font-size:10px">'+esc(d.source_task_id.slice(0,8))+'\u2026 \u2192</a></div>'
           : '')
-        +'<div class="fm-key">File</div><div class="fm-val"><a href="#" id="graph-open-link" style="color:#58a6ff;font-size:11px">Open in Files tab \u2192</a></div>';
+        +'<div class="fm-key">File</div><div class="fm-val"><a href="'+fileHash+'" id="graph-open-link" style="color:#58a6ff;font-size:11px">Open in Files tab \u2192</a></div>';
       panel.style.display = 'block';
       document.getElementById('graph-open-link').onclick = function(e) {
         e.preventDefault();
-        if (d.path) {
-          var rel = currentGroup && d.path.startsWith(currentGroup.folder+'/') ? d.path.slice(currentGroup.folder.length+1) : d.path;
-          switchTab('files', rel);
-        }
+        if (fileRel) switchTab('files', fileRel);
       };
       var taskLinkEl = document.getElementById('graph-task-link');
       if (taskLinkEl) {

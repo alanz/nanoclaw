@@ -47,7 +47,6 @@ interface ContainerOutput {
   totalTokens?: number;
 }
 
-
 interface SDKUserMessage {
   type: 'user';
   message: { role: 'user'; content: string };
@@ -122,7 +121,6 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
-
 /**
  * Archive the full transcript to conversations/ before compaction.
  */
@@ -141,7 +139,10 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       log(`No transcript found for archiving — writing placeholder`);
       try {
         fs.mkdirSync(conversationsDir, { recursive: true });
-        const filePath = path.join(conversationsDir, `${date}-${time}-missing.md`);
+        const filePath = path.join(
+          conversationsDir,
+          `${date}-${time}-missing.md`,
+        );
         const markdown = formatTranscriptMarkdown(
           [],
           'Missing',
@@ -153,7 +154,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
         fs.writeFileSync(filePath, markdown);
         log(`Wrote missing-JSONL placeholder to ${filePath}`);
       } catch (err) {
-        log(`Failed to write missing placeholder: ${err instanceof Error ? err.message : String(err)}`);
+        log(
+          `Failed to write missing placeholder: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
       return {};
     }
@@ -165,7 +168,10 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       if (messages.length === 0) {
         log('No messages to archive — writing empty placeholder');
         fs.mkdirSync(conversationsDir, { recursive: true });
-        const filePath = path.join(conversationsDir, `${date}-${time}-empty.md`);
+        const filePath = path.join(
+          conversationsDir,
+          `${date}-${time}-empty.md`,
+        );
         const markdown = formatTranscriptMarkdown(
           [],
           'Empty Session',
@@ -222,7 +228,9 @@ function writeReactionTask(chatJid: string, emoji: string): void {
     });
     fs.writeFileSync(path.join(ipcTaskDir, filename), task);
   } catch (err) {
-    log(`Failed to write reaction IPC task: ${err instanceof Error ? err.message : String(err)}`);
+    log(
+      `Failed to write reaction IPC task: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
@@ -233,7 +241,10 @@ function createPreCompactReactionHook(chatJid: string): HookCallback {
   };
 }
 
-function createPostCompactHook(chatJid: string, groupFolder: string): HookCallback {
+function createPostCompactHook(
+  chatJid: string,
+  groupFolder: string,
+): HookCallback {
   return async (input, _toolUseId, _context) => {
     const postCompact = input as PostCompactHookInput;
     const sessionId = postCompact.session_id;
@@ -260,13 +271,14 @@ function createPostCompactHook(chatJid: string, groupFolder: string): HookCallba
       );
       log(`Requested throwaway session for session ${sessionId}`);
     } catch (err) {
-      log(`Failed to write spawn_throwaway_session task: ${err instanceof Error ? err.message : String(err)}`);
+      log(
+        `Failed to write spawn_throwaway_session task: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     return {};
   };
 }
-
 
 interface ParsedMessage {
   role: 'user' | 'assistant';
@@ -474,7 +486,9 @@ async function runQuery(
     }
     const { messages, interrupt } = drainIpcInput();
     if (interrupt) {
-      log(`Interrupt received during query (${interrupt.length} chars), ending stream`);
+      log(
+        `Interrupt received during query (${interrupt.length} chars), ending stream`,
+      );
       interruptText = interrupt;
       for (const text of messages) stream.push(text);
       stream.end();
@@ -566,21 +580,35 @@ async function runQuery(
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
             ...(process.env.NANOCLAW_SPECIALIST_TYPE
-              ? { NANOCLAW_SPECIALIST_TYPE: process.env.NANOCLAW_SPECIALIST_TYPE }
+              ? {
+                  NANOCLAW_SPECIALIST_TYPE:
+                    process.env.NANOCLAW_SPECIALIST_TYPE,
+                }
               : {}),
-            ...(process.env.BRAVE_API_KEY ? { BRAVE_API_KEY: process.env.BRAVE_API_KEY } : {}),
+            ...(process.env.BRAVE_API_KEY
+              ? { BRAVE_API_KEY: process.env.BRAVE_API_KEY }
+              : {}),
           },
         },
       },
-      hooks: containerInput.isThrowaway ? undefined : {
-        PreCompact: [
-          { hooks: [createPreCompactHook(containerInput.assistantName)] },
-          { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
-        ],
-        PostCompact: [
-          { hooks: [createPostCompactHook(containerInput.chatJid, containerInput.groupFolder)] },
-        ],
-      },
+      hooks: containerInput.isThrowaway
+        ? undefined
+        : {
+            PreCompact: [
+              { hooks: [createPreCompactHook(containerInput.assistantName)] },
+              { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
+            ],
+            PostCompact: [
+              {
+                hooks: [
+                  createPostCompactHook(
+                    containerInput.chatJid,
+                    containerInput.groupFolder,
+                  ),
+                ],
+              },
+            ],
+          },
     },
   })) {
     messageCount++;
@@ -643,6 +671,10 @@ async function runQuery(
         newSessionId,
         totalTokens: totalInputTokens + totalOutputTokens || undefined,
       });
+      // Break so control returns to the outer while(true) loop where
+      // waitForIpcMessage() handles follow-ups. Without this, the
+      // for-await iterator hangs and IPC messages are silently lost.
+      break;
     }
   }
 
@@ -771,7 +803,9 @@ async function main(): Promise<void> {
   }
   const pending = drainIpcInput();
   if (pending.messages.length > 0) {
-    log(`Draining ${pending.messages.length} pending IPC messages into initial prompt`);
+    log(
+      `Draining ${pending.messages.length} pending IPC messages into initial prompt`,
+    );
     prompt += '\n' + pending.messages.join('\n');
   }
 
@@ -801,20 +835,36 @@ async function main(): Promise<void> {
           permissionMode: 'bypassPermissions' as const,
           allowDangerouslySkipPermissions: true,
           settingSources: ['project', 'user'] as const,
-          hooks: containerInput.isThrowaway ? undefined : {
-            PreCompact: [
-              { hooks: [createPreCompactHook(containerInput.assistantName)] },
-              { hooks: [createPreCompactReactionHook(containerInput.chatJid)] },
-            ],
-            PostCompact: [
-              { hooks: [createPostCompactHook(containerInput.chatJid, containerInput.groupFolder)] },
-            ],
-          },
+          hooks: containerInput.isThrowaway
+            ? undefined
+            : {
+                PreCompact: [
+                  {
+                    hooks: [createPreCompactHook(containerInput.assistantName)],
+                  },
+                  {
+                    hooks: [
+                      createPreCompactReactionHook(containerInput.chatJid),
+                    ],
+                  },
+                ],
+                PostCompact: [
+                  {
+                    hooks: [
+                      createPostCompactHook(
+                        containerInput.chatJid,
+                        containerInput.groupFolder,
+                      ),
+                    ],
+                  },
+                ],
+              },
         },
       })) {
-        const msgType = message.type === 'system'
-          ? `system/${(message as { subtype?: string }).subtype}`
-          : message.type;
+        const msgType =
+          message.type === 'system'
+            ? `system/${(message as { subtype?: string }).subtype}`
+            : message.type;
         log(`[slash-cmd] type=${msgType}`);
 
         if (message.type === 'system' && message.subtype === 'init') {
@@ -823,14 +873,20 @@ async function main(): Promise<void> {
         }
 
         // Observe compact_boundary to confirm compaction completed
-        if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+        if (
+          message.type === 'system' &&
+          (message as { subtype?: string }).subtype === 'compact_boundary'
+        ) {
           compactBoundarySeen = true;
           log('Compact boundary observed — compaction completed');
         }
 
         if (message.type === 'result') {
           const resultSubtype = (message as { subtype?: string }).subtype;
-          const textResult = 'result' in message ? (message as { result?: string }).result : null;
+          const textResult =
+            'result' in message
+              ? (message as { result?: string }).result
+              : null;
 
           if (resultSubtype?.startsWith('error')) {
             hadError = true;
@@ -857,11 +913,15 @@ async function main(): Promise<void> {
       writeOutput({ status: 'error', result: null, error: errorMsg });
     }
 
-    log(`Slash command done. compactBoundarySeen=${compactBoundarySeen}, hadError=${hadError}`);
+    log(
+      `Slash command done. compactBoundarySeen=${compactBoundarySeen}, hadError=${hadError}`,
+    );
 
     // Warn if compact_boundary was never observed — compaction may not have occurred
     if (!hadError && !compactBoundarySeen) {
-      log('WARNING: compact_boundary was not observed. Compaction may not have completed.');
+      log(
+        'WARNING: compact_boundary was not observed. Compaction may not have completed.',
+      );
     }
 
     // Only emit final session marker if no result was emitted yet and no error occurred
@@ -875,7 +935,11 @@ async function main(): Promise<void> {
       });
     } else if (!hadError) {
       // Emit session-only marker so host updates session tracking
-      writeOutput({ status: 'success', result: null, newSessionId: slashSessionId });
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: slashSessionId,
+      });
     }
     return;
   }
@@ -936,8 +1000,14 @@ async function main(): Promise<void> {
 
       // If interrupted (/esc), skip the idle wait and use the interrupt text as next prompt.
       if (queryResult.interruptText) {
-        log(`Interrupted, using interrupt text as next prompt (${queryResult.interruptText.length} chars)`);
-        writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+        log(
+          `Interrupted, using interrupt text as next prompt (${queryResult.interruptText.length} chars)`,
+        );
+        writeOutput({
+          status: 'success',
+          result: null,
+          newSessionId: sessionId,
+        });
         prompt = queryResult.interruptText;
         continue;
       }

@@ -1141,7 +1141,7 @@ export function buildDashboardUrl(
         ? `groups/${groupFolder}`
         : `groups/${groupFolder}/${view}`;
   }
-  return `${webUiBaseUrl}#${hash}`;
+  return `${webUiBaseUrl}/#${hash}`;
 }
 
 /**

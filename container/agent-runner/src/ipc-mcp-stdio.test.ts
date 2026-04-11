@@ -11,73 +11,73 @@ describe('buildDashboardUrl', () => {
 
   it('builds a file URL from an absolute workspace path', () => {
     expect(buildDashboardUrl(BASE, FOLDER, '/workspace/CLAUDE.md')).toBe(
-      `${BASE}#groups/${FOLDER}/files/CLAUDE.md`,
+      `${BASE}/#groups/${FOLDER}/files/CLAUDE.md`,
     );
   });
 
   it('builds a file URL from a relative path', () => {
     expect(buildDashboardUrl(BASE, FOLDER, 'notes/todo.md')).toBe(
-      `${BASE}#groups/${FOLDER}/files/notes/todo.md`,
+      `${BASE}/#groups/${FOLDER}/files/notes/todo.md`,
     );
   });
 
   it('builds a file URL from workspace/ prefix (no leading slash)', () => {
     expect(buildDashboardUrl(BASE, FOLDER, 'workspace/CLAUDE.md')).toBe(
-      `${BASE}#groups/${FOLDER}/files/CLAUDE.md`,
+      `${BASE}/#groups/${FOLDER}/files/CLAUDE.md`,
     );
   });
 
   it('strips extra leading slashes from relative path', () => {
     expect(buildDashboardUrl(BASE, FOLDER, '//notes/todo.md')).toBe(
-      `${BASE}#groups/${FOLDER}/files/notes/todo.md`,
+      `${BASE}/#groups/${FOLDER}/files/notes/todo.md`,
     );
   });
 
   it('builds a nested file URL', () => {
     expect(buildDashboardUrl(BASE, FOLDER, '/workspace/subdir/deep/file.json')).toBe(
-      `${BASE}#groups/${FOLDER}/files/subdir/deep/file.json`,
+      `${BASE}/#groups/${FOLDER}/files/subdir/deep/file.json`,
     );
   });
 
   it('defaults to files tab when no file_path and no view', () => {
     expect(buildDashboardUrl(BASE, FOLDER)).toBe(
-      `${BASE}#groups/${FOLDER}/files`,
+      `${BASE}/#groups/${FOLDER}/files`,
     );
   });
 
   it('builds a chat view URL', () => {
     expect(buildDashboardUrl(BASE, FOLDER, undefined, 'chat')).toBe(
-      `${BASE}#groups/${FOLDER}`,
+      `${BASE}/#groups/${FOLDER}`,
     );
   });
 
   it('builds a tasks view URL', () => {
     expect(buildDashboardUrl(BASE, FOLDER, undefined, 'tasks')).toBe(
-      `${BASE}#groups/${FOLDER}/tasks`,
+      `${BASE}/#groups/${FOLDER}/tasks`,
     );
   });
 
   it('builds a files tab URL (no file selected)', () => {
     expect(buildDashboardUrl(BASE, FOLDER, undefined, 'files')).toBe(
-      `${BASE}#groups/${FOLDER}/files`,
+      `${BASE}/#groups/${FOLDER}/files`,
     );
   });
 
   it('uses correct group folder in URL', () => {
     expect(buildDashboardUrl(BASE, 'telegram_work', '/workspace/plan.md')).toBe(
-      `${BASE}#groups/telegram_work/files/plan.md`,
+      `${BASE}/#groups/telegram_work/files/plan.md`,
     );
   });
 
   it('strips /workspace/group/ prefix (group/ maps to the group folder on host)', () => {
     expect(buildDashboardUrl(BASE, 'deltachat_nanoclaw-group', '/workspace/group/conversations/2026-03-14-conversation.md')).toBe(
-      `${BASE}#groups/deltachat_nanoclaw-group/files/conversations/2026-03-14-conversation.md`,
+      `${BASE}/#groups/deltachat_nanoclaw-group/files/conversations/2026-03-14-conversation.md`,
     );
   });
 
   it('does not strip group/ when it is not a workspace-relative path', () => {
     expect(buildDashboardUrl(BASE, FOLDER, 'group-notes/todo.md')).toBe(
-      `${BASE}#groups/${FOLDER}/files/group-notes/todo.md`,
+      `${BASE}/#groups/${FOLDER}/files/group-notes/todo.md`,
     );
   });
 });
@@ -95,7 +95,7 @@ describe('parseDashboardUrl', () => {
   });
 
   it('parses a file URL back to a workspace path', () => {
-    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/files/CLAUDE.md`)).toEqual({
+    expect(parseDashboardUrl(`${BASE}/#groups/${FOLDER}/files/CLAUDE.md`)).toEqual({
       groupFolder: FOLDER,
       filePath: '/workspace/CLAUDE.md',
       view: 'files',
@@ -103,7 +103,7 @@ describe('parseDashboardUrl', () => {
   });
 
   it('parses a nested file URL', () => {
-    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/files/subdir/deep/file.json`)).toEqual({
+    expect(parseDashboardUrl(`${BASE}/#groups/${FOLDER}/files/subdir/deep/file.json`)).toEqual({
       groupFolder: FOLDER,
       filePath: '/workspace/subdir/deep/file.json',
       view: 'files',
@@ -111,7 +111,7 @@ describe('parseDashboardUrl', () => {
   });
 
   it('parses a files tab URL (no file selected)', () => {
-    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/files`)).toEqual({
+    expect(parseDashboardUrl(`${BASE}/#groups/${FOLDER}/files`)).toEqual({
       groupFolder: FOLDER,
       filePath: null,
       view: 'files',
@@ -119,7 +119,7 @@ describe('parseDashboardUrl', () => {
   });
 
   it('parses a tasks tab URL', () => {
-    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}/tasks`)).toEqual({
+    expect(parseDashboardUrl(`${BASE}/#groups/${FOLDER}/tasks`)).toEqual({
       groupFolder: FOLDER,
       filePath: null,
       view: 'tasks',
@@ -127,7 +127,7 @@ describe('parseDashboardUrl', () => {
   });
 
   it('parses a chat view URL', () => {
-    expect(parseDashboardUrl(`${BASE}#groups/${FOLDER}`)).toEqual({
+    expect(parseDashboardUrl(`${BASE}/#groups/${FOLDER}`)).toEqual({
       groupFolder: FOLDER,
       filePath: null,
       view: 'chat',
@@ -135,7 +135,7 @@ describe('parseDashboardUrl', () => {
   });
 
   it('parses a different group folder', () => {
-    expect(parseDashboardUrl(`${BASE}#groups/telegram_work/files/plan.md`)).toEqual({
+    expect(parseDashboardUrl(`${BASE}/#groups/telegram_work/files/plan.md`)).toEqual({
       groupFolder: 'telegram_work',
       filePath: '/workspace/plan.md',
       view: 'files',

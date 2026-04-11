@@ -156,7 +156,7 @@ describe('container-runner timeout behavior', () => {
     // Let output processing settle
     await vi.advanceTimersByTimeAsync(10);
 
-    // Fire the hard timeout (IDLE_TIMEOUT + 30s = 1830000ms)
+    // Fire the hard timeout (after success result: IDLE_TIMEOUT + 30s = 1830000ms)
     await vi.advanceTimersByTimeAsync(1830000);
 
     // Emit close event (as if container was stopped by the timeout)

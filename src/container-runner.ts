@@ -525,8 +525,24 @@ export async function runContainerAgent(
               newSessionId = parsed.newSessionId;
             }
             hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
-            resetTimeout();
+            // Activity detected — reset the hard timeout.
+            // After a completed agent turn (status=success, non-null result,
+            // not a progress marker), shrink the timeout to just past the idle
+            // window: the host's idle timer will write _close in IDLE_TIMEOUT ms,
+            // so the container should exit shortly after. If the Apple Container
+            // VM lingers after the process exits, this ensures we force-stop it
+            // within ~IDLE_TIMEOUT + 30s instead of waiting the full 30-min hard
+            // timeout.
+            if (
+              parsed.status === 'success' &&
+              parsed.result !== null &&
+              !parsed.progress
+            ) {
+              clearTimeout(timeout);
+              timeout = setTimeout(killOnTimeout, IDLE_TIMEOUT + 30_000);
+            } else {
+              resetTimeout();
+            }
             // Call onOutput for all markers (including null results)
             // so idle timers start even for "silent" query completions.
             outputChain = outputChain.then(() => onOutput(parsed));

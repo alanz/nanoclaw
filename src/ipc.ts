@@ -1649,11 +1649,12 @@ export async function processTaskIpc(
         );
         break;
       }
-      spawnThrowaway(tsGroup, jid, sessionId, jsonlPath, deps).catch((err) =>
-        logger.error(
-          { err, sessionId },
-          'Throwaway session failed unexpectedly',
-        ),
+      spawnThrowaway(tsGroup, jid, sessionId, jsonlPath, undefined, deps).catch(
+        (err) =>
+          logger.error(
+            { err, sessionId },
+            'Throwaway session failed unexpectedly',
+          ),
       );
       break;
     }
@@ -1765,7 +1766,10 @@ export async function processTaskIpc(
         break;
       }
 
-      // ArchiveAndStartThrowawayOnReset: write real archive and spawn throwaway
+      // ArchiveAndStartThrowawayOnReset: write real archive and spawn throwaway.
+      // The archive is written synchronously first; the throwaway reads it instead of
+      // the raw JSONL so long sessions don't exceed the throwaway's context window.
+      const archiveFilename = `${date}-${timestamp}-reset.md`;
       writeConversationArchive(
         conversationsDir,
         sessionId,
@@ -1774,7 +1778,14 @@ export async function processTaskIpc(
         date,
         timestamp,
       );
-      spawnThrowaway(raGroup, jid, sessionId, jsonlPath, deps).catch((err) =>
+      spawnThrowaway(
+        raGroup,
+        jid,
+        sessionId,
+        jsonlPath,
+        archiveFilename,
+        deps,
+      ).catch((err) =>
         logger.error({ err, sessionId }, 'Throwaway session failed on reset'),
       );
       break;
@@ -1954,6 +1965,7 @@ export async function spawnThrowaway(
   chatJid: string,
   sessionId: string,
   jsonlPath: string | undefined,
+  archiveFilename: string | undefined,
   deps: IpcDeps,
 ): Promise<void> {
   const now = new Date();
@@ -1968,15 +1980,19 @@ export async function spawnThrowaway(
     summaryFilename,
   );
 
-  // Container-internal JSONL path (via the .claude sessions mount)
-  const containerJsonlPath = jsonlPath
-    ? `/home/node/.claude/projects/-workspace-group/${path.basename(jsonlPath)}`
-    : undefined;
+  // Prefer the conversation archive (clean markdown, already written by the host) over
+  // the raw JSONL. The JSONL can be hundreds of KB of complex SDK JSON that exceeds the
+  // throwaway's effective context window for long sessions.
+  const transcriptSource = archiveFilename
+    ? `Read the conversation archive at: /workspace/group/conversations/${archiveFilename}`
+    : jsonlPath
+      ? `Read the session transcript at: /home/node/.claude/projects/-workspace-group/${path.basename(jsonlPath)}`
+      : null;
 
   const prompt =
     `You are writing a session summary. Do nothing except what is described here.\n\n` +
-    (containerJsonlPath
-      ? `Read the session transcript at: ${containerJsonlPath}\n`
+    (transcriptSource
+      ? `${transcriptSource}\n`
       : `The session transcript path is unknown. Write a placeholder summary.\n`) +
     `Write a structured summary to: /workspace/group/memory/sessions/${summaryFilename}\n\n` +
     `The file must start with this YAML frontmatter:\n` +

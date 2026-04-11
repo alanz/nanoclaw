@@ -933,7 +933,7 @@ async function recoverOrphanedArchives(
           { groupFolder: group.folder, sessionId, file },
           'Recovering orphaned archive — spawning throwaway',
         );
-        spawnThrowaway(group, groupJid, sessionId, jsonlPath, {
+        spawnThrowaway(group, groupJid, sessionId, jsonlPath, undefined, {
           sendMessage: async () => {},
           sendFile: async () => {},
           registeredGroups: () => ({}),

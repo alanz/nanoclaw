@@ -437,7 +437,14 @@ describe('spawnThrowaway', () => {
     });
 
     const deps = makeDeps();
-    await spawnThrowaway(group, 'g@test', 'sess-tw', '/some/path.jsonl', deps);
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-tw',
+      '/some/path.jsonl',
+      undefined,
+      deps,
+    );
 
     expect(mockRunContainerAgent).toHaveBeenCalledOnce();
     const [, input] = mockRunContainerAgent.mock.calls[0];
@@ -468,7 +475,14 @@ describe('spawnThrowaway', () => {
     );
 
     const deps = makeDeps({ setReaction });
-    await spawnThrowaway(group, 'g@test', 'sess-ok', '/path.jsonl', deps);
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-ok',
+      '/path.jsonl',
+      undefined,
+      deps,
+    );
 
     expect(setReaction).toHaveBeenCalledWith('g@test', '✅');
   });
@@ -486,7 +500,14 @@ describe('spawnThrowaway', () => {
     });
 
     const deps = makeDeps({ setReaction });
-    await spawnThrowaway(group, 'g@test', 'sess-fail', '/path.jsonl', deps);
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-fail',
+      '/path.jsonl',
+      undefined,
+      deps,
+    );
 
     expect(setReaction).toHaveBeenCalledWith('g@test', '💭');
 
@@ -519,11 +540,41 @@ describe('spawnThrowaway', () => {
       'g@test',
       'my-unique-session-id',
       undefined,
+      undefined,
       deps,
     );
 
     const [, input] = mockRunContainerAgent.mock.calls[0];
     expect(input.prompt).toContain('my-unique-session-id');
     expect(input.prompt).toContain('memory/sessions/');
+  });
+
+  it('reads conversation archive when archiveFilename is provided', async () => {
+    const folder = testFolder('tw-archive');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    const deps = makeDeps();
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-arc',
+      '/path/to/sess-arc.jsonl',
+      '2026-01-01-1200-reset.md',
+      deps,
+    );
+
+    const [, input] = mockRunContainerAgent.mock.calls[0];
+    // Prompt must reference the archive, not the JSONL
+    expect(input.prompt).toContain(
+      '/workspace/group/conversations/2026-01-01-1200-reset.md',
+    );
+    expect(input.prompt).not.toContain('.jsonl');
+    expect(input.prompt).not.toContain('/home/node/.claude');
   });
 });

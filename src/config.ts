@@ -28,7 +28,6 @@ const envConfig = readEnvFile([
   'MEMORY_SEARCH_RPM_LIMIT',
   'MEMORY_SEARCH_RPD_SESSION_BUDGET',
   'OLLAMA_ADMIN_TOOLS',
-  'ONECLI_URL',
   'TZ',
 ]);
 
@@ -119,7 +118,6 @@ export const WEB_UI_BASE_URL: string | null =
     /\/$/,
     '',
   ) || null;
-export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,

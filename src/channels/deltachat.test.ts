@@ -69,8 +69,9 @@ vi.mock('@deltachat/stdio-rpc-server', () => ({
         getMessage: vi.fn(),
         getBasicChatInfo: vi.fn(),
         getContact: vi.fn(),
-        sendMsg: vi.fn().mockResolvedValue(undefined),
+        sendMsg: vi.fn().mockResolvedValue(42),
         sendReaction: vi.fn().mockResolvedValue(undefined),
+        sendEditRequest: vi.fn().mockResolvedValue(null),
       },
       getContextEvents: vi.fn(() => emitter),
     };
@@ -1351,6 +1352,55 @@ describe('DeltaChatChannel', () => {
       const channel = new DeltaChatChannel(makeOpts());
       await channel.sendMessage(JID, 'No connection');
       expect(dcRef.current?.rpc.sendMsg).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sendMessageAndGetId', () => {
+    it('returns the message ID as a string', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      const id = await channel.sendMessageAndGetId(JID, 'Hello');
+
+      expect(id).toBe('42');
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: 'Hello' }),
+      );
+    });
+
+    it('returns null when not connected', async () => {
+      const channel = new DeltaChatChannel(makeOpts());
+      const id = await channel.sendMessageAndGetId(JID, 'Hello');
+      expect(id).toBeNull();
+    });
+  });
+
+  describe('editMessage', () => {
+    it('calls sendEditRequest with the numeric message ID and new text', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.editMessage(JID, '99', 'Updated text');
+
+      expect(dc.rpc.sendEditRequest).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        99,
+        'Updated text',
+      );
+    });
+
+    it('does nothing when not connected', async () => {
+      const channel = new DeltaChatChannel(makeOpts());
+      await channel.editMessage(JID, '99', 'Updated text');
+      expect(dcRef.current?.rpc.sendEditRequest).not.toHaveBeenCalled();
+    });
+
+    it('does nothing for a non-numeric message ID', async () => {
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.editMessage(JID, 'not-a-number', 'Updated text');
+
+      expect(dc.rpc.sendEditRequest).not.toHaveBeenCalled();
     });
   });
 });

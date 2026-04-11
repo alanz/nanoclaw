@@ -42,6 +42,7 @@ interface ContainerInput {
 interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
+  progress?: string;
   newSessionId?: string;
   error?: string;
   totalTokens?: number;
@@ -509,6 +510,7 @@ async function runQuery(
   let resultCount = 0;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let lastProgressText: string | undefined;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -620,6 +622,34 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+    }
+
+    // Emit progress updates for the host to display (edit in place).
+    // Only emit when the text changes to avoid redundant IPC chatter.
+    if (message.type === 'assistant') {
+      const content = (message as { message?: { content?: unknown[] } }).message
+        ?.content;
+      const toolUse = Array.isArray(content)
+        ? (content as Array<{ type: string; name?: string }>).find(
+            (b) => b.type === 'tool_use',
+          )
+        : undefined;
+      const text = toolUse?.name
+        ? `Using ${toolUse.name}…`
+        : lastProgressText === undefined
+          ? 'Thinking…'
+          : undefined;
+      if (text !== undefined && text !== lastProgressText) {
+        lastProgressText = text;
+        writeOutput({ status: 'success', result: null, progress: text });
+      }
+    } else if (message.type === 'tool_progress') {
+      const tp = message as { tool_name: string };
+      const text = `Using ${tp.tool_name}…`;
+      if (text !== lastProgressText) {
+        lastProgressText = text;
+        writeOutput({ status: 'success', result: null, progress: text });
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {

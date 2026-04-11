@@ -71,6 +71,7 @@ export interface ContainerInput {
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
+  progress?: string;
   newSessionId?: string;
   error?: string;
   totalTokens?: number;

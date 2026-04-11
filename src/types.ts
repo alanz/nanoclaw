@@ -222,6 +222,10 @@ export interface Channel {
   sendFile?(jid: string, filePath: string, caption?: string): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: send a message and return an opaque message ID (for later editing).
+  sendMessageAndGetId?(jid: string, text: string): Promise<string | null>;
+  // Optional: edit a previously sent message by its ID.
+  editMessage?(jid: string, messageId: string, text: string): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

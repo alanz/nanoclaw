@@ -392,8 +392,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  // Track the message ID of the in-progress placeholder (for channels that
+  // support sendMessageAndGetId + editMessage, e.g. DeltaChat).
+  let progressMsgId: string | null = null;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
+    // Progress update — send a placeholder on first update, edit in place thereafter.
+    if (result.progress && channel.sendMessageAndGetId && channel.editMessage) {
+      const progressText = `⏳ ${result.progress}`;
+      if (progressMsgId === null) {
+        progressMsgId = await channel.sendMessageAndGetId(
+          chatJid,
+          progressText,
+        );
+      } else {
+        await channel.editMessage(chatJid, progressMsgId, progressText);
+      }
+    }
+
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -404,7 +420,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        // If we sent a progress placeholder, edit it with the final result instead
+        // of sending a new message so the conversation stays clean.
+        if (progressMsgId !== null && channel.editMessage) {
+          await channel.editMessage(chatJid, progressMsgId, text);
+          progressMsgId = null;
+        } else {
+          await channel.sendMessage(chatJid, text);
+        }
         storeMessage({
           id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           chat_jid: chatJid,
@@ -421,7 +444,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
+    // Progress-only outputs are not completions — skip idle/typing signals.
+    if (result.status === 'success' && !result.progress) {
       queue.notifyIdle(chatJid);
       // Send ✅ here — runAgent only resolves when the container exits (idle timeout),
       // not when the agent finishes its turn. status === 'success' is the real signal.
@@ -998,7 +1022,6 @@ async function main(): Promise<void> {
         jid,
         orphan.name,
         group.folder,
-        remaining,
         isContainerRunning,
         killContainer,
       );

@@ -616,9 +616,17 @@ export class DeltaChatChannel implements Channel {
   }
 
   async sendMessage(jid: string, text: string, sender?: string): Promise<void> {
+    await this.sendMessageAndGetId(jid, text, sender);
+  }
+
+  async sendMessageAndGetId(
+    jid: string,
+    text: string,
+    sender?: string,
+  ): Promise<string | null> {
     const chatId = chatIdFromJid(jid);
-    if (chatId === null || !this.dc || this.accountId === null) return;
-    await this.dc.rpc.sendMsg(this.accountId, chatId, {
+    if (chatId === null || !this.dc || this.accountId === null) return null;
+    const msgId = await this.dc.rpc.sendMsg(this.accountId, chatId, {
       text,
       html: null,
       viewtype: null,
@@ -629,6 +637,22 @@ export class DeltaChatChannel implements Channel {
       quotedMessageId: null,
       quotedText: null,
     });
+    return String(msgId);
+  }
+
+  async editMessage(
+    jid: string,
+    messageId: string,
+    text: string,
+  ): Promise<void> {
+    if (!this.dc || this.accountId === null) return;
+    const msgId = parseInt(messageId, 10);
+    if (isNaN(msgId)) return;
+    try {
+      await this.dc.rpc.sendEditRequest(this.accountId, msgId, text);
+    } catch (err) {
+      logger.warn({ err, jid, msgId }, 'DeltaChat: failed to edit message');
+    }
   }
 
   async sendFile(

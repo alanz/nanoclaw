@@ -182,6 +182,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .graph-legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 #graph-node-panel{display:none;position:absolute;bottom:12px;right:12px;width:320px;background:rgba(22,27,34,0.95);border:1px solid #30363d;border-radius:8px;padding:14px;z-index:10;backdrop-filter:blur(8px)}
 #graph-node-panel h3{font-size:13px;font-weight:600;color:#f0f6fc;margin:0 0 10px;word-break:break-all}
+#graph-node-panel h3 a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -1550,19 +1551,19 @@ document.addEventListener('DOMContentLoaded', function() {
     graphCy.on('tap', 'node', function(evt) {
       var d = evt.target.data();
       var panel = document.getElementById('graph-node-panel');
-      document.getElementById('graph-node-id').textContent = d.id;
       var tagsHtml = (d.tags||[]).map(function(t){ return '<span class="fm-tag" style="background:'+tagColor(t)+';color:#0d1117;border-color:transparent">'+esc(t)+'</span>'; }).join(' ');
       var kwHtml = (d.keywords||[]).map(function(k){ return '<span class="fm-tag">'+esc(k)+'</span>'; }).join(' ');
       var fileRel = (d.path && currentGroup && d.path.startsWith(currentGroup.folder+'/')) ? d.path.slice(currentGroup.folder.length+1) : d.path;
       var fileHash = (fileRel && currentGroup) ? '#groups/'+currentGroup.folder+'/files/'+fileRel : '#';
+      var titleEl = document.getElementById('graph-node-id');
+      titleEl.innerHTML = '<a href="'+fileHash+'" id="graph-open-link" style="color:inherit;text-decoration:none">'+esc(d.id)+'</a>';
       document.getElementById('graph-node-meta').innerHTML =
         '<div class="fm-key">Created</div><div class="fm-val">'+esc(d.created)+'</div>'
         +(tagsHtml ? '<div class="fm-key">Tags</div><div class="fm-val">'+tagsHtml+'</div>' : '')
         +(kwHtml   ? '<div class="fm-key">Keywords</div><div class="fm-val">'+kwHtml+'</div>' : '')
         +(d.source_task_id
           ? '<div class="fm-key">Research Task</div><div class="fm-val"><a href="#specialists" id="graph-task-link" data-task-id="'+esc(d.source_task_id)+'" style="color:#58a6ff;font-family:monospace;font-size:10px">'+esc(d.source_task_id.slice(0,8))+'\u2026 \u2192</a></div>'
-          : '')
-        +'<div class="fm-key">File</div><div class="fm-val"><a href="'+fileHash+'" id="graph-open-link" style="color:#58a6ff;font-size:11px">Open in Files tab \u2192</a></div>';
+          : '');
       panel.style.display = 'block';
       document.getElementById('graph-open-link').onclick = function(e) {
         e.preventDefault();

@@ -1703,8 +1703,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
       // Active containers
       var active = q.groups.filter(function(g) { return g.active; });
+      var background = q.groups.filter(function(g) { return !g.active && g.containerName && !g.pendingMessages && g.pendingTaskCount === 0; });
       var queued = q.groups.filter(function(g) { return !g.active && (g.pendingMessages || g.pendingTaskCount > 0); });
-      if (!active.length && !queued.length) {
+      if (!active.length && !background.length && !queued.length) {
         containersEl.innerHTML = '<div class="empty" style="padding:16px">No containers running</div>';
       } else {
         var html = '';
@@ -1726,6 +1727,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 +'</tr>';
             }).join('')
             +'</tbody></table>';
+        }
+        if (background.length) {
+          html += '<div style="border-top:'+(active.length?'1px solid #30363d':'none')+'">'
+            +'<div class="dim" style="font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;padding:8px 12px;background:#0d1117">Background</div>'
+            +'<table><thead><tr><th>JID</th><th>Container</th><th>Type</th></tr></thead><tbody>'
+            + background.map(function(g) {
+              return '<tr>'
+                +'<td class="dim" style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(g.jid)+'">'+esc(g.groupFolder||g.jid)+'</td>'
+                +'<td class="dim" style="font-family:monospace;font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(g.containerName||'\u2014')+'</td>'
+                +'<td><span class="badge bb">background</span></td>'
+                +'</tr>';
+            }).join('')
+            +'</tbody></table></div>';
         }
         if (queued.length) {
           html += '<div style="margin-top:'+(active.length?'0':'0')+'px;border-top:'+(active.length?'1px solid #30363d':'none')+'">'

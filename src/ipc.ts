@@ -103,6 +103,16 @@ export interface IpcDeps {
   /** Called when a sub-group delivers a result back to main (cycle closed). */
   onCycleDelivered?: (subGroupFolder: string) => void;
   setReaction?: (jid: string, emoji: string) => Promise<void>;
+  /** Called when a background container (e.g. throwaway) spawns, so it can be
+   *  registered with the queue for web UI visibility. */
+  onProcess?: (
+    jid: string,
+    proc: import('child_process').ChildProcess,
+    containerName: string,
+    groupFolder: string,
+  ) => void;
+  /** Called when a background container exits, to clear the queue registration. */
+  onProcessExit?: (jid: string) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -2009,8 +2019,9 @@ export async function spawnThrowaway(
   };
 
   try {
-    await runContainerAgent(group, containerInput, (_proc, name) => {
+    await runContainerAgent(group, containerInput, (proc, name) => {
       throwawayContainerName = name;
+      deps.onProcess?.(chatJid, proc, name, group.folder);
       startSummaryPoller();
     });
   } catch (err) {
@@ -2023,6 +2034,7 @@ export async function spawnThrowaway(
       clearInterval(summaryPoller);
       summaryPoller = null;
     }
+    deps.onProcessExit?.(chatJid);
   }
 
   const summaryExists = fs.existsSync(summaryFullPath);

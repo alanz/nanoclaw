@@ -1367,6 +1367,9 @@ async function main(): Promise<void> {
       );
     },
     setReaction: setReactionFn,
+    onProcess: (jid, proc, containerName, groupFolder) =>
+      queue.registerProcess(jid, proc, containerName, groupFolder),
+    onProcessExit: (jid) => queue.deregisterProcess(jid),
   });
   // Wire up specialist container lifecycle
   const mainGroupEntry = Object.entries(registeredGroups).find(

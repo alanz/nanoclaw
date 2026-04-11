@@ -162,6 +162,15 @@ export class GroupQueue {
     if (groupFolder) state.groupFolder = groupFolder;
   }
 
+  /** Clear process registration for a background container (e.g. throwaway) once it exits. */
+  deregisterProcess(groupJid: string): void {
+    const state = this.groups.get(groupJid);
+    if (!state || state.active) return; // don't clear if group is actively processing
+    state.process = null;
+    state.containerName = null;
+    state.groupFolder = null;
+  }
+
   /**
    * Mark the container as idle-waiting (finished work, waiting for IPC input).
    * If tasks are pending, preempt the idle container immediately.
@@ -491,7 +500,8 @@ export class GroupQueue {
       if (
         state.active ||
         state.pendingMessages ||
-        state.pendingTasks.length > 0
+        state.pendingTasks.length > 0 ||
+        state.containerName !== null // background container (e.g. throwaway)
       ) {
         groups.push({
           jid,

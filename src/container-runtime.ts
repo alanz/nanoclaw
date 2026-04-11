@@ -6,7 +6,14 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+
+const runtimeEnv = readEnvFile([
+  'CONTAINER_RUNTIME',
+  'CONTAINER_HOST_GATEWAY',
+  'CREDENTIAL_PROXY_HOST',
+]);
 
 /**
  * The container runtime binary name.
@@ -15,17 +22,21 @@ import { logger } from './logger.js';
  */
 export const CONTAINER_RUNTIME_BIN =
   process.env.CONTAINER_RUNTIME ??
+  runtimeEnv.CONTAINER_RUNTIME ??
   (os.platform() === 'darwin' ? 'container' : 'docker');
 
 /**
  * Hostname or IP containers use to reach the host machine.
  * Apple Container VMs can reach the host via the bridge IP directly.
  * Docker Desktop resolves host.docker.internal automatically.
+ * Override with CONTAINER_HOST_GATEWAY in .env (e.g. 192.168.64.1 for Apple Container).
  */
 export const CONTAINER_HOST_GATEWAY =
-  CONTAINER_RUNTIME_BIN === 'container'
+  process.env.CONTAINER_HOST_GATEWAY ??
+  runtimeEnv.CONTAINER_HOST_GATEWAY ??
+  (CONTAINER_RUNTIME_BIN === 'container'
     ? (detectAppleContainerBridgeIp() ?? 'host.docker.internal')
-    : 'host.docker.internal';
+    : 'host.docker.internal');
 
 /**
  * Address the credential proxy binds to.
@@ -33,9 +44,12 @@ export const CONTAINER_HOST_GATEWAY =
  * Docker Desktop (macOS): 127.0.0.1 — the VM routes host.docker.internal to loopback.
  * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it,
  *   falling back to 0.0.0.0 if the interface isn't found.
+ * Override with CREDENTIAL_PROXY_HOST in .env (e.g. 0.0.0.0 for Apple Container without bridge100).
  */
 export const PROXY_BIND_HOST =
-  process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
+  process.env.CREDENTIAL_PROXY_HOST ??
+  runtimeEnv.CREDENTIAL_PROXY_HOST ??
+  detectProxyBindHost();
 
 /**
  * Detect the IP of Apple Container's VM bridge (bridge100 or similar).

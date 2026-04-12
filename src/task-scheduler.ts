@@ -477,6 +477,11 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
+        // Claim the task before running: advance next_run (marking once tasks
+        // completed) so that a crash or restart cannot cause a duplicate run.
+        const claimedNextRun = computeNextRun(currentTask);
+        updateTaskAfterRun(currentTask.id, claimedNextRun, 'claimed');
+
         deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
           runTask(currentTask, deps),
         );

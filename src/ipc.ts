@@ -412,7 +412,9 @@ export async function processTaskIpc(
         data.schedule_type &&
         data.schedule_value &&
         data.targetJid &&
-        (data.task_type === 'session_reset' || data.prompt)
+        (data.task_type === 'session_reset' ||
+          data.task_type === 'user_profile' ||
+          data.prompt)
       ) {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
@@ -496,7 +498,11 @@ export async function processTaskIpc(
           created_at: new Date().toISOString(),
           dispatch_depth: data.dispatchDepth ?? 0,
           task_type:
-            data.task_type === 'session_reset' ? 'session_reset' : 'prompt',
+            data.task_type === 'session_reset'
+              ? 'session_reset'
+              : data.task_type === 'user_profile'
+                ? 'user_profile'
+                : 'prompt',
           min_idle_minutes:
             typeof data.min_idle_minutes === 'number'
               ? data.min_idle_minutes

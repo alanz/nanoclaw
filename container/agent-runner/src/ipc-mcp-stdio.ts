@@ -215,10 +215,10 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 \u2022 once: Local time WITHOUT "Z" suffix (e.g., "2026-02-01T15:30:00"). Do NOT use UTC/Z suffix.`,
   {
     task_type: z
-      .enum(['prompt', 'session_reset'])
+      .enum(['prompt', 'session_reset', 'user_profile'])
       .default('prompt')
       .describe(
-        'prompt=run an agent with the given prompt (default). session_reset=archive the current conversation and start a fresh session without spawning an agent; the prompt field is ignored.',
+        'prompt=run an agent with the given prompt (default). session_reset=archive the current conversation and start a fresh session without spawning an agent; the prompt field is ignored. user_profile=synthesise memory/USER.md from all memory sources (notes, session summaries, org files); the prompt field is ignored.',
       ),
     prompt: z
       .string()

@@ -6,11 +6,13 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  GROUPS_DIR,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
 import {
   generateUserProfile,
+  PROFILE_GENERATION_PROMPT,
   ProfileGenerationRunner,
 } from './session-warm-start.js';
 import {
@@ -201,6 +203,25 @@ async function runUserProfileGeneration(
     return;
   }
 
+  // Load prompt from prompts/user-profile-prompt.md in the main group folder,
+  // falling back to the hardcoded default if the file doesn't exist.
+  let profilePrompt = PROFILE_GENERATION_PROMPT;
+  try {
+    const promptFile = path.join(
+      GROUPS_DIR,
+      group.folder,
+      'prompts',
+      'user-profile-prompt.md',
+    );
+    const custom = fs.readFileSync(promptFile, 'utf8').trim();
+    if (custom) {
+      profilePrompt = custom;
+      logger.debug({ taskId: task.id }, 'Using custom user-profile-prompt.md');
+    }
+  } catch {
+    // file not found — use default
+  }
+
   const runner: ProfileGenerationRunner = { runContainerAgent };
 
   // Close the container promptly after the agent finishes — same pattern as runTask.
@@ -226,6 +247,7 @@ async function runUserProfileGeneration(
           scheduleClose();
         }
       },
+      profilePrompt,
     );
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);

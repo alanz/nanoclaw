@@ -624,6 +624,9 @@ export interface ProfileGenerationRunner {
  * Decoupled from the trigger: call from a cron task, session-end hook, or
  * anywhere else without changing this function.
  *
+ * @param prompt - The prompt to use. Defaults to PROFILE_GENERATION_PROMPT.
+ *   Callers can load a custom prompt from disk (e.g. prompts/user-profile-prompt.md)
+ *   and pass it here.
  * @param onOutput - Optional streaming callback, forwarded to the container
  *   runner. The scheduler uses this to close the container promptly after the
  *   agent finishes rather than waiting for the process to exit on its own.
@@ -634,13 +637,14 @@ export async function generateUserProfile(
   assistantName: string,
   runner: ProfileGenerationRunner,
   onOutput?: (output: { status: string }) => Promise<void>,
+  prompt: string = PROFILE_GENERATION_PROMPT,
 ): Promise<void> {
   logger.info({ group: group.folder }, 'Starting user profile generation');
   try {
     const output = await runner.runContainerAgent(
       group,
       {
-        prompt: PROFILE_GENERATION_PROMPT,
+        prompt,
         groupFolder: group.folder,
         chatJid,
         isMain: true,

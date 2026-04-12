@@ -316,7 +316,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           return (
             fs
               .readFileSync(
-                path.join(GROUPS_DIR, group.folder, 'reset-prompt.md'),
+                path.join(
+                  GROUPS_DIR,
+                  group.folder,
+                  'prompts',
+                  'reset-prompt.md',
+                ),
                 'utf8',
               )
               .trim() || undefined

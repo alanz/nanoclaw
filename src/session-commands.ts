@@ -48,7 +48,7 @@ export interface SessionCommandDeps {
   clearSession: () => void;
   /** Current session ID — used to reference the .jsonl log in the summary note. */
   sessionId?: string;
-  /** Custom summarisation prompt read from reset-prompt.md — overrides the default. */
+  /** Custom summarisation prompt read from prompts/reset-prompt.md — overrides the default. */
   resetPrompt?: string;
   /** Whether the denied sender would normally be allowed to interact (for denial messages). */
   canSenderInteract: (msg: NewMessage) => boolean;

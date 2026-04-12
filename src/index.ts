@@ -122,6 +122,14 @@ import {
   SpecialistTask,
 } from './types.js';
 import { logger } from './logger.js';
+import {
+  buildWarmStartPrompt,
+  loadUserProfile,
+  onProfileBecomesStale,
+  onProfileFileUpdated,
+  saveUserProfile,
+  type UserProfile,
+} from './session-warm-start.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -131,6 +139,7 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+let warmStartProfile: UserProfile = { status: 'absent' };
 // pendingDispatchDepth is now persisted on registered_groups.pending_dispatch_depth.
 // The in-memory registeredGroups map is kept in sync so reads are cheap.
 
@@ -492,6 +501,7 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
+  let promptToSend = prompt;
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -548,11 +558,42 @@ async function runAgent(
     setPendingDispatchDepthDb(chatJid, null);
   }
 
+  // Check and apply profile staleness before each spawn.
+  const now = new Date();
+  const staleness = onProfileBecomesStale(warmStartProfile, now);
+  if (staleness) {
+    warmStartProfile = staleness;
+    saveUserProfile(warmStartProfile);
+  }
+
+  // Assemble warm-start context and prepend to the prompt.
+  const mainEntry = Object.entries(registeredGroups).find(([, g]) => g.isMain);
+  const mainGroup = mainEntry?.[1];
+  if (mainGroup) {
+    const mainGroupDir = path.join(GROUPS_DIR, mainGroup.folder);
+    const memMgr = MEMORY_SEARCH_ENABLED
+      ? await getOrCreateMemoryManager(mainGroup.folder).catch(() => null)
+      : null;
+    try {
+      const warmPrefix = await buildWarmStartPrompt(
+        mainGroup,
+        mainGroupDir,
+        warmStartProfile,
+        memMgr,
+      );
+      if (warmPrefix) {
+        promptToSend = `${warmPrefix}\n\n${promptToSend}`;
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Warm-start context assembly failed');
+    }
+  }
+
   try {
     const output = await runContainerAgent(
       group,
       {
-        prompt,
+        prompt: promptToSend,
         sessionId,
         groupFolder: group.folder,
         chatJid,
@@ -958,6 +999,48 @@ async function recoverOrphanedArchives(
   }
 }
 
+/**
+ * Watches the main group workspace for changes to memory/USER.md.
+ * When the file is written by the weekly profile-generation task, updates
+ * the in-memory UserProfile and persists it.
+ */
+async function startUserMdWatcher(): Promise<void> {
+  const mainEntry = Object.entries(registeredGroups).find(([, g]) => g.isMain);
+  if (!mainEntry) return;
+  const [, mainGroup] = mainEntry;
+  const workspaceDir = path.join(GROUPS_DIR, mainGroup.folder);
+  if (!fs.existsSync(workspaceDir)) return;
+
+  // Lazy import to keep the watcher optional (same pattern as memory/manager.ts)
+  const parcelWatcher = await import('@parcel/watcher');
+
+  try {
+    await parcelWatcher.subscribe(workspaceDir, (_err, events) => {
+      if (_err) return;
+      for (const event of events) {
+        // Only fire on creates/updates — a deletion should not mark the profile current.
+        if (event.type === 'delete') continue;
+        // Normalise to a path relative to the workspace dir, forward slashes
+        const rel = path.relative(workspaceDir, event.path).replace(/\\/g, '/');
+        const now = new Date();
+        const updated = onProfileFileUpdated(
+          mainGroup,
+          rel,
+          warmStartProfile,
+          now,
+        );
+        if (updated) {
+          warmStartProfile = updated;
+          saveUserProfile(warmStartProfile);
+        }
+      }
+    });
+    logger.info({ workspaceDir }, 'USER.md watcher started');
+  } catch (err) {
+    logger.warn({ err }, 'Failed to start USER.md watcher');
+  }
+}
+
 /** Extract a single YAML frontmatter field value from a markdown file's content. */
 function parseFrontmatterField(
   content: string,
@@ -983,6 +1066,11 @@ async function main(): Promise<void> {
   loadState();
   queue.mainGroupJid =
     Object.entries(registeredGroups).find(([, g]) => g.isMain)?.[0] ?? null;
+
+  // Load persisted UserProfile state and start the USER.md watcher for the main group.
+  warmStartProfile = loadUserProfile();
+  logger.info({ status: warmStartProfile.status }, 'UserProfile loaded');
+  void startUserMdWatcher();
 
   // Eagerly initialize memory managers for groups with an existing index.
   // This triggers the startup sync (including any forced re-index from config
@@ -1219,6 +1307,34 @@ async function main(): Promise<void> {
           is_bot_message: true,
         });
       }
+    },
+    getWarmStartPrompt: async (group) => {
+      const stale = onProfileBecomesStale(warmStartProfile, new Date());
+      if (stale) {
+        warmStartProfile = stale;
+        saveUserProfile(warmStartProfile);
+      }
+      const mainEntry = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      );
+      const mainGroup = mainEntry?.[1];
+      if (!mainGroup) return '';
+      const mainGroupDir = path.join(GROUPS_DIR, mainGroup.folder);
+      const memMgr = MEMORY_SEARCH_ENABLED
+        ? await getOrCreateMemoryManager(mainGroup.folder).catch(() => null)
+        : null;
+      return buildWarmStartPrompt(
+        group,
+        mainGroupDir,
+        warmStartProfile,
+        memMgr,
+      ).catch((err) => {
+        logger.warn(
+          { err },
+          'Warm-start context assembly failed for scheduled task',
+        );
+        return '';
+      });
     },
   });
   startRssMonitorLoop({

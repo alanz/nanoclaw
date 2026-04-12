@@ -121,8 +121,8 @@ rule ProfileFileUpdated {
         -- the agent. No information is lost in a rewrite because the prior USER.md is
         -- itself one of the agent's input sources; anything still relevant is carried
         -- forward, anything no longer relevant is dropped.
-        -- WorkspaceFileChanged fires within seconds of the write via the chokidar watcher
-        -- (the same watcher that drives memory.allium's FileDiscovered/FileUpdated rules).
+        -- WorkspaceFileChanged fires within seconds of the write via the @parcel/watcher
+        -- subscription (the same watcher that drives memory.allium's FileDiscovered/FileUpdated rules).
         -- The profile content is not stored in this entity; the host reads it directly
         -- from disk at injection time.
 }
@@ -157,8 +157,8 @@ rule AssembleSessionContext {
     let main = main_group()
     let notes = top_n_by_mtime(memgraph.MemoryNotes where group = main, config.recent_notes_count)
 
-    -- Phase 3: prior session tail used as a search query.
-    let tail = prior_session_tail(archiving.ConversationArchive, group, config.prior_session_turns)
+    -- Phase 3: prior session tail used as a search query (main group only).
+    let tail = prior_session_tail(archiving.ConversationArchive, main, config.prior_session_turns)
 
     ensures:
         SessionContext.created(
@@ -175,15 +175,14 @@ rule AssembleSessionContext {
                 if notes.count > 0: render_notes(notes) else: null,
             prior_session_search_block:
                 if tail != null:
-                    render_search(
-                        memory.hybrid_search(
-                            group: main,
-                            query: tail,
-                            path_prefix: "memory/notes/",
-                            limit: config.prior_session_search_limit,
-                            min_score: config.prior_session_search_min_score
-                        )
+                    let results = memory.hybrid_search(
+                        group: main,
+                        query: tail,
+                        path_prefix: "memory/notes/",
+                        limit: config.prior_session_search_limit,
+                        min_score: config.prior_session_search_min_score
                     )
+                    if results.count > 0: render_search(results) else: null
                 else: null,
             current_datetime_block: format_datetime(now)
         )
@@ -195,10 +194,12 @@ rule AssembleSessionContext {
         --   This is intentional: a note that was recently connected to another note has
         --   entered the active knowledge graph and is relevant context, even if its body
         --   is unchanged. Link-graph updates are a valid recency signal.
-        -- prior_session_tail(group, N) returns a String? by reading the most recent
-        --   non-placeholder archiving.ConversationArchive for the group (ordered by
+        -- prior_session_tail(main, N) returns a String? by reading the most recent
+        --   non-placeholder archiving.ConversationArchive for the main group (ordered by
         --   archived_at desc) and extracting the last N user/assistant turns from
         --   its path file (e.g. conversations/YYYY-MM-DD-conversation-HHMM.md).
+        --   The main group is used regardless of which group triggered the spawn — prior
+        --   session context is always sourced from the user's primary conversation history.
         --   If the extracted tail is below config.prior_session_search_min_chars, the
         --   function falls back to the second-most-recent non-placeholder archive and
         --   uses its tail instead. Returns null if no non-placeholder archive exists,
@@ -230,12 +231,17 @@ rule InjectContextIntoPrompt {
         --   3. prior_session_search_block  (memory search from prior session tail; omitted when null)
         --   4. current_datetime_block      (always present, always last)
         -- current_datetime_block is injected last so that the stable blocks above it are
-        -- eligible for provider prompt-cache hits. The host places a cache_control breakpoint
-        -- after block 3 (the last potentially-stable block); block 4 sits outside the cached
-        -- prefix and changes on every spawn.
-        -- Granularity: format_datetime renders date and hour only (e.g. "2026-04-12T14:00Z"),
-        -- not seconds, so the block is identical across all spawns within the same hour —
-        -- reducing cache misses to at most once per hour.
+        -- positioned to benefit from provider prompt-cache hits if a cache boundary is
+        -- ever introduced. Granularity: format_datetime renders date and hour only
+        -- (e.g. "2026-04-12T14:00Z"), not seconds, so the block is identical across all
+        -- spawns within the same hour.
+        -- NOTE: cache_control boundary injection is not currently implemented. All four
+        -- blocks are prepended to the human turn as a plain string. Placing blocks 1–3 in
+        -- the system prompt append (where a provider cache hit could apply) requires a
+        -- ContainerInput.systemContext field and agent-runner changes, and conflicts with
+        -- session-resume semantics (the SDK uses the original session's system prompt on
+        -- resume, so systemContext would only take effect on new sessions). Deferred as
+        -- a future optimisation.
         -- Null blocks are silently omitted. The prompt is always valid regardless
         -- of whether USER.md exists or a prior session is available.
 }

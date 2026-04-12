@@ -82,6 +82,7 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
+  getWarmStartPrompt?: (group: RegisteredGroup) => Promise<string>;
 }
 
 /**
@@ -255,6 +256,22 @@ export async function runTask(
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
+  // Prepend warm-start context to the task prompt (Phase 1-3 context injection).
+  let taskPrompt = task.prompt;
+  if (deps.getWarmStartPrompt) {
+    try {
+      const warmPrefix = await deps.getWarmStartPrompt(group);
+      if (warmPrefix) {
+        taskPrompt = `${warmPrefix}\n\n${taskPrompt}`;
+      }
+    } catch (err) {
+      logger.warn(
+        { err, taskId: task.id },
+        'Warm-start context assembly failed for task',
+      );
+    }
+  }
+
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
   // query loop to time out. A short delay handles any final MCP calls.
@@ -273,7 +290,7 @@ export async function runTask(
     const output = await runContainerAgent(
       group,
       {
-        prompt: task.prompt,
+        prompt: taskPrompt,
         sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,

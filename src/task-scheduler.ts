@@ -342,9 +342,10 @@ export async function runTask(
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
-  // Prepend warm-start context to the task prompt (Phase 1-3 context injection).
+  // Prepend warm-start context to the task prompt — new sessions only.
+  // group context mode may resume an existing session which already has context.
   let taskPrompt = task.prompt;
-  if (deps.getWarmStartPrompt) {
+  if (!sessionId && deps.getWarmStartPrompt) {
     try {
       const warmPrefix = await deps.getWarmStartPrompt(group);
       if (warmPrefix) {

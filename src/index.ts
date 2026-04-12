@@ -566,26 +566,31 @@ async function runAgent(
     saveUserProfile(warmStartProfile);
   }
 
-  // Assemble warm-start context and prepend to the prompt.
-  const mainEntry = Object.entries(registeredGroups).find(([, g]) => g.isMain);
-  const mainGroup = mainEntry?.[1];
-  if (mainGroup) {
-    const mainGroupDir = path.join(GROUPS_DIR, mainGroup.folder);
-    const memMgr = MEMORY_SEARCH_ENABLED
-      ? await getOrCreateMemoryManager(mainGroup.folder).catch(() => null)
-      : null;
-    try {
-      const warmPrefix = await buildWarmStartPrompt(
-        mainGroup,
-        mainGroupDir,
-        warmStartProfile,
-        memMgr,
-      );
-      if (warmPrefix) {
-        promptToSend = `${warmPrefix}\n\n${promptToSend}`;
+  // Assemble warm-start context and prepend to the prompt — new sessions only.
+  // Resuming an existing session already has the context from the first turn.
+  if (!sessionId) {
+    const mainEntry = Object.entries(registeredGroups).find(
+      ([, g]) => g.isMain,
+    );
+    const mainGroup = mainEntry?.[1];
+    if (mainGroup) {
+      const mainGroupDir = path.join(GROUPS_DIR, mainGroup.folder);
+      const memMgr = MEMORY_SEARCH_ENABLED
+        ? await getOrCreateMemoryManager(mainGroup.folder).catch(() => null)
+        : null;
+      try {
+        const warmPrefix = await buildWarmStartPrompt(
+          mainGroup,
+          mainGroupDir,
+          warmStartProfile,
+          memMgr,
+        );
+        if (warmPrefix) {
+          promptToSend = `${warmPrefix}\n\n${promptToSend}`;
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Warm-start context assembly failed');
       }
-    } catch (err) {
-      logger.warn({ err }, 'Warm-start context assembly failed');
     }
   }
 

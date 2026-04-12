@@ -21,6 +21,7 @@
 
 use "./nanoclaw.allium" as core
 use "./container-claude-sdk.allium" as sdk
+use "./scheduling.allium" as scheduling
 
 ------------------------------------------------------------
 -- Entities
@@ -230,6 +231,27 @@ rule ResetOnEmptySession {
         text: "Reset issued on empty session for group {group.folder}"
     )
     ensures: not exists cs
+}
+
+-- ---- Scheduled session reset ----
+
+-- A scheduling.ScheduledTask with task_type = session_reset fires
+-- SessionResetRequested when its idle check passes. This bridges the scheduler
+-- into the existing /reset flow: a scheduled reset is behaviourally identical
+-- to the user issuing /reset, and therefore produces the same
+-- ConversationArchive + SessionSummary pair through the rules below.
+rule ScheduledResetBridged {
+    when: scheduling.SessionResetRequested(group, chat)
+
+    ensures: core.SessionCommandApplied(group: group, command: reset)
+
+    @guidance
+        -- The scheduler writes an IPC task file of type request_session_archive
+        -- and clears the in-memory session; the net effect is the same as if
+        -- the user had typed /reset in their chat. All downstream archiving,
+        -- summarisation and reaction behaviour follows the rules above.
+        -- The idle check is performed in scheduling.TaskSessionResetDispatched;
+        -- by the time this rule fires, the check has already passed.
 }
 
 -- ---- Throwaway session lifecycle ----

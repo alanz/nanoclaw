@@ -34,6 +34,12 @@ enum ContextMode { isolated | group }
 
 enum TaskStatus { active | paused | completed | cancelled }
 
+-- Dispatches the task to a different execution path. "prompt" runs the agent
+-- container with the task's prompt (the default, historical behaviour).
+-- "session_reset" archives and clears the group's current session without
+-- spawning an agent. "user_profile" generates memory/USER.md for the main group.
+enum TaskType { prompt | session_reset | user_profile }
+
 enum RssFeedStatus { active | paused | cancelled }
 
 ------------------------------------------------------------
@@ -45,7 +51,9 @@ enum RssFeedStatus { active | paused | cancelled }
 entity ScheduledTask {
     group: nanoclaw.Group
     target_chat: nanoclaw.Chat          -- where to deliver output
-    prompt: String                      -- instruction sent to the agent
+    task_type: TaskType                 -- dispatches to prompt / session_reset / user_profile paths (default: prompt)
+    prompt: String                      -- instruction sent to the agent (ignored when script is set or task_type != prompt)
+    script: String?                     -- optional alternative to prompt; when set, the agent runs this script instead
     schedule: Schedule
     context_mode: ContextMode
     status: TaskStatus
@@ -53,6 +61,7 @@ entity ScheduledTask {
     last_run: Timestamp?
     last_result: String?
     dispatch_depth: Integer             -- nesting level; prevents agent-to-agent loops
+    min_idle_minutes: Integer?          -- only for task_type = session_reset; skip run if chat activity within this window (default 60)
     created_at: Timestamp
 
     -- Derived
@@ -105,6 +114,7 @@ config {
     max_dispatch_depth: Integer = 5
     max_items_per_prompt: Integer = 20    -- max new items batched into a single judgment prompt
     fetch_error_retry_delay: Duration = 15.minutes  -- next_check advance on fetch failure
+    default_session_reset_min_idle: Integer = 60    -- default min_idle_minutes for session_reset tasks
 }
 
 ------------------------------------------------------------
@@ -116,35 +126,77 @@ config {
 -- A new scheduled task is created by an agent (via IPC) or through the web UI.
 -- Non-main groups can only create tasks targeting their own chat.
 rule TaskCreated {
-    when: CreateTask(group, target_chat, prompt, schedule, context_mode, dispatch_depth)
+    when: CreateTask(group, target_chat, task_type, prompt, script, schedule, context_mode, dispatch_depth, min_idle_minutes)
 
     requires: group.is_main or target_chat = group.chat
     requires: dispatch_depth < config.max_dispatch_depth
+    -- user_profile tasks always run against the main group
+    requires: task_type = user_profile implies group.is_main
 
     let next_run = compute_next_run(schedule, now)
 
     ensures: ScheduledTask.created(
         group: group,
         target_chat: target_chat,
+        task_type: task_type,
         prompt: prompt,
+        script: script,
         schedule: schedule,
         context_mode: context_mode,
         status: active,
         next_run: next_run,
         dispatch_depth: dispatch_depth,
+        min_idle_minutes: min_idle_minutes,
         created_at: now
     )
 }
 
--- A due task invokes the agent with its prompt when a concurrency slot is free.
--- If context_mode is group, the group's existing conversation session is reused.
-rule TaskExecuted {
+-- When a task becomes due, its next_run is advanced (and once-tasks marked
+-- completed) *before* any work begins. This is the "claim" step: a crash or
+-- process restart after this point will not re-fire the task. Post-run
+-- rescheduling is deliberately absent — the schedule has already advanced.
+--
+-- After claiming, the task is dispatched to one of three execution paths
+-- depending on task_type (see TaskPromptDispatched, TaskSessionResetDispatched,
+-- TaskUserProfileDispatched below).
+rule TaskClaimed {
     when: task: ScheduledTask.is_due
 
     requires: task.status = active
-    requires: nanoclaw.AgentSessions where status = active .count < nanoclaw.config.max_concurrent_agents
+
+    let next_run = compute_next_run(task.schedule, now)
 
     ensures: task.last_run = now
+    ensures: if task.schedule.type = once:
+                 task.next_run = null
+                 task.status = completed
+             else:
+                 task.next_run = next_run
+    ensures: TaskClaimReady(task: task)
+
+    @guidance
+        -- Code reference: task-scheduler.ts startSchedulerLoop, which calls
+        -- updateTaskAfterRun before enqueuing the container. Because the schedule
+        -- advances synchronously with the due check, a duplicate poll or a
+        -- restart mid-run will see the task as not yet due.
+        -- One consequence: if the run itself fails, the task is not retried until
+        -- its next scheduled occurrence. Transient failures fall through to the
+        -- next tick rather than being retried on the spot.
+}
+
+-- Dispatch path: task_type = prompt. Runs the agent container with the task's
+-- prompt (or script, when set). If context_mode = group, the group's existing
+-- conversation session is reused; otherwise an isolated session is used.
+rule TaskPromptDispatched {
+    when: TaskClaimReady(task)
+
+    requires: task.task_type = prompt
+    -- Concurrency cap: the main group is always allowed to run and never consumes
+    -- a slot; non-main groups must fit under nanoclaw.config.max_concurrent_agents.
+    -- When the cap is reached, dispatch is skipped here and TaskQueued takes over.
+    requires: task.group.is_main
+              or nanoclaw.AgentSessions where status = active .count < nanoclaw.config.max_concurrent_agents
+
     ensures: TaskAgentStarted(
         task: task,
         conversation_session: if task.context_mode = group: task.group.session else: null,
@@ -157,17 +209,85 @@ rule TaskExecuted {
         -- For tasks created via schedule_task from an agent, dispatch_depth = caller's depth + 1
         -- (set at creation time in ipc.allium: AgentScheduledTask).
         -- For tasks created via the web UI or directly, dispatch_depth = 0.
+        -- When task.script is set, the agent runs the script instead of interpreting
+        -- task.prompt as a natural-language instruction.
         -- Task agent containers have a shorter close delay (10 seconds after output)
         -- compared to message-triggered sessions (which idle for up to idle_timeout).
+        --
+        -- CONCURRENCY MODEL
+        -- The main group bypasses max_concurrent_agents entirely: it must remain
+        -- responsive and never consumes a concurrency slot. All other groups share
+        -- the cap with message-driven AgentSessions (see nanoclaw.AgentInvoked).
+        -- Per-JID serialisation (at most one container per group) is enforced
+        -- separately by GroupQueue in code; see OneActiveContainerPerGroupJid.
 }
 
--- When all agent slots are occupied, a due task is enqueued with kind = task.
--- Because kind is ordered task < message, tasks are drained before queued messages
--- when a slot frees (see nanoclaw.AgentSlotFreed).
-rule TaskQueued {
-    when: task: ScheduledTask.is_due
+-- Dispatch path: task_type = session_reset. Archives and clears the group's
+-- current session without spawning an agent container. Skips the run if the
+-- group's chat has been active within min_idle_minutes.
+--
+-- Note: the session archive itself is produced by the archiving spec — this
+-- rule only triggers the reset; see session-archiving.allium for the subsequent
+-- ConversationArchive / ThrowawaySession flow.
+rule TaskSessionResetDispatched {
+    when: TaskClaimReady(task)
 
-    requires: task.status = active
+    requires: task.task_type = session_reset
+
+    let min_idle = task.min_idle_minutes ?? config.default_session_reset_min_idle
+    let idle_minutes = minutes_since(chat_last_active(task.group.chat))
+
+    ensures: if idle_minutes != null and idle_minutes < min_idle:
+                 task.last_result = "Skipped: group active recently"
+             else:
+                 SessionResetRequested(group: task.group, chat: task.target_chat)
+
+    @guidance
+        -- Code reference: task-scheduler.ts runSessionReset. On skip, the task's
+        -- next_run was already advanced by TaskClaimed, so the run is simply
+        -- recorded and the next tick waits for the subsequent schedule slot.
+        -- SessionResetRequested is handled by session-archiving.allium, which
+        -- writes the IPC task file and clears the in-memory session. The reset
+        -- path never spawns an agent container directly.
+}
+
+-- Dispatch path: task_type = user_profile. Spawns an isolated agent container
+-- on the main group to regenerate memory/USER.md. The prompt is loaded from
+-- the main group's prompts/ override if present (see session-warm-start.allium
+-- ProfileFileUpdated), otherwise the built-in default prompt is used.
+rule TaskUserProfileDispatched {
+    when: TaskClaimReady(task)
+
+    requires: task.task_type = user_profile
+    requires: task.group.is_main
+    -- user_profile tasks always run against the main group, which bypasses the
+    -- concurrency cap. The guard is stated explicitly for symmetry with
+    -- TaskPromptDispatched and to make the bypass auditable.
+
+    ensures: UserProfileGenerationRequested(group: task.group, chat: task.target_chat)
+
+    @guidance
+        -- Code reference: task-scheduler.ts runUserProfileGeneration. The agent
+        -- writes memory/USER.md directly; its completion is observed by the
+        -- file watcher, which drives session-warm-start.ProfileFileUpdated.
+        -- No chat output is produced — the result of the run is the updated
+        -- profile file, not a delivered message.
+}
+
+-- A claimed prompt task that cannot dispatch immediately because the
+-- concurrency cap is full. The task is held by enqueuing a WaitingGroup with
+-- kind = task, which is drained ahead of message-kind entries when an agent
+-- slot frees (see nanoclaw.AgentSlotFreed). Only non-main groups can queue:
+-- the main group bypasses the cap and never reaches this rule.
+--
+-- TaskClaimed has already advanced next_run by this point, so the task will
+-- not re-fire from the scheduler tick. The held work is carried by the
+-- WaitingGroup entry until the slot frees.
+rule TaskQueued {
+    when: TaskClaimReady(task)
+
+    requires: task.task_type = prompt
+    requires: not task.group.is_main
     requires: nanoclaw.AgentSessions where status = active .count >= nanoclaw.config.max_concurrent_agents
     requires: not exists nanoclaw.WaitingGroup{group: task.group}
 
@@ -176,29 +296,19 @@ rule TaskQueued {
         queued_at: now,
         kind: task
     )
-    ensures: task.last_run = now      -- mark attempted so next_run advances normally
-}
 
--- After a task runs, it is rescheduled or completed depending on schedule type.
-rule TaskRescheduled {
-    when: TaskAgentCompleted(task, result)
-
-    let next_run = compute_next_run(task.schedule, task.last_run)
-
-    requires: task.schedule.type in { cron, interval }
-
-    ensures: task.last_result = result
-    ensures: task.next_run = next_run
-}
-
-rule TaskCompleted {
-    when: TaskAgentCompleted(task, result)
-
-    requires: task.schedule.type = once
-
-    ensures: task.last_result = result
-    ensures: task.next_run = null
-    ensures: task.status = completed
+    @guidance
+        -- Code reference: task-scheduler.ts dispatches via GroupQueue.enqueueTask,
+        -- which serialises by JID. When the global concurrency cap is reached, the
+        -- scheduler holds the task on its per-JID queue rather than launching a
+        -- container. The next scheduler tick re-checks capacity; once a slot
+        -- frees, AgentSlotFreed (in nanoclaw.allium) drains task-kind WaitingGroups
+        -- before message-kind ones, so scheduled tasks take priority over
+        -- pending message dispatches.
+        --
+        -- session_reset and user_profile tasks never reach this rule:
+        -- session_reset does not spawn a container at all, and user_profile only
+        -- runs on the main group, which bypasses the cap.
 }
 
 -- ---- Task Management (agent-initiated via IPC) ----

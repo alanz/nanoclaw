@@ -10,6 +10,10 @@ import {
   TIMEZONE,
 } from './config.js';
 import {
+  generateUserProfile,
+  ProfileGenerationRunner,
+} from './session-warm-start.js';
+import {
   ContainerOutput,
   runContainerAgent,
   writeTasksSnapshot,
@@ -169,6 +173,60 @@ async function runSessionReset(
   updateTaskAfterRun(task.id, computeNextRun(task), msg);
 }
 
+/**
+ * Handle a user_profile task: spawn an isolated agent on the main group to
+ * synthesise memory/USER.md. The profile update is communicated back through
+ * the file watcher (onProfileFileUpdated in index.ts), not via chat.
+ */
+async function runUserProfileGeneration(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+  startTime: number,
+): Promise<void> {
+  const groups = deps.registeredGroups();
+  const group = Object.values(groups).find((g) => g.isMain === true);
+
+  if (!group) {
+    const error = 'No main group found for user profile generation';
+    logger.error({ taskId: task.id }, error);
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: 'error',
+      result: null,
+      error,
+    });
+    updateTaskAfterRun(task.id, computeNextRun(task), `Error: ${error}`);
+    return;
+  }
+
+  const runner: ProfileGenerationRunner = { runContainerAgent };
+
+  let error: string | null = null;
+  try {
+    await generateUserProfile(group, task.chat_jid, ASSISTANT_NAME, runner);
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+  }
+
+  const durationMs = Date.now() - startTime;
+  const result = error ? null : 'Profile generation dispatched';
+  logTaskRun({
+    task_id: task.id,
+    run_at: new Date().toISOString(),
+    duration_ms: durationMs,
+    status: error ? 'error' : 'success',
+    result,
+    error,
+  });
+  updateTaskAfterRun(
+    task.id,
+    computeNextRun(task),
+    error ? `Error: ${error}` : result!,
+  );
+}
+
 export async function runTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
@@ -177,6 +235,11 @@ export async function runTask(
 
   if ((task.task_type ?? 'prompt') === 'session_reset') {
     await runSessionReset(task, deps, startTime);
+    return;
+  }
+
+  if (task.task_type === 'user_profile') {
+    await runUserProfileGeneration(task, deps, startTime);
     return;
   }
 

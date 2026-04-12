@@ -74,8 +74,9 @@ export interface ScheduledTask {
   status: 'active' | 'paused' | 'completed' | 'cancelled';
   created_at: string;
   dispatch_depth?: number;
-  /** 'session_reset' writes an IPC archive task and clears the session without spawning an agent. */
-  task_type?: 'prompt' | 'session_reset';
+  /** 'session_reset' writes an IPC archive task and clears the session without spawning an agent.
+   *  'user_profile' spawns an isolated agent to synthesise memory/USER.md from available sources. */
+  task_type?: 'prompt' | 'session_reset' | 'user_profile';
   /** For session_reset tasks: skip if the chat has been active within this many minutes. */
   min_idle_minutes?: number | null;
 }

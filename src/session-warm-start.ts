@@ -567,3 +567,91 @@ export async function buildWarmStartPrompt(
   );
   return buildInitialPrompt(ctx);
 }
+
+// ---------------------------------------------------------------------------
+// Profile generation
+// Spec: ProfileFileUpdated @guidance — the agent task that writes memory/USER.md
+// ---------------------------------------------------------------------------
+
+/**
+ * Prompt for the profile-generation agent.
+ * Instructs it to synthesise memory/USER.md from all available memory sources.
+ * Exported so callers (tests, alternative triggers) can inspect or override it.
+ */
+export const PROFILE_GENERATION_PROMPT = `Your task is to synthesise a user profile and write it to memory/USER.md.
+
+This file is injected into the context of every future session so the agent knows who the user is and what they are currently focused on. Weight recent activity heavily — the goal is to capture current focus and in-progress work, not a historical average.
+
+## Sources to read
+
+Read as many of these as exist:
+- memory/notes/          — all A-MEM notes (use Glob then Read)
+- memory/sessions/       — session summary files (use Glob then Read)
+- memory/research-topics.md — if it exists
+- memory/USER.md         — the prior profile, if it exists (carry forward anything still relevant; drop anything that no longer reflects the user's current focus)
+- /workspace/extra/org/  — org GTD files if mounted (use Glob then Read)
+
+## Output
+
+Write a complete rewrite of memory/USER.md. Do not patch or append to the existing file — overwrite it entirely. Anything still relevant from the prior profile should be carried forward; anything stale or no longer relevant should be dropped.
+
+Keep the total length under ${WARM_START_DEFAULTS.profileMaxTokens} tokens. Be concise and specific. Prioritise what is currently active over what is historically interesting.
+
+Write the file now using the Write tool. Do not explain what you are doing.`;
+
+/** Slim interface for the container runner dependency — keeps the function testable. */
+export interface ProfileGenerationRunner {
+  runContainerAgent: (
+    group: RegisteredGroup,
+    input: {
+      prompt: string;
+      groupFolder: string;
+      chatJid: string;
+      isMain: boolean;
+      isScheduledTask: boolean;
+      assistantName: string;
+    },
+    onProcess: (proc: unknown, containerName: string) => void,
+  ) => Promise<{ status: string; error?: string }>;
+}
+
+/**
+ * Spawns an isolated agent on the main group to synthesise memory/USER.md.
+ * Writes nothing to the chat — the result is communicated via the file watcher
+ * (onProfileFileUpdated fires when the agent writes the file).
+ *
+ * Decoupled from the trigger: call from a cron task, session-end hook, or
+ * anywhere else without changing this function.
+ */
+export async function generateUserProfile(
+  group: RegisteredGroup,
+  chatJid: string,
+  assistantName: string,
+  runner: ProfileGenerationRunner,
+): Promise<void> {
+  logger.info({ group: group.folder }, 'Starting user profile generation');
+  try {
+    const output = await runner.runContainerAgent(
+      group,
+      {
+        prompt: PROFILE_GENERATION_PROMPT,
+        groupFolder: group.folder,
+        chatJid,
+        isMain: true,
+        isScheduledTask: true,
+        assistantName,
+      },
+      () => {}, // background task — no process registration needed
+    );
+    if (output.status === 'error') {
+      logger.error(
+        { group: group.folder, error: output.error },
+        'User profile generation failed',
+      );
+    } else {
+      logger.info({ group: group.folder }, 'User profile generation complete');
+    }
+  } catch (err) {
+    logger.error({ err, group: group.folder }, 'User profile generation threw');
+  }
+}

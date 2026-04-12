@@ -34,8 +34,11 @@ import {
   onProfileBecomesStale,
   assembleSessionContext,
   buildInitialPrompt,
+  generateUserProfile,
+  PROFILE_GENERATION_PROMPT,
   type UserProfile,
   type SessionContext,
+  type ProfileGenerationRunner,
 } from './session-warm-start.js';
 
 // ---------------------------------------------------------------------------
@@ -1073,5 +1076,73 @@ describe('buildInitialPrompt', () => {
     const ctx = makeContext({});
     const prompt = buildInitialPrompt(ctx);
     expect(prompt.trim().length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateUserProfile
+// ---------------------------------------------------------------------------
+
+describe('generateUserProfile', () => {
+  const mainGroup: RegisteredGroup = {
+    name: 'Main',
+    folder: 'main',
+    trigger: '',
+    added_at: '2026-01-01T00:00:00.000Z',
+    isMain: true,
+  };
+
+  it('calls runContainerAgent with the profile generation prompt', async () => {
+    type RunArgs = Parameters<ProfileGenerationRunner['runContainerAgent']>;
+    const calls: RunArgs[] = [];
+    const runner: ProfileGenerationRunner = {
+      runContainerAgent: async (
+        group: RunArgs[0],
+        input: RunArgs[1],
+        onProcess: RunArgs[2],
+      ) => {
+        calls.push([group, input, onProcess]);
+        return { status: 'success' };
+      },
+    };
+
+    await generateUserProfile(mainGroup, 'chat@jid', 'Claw', runner);
+
+    expect(calls).toHaveLength(1);
+    const [group, input] = calls[0];
+    expect(group).toBe(mainGroup);
+    expect(input.prompt).toBe(PROFILE_GENERATION_PROMPT);
+    expect(input.groupFolder).toBe('main');
+    expect(input.chatJid).toBe('chat@jid');
+    expect(input.isMain).toBe(true);
+    expect(input.isScheduledTask).toBe(true);
+    expect(input.assistantName).toBe('Claw');
+  });
+
+  it('does not throw when runContainerAgent returns error status', async () => {
+    const runner: ProfileGenerationRunner = {
+      runContainerAgent: async () => ({ status: 'error', error: 'oops' }),
+    };
+    // Should resolve without throwing
+    await expect(
+      generateUserProfile(mainGroup, 'chat@jid', 'Claw', runner),
+    ).resolves.toBeUndefined();
+  });
+
+  it('does not throw when runContainerAgent throws', async () => {
+    const runner: ProfileGenerationRunner = {
+      runContainerAgent: async () => {
+        throw new Error('container exploded');
+      },
+    };
+    await expect(
+      generateUserProfile(mainGroup, 'chat@jid', 'Claw', runner),
+    ).resolves.toBeUndefined();
+  });
+
+  it('PROFILE_GENERATION_PROMPT references the token budget from config', () => {
+    expect(PROFILE_GENERATION_PROMPT).toContain(
+      String(WARM_START_DEFAULTS.profileMaxTokens),
+    );
   });
 });

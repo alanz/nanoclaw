@@ -1192,6 +1192,10 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
+    clearSession: (groupFolder) => {
+      delete sessions[groupFolder];
+      deleteSession(groupFolder);
+    },
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),

@@ -1,15 +1,23 @@
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
+import path from 'path';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  DATA_DIR,
+  SCHEDULER_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
+  deleteSession,
   getAllTasks,
+  getChatActivity,
   getDueTasks,
   getTaskById,
   logTaskRun,
@@ -65,6 +73,7 @@ export function computeNextRun(task: ScheduledTask): string | null {
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  clearSession: (groupFolder: string) => void;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -75,11 +84,101 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string, sender?: string) => Promise<void>;
 }
 
+/**
+ * Handle a session_reset task: archive the current session and clear it
+ * without spawning an agent container. Skips if the chat has been active
+ * within min_idle_minutes (default 60).
+ */
+async function runSessionReset(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+  startTime: number,
+): Promise<void> {
+  const minIdle = task.min_idle_minutes ?? 60;
+
+  const lastActivity = getChatActivity(task.chat_jid);
+  if (lastActivity) {
+    const idleMs = Date.now() - new Date(lastActivity).getTime();
+    const idleMinutes = idleMs / 60000;
+    if (idleMinutes < minIdle) {
+      const msg = `Skipped: group active ${Math.round(idleMinutes)}m ago (threshold: ${minIdle}m)`;
+      logger.info(
+        { taskId: task.id, idleMinutes: Math.round(idleMinutes), minIdle },
+        'session_reset skipped: group not idle enough',
+      );
+      logTaskRun({
+        task_id: task.id,
+        run_at: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        status: 'skipped',
+        result: msg,
+        error: null,
+      });
+      updateTaskAfterRun(task.id, computeNextRun(task), msg);
+      return;
+    }
+  }
+
+  const sessions = deps.getSessions();
+  const sessionId = sessions[task.group_folder];
+  if (!sessionId) {
+    const msg = 'Skipped: no active session';
+    logger.info({ taskId: task.id }, 'session_reset: no active session');
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: 'skipped',
+      result: msg,
+      error: null,
+    });
+    updateTaskAfterRun(task.id, computeNextRun(task), msg);
+    return;
+  }
+
+  // Write IPC task file — same format as session-commands.ts / writeIpcTask in index.ts
+  const ipcTaskDir = path.join(DATA_DIR, 'ipc', task.group_folder, 'tasks');
+  fs.mkdirSync(ipcTaskDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(ipcTaskDir, `${Date.now()}-session-archive.json`),
+    JSON.stringify({
+      type: 'request_session_archive',
+      jid: task.chat_jid,
+      sessionId,
+      groupFolder: task.group_folder,
+    }),
+  );
+
+  // Clear the in-memory session so the next message starts a fresh context
+  deps.clearSession(task.group_folder);
+
+  const msg = `Session ${sessionId.slice(0, 8)} archived`;
+  logger.info(
+    { taskId: task.id, sessionId },
+    'session_reset: IPC task written, session cleared',
+  );
+  logTaskRun({
+    task_id: task.id,
+    run_at: new Date().toISOString(),
+    duration_ms: Date.now() - startTime,
+    status: 'success',
+    result: msg,
+    error: null,
+  });
+  updateTaskAfterRun(task.id, computeNextRun(task), msg);
+}
+
 export async function runTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
+
+  if ((task.task_type ?? 'prompt') === 'session_reset') {
+    await runSessionReset(task, deps, startTime);
+    return;
+  }
+
   let groupDir: string;
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);

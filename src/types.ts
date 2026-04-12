@@ -74,6 +74,10 @@ export interface ScheduledTask {
   status: 'active' | 'paused' | 'completed' | 'cancelled';
   created_at: string;
   dispatch_depth?: number;
+  /** 'session_reset' writes an IPC archive task and clears the session without spawning an agent. */
+  task_type?: 'prompt' | 'session_reset';
+  /** For session_reset tasks: skip if the chat has been active within this many minutes. */
+  min_idle_minutes?: number | null;
 }
 
 export interface RssFeed {
@@ -95,7 +99,7 @@ export interface TaskRunLog {
   task_id: string;
   run_at: string;
   duration_ms: number;
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'skipped';
   result: string | null;
   error: string | null;
   total_tokens?: number;

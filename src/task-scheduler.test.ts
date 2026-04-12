@@ -48,6 +48,7 @@ describe('task scheduler', () => {
     startSchedulerLoop({
       registeredGroups: () => ({}),
       getSessions: () => ({}),
+      clearSession: () => {},
       queue: { enqueueTask } as any,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -186,6 +187,7 @@ describe('runTask sender', () => {
         },
       }),
       getSessions: () => ({}),
+      clearSession: vi.fn(),
       queue: {
         enqueueTask: vi.fn(),
         notifyIdle: vi.fn(),
@@ -200,5 +202,119 @@ describe('runTask sender', () => {
       'task output',
       'Scheduler',
     );
+  });
+});
+
+// ── session_reset task type ───────────────────────────────────────────────────
+
+describe('session_reset task type', () => {
+  const baseTask = {
+    id: 'reset-test',
+    group_folder: 'main',
+    chat_jid: 'main@g.us',
+    prompt: '',
+    task_type: 'session_reset' as const,
+    min_idle_minutes: 60,
+    schedule_type: 'cron' as const,
+    schedule_value: '0 4 * * *',
+    context_mode: 'isolated' as const,
+    next_run: new Date(Date.now() - 1000).toISOString(),
+    last_run: null,
+    last_result: null,
+    status: 'active' as const,
+    created_at: new Date().toISOString(),
+  };
+
+  const makeDeps = (
+    overrides: Partial<{
+      sessions: Record<string, string>;
+      clearSession: (f: string) => void;
+      writeFile: typeof fs.writeFileSync;
+    }> = {},
+  ) => ({
+    registeredGroups: () => ({}) as any,
+    getSessions: () => overrides.sessions ?? {},
+    clearSession: overrides.clearSession ?? vi.fn(),
+    queue: {
+      enqueueTask: vi.fn(),
+      notifyIdle: vi.fn(),
+      closeStdin: vi.fn(),
+    } as any,
+    onProcess: vi.fn(),
+    sendMessage: vi.fn(async () => {}),
+  });
+
+  beforeEach(() => {
+    _initTestDatabase();
+    vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined as any);
+    vi.spyOn(fs, 'writeFileSync').mockReturnValue(undefined as any);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('writes IPC task and clears session when group is idle', async () => {
+    const clearSession = vi.fn();
+    createTask(baseTask);
+
+    // Simulate a chat that was active 90 minutes ago (above 60m threshold)
+    const { storeChatMetadata } = await import('./db.js');
+    storeChatMetadata(
+      'main@g.us',
+      new Date(Date.now() - 90 * 60_000).toISOString(),
+      'Main',
+    );
+
+    await runTask(
+      baseTask,
+      makeDeps({ sessions: { main: 'sess-abc-123' }, clearSession }),
+    );
+
+    expect(fs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('session-archive.json'),
+      expect.stringContaining('"type":"request_session_archive"'),
+    );
+    expect(clearSession).toHaveBeenCalledWith('main');
+
+    const task = getTaskById('reset-test');
+    expect(task?.last_result).toMatch(/archived/);
+  });
+
+  it('skips and reschedules when group was active recently', async () => {
+    const clearSession = vi.fn();
+    createTask(baseTask);
+
+    const { storeChatMetadata } = await import('./db.js');
+    storeChatMetadata(
+      'main@g.us',
+      new Date(Date.now() - 10 * 60_000).toISOString(),
+      'Main',
+    );
+
+    await runTask(
+      baseTask,
+      makeDeps({ sessions: { main: 'sess-abc-123' }, clearSession }),
+    );
+
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+
+    const task = getTaskById('reset-test');
+    expect(task?.last_result).toMatch(/Skipped/);
+    expect(task?.next_run).not.toBeNull(); // rescheduled to next cron tick
+  });
+
+  it('skips when there is no active session', async () => {
+    const clearSession = vi.fn();
+    createTask(baseTask);
+
+    await runTask(baseTask, makeDeps({ sessions: {}, clearSession }));
+
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+
+    const task = getTaskById('reset-test');
+    expect(task?.last_result).toMatch(/no active session/);
   });
 });

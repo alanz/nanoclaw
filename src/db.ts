@@ -309,6 +309,24 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Add task_type column to scheduled_tasks if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'prompt'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add min_idle_minutes column to scheduled_tasks if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN min_idle_minutes INTEGER`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -393,6 +411,16 @@ export interface ChatInfo {
   last_message_time: string;
   channel: string;
   is_group: number;
+}
+
+/**
+ * Get the last_message_time for a specific chat JID, or null if unknown.
+ */
+export function getChatActivity(jid: string): string | null {
+  const row = db
+    .prepare('SELECT last_message_time FROM chats WHERE jid = ?')
+    .get(jid) as { last_message_time: string } | undefined;
+  return row?.last_message_time ?? null;
 }
 
 /**
@@ -561,8 +589,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, dispatch_depth)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, dispatch_depth, task_type, min_idle_minutes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -577,6 +605,8 @@ export function createTask(
     task.status,
     task.created_at,
     task.dispatch_depth ?? 0,
+    task.task_type ?? 'prompt',
+    task.min_idle_minutes ?? null,
   );
 }
 

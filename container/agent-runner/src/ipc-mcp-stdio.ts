@@ -214,10 +214,17 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 \u2022 interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
 \u2022 once: Local time WITHOUT "Z" suffix (e.g., "2026-02-01T15:30:00"). Do NOT use UTC/Z suffix.`,
   {
+    task_type: z
+      .enum(['prompt', 'session_reset'])
+      .default('prompt')
+      .describe(
+        'prompt=run an agent with the given prompt (default). session_reset=archive the current conversation and start a fresh session without spawning an agent; the prompt field is ignored.',
+      ),
     prompt: z
       .string()
+      .default('')
       .describe(
-        'What the agent should do when the task runs. For isolated mode, include all necessary context here.',
+        'What the agent should do when the task runs. For isolated mode, include all necessary context here. Ignored for session_reset tasks.',
       ),
     schedule_type: z
       .enum(['cron', 'interval', 'once'])
@@ -228,6 +235,12 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       .string()
       .describe(
         'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
+      ),
+    min_idle_minutes: z
+      .number()
+      .optional()
+      .describe(
+        'For session_reset tasks: skip the reset if the group has been active within this many minutes. Default: 60. Useful to avoid resetting mid-conversation.',
       ),
     context_mode: z
       .enum(['group', 'isolated'])
@@ -315,7 +328,9 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     const data = {
       type: 'schedule_task',
       taskId,
-      prompt: args.prompt,
+      task_type: args.task_type ?? 'prompt',
+      prompt: args.prompt ?? '',
+      min_idle_minutes: args.min_idle_minutes ?? null,
       script: args.script || undefined,
       schedule_type: args.schedule_type,
       schedule_value: args.schedule_value,

@@ -396,6 +396,9 @@ export async function processTaskIpc(
     stagingPath?: string;
     // For dispatch_specialist_task (main group dispatches a top-level specialist)
     typeName?: string;
+    // For schedule_task task_type extension
+    task_type?: string;
+    min_idle_minutes?: number;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -406,10 +409,10 @@ export async function processTaskIpc(
   switch (data.type) {
     case 'schedule_task':
       if (
-        data.prompt &&
         data.schedule_type &&
         data.schedule_value &&
-        data.targetJid
+        data.targetJid &&
+        (data.task_type === 'session_reset' || data.prompt)
       ) {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
@@ -483,7 +486,7 @@ export async function processTaskIpc(
           id: taskId,
           group_folder: targetFolder,
           chat_jid: targetJid,
-          prompt: data.prompt,
+          prompt: data.prompt || '',
           script: data.script || null,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
@@ -492,6 +495,12 @@ export async function processTaskIpc(
           status: 'active',
           created_at: new Date().toISOString(),
           dispatch_depth: data.dispatchDepth ?? 0,
+          task_type:
+            data.task_type === 'session_reset' ? 'session_reset' : 'prompt',
+          min_idle_minutes:
+            typeof data.min_idle_minutes === 'number'
+              ? data.min_idle_minutes
+              : null,
         });
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },

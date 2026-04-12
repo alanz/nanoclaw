@@ -22,6 +22,7 @@ import {
   TRIGGER_PATTERN,
   WEB_UI_BASE_URL,
   WEB_UI_PORT,
+  ZOTERO_GROUP_FOLDER,
 } from './config.js';
 import './channels/index.js';
 import { makeSpecialistJid } from './channels/null-channel.js';
@@ -1448,6 +1449,26 @@ async function main(): Promise<void> {
           logger.warn(
             { mainGroupFolder, taskId: task.id },
             'Could not resolve main group folder for memory-provider mount',
+          );
+        }
+      }
+
+      // Mount Zotero markdown files read-only for researcher containers
+      if (task.specialist_type === 'researcher' && ZOTERO_GROUP_FOLDER) {
+        const zoteroMdPath = path.join(
+          GROUPS_DIR,
+          ZOTERO_GROUP_FOLDER,
+          'zotero-md',
+        );
+        if (fs.existsSync(zoteroMdPath)) {
+          extraReadonlyMounts.push({
+            hostPath: zoteroMdPath,
+            containerPath: '/workspace/zotero',
+          });
+        } else {
+          logger.debug(
+            { zoteroMdPath, taskId: task.id },
+            'Zotero markdown directory does not exist yet, skipping mount',
           );
         }
       }

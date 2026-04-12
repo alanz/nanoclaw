@@ -1100,8 +1100,9 @@ describe('generateUserProfile', () => {
         group: RunArgs[0],
         input: RunArgs[1],
         onProcess: RunArgs[2],
+        onOutput: RunArgs[3],
       ) => {
-        calls.push([group, input, onProcess]);
+        calls.push([group, input, onProcess, onOutput]);
         return { status: 'success' };
       },
     };
@@ -1117,6 +1118,21 @@ describe('generateUserProfile', () => {
     expect(input.isMain).toBe(true);
     expect(input.isScheduledTask).toBe(true);
     expect(input.assistantName).toBe('Claw');
+  });
+
+  it('forwards onOutput callback to runContainerAgent', async () => {
+    let capturedOnOutput:
+      | ((output: { status: string }) => Promise<void>)
+      | undefined;
+    const runner: ProfileGenerationRunner = {
+      runContainerAgent: async (_g, _i, _p, onOutput) => {
+        capturedOnOutput = onOutput;
+        return { status: 'success' };
+      },
+    };
+    const onOutput = async (_: { status: string }) => {};
+    await generateUserProfile(mainGroup, 'chat@jid', 'Claw', runner, onOutput);
+    expect(capturedOnOutput).toBe(onOutput);
   });
 
   it('does not throw when runContainerAgent returns error status', async () => {

@@ -612,6 +612,7 @@ export interface ProfileGenerationRunner {
       assistantName: string;
     },
     onProcess: (proc: unknown, containerName: string) => void,
+    onOutput?: (output: { status: string }) => Promise<void>,
   ) => Promise<{ status: string; error?: string }>;
 }
 
@@ -622,12 +623,17 @@ export interface ProfileGenerationRunner {
  *
  * Decoupled from the trigger: call from a cron task, session-end hook, or
  * anywhere else without changing this function.
+ *
+ * @param onOutput - Optional streaming callback, forwarded to the container
+ *   runner. The scheduler uses this to close the container promptly after the
+ *   agent finishes rather than waiting for the process to exit on its own.
  */
 export async function generateUserProfile(
   group: RegisteredGroup,
   chatJid: string,
   assistantName: string,
   runner: ProfileGenerationRunner,
+  onOutput?: (output: { status: string }) => Promise<void>,
 ): Promise<void> {
   logger.info({ group: group.folder }, 'Starting user profile generation');
   try {
@@ -642,6 +648,7 @@ export async function generateUserProfile(
         assistantName,
       },
       () => {}, // background task — no process registration needed
+      onOutput,
     );
     if (output.status === 'error') {
       logger.error(

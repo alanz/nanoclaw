@@ -203,11 +203,34 @@ async function runUserProfileGeneration(
 
   const runner: ProfileGenerationRunner = { runContainerAgent };
 
+  // Close the container promptly after the agent finishes — same pattern as runTask.
+  const TASK_CLOSE_DELAY_MS = 10000;
+  let closeTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleClose = () => {
+    if (closeTimer) return;
+    closeTimer = setTimeout(() => {
+      logger.debug({ taskId: task.id }, 'Closing profile generation container');
+      deps.queue.closeStdin(task.chat_jid);
+    }, TASK_CLOSE_DELAY_MS);
+  };
+
   let error: string | null = null;
   try {
-    await generateUserProfile(group, task.chat_jid, ASSISTANT_NAME, runner);
+    await generateUserProfile(
+      group,
+      task.chat_jid,
+      ASSISTANT_NAME,
+      runner,
+      async (streamedOutput) => {
+        if (streamedOutput.status === 'success') {
+          scheduleClose();
+        }
+      },
+    );
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
+  } finally {
+    if (closeTimer) clearTimeout(closeTimer);
   }
 
   const durationMs = Date.now() - startTime;

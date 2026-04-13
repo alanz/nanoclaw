@@ -179,6 +179,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .graph-legend-item{display:flex;align-items:center;gap:4px;font-size:11px;color:#8b949e;cursor:pointer;padding:2px 6px;border-radius:4px;border:1px solid transparent;user-select:none}
 .graph-legend-item:hover{color:#e6edf3;background:rgba(255,255,255,0.05)}
 .graph-legend-item.active{color:#e6edf3;border-color:currentColor;background:rgba(255,255,255,0.08)}
+.graph-legend-item.node-highlighted{color:#e6edf3;border-color:currentColor;background:rgba(88,166,255,0.15);box-shadow:0 0 0 1px rgba(88,166,255,0.4)}
 .graph-legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 #graph-node-panel{display:none;position:absolute;bottom:12px;right:12px;width:320px;background:rgba(22,27,34,0.95);border:1px solid #30363d;border-radius:8px;padding:14px;z-index:10;backdrop-filter:blur(8px)}
 #graph-node-panel h3{font-size:13px;font-weight:600;color:#f0f6fc;margin:0 0 10px;word-break:break-all}
@@ -1526,6 +1527,9 @@ document.addEventListener('DOMContentLoaded', function() {
     function highlightSubgraph(node) {
       // Clear previous highlights
       graphCy.elements().removeClass('dimmed neighbor highlighted');
+      document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+        el.classList.remove('node-highlighted');
+      });
       // Get connected edges and neighbour nodes
       var connEdges = node.connectedEdges();
       var neighbors = node.neighborhood().nodes();
@@ -1535,10 +1539,20 @@ document.addEventListener('DOMContentLoaded', function() {
       node.removeClass('dimmed');
       neighbors.removeClass('dimmed').addClass('neighbor');
       connEdges.removeClass('dimmed').addClass('highlighted');
+      // Highlight the selected node's tags in the legend
+      var nodeTags = node.data('tags') || [];
+      nodeTags.forEach(function(tag) {
+        document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+          if (el.dataset.tag === tag) el.classList.add('node-highlighted');
+        });
+      });
     }
 
     function clearHighlight() {
       graphCy.elements().removeClass('dimmed neighbor highlighted');
+      document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+        el.classList.remove('node-highlighted');
+      });
     }
 
     graphCy.on('select', 'node', function(evt) {
@@ -1589,11 +1603,23 @@ document.addEventListener('DOMContentLoaded', function() {
       evt.target.addClass('hovered');
       evt.target.connectedEdges().addClass('hover-highlighted');
       evt.target.neighborhood().nodes().addClass('hover-neighbor');
+      var nodeTags = evt.target.data('tags') || [];
+      nodeTags.forEach(function(tag) {
+        document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+          if (el.dataset.tag === tag) el.classList.add('node-highlighted');
+        });
+      });
     });
     graphCy.on('mouseout', 'node', function(evt) {
       evt.target.removeClass('hovered');
       evt.target.connectedEdges().removeClass('hover-highlighted');
       evt.target.neighborhood().nodes().removeClass('hover-neighbor');
+      // Only clear node-highlighted if no node is currently selected
+      if (graphCy.$('node:selected').length === 0) {
+        document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+          el.classList.remove('node-highlighted');
+        });
+      }
     });
 
     graphCy.on('tap', function(evt) {

@@ -192,6 +192,7 @@ describe('container-runner timeout behavior', () => {
 
     const result = await resultPromise;
     expect(result.status).toBe('error');
+    expect(result.timedOut).toBe(true);
     expect(result.error).toContain('timed out');
     expect(onOutput).not.toHaveBeenCalled();
   });

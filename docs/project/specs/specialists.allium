@@ -47,6 +47,21 @@ value TaskFailure {
     detail: String
 }
 
+-- The source identity of an IPC call from a specialist container.
+-- Determined by the per-task IPC directory: DATA_DIR/ipc/spec-{task-id}/.
+-- Specialist directories live as siblings of group IPC directories under DATA_DIR/ipc/
+-- and are scanned by the same polling loop. The host resolves the task by recognising
+-- the "spec-" prefix and parsing the task_id from the directory name; task identity is
+-- never taken from the file payload.
+-- Moved here from ipc.allium so that specialist IPC bridge rules can live in this file
+-- without creating a circular import (ipc.allium imports specialists.allium).
+-- allium-ignore allium.definition.unused
+value SpecialistIpcAuthor {
+    task_id: String          -- derived from the IPC directory name
+    task: SpecialistTask     -- resolved by the host from task_id
+    specialist_type: SpecialistType  -- task.specialist_type; convenience accessor
+}
+
 ------------------------------------------------------------
 -- Entities
 ------------------------------------------------------------
@@ -193,8 +208,263 @@ config {
 }
 
 ------------------------------------------------------------
+-- System Triggers
+------------------------------------------------------------
+
+-- SpecialistMcpCall(author: SpecialistIpcAuthor, tool: String, ...payload_fields)
+-- Emitted by the host IPC watcher (src/ipc.ts) when it processes a JSON file written
+-- by a specialist container's MCP server into the per-task IPC directory
+-- (DATA_DIR/ipc/spec-{task-id}/). The "spec-" prefix distinguishes specialist
+-- directories from group directories in the same polling loop. The host resolves
+-- `author` from the directory name; `tool` is the MCP tool name from the JSON payload.
+-- All SpecialistMcpCall rules in this file listen for this trigger.
+
+-- AgentMcpCall(author: IpcAuthor, tool: String, ...payload_fields)
+-- Same as the declaration in ipc.allium. Appears here only for AgentDispatchedSpecialist,
+-- which is called from the main group agent's regular IPC directory, not a specialist
+-- directory. See ipc.allium for the full AgentMcpCall declaration.
+
+-- SpecialistContainerStarted(task: SpecialistTask)
+-- Emitted by the host specialist runner (src/specialists.ts) immediately after a
+-- specialist container is launched for `task` and the container process is live.
+-- Fires on every invocation: initial start, restart after sub-task, and retry.
+
+-- SpecialistContainerTimedOut(task: SpecialistTask)
+-- Emitted by the host specialist runner when a specialist container exceeds
+-- config.container_timeout without exiting. This is the per-invocation timeout;
+-- the overall task wall-clock limit is enforced separately via is_overdue / checkOverdueSpecialistTasks.
+
+-- SpecialistContainerExited(task: SpecialistTask, exit_reason: String)
+-- Emitted by the host specialist runner when a specialist container process exits,
+-- whether cleanly (exit code 0) or not. exit_reason values: "success", "error",
+-- "signal", "unknown". Fired after SpecialistContainerTimedOut if the timeout
+-- caused the process to be killed.
+
+-- MemorySubmissionFiled(submission: RawMemorySubmission, final_path: String)
+-- Emitted by the memory indexing pipeline (see memory.allium) after a staged raw
+-- memory submission is moved to its permanent path and registered for embedding.
+-- specialists.allium does not import memory.allium; this trigger crosses the
+-- file boundary and cannot be traced by the checker.
+
+-- NanoclawStarted(started_at: Timestamp)
+-- Declared in nanoclaw.allium (imported as nanoclaw). Emitted by the host process
+-- on startup/restart. Repeated here for visibility: recovery rules in this file
+-- listen for it to detect tasks that were in-flight when the host was killed.
+
+------------------------------------------------------------
 -- Rules
 ------------------------------------------------------------
+
+-- ---- IPC Bridge Rules ----
+-- These rules translate MCP tool calls from agent containers into specialist domain events.
+-- They live here (rather than ipc.allium) so that specialist domain events can be emitted
+-- and consumed within the same file, avoiding a circular import. ipc.allium imports
+-- specialists.allium for entity types; if the bridge rules lived in ipc.allium, specialists
+-- would need to import ipc back to receive those events.
+--
+-- Trust model for payload taskId fields (specialist commands):
+-- Commands such as deliver_specialist_result, query_memory_specialist,
+-- report_specialist_session, and submit_raw_memory carry a taskId in the JSON payload.
+-- The host does NOT re-verify that the payload taskId matches the directory-derived task.
+-- This is intentional: structural isolation is already enforced at the mount layer.
+-- Each specialist container has only its own spec-{task-id} subdirectory mounted;
+-- it cannot write into a sibling spec-{other-task-id} directory.
+-- See also: ipc.allium, which documents the same trust model from the IPC protocol side.
+
+-- The main group agent dispatches a task to a specialist type.
+-- IPC bridge: agent calls MCP tool "dispatch_specialist_task" → host fires this event.
+rule AgentDispatchedSpecialist {
+    when: AgentMcpCall(author, "dispatch_specialist_task", specialist_type_name, prompt)
+
+    requires: author.is_main
+
+    let specialist_type = SpecialistType{name: specialist_type_name}
+
+    requires: exists specialist_type
+
+    ensures: AgentDispatchesSpecialistTask(
+        main_group: nanoclaw.Group{folder: author.group_folder},
+        specialist_type: specialist_type,
+        prompt: prompt
+    )
+
+    @guidance
+        -- The wire tool name is "dispatch_specialist_task" (main-group only). It is
+        -- fire-and-forget from the main group agent's perspective: it returns
+        -- immediately with the assigned task_id. The specialist result is delivered back
+        -- to the main group's session asynchronously once the specialist completes.
+        -- Available only to the main group agent because specialist dispatch is an
+        -- orchestration action; sub-groups cannot spawn specialists.
+}
+
+-- A running specialist dispatches a sub-task to another specialist type.
+-- IPC bridge for SpecialistDispatchesSubTask (and its rejection rules).
+-- The specialist's container exits after this call; the sub-task runs in its own container,
+-- and the specialist is re-invoked with the result.
+rule SpecialistDispatchedSubTask {
+    when: SpecialistMcpCall(spec_author, "dispatch_specialist", target_type_name, prompt)
+
+    requires: spec_author.task.status = running
+
+    let target_type = SpecialistType{name: target_type_name}
+    let session_id = current_session_id(spec_author.task)
+
+    requires: exists target_type
+
+    ensures: SpecialistSubTaskRequested(
+        parent_task: spec_author.task,
+        target_type: target_type,
+        prompt: prompt,
+        session_id: session_id
+    )
+
+    @guidance
+        -- The wire tool name is "dispatch_specialist" (specialist-only); main-group agents
+        -- use "dispatch_specialist_task" instead (AgentDispatchedSpecialist).
+        -- session_id is captured from the specialist's active Claude conversation so the
+        -- specialist can resume its chain of thought when re-invoked after the sub-task
+        -- completes. The container reads its current session id via readCurrentSessionId()
+        -- and writes it into the IPC file payload; the host reads it directly from the
+        -- payload (data.sessionId), it is not resolved from any host-side session state.
+        -- The tool returns synchronously with success or a rejection error (cycle_detected,
+        -- depth_exceeded, count_exceeded, same_type_limit_exceeded). On success, the
+        -- specialist's container is expected to exit cleanly; no further output is expected.
+        -- On rejection, the specialist remains running and may handle the error.
+}
+
+-- A running specialist submits raw information to the main group's memory store.
+-- IPC bridge for SpecialistSubmitsRawMemory.
+-- Unlike dispatch_specialist, this is synchronous: the specialist does not exit and
+-- continues working after receiving the acknowledgement.
+rule SpecialistSubmittedMemory {
+    when: SpecialistMcpCall(spec_author, "submit_raw_memory", topic, content)
+
+    requires: spec_author.task.status = running
+
+    let staging_path = memory_staging_path(spec_author.task, topic)
+
+    ensures: SpecialistMemorySubmission(
+        task: spec_author.task,
+        topic: topic,
+        staging_path: staging_path
+    )
+
+    @guidance
+        -- The wire tool name is "submit_raw_memory".
+        -- The host writes content to the staging_path before returning the acknowledgement.
+        -- staging_path is generated by the host from the task identity and topic label:
+        -- groups/main/memory/staging/{date}-{specialist-type}-{sanitised-topic}.md
+        -- The specialist may make multiple submissions during a single task; each produces
+        -- an independent RawMemorySubmission in this spec.
+        -- The tool returns the staging_path on success or an error on infrastructure failure
+        -- (disk full, bad mount, permissions). It does not wait for the main group to be
+        -- notified — notification is dispatched asynchronously by the host.
+}
+
+-- A running specialist queries a memory-provider specialist.
+-- IPC bridge for SpecialistQueriesMemory.
+-- Unlike dispatch_specialist, this bypasses delegation policy (cycle/depth/count
+-- checks) because memory providers are read-only information sources. The target
+-- must have is_memory_provider = true; regular specialist types are rejected.
+-- The session_id is recorded so the memory provider's response can be injected
+-- back into the querying specialist's Claude conversation when it resumes.
+rule SpecialistQueriedMemory {
+    when: SpecialistMcpCall(spec_author, "query_memory_specialist", target_type_name, prompt, session_id)
+
+    requires: spec_author.task.status = running
+
+    let target_type = SpecialistType{name: target_type_name}
+
+    requires: exists target_type
+    requires: target_type.is_memory_provider = true
+
+    ensures: SpecialistMemoryQueryRequested(
+        querying_task: spec_author.task,
+        target_type: target_type,
+        prompt: prompt,
+        session_id: session_id
+    )
+
+    @guidance
+        -- The wire tool name is "query_memory_specialist" (specialist-only).
+        -- The host records the querying specialist's current session_id via reportSession
+        -- before starting the memory-provider container, so the provider's reply can be
+        -- delivered back into the querying specialist's conversation on resume.
+        -- Delegation policy (cycle detection, depth limit, dispatch count, same-type
+        -- limit) does not apply here: memory providers are treated as read-only lookups
+        -- rather than delegated sub-tasks. Targets that are not flagged as memory
+        -- providers are rejected with an error and the querying specialist remains running.
+}
+
+-- A running specialist reports its Claude conversation session id to the host.
+-- IPC bridge for SpecialistSessionEstablished.
+-- Called by the specialist container as soon as its Claude session is established,
+-- so the host can track the session id for continuity across specialist runs
+-- (e.g. resuming after a sub-task or memory query completes).
+rule SpecialistSessionReported {
+    when: SpecialistMcpCall(spec_author, "report_specialist_session", session_id)
+
+    ensures: SpecialistSessionRecorded(
+        task: spec_author.task,
+        session_id: session_id
+    )
+
+    @guidance
+        -- The wire tool name is "report_specialist_session".
+        -- The host upserts a SpecialistConversationSession row keyed by task_id:
+        -- if no session exists it creates one with status = active; if one already
+        -- exists it updates the session_id and sets status = active. This is how the
+        -- host tracks session ids so a specialist can resume its chain of thought
+        -- when re-invoked after a sub-task or memory query completes.
+}
+
+-- A running specialist delivers its final result.
+-- IPC bridge for SpecialistTaskCompleted.
+--
+-- Note: deliver_specialist_result is a separate tool from deliver_result.
+-- deliver_result (ipc.SubGroupDeliveredResult) injects a synthetic message into the main
+-- group's chat — it is the sub-group-to-main-group result delivery for orchestration cycles.
+-- Specialist result delivery has different semantics: it sets task.result, transitions the
+-- task to completed, and routes to either the main group or a parent specialist depending
+-- on task.requester_group / task.requester_task. The authorization model also differs:
+-- specialists run under the null channel group with per-task IPC directories, not regular
+-- group IPC directories. A parallel tool keeps the two delivery mechanisms cleanly separated.
+rule SpecialistDeliveredResultViaIpc {
+    when: SpecialistMcpCall(
+        spec_author,
+        "deliver_specialist_result",
+        result_text,
+        file_paths: List<String>?,
+        commit_to_memory: Boolean?
+    )
+
+    requires: spec_author.task.status = running
+
+    ensures: SpecialistDeliveredResult(
+        task: spec_author.task,
+        result_text: result_text,
+        file_paths: resolve_delivery_paths(spec_author.task, file_paths, commit_to_memory)
+    )
+
+    @guidance
+        -- The tool is fire-and-forget: the specialist's container exits after this call.
+        -- The host records the result on the task entity and routes it to the requester
+        -- (main group or parent specialist) as defined by SpecialistTaskCompleted.
+        -- Each specialist container may call deliver_specialist_result at most once,
+        -- enforced in the container MCP server (in-memory flag, same pattern as deliver_result).
+        --
+        -- commit_to_memory flag:
+        -- When commit_to_memory = true and file_paths is non-empty, the host copies the listed
+        -- files from the specialist's ipc-out directory into the main group's memory/reports/
+        -- directory before routing the result. commit_files_to_memory returns the committed
+        -- paths (relative to the main group workspace, e.g. "memory/reports/2026-04-08-slug.md").
+        -- The result message delivered to the requester references these committed paths
+        -- instead of the original ipc-out paths, so the requester can read them directly.
+        -- When commit_to_memory = true but file_paths is null or empty, the flag is silently
+        -- ignored and the result is delivered as plain text.
+        -- When commit_to_memory is false or absent, file_paths are placed under
+        -- /workspace/ipc-in/{transfer_id}/ in the requester's container as usual.
+}
 
 -- ---- Task Dispatch from Main ----
 
@@ -282,6 +552,7 @@ rule SubTaskRejectedCycle {
         depth: parent_task.depth + 1,
         chain_delegation_count: parent_task.chain_delegation_count + 1,
         ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+        is_last_same_type_dispatch: false,  -- rejected tasks never consume a last-turn slot
         delegated_at: now,
         closed_at: now,
         status: failed,
@@ -313,6 +584,7 @@ rule SubTaskRejectedDepth {
         depth: parent_task.depth + 1,
         chain_delegation_count: parent_task.chain_delegation_count + 1,
         ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+        is_last_same_type_dispatch: false,  -- rejected tasks never consume a last-turn slot
         delegated_at: now,
         closed_at: now,
         status: failed,
@@ -339,6 +611,7 @@ rule SubTaskRejectedCount {
         depth: parent_task.depth + 1,
         chain_delegation_count: parent_task.chain_delegation_count + 1,
         ancestor_types: parent_task.ancestor_types + {parent_task.specialist_type},
+        is_last_same_type_dispatch: false,  -- rejected tasks never consume a last-turn slot
         delegated_at: now,
         closed_at: now,
         status: failed,
@@ -465,7 +738,7 @@ rule SpecialistTaskResumed {
 -- The container reports its Claude conversation ID after the first turn completes.
 -- This session_id is stored and passed to the container on every subsequent re-invocation.
 rule SpecialistSessionEstablished {
-    when: SpecialistContainerReportedSession(task, session_id)
+    when: SpecialistSessionRecorded(task, session_id)
 
     requires: task.status = running
 
@@ -549,11 +822,11 @@ rule SpecialistInvocationTimedOut {
 }
 
 -- A task whose wall-clock duration (across all invocations) exceeds max_task_duration fails.
--- Applies in all live states including awaiting_sub_task.
+-- Applies in all live states: queued, running, awaiting_sub_task, and awaiting_restart.
+-- The is_overdue derivation already constrains which statuses can fire this rule;
+-- no separate requires clause is needed.
 rule SpecialistTaskOverallTimeout {
     when: task: SpecialistTask.is_overdue
-
-    requires: task.status in { queued, running, awaiting_sub_task }
 
     ensures: task.status = failed
     ensures: task.failure = { kind: timeout, detail: "Overall task duration exceeded" }
@@ -909,6 +1182,14 @@ rule RestartExhaustionReported {
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
+
+-- Specialist dispatch is restricted to the main group.
+invariant SpecialistDispatchMainGroupOnly {
+    -- Encoded in rule AgentDispatchedSpecialist: requires author.is_main.
+    -- Restated here to make the constraint explicit as an invariant.
+    for q in AgentDispatchesSpecialistTasks:
+        q.main_group.is_main
+}
 
 -- Specialist type names are unique.
 invariant UniqueSpecialistNames {

@@ -1249,7 +1249,7 @@ export function getSpecialistTasksByStatus(
 export function getLiveSpecialistTasks(): SpecialistTask[] {
   return db
     .prepare(
-      "SELECT * FROM specialist_tasks WHERE status IN ('queued', 'running', 'awaiting_sub_task') ORDER BY delegated_at",
+      "SELECT * FROM specialist_tasks WHERE status IN ('queued', 'running', 'awaiting_sub_task', 'awaiting_restart') ORDER BY delegated_at",
     )
     .all() as SpecialistTask[];
 }

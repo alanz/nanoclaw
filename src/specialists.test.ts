@@ -1262,7 +1262,7 @@ describe('rule SpecialistDispatchesSubTask', () => {
     });
     await expect(
       dispatchSubTask(memParent.id, 'memory', 'coder', 'p', 's'),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/memory provider.*cannot dispatch sub-tasks/i);
   });
 
   it('SubTaskRejectedCycle: creates failed sub-task with kind=cycle_detected when target already in ancestor chain', async () => {
@@ -1951,6 +1951,20 @@ describe('checkOverdueSpecialistTasks', () => {
     await dispatchSubTask(parent.id, 'researcher', 'coder', 'p', 's');
     await checkOverdueSpecialistTasks();
     expect(getSpecialistTask(parent.id)?.status).toBe('failed');
+  });
+
+  it('fails an awaiting_restart task whose delegated_at exceeds max_task_duration', async () => {
+    const old = new Date(
+      Date.now() - SPECIALISTS_CONFIG.maxTaskDurationMs - 1000,
+    );
+    const task = makeRunningTask({
+      id: 'cot-3b',
+      status: 'awaiting_restart',
+      delegated_at: old.toISOString(),
+    });
+    await checkOverdueSpecialistTasks();
+    expect(getSpecialistTask(task.id)?.status).toBe('failed');
+    expect(getSpecialistTask(task.id)?.failure_kind).toBe('timeout');
   });
 
   it('does not fail a task whose delegated_at is within max_task_duration', async () => {

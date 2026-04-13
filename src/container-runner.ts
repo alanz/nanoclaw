@@ -74,6 +74,7 @@ export interface ContainerOutput {
   progress?: string;
   newSessionId?: string;
   error?: string;
+  timedOut?: boolean;
   totalTokens?: number;
   durationMs?: number;
 }
@@ -850,6 +851,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
+          timedOut: true,
           error: `Container timed out after ${configTimeout}ms`,
         });
         return;

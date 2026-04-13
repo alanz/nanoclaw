@@ -1645,7 +1645,7 @@ async function main(): Promise<void> {
           ) {
             await failSpecialistTask(
               task.id,
-              'execution_error',
+              output.timedOut ? 'timeout' : 'execution_error',
               output.error ?? 'Container exited with error',
             );
           }

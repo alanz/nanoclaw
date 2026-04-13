@@ -197,6 +197,26 @@ describe('container-runner timeout behavior', () => {
     expect(onOutput).not.toHaveBeenCalled();
   });
 
+  it('timeout with no streaming output but isCompleted=true resolves as idle cleanup', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      { ...testInput, isCompleted: () => true },
+      () => {},
+      onOutput,
+    );
+
+    // No stdout output — container delivered result via IPC side-channel
+    await vi.advanceTimersByTimeAsync(1830000);
+
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+    expect(result.timedOut).toBeUndefined();
+  });
+
   it('normal exit after output resolves as success', async () => {
     const onOutput = vi.fn(async () => {});
     const resultPromise = runContainerAgent(

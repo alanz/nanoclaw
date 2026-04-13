@@ -63,6 +63,10 @@ export interface ContainerInput {
   /** Called after mounts are created (including ipc-in) but before the
    *  container spawns. Use this to populate ipc-in with pending transfer files. */
   onInvocationReady?: (invocationId: string) => void;
+  /** Called on timeout when there is no streaming output, to distinguish a
+   *  genuinely stuck container from one that already delivered its result via
+   *  a side-channel (e.g. specialist IPC).  Return true if the work is done. */
+  isCompleted?: () => boolean;
   /** When true, the container skips PreCompact/PostCompact hook registration.
    *  Set for throwaway summarisation sessions to prevent recursive spawning. */
   isThrowaway?: boolean;
@@ -820,7 +824,14 @@ export async function runContainerAgent(
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
         // container being reaped after the idle period expired.
-        if (hadStreamingOutput) {
+        //
+        // Specialist containers deliver results via IPC files rather than
+        // stdout streaming markers, so hadStreamingOutput is always false for
+        // them even on success. Fall back to isCompleted() to distinguish a
+        // genuinely stuck container from one that already delivered its result.
+        const idleCleanup =
+          hadStreamingOutput || (input.isCompleted?.() ?? false);
+        if (idleCleanup) {
           logger.info(
             { group: group.name, containerName, duration, code },
             'Container timed out after output (idle cleanup)',

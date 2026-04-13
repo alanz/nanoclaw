@@ -1627,6 +1627,8 @@ async function main(): Promise<void> {
             onInvocationReady: (invocationId) => {
               placeFilesForInvocation(task.id, invocationId);
             },
+            isCompleted: () =>
+              getSpecialistTask(task.id)?.status === 'completed',
           },
           (proc, containerName) =>
             queue.registerProcess(

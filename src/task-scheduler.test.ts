@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 
-import { _initTestDatabase, createTask, getTaskById } from './db.js';
+import {
+  _initTestDatabase,
+  createTask,
+  getTaskById,
+  updateTaskAfterRun,
+} from './db.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
+  recoverClaimedTasks,
   runTask,
   startSchedulerLoop,
 } from './task-scheduler.js';
@@ -133,6 +139,118 @@ describe('task scheduler', () => {
     const offset =
       (new Date(nextRun!).getTime() - new Date(scheduledTime).getTime()) % ms;
     expect(offset).toBe(0);
+  });
+});
+
+// ── recoverClaimedTasks ───────────────────────────────────────────────────────
+
+describe('recoverClaimedTasks', () => {
+  const makeQueue = () => ({ enqueueTask: vi.fn() }) as any;
+  const makeDeps = (queue: any) => ({
+    registeredGroups: () => ({}),
+    getSessions: () => ({}),
+    clearSession: vi.fn(),
+    queue,
+    onProcess: vi.fn(),
+    sendMessage: vi.fn(async () => {}),
+  });
+
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  it('re-enqueues a recurring task left in claimed state', () => {
+    createTask({
+      id: 'rec-interval',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'do work',
+      schedule_type: 'interval',
+      schedule_value: '60000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() + 60_000).toISOString(), // already advanced by claim
+      status: 'active',
+      created_at: new Date().toISOString(),
+    });
+    // Simulate the claim step: last_result = 'claimed', next_run advanced
+    updateTaskAfterRun(
+      'rec-interval',
+      new Date(Date.now() + 60_000).toISOString(),
+      'claimed',
+    );
+
+    const queue = makeQueue();
+    recoverClaimedTasks(makeDeps(queue));
+
+    expect(queue.enqueueTask).toHaveBeenCalledWith(
+      'main@g.us',
+      'rec-interval',
+      expect.any(Function),
+    );
+
+    const task = getTaskById('rec-interval');
+    expect(task?.last_result).toBe('recovering');
+    expect(task?.status).toBe('active');
+  });
+
+  it('re-enqueues and reactivates a once task left in claimed state', () => {
+    createTask({
+      id: 'once-claimed',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'run once',
+      schedule_type: 'once',
+      schedule_value: new Date(Date.now() - 1000).toISOString(),
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: new Date().toISOString(),
+    });
+    // Claim step marks once tasks as completed (nextRun = null)
+    updateTaskAfterRun('once-claimed', null, 'claimed');
+
+    const taskAfterClaim = getTaskById('once-claimed');
+    expect(taskAfterClaim?.status).toBe('completed'); // confirm claim behaviour
+
+    const queue = makeQueue();
+    recoverClaimedTasks(makeDeps(queue));
+
+    expect(queue.enqueueTask).toHaveBeenCalledWith(
+      'main@g.us',
+      'once-claimed',
+      expect.any(Function),
+    );
+
+    const task = getTaskById('once-claimed');
+    expect(task?.status).toBe('active');
+    expect(task?.last_result).toBe('recovering');
+  });
+
+  it('does not re-enqueue tasks that completed normally', () => {
+    createTask({
+      id: 'normal-done',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'done',
+      schedule_type: 'once',
+      schedule_value: new Date(Date.now() - 1000).toISOString(),
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: new Date().toISOString(),
+    });
+    updateTaskAfterRun('normal-done', null, 'Task completed successfully');
+
+    const queue = makeQueue();
+    recoverClaimedTasks(makeDeps(queue));
+
+    expect(queue.enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when no claimed tasks exist', () => {
+    const queue = makeQueue();
+    recoverClaimedTasks(makeDeps(queue));
+    expect(queue.enqueueTask).not.toHaveBeenCalled();
   });
 });
 

@@ -21,12 +21,13 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
-  deleteSession,
   getAllTasks,
   getChatActivity,
+  getClaimedTasks,
   getDueTasks,
   getTaskById,
   logTaskRun,
+  resetTaskForRecovery,
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
@@ -516,6 +517,43 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   };
 
   loop();
+}
+
+/**
+ * Startup recovery: re-enqueue tasks that were claimed but never completed.
+ *
+ * The scheduler claims a task (advancing next_run) before enqueuing it, to
+ * prevent duplicate runs on restart. If the process dies between claim and
+ * completion, last_result is left as 'claimed'. This function detects that
+ * sentinel and re-enqueues the task immediately so the current cycle runs.
+ *
+ * Once tasks (schedule_type = 'once') are reset to active so they are not
+ * permanently lost. The preference is to run twice rather than skip.
+ */
+export function recoverClaimedTasks(deps: SchedulerDependencies): void {
+  const claimed = getClaimedTasks();
+  if (claimed.length === 0) return;
+
+  logger.info(
+    { count: claimed.length },
+    'Recovery: re-enqueueing interrupted tasks',
+  );
+
+  for (const task of claimed) {
+    resetTaskForRecovery(task.id);
+    const recovered = { ...task, status: 'active' as const };
+    deps.queue.enqueueTask(recovered.chat_jid, recovered.id, () =>
+      runTask(recovered, deps),
+    );
+    logger.info(
+      {
+        taskId: task.id,
+        groupFolder: task.group_folder,
+        scheduleType: task.schedule_type,
+      },
+      'Recovery: task re-enqueued',
+    );
+  }
 }
 
 /** @internal - for tests only. */

@@ -157,11 +157,31 @@ entity ConversationSession {
 }
 
 -- A group whose agent invocation is queued because the system is at capacity.
--- The group will be retried in priority order once an agent slot frees.
+-- The main group is never queued — it bypasses the concurrency gate entirely.
+-- Waiting groups are drained in FIFO order once a slot frees (see AgentSlotFreed).
+--
+-- WaitingGroup is a derived, in-memory view — it is not persisted. On restart it
+-- is fully reconstructed from primary state: messages are recovered via
+-- recoverPendingMessages (DB-backed), and tasks are recovered via
+-- recoverClaimedTasks (tasks whose last_result = 'claimed' were interrupted
+-- mid-flight and are re-enqueued). Both recovery paths call through
+-- enqueueMessageCheck / enqueueTask, which repopulate the waiting list as a
+-- side effect. FIFO ordering across groups is not preserved across restarts.
 entity WaitingGroup {
     group: Group
     queued_at: Timestamp
-    kind: message | task              -- tasks are drained before messages
+}
+
+-- Per-chat access control loaded from sender-allowlist.json.
+-- Controls which senders may trigger the agent (trigger mode) or have their
+-- messages stored at all (drop mode). A default entry applies to any chat
+-- without an explicit per-chat override.
+entity SenderAllowlistEntry {
+    chat: Chat?                  -- null = default entry; overridden by per-chat entries
+    allow_all: Boolean           -- true when allow = '*'
+    allowed_senders: Set<String>  -- sender IDs when allow_all = false
+    mode: trigger | drop         -- trigger: denied messages stored but won't fire agent
+                                 -- drop: denied messages discarded before storage
 }
 
 -- A currently running agent processing messages for a group.
@@ -208,11 +228,15 @@ config {
 
 -- ---- Message Ingestion ----
 
--- Every inbound message is stored, regardless of whether the chat is registered.
--- Raw fields (content, reply_to_*) are stored; enrichment is applied later at
--- prompt assembly time by formatMessages.
+-- Every inbound message is stored, unless the chat is in drop mode and the sender
+-- is not on the allowlist (see MessageDropped). Raw fields (content, reply_to_*) are
+-- stored; enrichment is applied later at prompt assembly time by formatMessages.
 rule MessageReceived {
     when: InboundMessage(chat, sender, sender_name, content, sent_at, quoted_message?, attachments?)
+
+    let entry = SenderAllowlistEntry{chat: chat} ?? SenderAllowlistEntry{chat: null}
+
+    requires: not (entry.mode = drop and not entry.allow_all and sender.id not in entry.allowed_senders)
 
     ensures: Message.created(
         chat: chat,
@@ -232,6 +256,26 @@ rule MessageReceived {
         -- Attachment metadata from the attachments? parameter is not currently
         -- persisted. Media labels ("[Image: …]" etc.) are generated transiently
         -- at prompt assembly from attachment paths available at delivery time only.
+}
+
+-- When a chat is in drop mode and the sender is denied, the message is silently
+-- discarded before storage. No Message entity is created; no agent is triggered.
+rule MessageDropped {
+    when: InboundMessage(chat, sender, sender_name, content, sent_at, quoted_message?, attachments?)
+
+    let entry = SenderAllowlistEntry{chat: chat} ?? SenderAllowlistEntry{chat: null}
+
+    requires: entry.mode = drop
+    requires: not entry.allow_all
+    requires: sender.id not in entry.allowed_senders
+
+    @guidance
+        -- No ensures: discarding has no observable effect on stored state.
+        -- The message is dropped at the onInboundMessage boundary in src/index.ts
+        -- before storeMessage is called. This is the only path where an InboundMessage
+        -- event produces no stored Message. Trigger-mode denials (mode = trigger) do
+        -- not fire this rule — the message is stored but cannot satisfy the trigger
+        -- condition (see AgentInvoked guidance).
 }
 
 -- An inbound edit is delivered as a brand-new message whose content carries a
@@ -299,18 +343,21 @@ rule TrustRevoked {
 rule SessionCommandIntercepted {
     when: SessionCommand(group, sender, command)
 
-    requires: command in { compact, reset, clear_session }
+    requires: command in { compact, reset }
     requires: group.is_main or group.is_trusted or sender_is_authorised(sender, group)
 
     ensures: SessionCommandApplied(group: group, command: command)
 }
 
+-- /reset clears the persisted conversation session as part of handling the command,
+-- so the next agent run starts fresh. Handled in src/session-commands.ts, which calls
+-- deps.clearSession() in the reset branch.
 rule SessionCleared {
     when: SessionCommandApplied(group, command)
 
     let cs = ConversationSession{group: group}
 
-    requires: command = clear_session
+    requires: command = reset
     requires: exists cs
 
     ensures: not exists cs
@@ -361,10 +408,24 @@ rule AgentInvoked {
         --
         -- The conversation_session provides the Claude conversation ID so the
         -- agent can resume prior context. Absent or cleared sessions start fresh.
+        -- Sender allowlist (trigger mode): any_matches_trigger is applied only to messages
+        -- from authorised senders — i.e. is_from_me or sender is on the allowlist for
+        -- this chat (src/sender-allowlist.ts isTriggerAllowed). A trigger-mode denied
+        -- sender's message is stored (MessageReceived fires) but cannot satisfy the
+        -- trigger condition here. Drop-mode denied messages are never stored, so they
+        -- never appear in new_messages.
+        --
         -- The debounce_window check defers invocation until the user stops typing.
         -- pending_dispatch_depth is set by SubGroupDeliveredResult (ipc.allium) when a
         -- sub-group delivers a result; it is consumed here and cleared so subsequent
         -- user-initiated runs start at depth 0.
+        --
+        -- The depth < max_dispatch_depth clause describes an invariant maintained by
+        -- the system, not a blocking check at invocation time. The actual gate is
+        -- enforced upstream at deliver_result time in ipc.allium: the host only ever
+        -- sets pending_dispatch_depth to values strictly less than max_dispatch_depth,
+        -- rejecting (or dropping) deliveries that would exceed the cap. By the time
+        -- AgentInvoked fires, depth is already guaranteed safe.
 }
 
 -- When the system is at capacity and a group has new messages, it is queued.
@@ -386,18 +447,17 @@ rule GroupQueued {
 
     ensures: WaitingGroup.created(
         group: group,
-        queued_at: now,
-        kind: message
+        queued_at: now
     )
 }
 
--- When an agent slot frees, the highest-priority waiting group is dequeued and invoked.
--- Tasks (kind = task) are drained before messages (kind = message).
--- Among equal kinds, earliest queued_at wins (FIFO).
+-- When an agent slot frees, the next waiting group is dequeued and invoked.
+-- Groups are drained in FIFO order (earliest queued_at first).
+-- Within a group, pending tasks are run before pending messages.
 rule AgentSlotFreed {
     when: session: AgentSession.status transitions_to closed
 
-    let next = next_waiting_group(WaitingGroups)  -- task kind before message; FIFO within kind
+    let next = next_waiting_group(WaitingGroups)  -- FIFO by queued_at; see guidance
 
     requires: exists next
 
@@ -405,10 +465,11 @@ rule AgentSlotFreed {
     ensures: NewMessagesAvailable(next.group)
 
     @guidance
-        -- next_waiting_group selects the WaitingGroup with kind = task first (tasks
-        -- have higher priority than messages), then the earliest queued_at within that kind.
+        -- The main group never enters WaitingGroups — it bypasses the concurrency
+        -- gate entirely and always runs immediately (see GroupQueued: requires not group.is_main).
+        -- Among non-main groups, drain order is FIFO by queued_at. Within each dequeued
+        -- group, pending tasks take priority over pending messages (src/group-queue.ts drainWaiting).
         -- Emitting NewMessagesAvailable re-triggers AgentInvoked for the dequeued group.
-        -- Tasks queued from the scheduler set kind = task when creating their WaitingGroup entry.
 }
 
 -- When the agent is already active and new messages arrive, they are piped into
@@ -579,6 +640,15 @@ rule AgentPostedMessage {
         is_from_me: true,
         is_bot_response: true
     )
+
+    @guidance
+        -- Specialist containers (see specialists.allium) satisfy this rule via a
+        -- different path: they target "specialist:<folder>" JIDs owned by the
+        -- NullChannel, which relays the message back to the requester group's chat
+        -- rather than to the specialist's own chat. From this rule's perspective the
+        -- target_chat is the specialist's own chat binding, but the concrete effect
+        -- is that the requester group receives the message. See specialists.allium
+        -- for the full forwarding contract.
 }
 
 -- ---- Outbound Message Routing ----
@@ -602,6 +672,17 @@ rule OutboundMessageRouted {
         -- message cannot be delivered (the requires clause fails).
         -- This rule captures the host-side routing contract; individual channel
         -- specs (null-channel.allium, etc.) define what happens on delivery.
+        --
+        -- In addition to owning the JID, the chosen channel must be currently
+        -- connected (c.isConnected() in src/router.ts). A registered but
+        -- disconnected channel is skipped and delivery fails as if no owner
+        -- existed. Reconnection is a channel-level concern outside this rule.
+        --
+        -- Before delivery, <internal>…</internal> blocks are stripped from the
+        -- outbound content by stripInternalTags in src/router.ts. These blocks
+        -- are an agent-side convention for private reasoning that should never
+        -- reach the user; the routing layer enforces the redaction centrally so
+        -- individual channels do not need to re-implement it.
 }
 
 -- ---- Group Registration ----
@@ -755,6 +836,8 @@ invariant WorkspaceIsolation {
 -- Open Questions
 ------------------------------------------------------------
 
-open question "Sender authorisation - exact rules for who is an authorised sender in non-trusted, non-main groups?"
+-- Sender authorisation resolved: see SenderAllowlistEntry entity, MessageDropped rule,
+-- and AgentInvoked guidance. Allowlist loaded from sender-allowlist.json; two modes:
+-- 'trigger' (denied messages stored, cannot fire agent) and 'drop' (discarded pre-storage).
 open question "Trigger matching - should trigger_pattern apply to sender name, message content, or both?"
 open question "Attachment persistence - attachment metadata (filename, mime type, local path) is not currently stored in the messages table. Until it is, media label enrichment ('[Image: …]', '[Audio: …]' etc.) cannot be regenerated from stored fields, violating the intent of MessageEnrichmentRegenerableFromStoredFields for messages with attachments. Should an attachments table or JSON column be added?"

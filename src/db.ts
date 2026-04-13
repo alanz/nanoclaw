@@ -686,6 +686,29 @@ export function deleteTask(id: string): void {
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }
 
+export function getClaimedTasks(): ScheduledTask[] {
+  return db
+    .prepare(
+      `
+    SELECT * FROM scheduled_tasks
+    WHERE last_result = 'claimed'
+    AND (status = 'active' OR (status = 'completed' AND schedule_type = 'once'))
+  `,
+    )
+    .all() as ScheduledTask[];
+}
+
+export function resetTaskForRecovery(id: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `
+    UPDATE scheduled_tasks
+    SET status = 'active', next_run = ?, last_result = 'recovering'
+    WHERE id = ?
+  `,
+  ).run(now, id);
+}
+
 export function getDueTasks(): ScheduledTask[] {
   const now = new Date().toISOString();
   return db

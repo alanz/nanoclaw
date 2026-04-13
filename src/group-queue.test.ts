@@ -98,6 +98,33 @@ describe('GroupQueue', () => {
     expect(processMessages).toHaveBeenCalledTimes(3);
   });
 
+  it('main group tasks bypass the concurrency gate', async () => {
+    const completionCallbacks: Array<() => void> = [];
+    const processed: string[] = [];
+
+    const processMessages = vi.fn(async (groupJid: string) => {
+      processed.push(groupJid);
+      await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.mainGroupJid = 'main@g.us';
+
+    // Fill both non-main slots
+    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueMessageCheck('group2@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(processed).toEqual(['group1@g.us', 'group2@g.us']);
+
+    // Enqueue a task for the main group — should run immediately despite full slots
+    const taskFn = vi.fn(async () => {});
+    queue.enqueueTask('main@g.us', 'main-task-1', taskFn);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(taskFn).toHaveBeenCalledTimes(1);
+  });
+
   // --- Tasks prioritized over messages ---
 
   it('drains tasks before messages for same group', async () => {

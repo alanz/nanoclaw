@@ -107,7 +107,7 @@ import {
 import { getSpecialistType, initSpecialistTypes } from './specialist-types.js';
 import { startZoteroMonitorLoop } from './zotero-monitor.js';
 import { startSessionCleanup } from './session-cleanup.js';
-import { startSchedulerLoop } from './task-scheduler.js';
+import { recoverClaimedTasks, startSchedulerLoop } from './task-scheduler.js';
 import { startWebUi } from './web-ui.js';
 import {
   closeAllMemoryManagers,
@@ -1287,17 +1287,21 @@ async function main(): Promise<void> {
   }
 
   // Start subsystems (independently of connection handler)
-  startSchedulerLoop({
+  const schedulerDeps = {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
-    clearSession: (groupFolder) => {
+    clearSession: (groupFolder: string) => {
       delete sessions[groupFolder];
       deleteSession(groupFolder);
     },
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) =>
-      queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText, sender) => {
+    onProcess: (
+      groupJid: string,
+      proc: Parameters<typeof queue.registerProcess>[1],
+      containerName: string,
+      groupFolder: string,
+    ) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    sendMessage: async (jid: string, rawText: string, sender?: string) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
@@ -1318,7 +1322,7 @@ async function main(): Promise<void> {
         });
       }
     },
-    getWarmStartPrompt: async (group) => {
+    getWarmStartPrompt: async (group: RegisteredGroup) => {
       const stale = onProfileBecomesStale(warmStartProfile, new Date());
       if (stale) {
         warmStartProfile = stale;
@@ -1346,7 +1350,8 @@ async function main(): Promise<void> {
         return '';
       });
     },
-  });
+  };
+  startSchedulerLoop(schedulerDeps);
   startRssMonitorLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
@@ -1687,6 +1692,7 @@ async function main(): Promise<void> {
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+  recoverClaimedTasks(schedulerDeps);
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);

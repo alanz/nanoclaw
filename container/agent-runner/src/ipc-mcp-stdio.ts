@@ -964,6 +964,9 @@ PAGINATION: The response includes has_more (boolean) and next_cursor. If has_mor
   },
 );
 
+// memory_search / memory_get / memory_list are only available to regular group agents.
+// Specialist containers must use query_memory (routes through a memory-provider specialist).
+if (!isSpecialist) {
 server.tool(
   'memory_search',
   `Search your personal knowledge base (org notes, workspace memory files, research documents). Use when the user references something you may have notes on, or when background context would improve your answer. Also use when creating a new A-MEM note to find related notes for the links field.
@@ -1129,6 +1132,7 @@ Returns file paths, modification times, sizes, and optionally parsed frontmatter
     };
   },
 );
+} // end if (!isSpecialist) — memory_search / memory_get / memory_list
 
 /**
  * Pure function for building a dashboard URL — exported for testing.

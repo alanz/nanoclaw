@@ -46,8 +46,11 @@ enum QueryKind {
 -- The source identity of an IPC call from a regular group agent.
 -- Determined entirely by which IPC directory the file appeared in — not from payload contents.
 -- The host never trusts group identity claims written inside a file.
--- dispatch_depth is read from the NANOCLAW_DISPATCH_DEPTH environment variable set by the
--- container runner when the container starts; it is not taken from the IPC file payload.
+-- dispatch_depth: the container reads NANOCLAW_DISPATCH_DEPTH from its environment and writes
+-- the value into the IPC file payload; the host reads it back from the payload. This means
+-- the host trusts the container-supplied depth rather than deriving it from its own records.
+-- Contrast with specialist IPC, where the host computes depth from the DB (parentTask.depth + 1)
+-- and the payload carries no depth field. See open question below for alignment work.
 value IpcAuthor {
     group_folder: String    -- name of the group whose IPC directory contained the file
     is_main: Boolean        -- whether that group is the registered main group
@@ -255,9 +258,15 @@ rule AgentScheduledTask {
         --                    isolated container with a dedicated profile-synthesis
         --                    prompt. prompt is not required (supplied by the host).
         --
-        -- dispatch_depth handling (incrementing from the caller's container depth to
-        -- prevent orchestrator-subagent loops) is described in D8 and intentionally
-        -- left for that discussion.
+        -- dispatch_depth: the +1 increment is applied by the container at schedule time,
+        -- not by the host at run time. The scheduling container reads its own depth from
+        -- NANOCLAW_DISPATCH_DEPTH (= D) and writes dispatchDepth: D + 1 into the IPC
+        -- payload. The host stores that value in the task record as-is. When the task
+        -- fires, the task-scheduler passes task.dispatch_depth flat (no second +1) to
+        -- runContainerAgent, so the sub-group container starts at NANOCLAW_DISPATCH_DEPTH
+        -- = D + 1. This matches the ensures clause above (author.dispatch_depth + 1).
+        -- If the D7 open question (host-authoritative depth via invocationId map) is
+        -- resolved, the +1 would move to the host side at the same time.
 }
 
 -- When the main group agent creates a task for a *different* group, it is a delegation.
@@ -517,6 +526,56 @@ rule SubGroupDeliveredResult {
         -- not re-enforced on the host.
 }
 
+-- ---- Session Archiving IPC ----
+--
+-- Two IPC task types relate to session archiving. They are different in kind:
+--
+--   spawn_throwaway_session — written by the container's PostCompact hook;
+--     a genuine container→host IPC command modelled below.
+--
+--   request_session_archive — written by the HOST itself (session-commands.ts
+--     on /reset, task-scheduler.ts on session_reset task). It is an internal
+--     host routing mechanism: the host writes a task file to its own IPC
+--     directory so the polling loop picks it up asynchronously. This is below
+--     the spec boundary (no container is involved) and is not modelled as an
+--     IPC rule. The session-archiving.allium rules ArchiveAndStartThrowawayOnReset
+--     and ScheduledResetBridged describe the intent; their guidance notes the
+--     IPC file as an implementation detail.
+
+-- A container's PostCompact hook requests a throwaway summarisation session.
+-- This is the IPC bridge between the PostCompact hook and
+-- session-archiving.StartThrowawayOnPostCompact.
+-- The hook writes the file to /workspace/ipc/tasks/; the host calls spawnThrowaway()
+-- which runs an isolated container to produce the SessionSummary.
+rule ContainerRequestedThrowaway {
+    when: AgentIpcTask(author, "spawn_throwaway_session", session_id, jsonl_path)
+
+    requires: not author.is_main
+
+    let group = nanoclaw.Group{folder: author.group_folder}
+
+    requires: exists group
+
+    ensures: session_archiving.ThrowawaySession.created(
+        for_session_id: session_id,
+        group: group,
+        source_jsonl: jsonl_path,
+        status: queued,
+        started_at: now
+    )
+
+    @guidance
+        -- The PostCompact hook fires inside the running agent container after Claude Code
+        -- compacts its context. It writes the spawn_throwaway_session file synchronously
+        -- before the hook returns, then continues normally. The host processes the file
+        -- on the next IPC poll and spawns the throwaway container fire-and-forget.
+        -- The throwaway container has isThrowaway = true, which prevents its own
+        -- PostCompact/PreCompact hooks from spawning further throwaways.
+        -- Fields: jid (chatJid), sessionId, jsonlPath, groupFolder.
+        -- jsonlPath may be null if the transcript was not available at hook time;
+        -- spawnThrowaway handles the missing-JSONL case by writing placeholder files.
+}
+
 -- ---- Specialist Tools ----
 -- These tools are available in specialist containers, whose per-task IPC directories
 -- (DATA_DIR/ipc/spec-{task-id}/) sit as siblings of group IPC directories and are scanned
@@ -524,6 +583,16 @@ rule SubGroupDeliveredResult {
 -- appeared in: the host recognises the "spec-" prefix and resolves the task from the
 -- directory name, not from payload contents.
 -- This follows the same trust model as regular IPC (see IpcAuthor / SpecialistIpcAuthor).
+--
+-- Trust model for payload taskId fields:
+-- Commands such as deliver_specialist_result, query_memory_specialist,
+-- report_specialist_session, and submit_raw_memory carry a taskId in the JSON payload.
+-- The host does NOT re-verify that the payload taskId matches the directory-derived task.
+-- This is intentional: structural isolation is already enforced at the mount layer.
+-- Each specialist container has only its own spec-{task-id} subdirectory mounted into
+-- the container; it cannot write files into a sibling spec-{other-task-id} directory.
+-- The payload taskId is therefore inherently constrained to the task that owns the
+-- directory, making a cross-task forgery impossible without a full VM compromise.
 
 -- The main group agent dispatches a task to a specialist type.
 -- This is the IPC bridge for specialists.MainDispatchesSpecialistTask.
@@ -796,6 +865,12 @@ rule HostFulfilledMemorySearchQuery {
         -- If memory search is not enabled (MEMORY_SEARCH_ENABLED = false) or the group
         -- has no memory manager, the response payload is { error: "Memory search not available" }.
         -- search_params may include: limit?, min_score?, path_prefix?, source?, include_content?
+        --
+        -- Specialist containers: memory_search, memory_get, and memory_list are not registered
+        -- in the specialist container MCP server (gated by isSpecialist at startup). Specialists
+        -- that need memory access must use the query_memory tool, which routes through a
+        -- memory-provider specialist type. This is intentional: direct memory access is scoped
+        -- to regular group agents; specialists go through a controlled, auditable provider.
 }
 
 rule AgentQueriedMemoryGet {
@@ -978,5 +1053,6 @@ invariant QueryDispatchDepthBounded {
 ------------------------------------------------------------
 
 open question "list_tasks / list_rss_feeds read snapshot files directly from disk — should these be modelled as reads against current spec state instead, or is the snapshot-file pattern a domain concept worth preserving?"
+open question "dispatch_depth trust model mismatch: sub-group IPC reads depth from the IPC payload (container-supplied, trusts the container), while specialist IPC derives depth from the host DB (parentTask.depth + 1, no payload field). Align by: recording invocationId→depth when starting containers, adding invocationId to deliver_result and schedule_task payloads, and replacing data.dispatchDepth reads in ipc.ts with host-side map lookups. Requires a container rebuild."
 open question "deliver_result one-call guard is enforced in the container process (in-memory flag) — should this be an entity-level constraint in the spec, or is the container-process boundary sufficient?"
 open question "Brave Search and search_zotero are conditionally available — should their availability conditions (BRAVE_API_KEY present, /workspace/group/zotero-md exists) be modelled as config flags?"

@@ -6,6 +6,11 @@
 -- Inside each container an MCP server (ipc-mcp-stdio) translates tool calls into JSON files.
 -- The host IPC watcher polls per-group IPC directories, processes files, and writes responses.
 --
+-- Error handling: IPC files that fail to process (JSON parse error, missing fields,
+-- unhandled exception) are moved to DATA_DIR/ipc/errors/{sourceGroup}-{filename}
+-- rather than deleted, preserving them for post-hoc inspection. Nothing reads from
+-- the errors directory; it is write-only from the host's perspective.
+--
 -- Scope: IPC protocol, MCP tool surface, authorization, request-response queries
 -- Includes: message/file delivery, task commands, read-only snapshot reads,
 --           request-response queries, agent-to-agent deliver_result,
@@ -50,10 +55,11 @@ value IpcAuthor {
 }
 
 -- The source identity of an IPC call from a specialist container.
--- Determined by the per-task IPC directory: DATA_DIR/ipc/specialists/{task-id}/.
--- The host resolves the task from the directory name; task identity is never taken from
--- the file payload. Specialist IPC directories are a parallel namespace to group IPC
--- directories, so specialist calls are never confused with regular group calls.
+-- Determined by the per-task IPC directory: DATA_DIR/ipc/spec-{task-id}/.
+-- Specialist directories live as siblings of group IPC directories under DATA_DIR/ipc/
+-- and are scanned by the same polling loop. The host resolves the task by recognising
+-- the "spec-" prefix and parsing the task_id from the directory name; task identity is
+-- never taken from the file payload.
 value SpecialistIpcAuthor {
     task_id: String                         -- derived from the IPC directory name
     task: specialists.SpecialistTask        -- resolved by the host from task_id
@@ -67,6 +73,26 @@ value SpecialistIpcAuthor {
 -- A pending request-response IPC call issued by an agent.
 -- The agent writes a task file containing a unique requestId, then polls
 -- /workspace/ipc/responses/{requestId}.json until it appears or times out.
+--
+-- NOTE: IpcQuery is a conceptual model of the query lifecycle — it is NOT currently
+-- materialised on the host. The host processes queries synchronously in the IPC poll
+-- loop and writes response files immediately; it keeps no in-memory or DB record of
+-- pending queries. Timeouts are enforced entirely on the container side (the container
+-- MCP server polls for the response file with a deadline and returns an error if it
+-- expires). This entity is retained because host-side query tracking is a plausible
+-- future improvement that would address known failure modes:
+--
+--   • Orphaned response files: if the container times out (or crashes) before reading
+--     the response, the file is never consumed and accumulates in responses/.
+--   • IPC poll blocking: slow queries (memory_search etc.) hold up all other IPC
+--     processing for that group's directory for their duration. (skill_eval is exempt:
+--     it spawns a throwaway container fire-and-forget and returns immediately.)
+--   • skill_eval orphaned container on host crash: the throwaway eval container runs
+--     fire-and-forget in the background; if the host crashes during the eval, the
+--     container keeps running and occupies a concurrency slot until it exits naturally.
+--     The slot is not released cleanly because GroupQueue is rebuilt fresh on restart.
+--
+-- If host-side tracking is added, remove this note and the allium-ignore suppressions.
 entity IpcQuery {
     author: IpcAuthor
     kind: QueryKind
@@ -95,7 +121,7 @@ config {
     ipc_poll_interval: Integer = 1000      -- host polling cadence for IPC directories (milliseconds)
     query_timeout: Duration = 15.seconds   -- default timeout for transcript + memory queries
     eval_timeout: Duration = 180.seconds   -- timeout for skill_eval (longer: runs a full agent)
-    file_path_prefix: String = "/workspace/ipc/"  -- send_file paths must be under this prefix
+    file_path_prefix: String = "/workspace/ipc-out/"  -- send_file paths must be under this prefix (see container-ipc-transfer.allium)
 }
 
 ------------------------------------------------------------
@@ -127,22 +153,26 @@ rule AgentSentMessage {
 }
 
 -- An agent sends a file to a chat.
--- The file must already exist at a path under /workspace/ipc/ — the only directory
--- visible to both the container and the host at the same location.
--- The host resolves the container path to the corresponding host path and validates
--- it cannot escape the IPC directory via path traversal.
+-- The file must be staged under /workspace/ipc-out/ (the per-invocation outbound staging
+-- area) before calling this tool. Path traversal is rejected by the container MCP server
+-- at write time; the host then takes ownership of the file via the transfer mechanism.
+-- See container-ipc-transfer.allium for the full staging, ownership, and lifecycle model.
 rule AgentSentFile {
-    when: AgentMcpCall(author, "send_file", chat_jid, ipc_relative_path, caption?)
+    when: AgentMcpCall(author, "send_file", chat_jid, file_path, invocation_id, caption?)
 
     requires: author.is_main or chat_jid = own_chat_jid(author)
-    requires: not path_escapes_ipc_dir(ipc_relative_path)
 
-    ensures: FileSent(chat: Chat{jid: chat_jid}, path: ipc_relative_path, caption: caption)
+    ensures: FileSent(chat: Chat{jid: chat_jid}, path: file_path, caption: caption)
 
     @guidance
-        -- The host resolves ipc_relative_path against the group's IPC directory on the
-        -- host filesystem. Path traversal (containing "..") is blocked both in the
-        -- container (MCP validation) and on the host (path.relative check).
+        -- file_path must be an absolute path under /workspace/ipc-out/ (config.ipc_out_container_path
+        -- in container-ipc-transfer.allium). Path traversal (containing "..") is rejected
+        -- by the container MCP server before the IPC file is written.
+        --
+        -- invocation_id identifies the current container run so the host can resolve the
+        -- staged file to its host-side path via the ContainerTransfer record. After delivery
+        -- the TransferFile status is set to expired. See container-ipc-transfer.allium:
+        -- IpcOutMount, ContainerTransfer, and TransferFile for the full ownership model.
 }
 
 -- An agent sets a reaction emoji on the last incoming message in a chat.
@@ -191,10 +221,11 @@ rule AgentSetReaction {
 -- The schedule is validated before the IPC file is written (cron, interval, once).
 -- The dispatchDepth is incremented from the current container's depth to prevent loops.
 rule AgentScheduledTask {
-    when: AgentMcpCall(author, "schedule_task", task_id, target_jid, prompt, schedule, context_mode, script?)
+    when: AgentMcpCall(author, "schedule_task", task_id, target_jid, prompt?, schedule, context_mode, script?, task_type?, min_idle_minutes?)
 
     requires: author.is_main or target_jid = own_chat_jid(author)
     requires: valid_schedule(schedule)
+    requires: task_type = session_reset or task_type = user_profile or prompt != null
 
     ensures: scheduling.TaskCreated(
         group: Group{folder: author.group_folder},
@@ -202,15 +233,41 @@ rule AgentScheduledTask {
         prompt: prompt,
         schedule: schedule,
         context_mode: context_mode,
-        dispatch_depth: author.dispatch_depth + 1
+        dispatch_depth: author.dispatch_depth + 1,
+        task_type: task_type,
+        min_idle_minutes: min_idle_minutes
     )
+
+    @guidance
+        -- task_type selects the task execution mode (default: prompt):
+        --
+        --   prompt         — Runs the given prompt in an isolated or group-context
+        --                    container when the schedule fires. prompt is required.
+        --
+        --   session_reset  — Archives and clears the target group's conversation session
+        --                    without spawning a container. prompt is not required.
+        --                    min_idle_minutes (default 60) sets the minimum idle threshold:
+        --                    if the group has been active more recently than that window,
+        --                    the reset is skipped for this cycle and retried on the next
+        --                    scheduled occurrence.
+        --
+        --   user_profile   — Synthesises the group's memory/USER.md by running an
+        --                    isolated container with a dedicated profile-synthesis
+        --                    prompt. prompt is not required (supplied by the host).
+        --
+        -- dispatch_depth handling (incrementing from the caller's container depth to
+        -- prevent orchestrator-subagent loops) is described in D8 and intentionally
+        -- left for that discussion.
 }
 
 -- When the main group agent creates a task for a *different* group, it is a delegation.
 -- This emits AgentDelegatedTask so orchestration.allium can open an OrchestrationCycle.
 -- Fires in addition to AgentScheduledTask (same trigger, different requires).
 rule DelegationObserved {
-    when: AgentMcpCall(author, "schedule_task", task_id, target_jid, prompt, schedule, context_mode, script?)
+    -- prompt?, task_type?, min_idle_minutes? are present only to align the parameter
+    -- signature with AgentScheduledTask (both rules bind the same trigger). This rule
+    -- does not use them — its requires clauses fully constrain when it fires.
+    when: AgentMcpCall(author, "schedule_task", task_id, target_jid, prompt?, schedule, context_mode, script?, task_type?, min_idle_minutes?)
 
     let sub_group = nanoclaw.Group{chat: nanoclaw.Chat{jid: target_jid}}
 
@@ -286,19 +343,37 @@ rule AgentUpdatedTask {
 -- Non-main groups always subscribe for their own chat (target is implicit).
 -- Main groups may subscribe for any registered group's chat via target_group_jid.
 rule AgentSubscribedFeed {
-    when: AgentMcpCall(author, "subscribe_rss", url, schedule, interest?, target_jid?)
+    when: AgentMcpCall(author, "subscribe_rss", feed_id, feed_url, feed_schedule_type, feed_schedule_value, feed_interest?, target_jid?)
 
     let target = target_jid ?? own_chat_jid(author)
 
     requires: author.is_main or target = own_chat_jid(author)
-    requires: valid_schedule(schedule)
+    requires: valid_schedule(feed_schedule_type, feed_schedule_value)
 
     ensures: scheduling.FeedSubscribed(
         group: Group{folder: author.group_folder},
-        url: url,
-        schedule: schedule,
-        interest: interest
+        feed_id: feed_id,
+        feed_url: feed_url,
+        feed_schedule_type: feed_schedule_type,
+        feed_schedule_value: feed_schedule_value,
+        feed_interest: feed_interest
     )
+
+    @guidance
+        -- feed_id is generated by the container MCP server before writing the IPC
+        -- file. Unlike scheduled tasks (where the host generates a fallback id when
+        -- the agent omits one), the host treats feed_id as required here: if the
+        -- field is missing the subscribe_rss request is rejected outright.
+        --
+        -- feed_schedule_type and feed_schedule_value follow the same split
+        -- representation used by scheduled tasks: type is one of cron, interval,
+        -- or once, and value carries the cron expression, interval duration, or
+        -- one-shot timestamp respectively.
+        --
+        -- feed_interest is an optional natural-language description of what the
+        -- agent cares about in the feed. It is stored alongside the subscription
+        -- and used to filter items at fetch time so the agent is only notified
+        -- about entries matching the stated interest.
 }
 
 -- An agent permanently cancels an RSS feed subscription, retaining the record as a tombstone.
@@ -352,7 +427,7 @@ rule AgentResumedFeed {
 -- is_main cannot be set via IPC — if the group is already registered as main,
 -- that flag is preserved; if not, the new registration has is_main = false.
 rule AgentRegisteredGroup {
-    when: AgentMcpCall(author, "register_group", jid, name, folder, trigger)
+    when: AgentMcpCall(author, "register_group", jid, name, folder, trigger, requires_trigger?)
 
     requires: author.is_main
 
@@ -361,12 +436,14 @@ rule AgentRegisteredGroup {
         folder: folder,
         trigger_pattern: trigger,
         is_main: false,   -- IPC can never elevate a group to main
-        requires_trigger: true
+        requires_trigger: requires_trigger ?? true
     )
 
     @guidance
         -- The folder name must match the channel prefix convention: "{channel}_{group-name}"
         -- (e.g. "whatsapp_family-chat"). The host validates the folder name is filesystem-safe.
+        -- requires_trigger is taken from the IPC payload when provided and defaults to true
+        -- when the caller omits it, matching the host's behaviour in src/ipc.ts.
         -- If the group was already registered, its is_main flag is preserved (not overwritten).
 }
 
@@ -441,10 +518,11 @@ rule SubGroupDeliveredResult {
 }
 
 -- ---- Specialist Tools ----
--- These tools are available in specialist containers, which use a per-task IPC namespace
--- (DATA_DIR/ipc/specialists/{task-id}/) separate from regular group IPC directories.
--- Authorization is determined by which specialist IPC directory the file appeared in;
--- the host resolves the task from the directory name, not from payload contents.
+-- These tools are available in specialist containers, whose per-task IPC directories
+-- (DATA_DIR/ipc/spec-{task-id}/) sit as siblings of group IPC directories and are scanned
+-- by the same polling loop. Authorization is determined by which IPC directory the file
+-- appeared in: the host recognises the "spec-" prefix and resolves the task from the
+-- directory name, not from payload contents.
 -- This follows the same trust model as regular IPC (see IpcAuthor / SpecialistIpcAuthor).
 
 -- The main group agent dispatches a task to a specialist type.
@@ -452,7 +530,7 @@ rule SubGroupDeliveredResult {
 -- The main group's regular IPC directory is used (not a specialist IPC directory),
 -- since the caller is the main group agent, not a specialist.
 rule AgentDispatchedSpecialist {
-    when: AgentMcpCall(author, "dispatch_specialist", specialist_type_name, prompt)
+    when: AgentMcpCall(author, "dispatch_specialist_task", specialist_type_name, prompt)
 
     requires: author.is_main
 
@@ -467,7 +545,8 @@ rule AgentDispatchedSpecialist {
     )
 
     @guidance
-        -- The tool is fire-and-forget from the main group agent's perspective: it returns
+        -- The wire tool name is "dispatch_specialist_task" (main-group only). It is
+        -- fire-and-forget from the main group agent's perspective: it returns
         -- immediately with the assigned task_id. The specialist result is delivered back
         -- to the main group's session asynchronously once the specialist completes.
         -- Available only to the main group agent because specialist dispatch is an
@@ -479,7 +558,7 @@ rule AgentDispatchedSpecialist {
 -- The specialist's container exits after this call; the sub-task runs in its own container,
 -- and the specialist is re-invoked with the result.
 rule SpecialistDispatchedSubTask {
-    when: SpecialistMcpCall(spec_author, "dispatch_sub_task", target_type_name, prompt)
+    when: SpecialistMcpCall(spec_author, "dispatch_specialist", target_type_name, prompt)
 
     requires: spec_author.task.status = running
 
@@ -496,10 +575,13 @@ rule SpecialistDispatchedSubTask {
     )
 
     @guidance
+        -- The wire tool name is "dispatch_specialist" (specialist-only); main-group agents
+        -- use "dispatch_specialist_task" instead (AgentDispatchedSpecialist).
         -- session_id is captured from the specialist's active Claude conversation so the
         -- specialist can resume its chain of thought when re-invoked after the sub-task
-        -- completes. The host reads it from the container's session state, not from the
-        -- IPC file payload.
+        -- completes. The container reads its current session id via readCurrentSessionId()
+        -- and writes it into the IPC file payload; the host reads it directly from the
+        -- payload (data.sessionId), it is not resolved from any host-side session state.
         -- The tool returns synchronously with success or a rejection error (cycle_detected,
         -- depth_exceeded, count_exceeded, same_type_limit_exceeded). On success, the
         -- specialist's container is expected to exit cleanly; no further output is expected.
@@ -511,7 +593,7 @@ rule SpecialistDispatchedSubTask {
 -- Unlike dispatch_sub_task, this is synchronous: the specialist does not exit and
 -- continues working after receiving the acknowledgement.
 rule SpecialistSubmittedMemory {
-    when: SpecialistMcpCall(spec_author, "submit_memory", topic, content)
+    when: SpecialistMcpCall(spec_author, "submit_raw_memory", topic, content)
 
     requires: spec_author.task.status = running
 
@@ -524,6 +606,7 @@ rule SpecialistSubmittedMemory {
     )
 
     @guidance
+        -- The wire tool name is "submit_raw_memory".
         -- The host writes content to the staging_path before returning the acknowledgement.
         -- staging_path is generated by the host from the task identity and topic label:
         -- groups/main/memory/staging/{date}-{specialist-type}-{sanitised-topic}.md
@@ -532,6 +615,63 @@ rule SpecialistSubmittedMemory {
         -- The tool returns the staging_path on success or an error on infrastructure failure
         -- (disk full, bad mount, permissions). It does not wait for the main group to be
         -- notified — notification is dispatched asynchronously by the host.
+}
+
+-- A running specialist queries a memory-provider specialist.
+-- This is the IPC bridge for specialists.SpecialistQueriesMemory.
+-- Unlike dispatch_specialist, this bypasses delegation policy (cycle/depth/count
+-- checks) because memory providers are read-only information sources. The target
+-- must have isMemoryProvider = true; regular specialist types are rejected.
+-- The sessionId is recorded so the memory provider's response can be injected
+-- back into the querying specialist's Claude conversation when it resumes.
+rule SpecialistQueriedMemory {
+    when: SpecialistMcpCall(spec_author, "query_memory_specialist", target_type_name, prompt, session_id)
+
+    requires: spec_author.task.status = running
+
+    let target_type = specialists.SpecialistType{name: target_type_name}
+
+    requires: exists target_type
+    requires: target_type.is_memory_provider = true
+
+    ensures: SpecialistMemoryQueryRequested(
+        querying_task: spec_author.task,
+        target_type: target_type,
+        prompt: prompt,
+        session_id: session_id
+    )
+
+    @guidance
+        -- The wire tool name is "query_memory_specialist" (specialist-only).
+        -- The host records the querying specialist's current session_id via reportSession
+        -- before starting the memory-provider container, so the provider's reply can be
+        -- delivered back into the querying specialist's conversation on resume.
+        -- Delegation policy (cycle detection, depth limit, dispatch count, same-type
+        -- limit) does not apply here: memory providers are treated as read-only lookups
+        -- rather than delegated sub-tasks. Targets that are not flagged as memory
+        -- providers are rejected with an error and the querying specialist remains running.
+}
+
+-- A running specialist reports its Claude conversation session id to the host.
+-- This is the IPC bridge for specialists.SpecialistSessionEstablished.
+-- Called by the specialist container as soon as its Claude session is established,
+-- so the host can track the session id for continuity across specialist runs
+-- (e.g. resuming after a sub-task or memory query completes).
+rule SpecialistSessionReported {
+    when: SpecialistMcpCall(spec_author, "report_specialist_session", session_id)
+
+    ensures: SpecialistSessionRecorded(
+        task: spec_author.task,
+        session_id: session_id
+    )
+
+    @guidance
+        -- The wire tool name is "report_specialist_session".
+        -- The host upserts a SpecialistConversationSession row keyed by task_id:
+        -- if no session exists it creates one with status = active; if one already
+        -- exists it updates the session_id and sets status = active. This is how the
+        -- host tracks session ids so a specialist can resume its chain of thought
+        -- when re-invoked after a sub-task or memory query completes.
 }
 
 -- A running specialist delivers its final result.
@@ -744,13 +884,21 @@ rule AgentQueriedSkillEval {
     )
 
     @guidance
-        -- The host snapshots the main group workspace for isolation, runs a fresh
-        -- container agent with the given prompt, optionally excluding the named skill,
-        -- then grades the assertions using an LLM grader.
+        -- MCP tool name: skill_eval. IPC task file type: run_skill_eval.
+        -- The host picks up the run_skill_eval task file and processes it fire-and-forget:
+        -- it snapshots the main group workspace for isolation, runs a fresh container agent
+        -- with the given prompt (optionally excluding the named skill), grades the assertions
+        -- using an LLM grader, and writes the response file when done.
         -- The response payload includes: status, passed, assertionResults, output, durationMs, totalTokens.
 }
 
 -- A query times out if the host has not written a response file within the timeout window.
+-- NOTE: this rule describes the intended logical behaviour, not a host-enforced transition.
+-- Timeouts are currently enforced container-side only: the container MCP server polls for
+-- the response file with a per-kind deadline (15s for most queries, 180s for skill_eval
+-- which spawns a full agent container)
+-- and returns an error to the agent when it expires. The host has no timeout poller.
+-- See the IpcQuery entity note above for the full set of failure modes this implies.
 rule IpcQueryTimedOut {
     when: q: IpcQuery.issued_at + query_timeout_for(q.kind) <= now
 

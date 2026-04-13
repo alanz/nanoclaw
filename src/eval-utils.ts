@@ -1,6 +1,6 @@
 /**
  * Shared utilities for skill evaluation.
- * Used by scripts/eval-skill.ts (CLI) and the run_eval IPC handler (chat-triggered evals).
+ * Used by scripts/eval-skill.ts (CLI) and the run_skill_eval IPC handler (chat-triggered evals).
  */
 
 import Anthropic from '@anthropic-ai/sdk';

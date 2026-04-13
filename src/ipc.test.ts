@@ -68,14 +68,14 @@ function makeDeps(overrides: Partial<IpcDeps> = {}): IpcDeps {
   };
 }
 
-describe('run_eval', () => {
+describe('run_skill_eval', () => {
   it('blocks non-main groups', async () => {
     const deps = makeDeps();
 
     // Should return without writing any response file (no filesystem side effects)
     await processTaskIpc(
       {
-        type: 'run_eval',
+        type: 'run_skill_eval',
         requestId: 'req-1',
         skillName: 'test-skill',
         prompt: 'do something',
@@ -95,7 +95,7 @@ describe('run_eval', () => {
 
     await processTaskIpc(
       {
-        type: 'run_eval',
+        type: 'run_skill_eval',
         // missing requestId, skillName, prompt, withSkill
       },
       'main',
@@ -126,7 +126,7 @@ describe('run_eval', () => {
       try {
         await processTaskIpc(
           {
-            type: 'run_eval',
+            type: 'run_skill_eval',
             requestId: 'req-err',
             skillName: 'test-skill',
             prompt: 'do something',

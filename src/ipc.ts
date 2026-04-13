@@ -351,7 +351,7 @@ export async function processTaskIpc(
     // For deliver_result / schedule_task depth tracking
     dispatchDepth?: number;
     text?: string;
-    // For run_eval
+    // For run_skill_eval
     skillName?: string;
     caseId?: string;
     withSkill?: boolean;
@@ -1199,9 +1199,9 @@ export async function processTaskIpc(
       break;
     }
 
-    case 'run_eval': {
+    case 'run_skill_eval': {
       if (!isMain) {
-        logger.warn({ sourceGroup }, 'run_eval blocked: not main group');
+        logger.warn({ sourceGroup }, 'run_skill_eval blocked: not main group');
         break;
       }
       if (
@@ -1212,7 +1212,7 @@ export async function processTaskIpc(
       ) {
         logger.warn(
           { data },
-          'Invalid run_eval request — missing required fields',
+          'Invalid run_skill_eval request — missing required fields',
         );
         break;
       }
@@ -1222,7 +1222,7 @@ export async function processTaskIpc(
 
       const mainGroup = Object.values(registeredGroups).find((g) => g.isMain);
       if (!mainGroup) {
-        logger.warn({ sourceGroup }, 'run_eval: main group not found');
+        logger.warn({ sourceGroup }, 'run_skill_eval: main group not found');
         fs.writeFileSync(
           responsePath,
           JSON.stringify({
@@ -1276,7 +1276,7 @@ export async function processTaskIpc(
 
           logger.info(
             { requestId: data.requestId, sourceGroup, durationMs },
-            'run_eval completed',
+            'run_skill_eval completed',
           );
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
@@ -1286,7 +1286,7 @@ export async function processTaskIpc(
           );
           logger.error(
             { requestId: data.requestId, sourceGroup, err },
-            'run_eval failed',
+            'run_skill_eval failed',
           );
         } finally {
           cleanup();

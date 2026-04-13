@@ -1490,7 +1490,7 @@ server.tool(
     const responsePath = path.join(IPC_DIR, 'responses', `${requestId}.json`);
 
     writeIpcFile(TASKS_DIR, {
-      type: 'run_eval',
+      type: 'run_skill_eval',
       requestId,
       skillName: args.skill_name,
       caseId: args.case_id,

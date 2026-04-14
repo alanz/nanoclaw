@@ -26,6 +26,23 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
+// --- WebXDC store mock ---
+
+const webxdcStoreMock = vi.hoisted(() => ({
+  getActiveWebxdcMsgId: vi.fn<(jid: string) => number | undefined>(
+    () => undefined,
+  ),
+  setActiveWebxdcSession: vi.fn(),
+  clearWebxdcSession: vi.fn(),
+  enqueueWebxdcUpdate: vi.fn(),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dequeueWebxdcUpdates: vi.fn(() => [] as any[]),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  peekWebxdcUpdates: vi.fn(() => [] as any[]),
+}));
+
+vi.mock('./webxdc-store.js', () => webxdcStoreMock);
+
 // --- DeltaChat RPC mock ---
 
 type EventHandler = (...args: any[]) => any;
@@ -72,6 +89,11 @@ vi.mock('@deltachat/stdio-rpc-server', () => ({
         sendMsg: vi.fn().mockResolvedValue(42),
         sendReaction: vi.fn().mockResolvedValue(undefined),
         sendEditRequest: vi.fn().mockResolvedValue(null),
+        sendWebxdcStatusUpdate: vi.fn().mockResolvedValue(null),
+        sendWebxdcRealtimeData: vi.fn().mockResolvedValue(null),
+        sendWebxdcRealtimeAdvertisement: vi.fn().mockResolvedValue(null),
+        getWebxdcStatusUpdates: vi.fn().mockResolvedValue('[]'),
+        getChatContacts: vi.fn().mockResolvedValue([1, 5]),
       },
       getContextEvents: vi.fn(() => emitter),
     };
@@ -1401,6 +1423,313 @@ describe('DeltaChatChannel', () => {
       await channel.editMessage(JID, 'not-a-number', 'Updated text');
 
       expect(dc.rpc.sendEditRequest).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- WebXDC ---
+
+  describe('/app command', () => {
+    it('sends the .xdc file and records the session', async () => {
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/app' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({
+          file: expect.stringContaining('nanoclaw.xdc'),
+        }),
+      );
+      expect(webxdcStoreMock.setActiveWebxdcSession).toHaveBeenCalledWith(
+        JID,
+        42, // sendMsg mock returns 42
+      );
+    });
+
+    it('does not route /app to the agent', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/app' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('/app reset sends clear update and calls clearWebxdcSession', async () => {
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(99);
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/app reset' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendWebxdcStatusUpdate).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        99,
+        expect.stringContaining('"type":"clear"'),
+        'clear',
+      );
+      expect(webxdcStoreMock.clearWebxdcSession).toHaveBeenCalledWith(JID);
+    });
+
+    it('/app reset sends error message when no active session', async () => {
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(undefined);
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/app reset' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendWebxdcStatusUpdate).not.toHaveBeenCalled();
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: expect.stringContaining('No active') }),
+      );
+    });
+  });
+
+  describe('WebxdcStatusUpdate event', () => {
+    it('drains queue via email on ping', async () => {
+      webxdcStoreMock.dequeueWebxdcUpdates.mockReturnValue([
+        { content: 'hi', title: 'Andy', timestamp: 1000 },
+      ]);
+      const { dc } = await buildConnectedChannel({ registered: true });
+
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([{ payload: { type: 'ping' } }]),
+      );
+
+      emitterRef.current.emit('WebxdcStatusUpdate', {
+        msgId: 77,
+        statusUpdateSerial: 1,
+      });
+      await settle();
+
+      // First call is the meta update; second call is the queued content
+      expect(dc.rpc.sendWebxdcStatusUpdate).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        77,
+        expect.stringContaining('"content":"hi"'),
+        null, // item.description is undefined → null via ?? null
+      );
+    });
+
+    it('routes user_message to agent with surface note', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+
+      // getMessage is called to find the chat for this webxdc session
+      dc.rpc.getMessage.mockResolvedValueOnce({ chatId: CHAT_ID });
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([
+          { payload: { type: 'user_message', content: 'What time is it?' } },
+        ]),
+      );
+
+      emitterRef.current.emit('WebxdcStatusUpdate', {
+        msgId: 77,
+        statusUpdateSerial: 1,
+      });
+      await settle();
+
+      // Echoes the user message back
+      expect(dc.rpc.sendWebxdcStatusUpdate).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        77,
+        expect.stringContaining('"type":"user_echo"'),
+        '',
+      );
+
+      // Routes to agent
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          content: expect.stringContaining('What time is it?'),
+        }),
+      );
+      // Content includes the surface note
+      const call = (opts.onMessage as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(call[1].content).toContain('[Surface: WebXDC');
+    });
+
+    it('deduplicates repeated user_message with same content', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+
+      dc.rpc.getMessage.mockResolvedValue({ chatId: CHAT_ID });
+      dc.rpc.getContact.mockResolvedValue(makeContact());
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValue(
+        JSON.stringify([
+          { payload: { type: 'user_message', content: 'duplicate' } },
+        ]),
+      );
+
+      // Fire twice rapidly
+      emitterRef.current.emit('WebxdcStatusUpdate', {
+        msgId: 77,
+        statusUpdateSerial: 1,
+      });
+      emitterRef.current.emit('WebxdcStatusUpdate', {
+        msgId: 77,
+        statusUpdateSerial: 2,
+      });
+      await settle();
+
+      expect(opts.onMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('converts action payload to user_message before routing', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+
+      dc.rpc.getMessage.mockResolvedValueOnce({ chatId: CHAT_ID });
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([
+          {
+            payload: {
+              type: 'action',
+              actionId: 'confirm',
+              value: 'Yes',
+              surfaceId: 'menu',
+            },
+          },
+        ]),
+      );
+
+      emitterRef.current.emit('WebxdcStatusUpdate', {
+        msgId: 77,
+        statusUpdateSerial: 1,
+      });
+      await settle();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          content: expect.stringContaining('[Action: confirm = "Yes"]'),
+        }),
+      );
+    });
+
+    it('ignores unknown payload types', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([{ payload: { type: 'unknown_type' } }]),
+      );
+
+      emitterRef.current.emit('WebxdcStatusUpdate', {
+        msgId: 77,
+        statusUpdateSerial: 1,
+      });
+      await settle();
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('WebxdcRealtimeAdvertisementReceived event', () => {
+    it('drains queue via realtime when items are queued', async () => {
+      webxdcStoreMock.peekWebxdcUpdates.mockReturnValue([
+        { content: 'realtime!', title: 'Andy', timestamp: 1000 },
+      ]);
+      const { dc } = await buildConnectedChannel({ registered: true });
+
+      emitterRef.current.emit('WebxdcRealtimeAdvertisementReceived', {
+        msgId: 55,
+      });
+      await settle();
+
+      expect(dc.rpc.sendWebxdcRealtimeData).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        55,
+        expect.any(Array), // encoded bytes
+      );
+      expect(webxdcStoreMock.dequeueWebxdcUpdates).toHaveBeenCalledWith(55);
+    });
+
+    it('does nothing when queue is empty', async () => {
+      webxdcStoreMock.peekWebxdcUpdates.mockReturnValue([]);
+      const { dc } = await buildConnectedChannel({ registered: true });
+
+      emitterRef.current.emit('WebxdcRealtimeAdvertisementReceived', {
+        msgId: 55,
+      });
+      await settle();
+
+      expect(dc.rpc.sendWebxdcRealtimeData).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sendWebxdcUpdate', () => {
+    it('enqueues the item and attempts realtime delivery', async () => {
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(99);
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendWebxdcUpdate(JID, {
+        content: 'Hello from agent',
+        title: 'Andy',
+      });
+
+      expect(webxdcStoreMock.enqueueWebxdcUpdate).toHaveBeenCalledWith(
+        99,
+        expect.objectContaining({ content: 'Hello from agent', title: 'Andy' }),
+      );
+      expect(dc.rpc.sendWebxdcRealtimeAdvertisement).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        99,
+      );
+      expect(dc.rpc.sendWebxdcRealtimeData).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        99,
+        expect.any(Array),
+      );
+    });
+
+    it('falls back to plain sendMessage when no active session', async () => {
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(undefined);
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendWebxdcUpdate(JID, { content: 'fallback text' });
+
+      // Should have sent a regular message instead
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: 'fallback text' }),
+      );
+    });
+
+    it('passes surfaceId and type through to the queued item', async () => {
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(99);
+      const { channel } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendWebxdcUpdate(JID, {
+        content: 'Pick one',
+        title: 'Menu',
+        type: 'interactive',
+        surfaceId: 'main-menu',
+        components: [{ id: 'a', type: 'button', label: 'A' }],
+      });
+
+      expect(webxdcStoreMock.enqueueWebxdcUpdate).toHaveBeenCalledWith(
+        99,
+        expect.objectContaining({
+          type: 'interactive',
+          surfaceId: 'main-menu',
+          components: expect.any(Array),
+        }),
+      );
     });
   });
 });

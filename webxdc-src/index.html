@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoClaw Output</title>
+  <script src="webxdc.js"></script>
+  <script src="marked.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 17px;
+      line-height: 1.6;
+      background: #f5f5f5;
+      color: #1a1a1a;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1a1a; color: #e8e8e8; }
+      .card { background: #2a2a2a; border-color: #3a3a3a; }
+      .card-meta { color: #888; }
+      code { background: #333; color: #e8e8e8; }
+      pre { background: #2d2d2d; border-color: #3a3a3a; }
+      table td, table th { border-color: #444; }
+      table th { background: #333; }
+      table tr:nth-child(even) { background: #2d2d2d; }
+      #empty { color: #555; }
+      #input-area { background: #222; border-color: #333; }
+      #footer { background: #222; }
+      #message-input { background: #2a2a2a; color: #e8e8e8; border-color: #444; }
+    }
+
+    #feed {
+      width: 100%;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-sizing: border-box;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 10px;
+      padding: 14px 16px;
+      word-break: break-word;
+      min-width: 0;
+    }
+
+    .card-meta {
+      font-size: 11px;
+      color: #999;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .card-body h1, .card-body h2, .card-body h3 {
+      margin: 0.8em 0 0.4em;
+      line-height: 1.3;
+    }
+    .card-body h1 { font-size: 1.3em; }
+    .card-body h2 { font-size: 1.15em; }
+    .card-body h3 { font-size: 1em; }
+    .card-body h1:first-child,
+    .card-body h2:first-child,
+    .card-body h3:first-child { margin-top: 0; }
+
+    .card-body p { margin: 0.5em 0; }
+    .card-body p:first-child { margin-top: 0; }
+    .card-body p:last-child { margin-bottom: 0; }
+
+    .card-body ul, .card-body ol {
+      padding-left: 1.4em;
+      margin: 0.4em 0;
+    }
+    .card-body li { margin: 0.2em 0; }
+
+    .card-body code {
+      background: #f0f0f0;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 0.88em;
+      font-family: "SF Mono", "Fira Code", Consolas, monospace;
+    }
+
+    .card-body pre {
+      background: #f6f6f6;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      margin: 0.6em 0;
+    }
+    .card-body pre code {
+      background: none;
+      padding: 0;
+      font-size: 0.85em;
+    }
+
+    .card-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0.6em 0;
+      font-size: 0.9em;
+      display: block;
+      overflow-x: auto;
+    }
+    .card-body th, .card-body td {
+      border: 1px solid #ddd;
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .card-body th {
+      background: #f0f0f0;
+      font-weight: 600;
+    }
+    .card-body tr:nth-child(even) { background: #fafafa; }
+
+    .card-body blockquote {
+      border-left: 3px solid #ccc;
+      margin: 0.5em 0;
+      padding: 0.3em 0.8em;
+      color: #666;
+    }
+
+    .card-body hr {
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      margin: 0.8em 0;
+    }
+
+    .card-body a { color: #0066cc; }
+
+    .card-body img, .card-body svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0.4em 0;
+    }
+
+    #empty {
+      text-align: center;
+      color: #aaa;
+      padding: 60px 20px;
+      font-size: 0.95em;
+    }
+
+    #empty .icon { font-size: 2em; margin-bottom: 10px; }
+
+    /* Chat interface */
+    #chat-container {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    #feed {
+      flex: 1;
+      overflow-y: auto;
+      padding-bottom: 12px;
+    }
+
+    .card.user-message {
+      background: #0066cc;
+      color: white;
+      border-color: #0052a3;
+      align-self: flex-end;
+      width: fit-content;
+      max-width: 70%;
+    }
+
+    .card.user-message .card-meta {
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    .card.user-message a { color: #66d9ff; }
+
+    #input-area {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      background: #fff;
+      border-top: 1px solid #e0e0e0;
+      flex-shrink: 0;
+    }
+
+    #footer {
+      padding: 4px 12px;
+      font-size: 11px;
+      color: #888;
+      text-align: right;
+      background: #fff;
+    }
+
+    #message-input {
+      flex: 1;
+      padding: 10px 12px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 15px;
+      font-family: inherit;
+    }
+
+    #message-input:focus {
+      outline: none;
+      border-color: #0066cc;
+      box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+    }
+
+    #send-btn {
+      padding: 10px 18px;
+      background: #0066cc;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    #send-btn:hover { background: #0052a3; }
+    #send-btn:active { background: #004399; }
+    #send-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+    /* Interactive component cards */
+    .card.interactive .card-components {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .card.interactive .comp-button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .card.interactive .comp-btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .card.interactive .comp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .card.interactive .comp-btn.primary { background: #0066cc; color: white; }
+    .card.interactive .comp-btn.primary:hover { background: #0052a3; }
+    .card.interactive .comp-btn.secondary { background: #e8e8e8; color: #333; }
+    .card.interactive .comp-btn.secondary:hover { background: #d8d8d8; }
+    .card.interactive .comp-btn.danger { background: #dc2626; color: white; }
+    .card.interactive .comp-btn.danger:hover { background: #b91c1c; }
+
+    .card.interactive .comp-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: #555;
+      margin-bottom: 2px;
+    }
+
+    .card.interactive .comp-input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 15px;
+      font-family: inherit;
+    }
+    .card.interactive .comp-input:focus {
+      outline: none;
+      border-color: #0066cc;
+      box-shadow: 0 0 0 2px rgba(0,102,204,0.15);
+    }
+
+    .card.interactive .comp-select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 15px;
+      font-family: inherit;
+      background: white;
+    }
+
+    .card.interactive.responded {
+      opacity: 0.65;
+    }
+    .card.interactive .comp-response-note {
+      font-size: 12px;
+      color: #888;
+      margin-top: 6px;
+      font-style: italic;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .card.interactive .comp-label { color: #aaa; }
+      .card.interactive .comp-input,
+      .card.interactive .comp-select { background: #2a2a2a; color: #e8e8e8; border-color: #444; }
+      .card.interactive .comp-btn.secondary { background: #3a3a3a; color: #e0e0e0; }
+    }
+  </style>
+</head>
+<body>
+  <div id="chat-container">
+    <div id="status" style="font-size:11px;color:#666;padding:4px 10px;background:#f8f8f8;font-family:monospace;border-bottom:1px solid #e0e0e0">initialising…</div>
+    <div id="feed">
+      <div id="empty">
+        <div class="icon">🐾</div>
+        Waiting for NanoClaw output…
+      </div>
+    </div>
+    <div id="input-area">
+      <input id="message-input" type="text" placeholder="Type a message…" />
+      <button id="send-btn">Send</button>
+    </div>
+    <div id="footer"></div>
+  </div>
+
+  <script>
+    const feed = document.getElementById('feed');
+    const empty = document.getElementById('empty');
+    const seen = new Set(); // deduplicate by content-based key
+    const surfaces = new Map(); // surfaceId → card DOM element (for in-place updates)
+
+    marked.setOptions({ breaks: true, gfm: true });
+
+    // --- localStorage persistence ---
+    const STORAGE_KEY = 'nanoclaw-chat-v1';
+    const MAX_STORED = 100; // keep last 100 cards
+    let storedCards = [];
+
+    function saveToStorage() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(storedCards.slice(-MAX_STORED)));
+      } catch { /* quota exceeded — ignore */ }
+    }
+
+    function loadFromStorage() {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      } catch { return []; }
+    }
+
+    function formatTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    // sendActionFn is set after webxdc init
+    let sendActionFn = null;
+
+    function renderComponents(components, card, surfaceId) {
+      const container = document.createElement('div');
+      container.className = 'card-components';
+
+      // Collect text/select inputs by id for submit
+      const inputRefs = {};
+      const buttonRow = document.createElement('div');
+      buttonRow.className = 'comp-button-row';
+      let hasButtons = false;
+
+      components.forEach(comp => {
+        if (comp.type === 'button') {
+          hasButtons = true;
+          const btn = document.createElement('button');
+          btn.className = `comp-btn ${comp.style || 'primary'}`;
+          btn.textContent = comp.label || comp.id;
+          btn.onclick = () => {
+            if (!sendActionFn) return;
+            sendActionFn({ actionId: comp.id, value: comp.label || comp.id, surfaceId });
+            // Disable all inputs on this card after action
+            card.classList.add('responded');
+            card.querySelectorAll('.comp-btn, .comp-input, .comp-select').forEach(el => el.disabled = true);
+            const note = document.createElement('div');
+            note.className = 'comp-response-note';
+            note.textContent = `✓ "${comp.label || comp.id}" sent`;
+            container.appendChild(note);
+          };
+          buttonRow.appendChild(btn);
+        } else if (comp.type === 'text' || comp.type === 'input') {
+          const wrap = document.createElement('div');
+          if (comp.label) {
+            const label = document.createElement('div');
+            label.className = 'comp-label';
+            label.textContent = comp.label;
+            wrap.appendChild(label);
+          }
+          const input = document.createElement('input');
+          input.className = 'comp-input';
+          input.type = 'text';
+          input.placeholder = comp.placeholder || '';
+          input.id = `comp-${surfaceId || 'x'}-${comp.id}`;
+          inputRefs[comp.id] = input;
+          wrap.appendChild(input);
+          container.appendChild(wrap);
+        } else if (comp.type === 'select') {
+          const wrap = document.createElement('div');
+          if (comp.label) {
+            const label = document.createElement('div');
+            label.className = 'comp-label';
+            label.textContent = comp.label;
+            wrap.appendChild(label);
+          }
+          const sel = document.createElement('select');
+          sel.className = 'comp-select';
+          (comp.options || []).forEach(opt => {
+            const o = document.createElement('option');
+            o.value = typeof opt === 'string' ? opt : opt.value;
+            o.textContent = typeof opt === 'string' ? opt : (opt.label || opt.value);
+            sel.appendChild(o);
+          });
+          inputRefs[comp.id] = sel;
+          wrap.appendChild(sel);
+          container.appendChild(wrap);
+        } else if (comp.type === 'submit') {
+          hasButtons = true;
+          const btn = document.createElement('button');
+          btn.className = `comp-btn ${comp.style || 'primary'}`;
+          btn.textContent = comp.label || 'Submit';
+          btn.onclick = () => {
+            if (!sendActionFn) return;
+            const values = {};
+            Object.entries(inputRefs).forEach(([id, el]) => { values[id] = el.value; });
+            sendActionFn({ actionId: comp.id, value: values, surfaceId });
+            card.classList.add('responded');
+            card.querySelectorAll('.comp-btn, .comp-input, .comp-select').forEach(el => el.disabled = true);
+            const note = document.createElement('div');
+            note.className = 'comp-response-note';
+            note.textContent = `✓ submitted`;
+            container.appendChild(note);
+          };
+          buttonRow.appendChild(btn);
+        }
+      });
+
+      if (hasButtons) container.appendChild(buttonRow);
+      return container;
+    }
+
+    function addCard(update, isUserMessage = false) {
+      const { content, title, timestamp, surfaceId, components, type } = update.payload;
+      const payloadType = type;
+      const isUser = payloadType === 'user_message' || payloadType === 'user_echo';
+      const isInteractive = payloadType === 'interactive';
+
+      if (!content && !isInteractive) return;
+
+      // Dedup key
+      const key = isUser
+        ? `user:${(content||'').slice(0, 60)}`
+        : surfaceId
+          ? `surface:${surfaceId}`
+          : `${timestamp}:${(content||'').slice(0, 40)}`;
+
+      // Named surface: update in-place if exists
+      if (surfaceId && surfaces.has(surfaceId)) {
+        const existing = surfaces.get(surfaceId);
+        // Update content
+        const bodyEl = existing.querySelector('.card-body');
+        const compsEl = existing.querySelector('.card-components');
+        if (bodyEl && content) bodyEl.innerHTML = marked.parse(content);
+        if (compsEl) compsEl.remove();
+        if (isInteractive && components?.length) {
+          existing.appendChild(renderComponents(components, existing, surfaceId));
+        }
+        // Update meta timestamp
+        const timeEl = existing.querySelector('.card-meta span:last-child');
+        if (timeEl) timeEl.textContent = formatTime(timestamp);
+        // Re-enable interactions if new card arrives
+        existing.classList.remove('responded');
+        existing.querySelectorAll('.comp-btn, .comp-input, .comp-select').forEach(el => el.disabled = false);
+        existing.querySelectorAll('.comp-response-note').forEach(el => el.remove());
+        // Update storage
+        const idx = storedCards.findIndex(c => c.payload.surfaceId === surfaceId);
+        if (idx >= 0) storedCards[idx] = { payload: update.payload, isUser: isUserMessage };
+        else storedCards.push({ payload: update.payload, isUser: isUserMessage });
+        saveToStorage();
+        return;
+      }
+
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      if (empty) empty.style.display = 'none';
+
+      const card = document.createElement('div');
+      let cardClass = isUserMessage ? 'card user-message' : 'card';
+      if (isInteractive) cardClass += ' interactive';
+      card.className = cardClass;
+
+      const meta = document.createElement('div');
+      meta.className = 'card-meta';
+      meta.innerHTML = `<span>${title || 'NanoClaw'}</span><span>${formatTime(timestamp)}</span>`;
+
+      const body = document.createElement('div');
+      body.className = 'card-body';
+      if (content) {
+        // Unescape literal \n from LLM tool calls (JSON-encoded newlines sometimes arrive as 2-char sequences)
+        const normalised = content.replace(/\\n/g, '\n');
+        body.innerHTML = isUserMessage
+          ? normalised.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')
+          : marked.parse(normalised);
+      }
+
+      card.appendChild(meta);
+      card.appendChild(body);
+
+      // Render interactive components
+      if (isInteractive && components?.length) {
+        card.appendChild(renderComponents(components, card, surfaceId));
+      }
+
+      // Register named surface
+      if (surfaceId) surfaces.set(surfaceId, card);
+
+      feed.appendChild(card);
+      window.scrollTo(0, document.body.scrollHeight);
+
+      // Persist to localStorage
+      storedCards.push({ payload: update.payload, isUser: isUserMessage });
+      saveToStorage();
+    }
+
+    function clearFeed() {
+      const cards = feed.querySelectorAll('.card');
+      cards.forEach(c => c.remove());
+      if (empty) empty.style.display = '';
+      surfaces.clear();
+      storedCards = [];
+      saveToStorage();
+    }
+
+    const status = document.getElementById('status');
+    function setStatus(msg) { status.textContent = msg; }
+
+    // --- Restore from cache immediately on load (before webxdc API ready) ---
+    (function restoreCache() {
+      const cached = loadFromStorage();
+      if (cached.length > 0) {
+        cached.forEach(({ payload, isUser }) => addCard({ payload }, isUser));
+        setStatus(`📋 ${cached.length} message${cached.length > 1 ? 's' : ''} from cache — connecting…`);
+      }
+    })();
+
+    let attempts = 0;
+    function initWebxdc() {
+      attempts++;
+      if (typeof window.webxdc === 'undefined') {
+        setStatus(`waiting for webxdc API… (attempt ${attempts})`);
+        if (attempts < 20) setTimeout(initWebxdc, 300);
+        else setStatus('❌ webxdc API not available — not running inside Delta.Chat?');
+        return;
+      }
+
+      // Read runtime limits
+      const maxSize = window.webxdc.sendUpdateMaxSize || Infinity;
+      const footer = document.getElementById('footer');
+
+      setStatus('✅ webxdc ready');
+
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+
+      function handleMessage(payload) {
+        if (!payload) return;
+        if (payload.type === 'clear') {
+          clearFeed();
+        } else if (payload.type === 'message' || payload.type === 'interactive') {
+          setStatus(`✅ received at ${new Date().toLocaleTimeString()}`);
+          addCard({ payload });
+        } else if (payload.type === 'user_message' || payload.type === 'user_echo') {
+          addCard({ payload }, true);
+        } else if (payload.type === 'meta') {
+          if (footer) {
+            footer.textContent = `ID: ${payload.msgId}${maxSize !== Infinity ? ` · max ${Math.round(maxSize/1024)}KB` : ''}`;
+          }
+        }
+      }
+
+      // --- Realtime channel (P2P, near-instant) ---
+      let rt = null;
+      try {
+        rt = window.webxdc.joinRealtimeChannel();
+        rt.setListener((data) => {
+          try {
+            const msg = JSON.parse(dec.decode(data));
+            handleMessage(msg);
+          } catch {}
+        });
+        // Announce presence to bot
+        rt.send(enc.encode(JSON.stringify({ type: 'ready' })));
+        setStatus('📡 realtime channel open');
+      } catch (e) {
+        setStatus('⚠️ realtime not available, using poll fallback');
+      }
+
+      // --- Status update listener: replay history then ping for fresh content ---
+      // setUpdateListener() returns a Promise that resolves once all historical
+      // updates have been replayed (pattern from webxdc-test). We send a ping
+      // AFTER replay is complete so the bot delivers any queued content exactly
+      // once, not during replay.
+      window.webxdc.setUpdateListener((update) => {
+        if (!update.payload) return;
+        handleMessage(update.payload);
+      }, 0).then(() => {
+        // All stored updates replayed — now request any fresh queued content
+        setStatus('🔄 catching up…');
+        window.webxdc.sendUpdate({ payload: { type: 'ping' } }, '');
+      }).catch(() => {
+        // Older DC clients may not return a promise — fall through to interval
+      });
+
+      // --- Foreground ping: re-request when app becomes visible ---
+      // Fires when user switches back to the app on Android (or any device).
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          window.webxdc.sendUpdate({ payload: { type: 'ping' } }, '');
+          setStatus('🔄 catching up…');
+        }
+      });
+
+      // --- Poll fallback: ping every 30s for clients without promise/visibility support ---
+      setInterval(() => {
+        window.webxdc.sendUpdate({ payload: { type: 'ping' } }, '');
+      }, 30000);
+
+      // --- Action handler (interactive component responses) ---
+      sendActionFn = ({ actionId, value, surfaceId }) => {
+        const updateObj = { payload: { type: 'action', actionId, value, surfaceId, timestamp: Date.now() } };
+        const encoded = JSON.stringify(updateObj);
+        if (encoded.length <= maxSize) {
+          window.webxdc.sendUpdate(updateObj, '');
+          try { rt?.send(enc.encode(encoded)); } catch { /* realtime best-effort */ }
+        }
+        setStatus('📤 action sent — waiting for response…');
+      };
+
+      // --- Send message handler ---
+      const input = document.getElementById('message-input');
+      const sendBtn = document.getElementById('send-btn');
+
+      function sendMessage() {
+        const text = input.value.trim();
+        if (!text) return;
+
+        // Check size limit before sending
+        const updateObj = { payload: { type: 'user_message', content: text } };
+        const encoded = JSON.stringify(updateObj);
+        if (encoded.length > maxSize) {
+          setStatus(`❌ message too long (${encoded.length} > ${maxSize} bytes)`);
+          return;
+        }
+
+        // Show user message immediately (local, before echo)
+        addCard({ payload: { content: text, title: 'You', timestamp: Date.now(), type: 'user_message' } }, true);
+
+        // Send to bot via email (status update)
+        window.webxdc.sendUpdate(updateObj, '');
+
+        // Also try realtime for instant delivery
+        try {
+          rt?.send(enc.encode(JSON.stringify({ type: 'user_message', content: text })));
+        } catch { /* realtime best-effort */ }
+
+        input.value = '';
+        sendBtn.disabled = true;
+        setStatus('📤 sent — waiting for response…');
+        setTimeout(() => { sendBtn.disabled = false; }, 1000);
+      }
+
+      sendBtn.addEventListener('click', sendMessage);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+    }
+
+    initWebxdc();
+  </script>
+</body>
+</html>

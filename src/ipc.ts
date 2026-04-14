@@ -103,6 +103,10 @@ export interface IpcDeps {
   /** Called when a sub-group delivers a result back to main (cycle closed). */
   onCycleDelivered?: (subGroupFolder: string) => void;
   setReaction?: (jid: string, emoji: string) => Promise<void>;
+  sendWebxdcUpdate?: (
+    jid: string,
+    payload: import('./types.js').WebxdcUpdatePayload,
+  ) => Promise<void>;
   /** Called when a background container (e.g. throwaway) spawns, so it can be
    *  registered with the queue for web UI visibility. */
   onProcess?: (
@@ -176,6 +180,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message') {
                 await processMessageIpc(data, sourceGroup, isMain, deps);
+              } else if (data.type === 'webxdc_update' && data.chatJid) {
+                await processWebxdcUpdateIpc(data, sourceGroup, isMain, deps);
               } else if (
                 data.type === 'file' &&
                 data.chatJid &&
@@ -320,6 +326,50 @@ export async function processMessageIpc(
       );
     }
   }
+}
+
+export async function processWebxdcUpdateIpc(
+  data: {
+    type: string;
+    chatJid?: string;
+    groupFolder?: string;
+    content?: string;
+    title?: string;
+    surfaceType?: string;
+    surfaceId?: string;
+    components?: unknown[];
+    description?: string;
+  },
+  sourceGroup: string,
+  isMain: boolean,
+  deps: IpcDeps,
+): Promise<void> {
+  if (!data.chatJid || !data.content || !deps.sendWebxdcUpdate) return;
+
+  const registeredGroups = deps.registeredGroups();
+  const targetGroup = registeredGroups[data.chatJid];
+
+  // Authorization: same rules as send_message
+  if (!isMain && !(targetGroup && targetGroup.folder === sourceGroup)) {
+    logger.warn(
+      { chatJid: data.chatJid, sourceGroup },
+      'Unauthorized IPC webxdc_update attempt blocked',
+    );
+    return;
+  }
+
+  await deps.sendWebxdcUpdate(data.chatJid, {
+    content: data.content,
+    title: data.title,
+    type: (data.surfaceType as 'message' | 'interactive') ?? 'message',
+    surfaceId: data.surfaceId,
+    components: data.components,
+    description: data.description,
+  });
+  logger.info(
+    { chatJid: data.chatJid, sourceGroup, surfaceId: data.surfaceId },
+    'IPC webxdc update sent',
+  );
 }
 
 export async function processTaskIpc(

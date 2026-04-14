@@ -210,6 +210,21 @@ export interface TransferFile {
   status: TransferFileStatus;
 }
 
+// --- WebXDC ---
+
+export interface WebxdcUpdatePayload {
+  content: string;
+  title?: string;
+  /** 'message' (default) or 'interactive' */
+  type?: 'message' | 'interactive';
+  /** Named surface: updates the card in-place instead of appending a new one */
+  surfaceId?: string;
+  /** Interactive component definitions (buttons, inputs, selects) */
+  components?: unknown[];
+  /** Short label used as the email-fallback update description */
+  description?: string;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {
@@ -231,6 +246,10 @@ export interface Channel {
   sendMessageAndGetId?(jid: string, text: string): Promise<string | null>;
   // Optional: edit a previously sent message by its ID.
   editMessage?(jid: string, messageId: string, text: string): Promise<void>;
+  // Optional: send the WebXDC chat surface app to a chat (DeltaChat only).
+  sendWebxdcApp?(jid: string): Promise<void>;
+  // Optional: push a content update to a running WebXDC app session.
+  sendWebxdcUpdate?(jid: string, payload: WebxdcUpdatePayload): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

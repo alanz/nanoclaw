@@ -8,11 +8,21 @@ import type {
   OnInboundMessage,
   OnChatMetadata,
   RegisteredGroup,
+  WebxdcUpdatePayload,
 } from '../types.js';
 import { readEnvFile } from '../env.js';
 import { HOME_DIR, ASSISTANT_NAME, DATA_DIR } from '../config.js';
 import { resolveGroupIpcPath } from '../group-folder.js';
 import { logger } from '../logger.js';
+import {
+  getActiveWebxdcMsgId,
+  setActiveWebxdcSession,
+  clearWebxdcSession,
+  enqueueWebxdcUpdate,
+  dequeueWebxdcUpdates,
+  peekWebxdcUpdates,
+  type WebxdcUpdateItem,
+} from './webxdc-store.js';
 
 const AVATAR_SOURCE = path.resolve(
   DATA_DIR,
@@ -20,6 +30,19 @@ const AVATAR_SOURCE = path.resolve(
   'assets',
   'nanoclaw-profile.jpeg',
 );
+
+/** Path to the built WebXDC chat surface app (.xdc = zip). */
+const XDC_PATH = path.resolve(DATA_DIR, '..', 'assets', 'nanoclaw.xdc');
+
+/** Note injected into inbound messages coming from the WebXDC app. */
+const WEBXDC_SURFACE_NOTE = `
+
+[Surface: WebXDC in-app chat viewer. The user typed this from inside the NanoClaw WebXDC app.
+- Use the webxdc_update tool to send responses visible in the app (markdown rendered as cards).
+- Use webxdc_update with type='interactive' and components=[...] for buttons/inputs.
+- Use webxdc_send_image for images (file path or URL → embedded inline in the app).
+- Named surfaces: add surface_id to webxdc_update to update a card in-place instead of appending.
+- Do NOT use send_message for this reply — it goes to the main chat, not the app.]`;
 
 /** Copy the NanoClaw avatar into the DC data directory and return its path, or null on failure. */
 function copyAvatarToDataDir(dataDir: string): string | null {
@@ -143,6 +166,11 @@ export class DeltaChatChannel implements Channel {
   private seenMsgIds = new Set<number>();
   /** Message IDs seen via IncomingMsg, kept for edit detection in MsgsChanged (1-hour window). */
   private processedMsgIds = new Set<number>();
+
+  /** Track which webxdc msgIds have already had their meta init sent. */
+  private webxdcInitSent = new Set<number>();
+  /** Dedup set for webxdc user messages (prevent echo loop from double-delivery). */
+  private seenWebxdcUserMessages = new Set<string>();
 
   constructor(private readonly opts: DeltaChatChannelOpts) {}
 
@@ -401,6 +429,17 @@ export class DeltaChatChannel implements Channel {
             return;
           }
 
+          // /app command: send the WebXDC chat surface to this chat
+          if (text.trim() === '/app' || text.trim().startsWith('/app ')) {
+            const sub = text.trim().slice('/app'.length).trim();
+            if (sub === 'reset') {
+              await this.resetWebxdcApp(jid);
+            } else {
+              await this.sendWebxdcApp(jid);
+            }
+            return;
+          }
+
           // React with 👀 to acknowledge receipt; track for 💭/✅ reactions
           this.lastMsgId.set(jid, msgId);
           try {
@@ -611,6 +650,240 @@ export class DeltaChatChannel implements Channel {
       logger.info('DeltaChat: SMTP connected');
     });
 
+    // --- WebXDC event listeners ---
+
+    const encodeRealtime = (obj: unknown): number[] =>
+      Array.from(new TextEncoder().encode(JSON.stringify(obj)));
+
+    const buildRealtimePayload = (item: WebxdcUpdateItem) => ({
+      type: item.type ?? 'message',
+      content: item.content,
+      title: item.title,
+      timestamp: item.timestamp,
+      ...(item.surfaceId ? { surfaceId: item.surfaceId } : {}),
+      ...(item.components ? { components: item.components } : {}),
+    });
+
+    // When the app opens the realtime channel, drain any queued content immediately.
+    emitter.on(
+      'WebxdcRealtimeAdvertisementReceived',
+      async ({ msgId }: { msgId: number }) => {
+        try {
+          const queued = peekWebxdcUpdates(msgId);
+          if (queued.length === 0) return;
+          for (const item of queued) {
+            await this.dc!.rpc.sendWebxdcRealtimeData(
+              this.accountId!,
+              msgId,
+              encodeRealtime(buildRealtimePayload(item)),
+            );
+          }
+          // Dequeue only after successful delivery
+          dequeueWebxdcUpdates(msgId);
+          logger.debug(
+            { msgId, count: queued.length },
+            'DeltaChat: WebXDC realtime: delivered queued updates on advertisement',
+          );
+        } catch (err) {
+          logger.warn(
+            { err, msgId },
+            'DeltaChat: WebXDC realtime advertisement handler error',
+          );
+        }
+      },
+    );
+
+    // When the app sends a "ready" ping over realtime, drain the queue.
+    emitter.on(
+      'WebxdcRealtimeData',
+      async ({ msgId, data }: { msgId: number; data: number[] }) => {
+        try {
+          const text = new TextDecoder().decode(new Uint8Array(data));
+          const payload = JSON.parse(text) as Record<string, unknown>;
+          if (payload.type !== 'ready') return;
+          const queued = peekWebxdcUpdates(msgId);
+          if (queued.length === 0) return;
+          for (const item of queued) {
+            await this.dc!.rpc.sendWebxdcRealtimeData(
+              this.accountId!,
+              msgId,
+              encodeRealtime(buildRealtimePayload(item)),
+            );
+          }
+          dequeueWebxdcUpdates(msgId);
+          logger.debug(
+            { msgId, count: queued.length },
+            'DeltaChat: WebXDC realtime: delivered queued updates via "ready" ping',
+          );
+        } catch {
+          // ignore malformed data
+        }
+      },
+    );
+
+    // Handle status updates from the webxdc app (email fallback path).
+    emitter.on(
+      'WebxdcStatusUpdate',
+      async ({
+        msgId,
+        statusUpdateSerial,
+      }: {
+        msgId: number;
+        statusUpdateSerial: number;
+      }) => {
+        try {
+          const dc = this.dc!;
+          const aid = this.accountId!;
+
+          const updatesJson = await dc.rpc.getWebxdcStatusUpdates(
+            aid,
+            msgId,
+            statusUpdateSerial - 1,
+          );
+          const updates: Array<{ payload: unknown }> = JSON.parse(updatesJson);
+          const latest = updates[updates.length - 1];
+          if (!latest) return;
+
+          let payload = latest.payload as Record<string, unknown> | null;
+          if (!payload) return;
+
+          // Interactive action → rewrite as user_message
+          if (payload.type === 'action') {
+            const actionId =
+              typeof payload.actionId === 'string'
+                ? payload.actionId
+                : 'action';
+            const value =
+              payload.value !== undefined
+                ? JSON.stringify(payload.value)
+                : actionId;
+            const surfaceNote =
+              typeof payload.surfaceId === 'string'
+                ? ` (surface: ${payload.surfaceId})`
+                : '';
+            payload = {
+              ...payload,
+              type: 'user_message',
+              content: `[Action: ${actionId} = ${value}]${surfaceNote}`,
+            };
+          }
+
+          // User message: echo back, then route to agent
+          if (
+            payload.type === 'user_message' &&
+            typeof payload.content === 'string'
+          ) {
+            const userText = payload.content;
+
+            // Dedup: prevent echo loop
+            const dedupKey = `${msgId}:${userText.slice(0, 100)}`;
+            if (this.seenWebxdcUserMessages.has(dedupKey)) return;
+            this.seenWebxdcUserMessages.add(dedupKey);
+            setTimeout(
+              () => this.seenWebxdcUserMessages.delete(dedupKey),
+              30_000,
+            );
+
+            logger.debug(
+              { msgId, preview: userText.slice(0, 80) },
+              'DeltaChat: WebXDC user message received',
+            );
+
+            // Echo back as user_echo so all devices see the user's own message
+            const echoUpdate = JSON.stringify({
+              payload: {
+                type: 'user_echo',
+                content: userText,
+                timestamp: Date.now(),
+                title: 'You',
+              },
+            });
+            await dc.rpc
+              .sendWebxdcStatusUpdate(aid, msgId, echoUpdate, '')
+              .catch(() => {});
+
+            // Determine which registered group owns this webxdc session
+            const webxdcMsg = await dc.rpc.getMessage(aid, msgId);
+            const webxdcChatId = webxdcMsg.chatId;
+            const webxdcJid = jidForChat(webxdcChatId);
+            const groups = this.opts.registeredGroups();
+            if (!(webxdcJid in groups)) {
+              logger.debug(
+                { webxdcJid, msgId },
+                'DeltaChat: WebXDC message for unregistered chat, ignoring',
+              );
+              return;
+            }
+
+            // Find the human sender
+            const contacts = await dc.rpc.getChatContacts(aid, webxdcChatId);
+            let senderAddr = '';
+            for (const contactId of contacts) {
+              if (contactId === 1) continue; // DC_CONTACT_ID_SELF
+              const contact = await dc.rpc.getContact(aid, contactId);
+              senderAddr = contact.address ?? String(contactId);
+              break;
+            }
+
+            // Route to the agent for this group, tagging the content so the agent
+            // knows to respond via webxdc_update (not send_message)
+            this.opts.onMessage(webxdcJid, {
+              id: `webxdc-${msgId}-${Date.now()}`,
+              chat_jid: webxdcJid,
+              sender: senderAddr,
+              sender_name: senderAddr,
+              content: userText + WEBXDC_SURFACE_NOTE,
+              timestamp: new Date().toISOString(),
+            });
+            return;
+          }
+
+          // Ping: drain the queue via email fallback
+          if (payload.type !== 'ping') return;
+
+          // Send meta update (msgId) on first ping so the app shows the session ID
+          if (!this.webxdcInitSent.has(msgId)) {
+            const metaUpdate = JSON.stringify({
+              payload: { type: 'meta', msgId, timestamp: Date.now() },
+            });
+            await dc.rpc
+              .sendWebxdcStatusUpdate(aid, msgId, metaUpdate, 'meta')
+              .catch(() => {});
+            this.webxdcInitSent.add(msgId);
+          }
+
+          // Drain the queue, delivering each item with push notification
+          const queued = dequeueWebxdcUpdates(msgId);
+          if (queued.length === 0) return;
+
+          for (const item of queued) {
+            const notifyText = (item.content || '')
+              .slice(0, 80)
+              .replace(/\n/g, ' ');
+            const update = JSON.stringify({
+              payload: buildRealtimePayload(item),
+              notify: { '*': `${ASSISTANT_NAME}: ${notifyText}` },
+            });
+            await dc.rpc.sendWebxdcStatusUpdate(
+              aid,
+              msgId,
+              update,
+              item.description ?? null,
+            );
+          }
+          logger.debug(
+            { msgId, count: queued.length },
+            'DeltaChat: WebXDC ping: delivered queued updates via email fallback',
+          );
+        } catch (err) {
+          logger.error(
+            { err },
+            'DeltaChat: WebXDC status update handler error',
+          );
+        }
+      },
+    );
+
     this._connected = true;
     logger.info('DeltaChat channel connected');
   }
@@ -699,6 +972,146 @@ export class DeltaChatChannel implements Channel {
 
   ownsJid(jid: string): boolean {
     return jid.startsWith('dc:');
+  }
+
+  /**
+   * Send the NanoClaw WebXDC chat surface app to the given chat.
+   * Records the resulting msgId as the active webxdc session for this JID.
+   */
+  async sendWebxdcApp(jid: string): Promise<void> {
+    const chatId = chatIdFromJid(jid);
+    if (chatId === null || !this.dc || this.accountId === null) return;
+
+    if (!fs.existsSync(XDC_PATH)) {
+      logger.error(
+        { xdcPath: XDC_PATH },
+        'DeltaChat: nanoclaw.xdc not found — run "npm run build:webxdc" first',
+      );
+      await this.sendMessage(
+        jid,
+        'WebXDC app not built. Run `npm run build:webxdc` on the server first.',
+      );
+      return;
+    }
+
+    try {
+      const msgId = await this.dc.rpc.sendMsg(this.accountId, chatId, {
+        text: null,
+        html: null,
+        viewtype: null, // auto-detected from .xdc extension
+        file: XDC_PATH,
+        filename: 'nanoclaw.xdc',
+        location: null,
+        overrideSenderName: null,
+        quotedMessageId: null,
+        quotedText: null,
+      });
+      setActiveWebxdcSession(jid, msgId);
+      logger.info({ jid, msgId }, 'DeltaChat: WebXDC app sent');
+    } catch (err) {
+      logger.error({ err, jid }, 'DeltaChat: failed to send WebXDC app');
+      await this.sendMessage(jid, 'Failed to send WebXDC app. Check the logs.');
+    }
+  }
+
+  /**
+   * Clear the active WebXDC session for a chat and send a "clear" update to the app,
+   * resetting the feed in all open instances.
+   */
+  async resetWebxdcApp(jid: string): Promise<void> {
+    const msgId = getActiveWebxdcMsgId(jid);
+    if (msgId === undefined || !this.dc || this.accountId === null) {
+      await this.sendMessage(
+        jid,
+        'No active WebXDC app session to reset. Send /app to start one.',
+      );
+      return;
+    }
+    try {
+      const clearUpdate = JSON.stringify({
+        payload: { type: 'clear', timestamp: Date.now() },
+      });
+      await this.dc.rpc.sendWebxdcStatusUpdate(
+        this.accountId,
+        msgId,
+        clearUpdate,
+        'clear',
+      );
+      clearWebxdcSession(jid);
+      logger.info({ jid, msgId }, 'DeltaChat: WebXDC session reset');
+    } catch (err) {
+      logger.error({ err, jid }, 'DeltaChat: failed to reset WebXDC session');
+    }
+  }
+
+  /**
+   * Push a content update to the active WebXDC app session for a JID.
+   * Uses two delivery paths:
+   *   1. Realtime (P2P) — near-instant if the app is open
+   *   2. Email queue — reliable fallback, drained on the next ping from the app
+   */
+  async sendWebxdcUpdate(
+    jid: string,
+    payload: WebxdcUpdatePayload,
+  ): Promise<void> {
+    const msgId = getActiveWebxdcMsgId(jid);
+    if (msgId === undefined || !this.dc || this.accountId === null) {
+      // No active webxdc session — fall back to a plain text message
+      logger.debug(
+        { jid },
+        'DeltaChat: sendWebxdcUpdate called but no active webxdc session',
+      );
+      await this.sendMessage(jid, payload.content);
+      return;
+    }
+
+    const item: WebxdcUpdateItem = {
+      content: payload.content,
+      title: payload.title ?? ASSISTANT_NAME,
+      timestamp: Date.now(),
+      type: payload.type,
+      surfaceId: payload.surfaceId,
+      components: payload.components,
+      description: payload.description,
+    };
+
+    // Enqueue for email fallback (survives restarts)
+    enqueueWebxdcUpdate(msgId, item);
+
+    const encoded = (obj: unknown): number[] =>
+      Array.from(new TextEncoder().encode(JSON.stringify(obj)));
+
+    const realtimePayload = {
+      type: item.type ?? 'message',
+      content: item.content,
+      title: item.title,
+      timestamp: item.timestamp,
+      ...(item.surfaceId ? { surfaceId: item.surfaceId } : {}),
+      ...(item.components ? { components: item.components } : {}),
+    };
+
+    // Attempt realtime delivery (best-effort — may not be connected yet)
+    try {
+      await this.dc.rpc.sendWebxdcRealtimeAdvertisement(this.accountId, msgId);
+      await this.dc.rpc.sendWebxdcRealtimeData(
+        this.accountId,
+        msgId,
+        encoded(realtimePayload),
+      );
+      // On successful realtime delivery, drain the queue
+      dequeueWebxdcUpdates(msgId);
+      logger.debug(
+        { jid, msgId },
+        'DeltaChat: WebXDC update delivered via realtime',
+      );
+    } catch {
+      // Realtime not available — the item stays queued and will be sent on the
+      // next ping from the app (email fallback path in WebxdcStatusUpdate handler)
+      logger.debug(
+        { jid, msgId },
+        'DeltaChat: WebXDC realtime unavailable, update queued for email fallback',
+      );
+    }
   }
 
   async disconnect(): Promise<void> {

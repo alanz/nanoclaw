@@ -1779,6 +1779,133 @@ Write the content to a file under /workspace/ipc/ first, then pass its path here
       };
     },
   );
+  server.tool(
+    'webxdc_update',
+    `Send content to the NanoClaw WebXDC chat surface app.
+
+Use this tool to deliver responses when the user is interacting via the in-app WebXDC viewer (the message will say "[Surface: WebXDC in-app chat viewer]"). Content is rendered as markdown cards inside the app.
+
+- For plain text/markdown: call with just content (and optionally title).
+- For interactive UI (buttons, inputs): set type='interactive' and provide components.
+- To update a card in-place instead of appending: set surface_id to a stable ID.
+- For images: use webxdc_send_image instead.
+
+Component types: { id, type: 'button'|'text'|'select'|'submit', label, style: 'primary'|'secondary'|'danger', placeholder, options }
+User taps a button → bot receives "[Action: id = value]".`,
+    {
+      content: z
+        .string()
+        .describe('Markdown text to display in the app'),
+      title: z
+        .string()
+        .optional()
+        .describe("Card header title (defaults to the assistant's name)"),
+      type: z
+        .enum(['message', 'interactive'])
+        .optional()
+        .describe("Card type: 'message' (default) for text, 'interactive' for components"),
+      surface_id: z
+        .string()
+        .optional()
+        .describe('Named surface ID — updates this card in-place on subsequent calls instead of appending a new card'),
+      components: z
+        .array(z.record(z.string(), z.unknown()))
+        .optional()
+        .describe('Interactive component definitions (required when type is interactive)'),
+    },
+    async (args) => {
+      writeIpcFile(MESSAGES_DIR, {
+        type: 'webxdc_update',
+        chatJid,
+        groupFolder,
+        content: args.content,
+        title: args.title,
+        surfaceType: args.type ?? 'message',
+        surfaceId: args.surface_id,
+        components: args.components,
+        timestamp: Date.now(),
+      });
+      return { content: [{ type: 'text' as const, text: 'WebXDC update queued.' }] };
+    },
+  );
+
+  server.tool(
+    'webxdc_send_image',
+    `Send an image to the NanoClaw WebXDC chat surface app.
+
+Embeds the image as a base64 data URI in a markdown card (required because WebXDC apps run sandboxed without external network access).
+
+- file_path: absolute path to a local image file (JPEG, PNG, GIF, SVG, WEBP) OR an https:// URL.
+- caption: optional text shown below the image.
+- surface_id: optional stable surface ID to update the card in-place.`,
+    {
+      file_path: z
+        .string()
+        .describe('Absolute path to a local image file, or an https:// URL'),
+      caption: z
+        .string()
+        .optional()
+        .describe('Optional text displayed below the image'),
+      surface_id: z
+        .string()
+        .optional()
+        .describe('Named surface ID for in-place update'),
+    },
+    async (args) => {
+      let dataUri: string;
+
+      const MIME: Record<string, string> = {
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        png: 'image/png',
+        gif: 'image/gif',
+        svg: 'image/svg+xml',
+        webp: 'image/webp',
+      };
+
+      try {
+        if (args.file_path.startsWith('https://') || args.file_path.startsWith('http://')) {
+          const res = await fetch(args.file_path);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const contentType = res.headers.get('content-type') ?? 'image/jpeg';
+          const buf = await res.arrayBuffer();
+          dataUri = `data:${contentType};base64,${Buffer.from(buf).toString('base64')}`;
+        } else {
+          if (!fs.existsSync(args.file_path)) {
+            return {
+              content: [{ type: 'text' as const, text: `File not found: ${args.file_path}` }],
+              isError: true,
+            };
+          }
+          const ext = path.extname(args.file_path).slice(1).toLowerCase();
+          const mime = MIME[ext] ?? 'application/octet-stream';
+          const buf = fs.readFileSync(args.file_path);
+          dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+        }
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Failed to load image: ${String(err)}` }],
+          isError: true,
+        };
+      }
+
+      const content = args.caption
+        ? `![image](${dataUri})\n\n${args.caption}`
+        : `![image](${dataUri})`;
+
+      writeIpcFile(MESSAGES_DIR, {
+        type: 'webxdc_update',
+        chatJid,
+        groupFolder,
+        content,
+        title: 'Image',
+        surfaceType: 'message',
+        surfaceId: args.surface_id,
+        timestamp: Date.now(),
+      });
+      return { content: [{ type: 'text' as const, text: 'WebXDC image queued.' }] };
+    },
+  );
 }
 
 // Start the stdio transport

@@ -13,7 +13,12 @@ import {
   getTransferFilesByTransfer,
   storeChatMetadata,
 } from './db.js';
-import { processTaskIpc, processMessageIpc, IpcDeps } from './ipc.js';
+import {
+  processTaskIpc,
+  processMessageIpc,
+  processWebxdcUpdateIpc,
+  IpcDeps,
+} from './ipc.js';
 import { _resetSpecialistDepsForTest, initSpecialists } from './specialists.js';
 import {
   _resetSpecialistTypesForTest,
@@ -1190,5 +1195,144 @@ describe('send_file', () => {
     );
 
     expect(sendFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('processWebxdcUpdateIpc', () => {
+  const MAIN_GROUP_JID = 'dc:10';
+  const SUB_GROUP_JID = 'dc:20';
+
+  function makeWebxdcDeps(overrides: Partial<IpcDeps> = {}): IpcDeps {
+    return {
+      sendMessage: vi.fn(),
+      sendFile: vi.fn(),
+      sendWebxdcUpdate: vi.fn(),
+      registeredGroups: () => ({
+        [MAIN_GROUP_JID]: {
+          name: 'Main',
+          folder: 'main',
+          trigger: '@Andy',
+          added_at: '',
+          isMain: true,
+        },
+        [SUB_GROUP_JID]: {
+          name: 'Sub',
+          folder: 'sub',
+          trigger: '@Andy',
+          added_at: '',
+        },
+      }),
+      registerGroup: vi.fn(),
+      setGroupTrusted: vi.fn(),
+      syncGroups: vi.fn(),
+      startRemoteControl: vi.fn(),
+      stopRemoteControl: vi.fn(),
+      getAvailableGroups: () => [],
+      writeGroupsSnapshot: vi.fn(),
+      onTasksChanged: vi.fn(),
+      setPendingDispatchDepth: vi.fn(),
+      ...overrides,
+    };
+  }
+
+  it('calls sendWebxdcUpdate when main group targets any jid', async () => {
+    const deps = makeWebxdcDeps();
+
+    await processWebxdcUpdateIpc(
+      { type: 'webxdc_update', chatJid: SUB_GROUP_JID, content: 'hello' },
+      'main',
+      true,
+      deps,
+    );
+
+    expect(deps.sendWebxdcUpdate).toHaveBeenCalledWith(
+      SUB_GROUP_JID,
+      expect.objectContaining({ content: 'hello' }),
+    );
+  });
+
+  it('calls sendWebxdcUpdate when group targets its own jid', async () => {
+    const deps = makeWebxdcDeps();
+
+    await processWebxdcUpdateIpc(
+      { type: 'webxdc_update', chatJid: SUB_GROUP_JID, content: 'reply' },
+      'sub',
+      false,
+      deps,
+    );
+
+    expect(deps.sendWebxdcUpdate).toHaveBeenCalledWith(
+      SUB_GROUP_JID,
+      expect.objectContaining({ content: 'reply' }),
+    );
+  });
+
+  it('blocks a non-main group targeting a different jid', async () => {
+    const deps = makeWebxdcDeps();
+
+    await processWebxdcUpdateIpc(
+      { type: 'webxdc_update', chatJid: MAIN_GROUP_JID, content: 'sneaky' },
+      'sub',
+      false,
+      deps,
+    );
+
+    expect(deps.sendWebxdcUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when content is missing', async () => {
+    const deps = makeWebxdcDeps();
+
+    await processWebxdcUpdateIpc(
+      { type: 'webxdc_update', chatJid: SUB_GROUP_JID },
+      'sub',
+      false,
+      deps,
+    );
+
+    expect(deps.sendWebxdcUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when sendWebxdcUpdate dep is absent', async () => {
+    const deps = makeWebxdcDeps({ sendWebxdcUpdate: undefined });
+
+    await processWebxdcUpdateIpc(
+      { type: 'webxdc_update', chatJid: SUB_GROUP_JID, content: 'hello' },
+      'sub',
+      false,
+      deps,
+    );
+
+    // No crash, no call
+  });
+
+  it('passes optional fields through to sendWebxdcUpdate', async () => {
+    const deps = makeWebxdcDeps();
+
+    await processWebxdcUpdateIpc(
+      {
+        type: 'webxdc_update',
+        chatJid: SUB_GROUP_JID,
+        content: 'pick one',
+        title: 'Menu',
+        surfaceType: 'interactive',
+        surfaceId: 'main-menu',
+        components: [{ id: 'a', type: 'button', label: 'A' }],
+        description: 'Choose an option',
+      },
+      'sub',
+      false,
+      deps,
+    );
+
+    expect(deps.sendWebxdcUpdate).toHaveBeenCalledWith(
+      SUB_GROUP_JID,
+      expect.objectContaining({
+        title: 'Menu',
+        type: 'interactive',
+        surfaceId: 'main-menu',
+        description: 'Choose an option',
+      }),
+    );
   });
 });

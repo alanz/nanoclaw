@@ -1470,7 +1470,7 @@ document.addEventListener('DOMContentLoaded', function() {
         { selector:'node.dimmed.hovered', style:{ opacity:1, 'text-opacity':1 } },
         { selector:'node.neighbor', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#58a6ff', width:22, height:22 } },
         { selector:'edge', style:{ width:1, 'line-color':'#6e7681', 'curve-style':'bezier', opacity:0.6 } },
-        { selector:'edge[?supersedes]', style:{ 'line-color':'#d29922', 'line-style':'dashed', 'line-dash-pattern':[6,3], opacity:0.7 } },
+        { selector:'edge[?supersedes]', style:{ 'line-color':'#d29922', 'line-style':'dashed', 'line-dash-pattern':[6,3], opacity:0.7, 'target-arrow-shape':'triangle', 'target-arrow-color':'#d29922', 'arrow-scale':1.2 } },
         { selector:'edge.dimmed', style:{ opacity:0.06 } },
         { selector:'edge.highlighted', style:{ width:2, 'line-color':'#58a6ff', opacity:0.8 } },
         { selector:'node.hover-neighbor', style:{ 'text-opacity':1, 'border-color':'rgba(88,166,255,0.5)', 'border-width':2, opacity:1 } },

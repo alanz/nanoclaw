@@ -1437,7 +1437,7 @@ document.addEventListener('DOMContentLoaded', function() {
       elements.push({ group:'nodes', data:{ id:n.id, label:n.label, tags:n.tags, keywords:n.keywords, created:n.created, path:n.path, color:n.color }, classes: faded ? 'faded' : '', position:{ x:n.x, y:n.y } });
     });
     edges.forEach(function(e, i) {
-      elements.push({ group:'edges', data:{ id:'e'+i, source:e.source, target:e.target } });
+      elements.push({ group:'edges', data:{ id:'e'+i, source:e.source, target:e.target, supersedes:e.supersedes||false } });
     });
 
     // Legend — clickable tag filters
@@ -1470,6 +1470,7 @@ document.addEventListener('DOMContentLoaded', function() {
         { selector:'node.dimmed.hovered', style:{ opacity:1, 'text-opacity':1 } },
         { selector:'node.neighbor', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#58a6ff', width:22, height:22 } },
         { selector:'edge', style:{ width:1, 'line-color':'#6e7681', 'curve-style':'bezier', opacity:0.6 } },
+        { selector:'edge[?supersedes]', style:{ 'line-color':'#d29922', 'line-style':'dashed', 'line-dash-pattern':[6,3], opacity:0.7 } },
         { selector:'edge.dimmed', style:{ opacity:0.06 } },
         { selector:'edge.highlighted', style:{ width:2, 'line-color':'#58a6ff', opacity:0.8 } },
         { selector:'node.hover-neighbor', style:{ 'text-opacity':1, 'border-color':'rgba(88,166,255,0.5)', 'border-width':2, opacity:1 } },
@@ -2704,6 +2705,8 @@ export function parseNoteFrontmatter(text: string): {
   keywords: string[];
   tags: string[];
   links: string[];
+  supersedes: string[];
+  superseded_by: string[];
   source_report_path: string | null;
 } | null {
   if (!text.startsWith('---')) return null;
@@ -2719,11 +2722,13 @@ export function parseNoteFrontmatter(text: string): {
   const parseList = (raw: string | undefined): string[] => {
     if (!raw) return [];
     const m = raw.match(/^\[(.+)\]$/);
-    if (!m) return [];
-    return m[1]
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    if (m)
+      return m[1]
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    // bare single value (no brackets)
+    return [raw.trim()].filter(Boolean);
   };
   if (!fields['id']) return null;
   // Extract the first file path under sources: that points to a report
@@ -2744,6 +2749,8 @@ export function parseNoteFrontmatter(text: string): {
     keywords: parseList(fields['keywords']),
     tags: parseList(fields['tags']),
     links: parseList(fields['links']),
+    supersedes: parseList(fields['supersedes']),
+    superseded_by: parseList(fields['superseded_by']),
     source_report_path,
   };
 }
@@ -3024,8 +3031,23 @@ export function startWebUi(
           });
           nodeIds.add(fm.id);
         }
-        const edges: Array<{ source: string; target: string }> = [];
+        const edges: Array<{
+          source: string;
+          target: string;
+          supersedes?: boolean;
+        }> = [];
         const seen = new Set<string>();
+        // Build a set of supersedes pairs (normalised: older||newer)
+        const supersedesPairs = new Set<string>();
+        for (const fm of fmMap.values()) {
+          if (!fm) continue;
+          for (const tgt of fm.supersedes) {
+            supersedesPairs.add([fm.id, tgt].sort().join('||'));
+          }
+          for (const tgt of fm.superseded_by) {
+            supersedesPairs.add([fm.id, tgt].sort().join('||'));
+          }
+        }
         for (const fm of fmMap.values()) {
           if (!fm) continue;
           for (const tgt of fm.links) {
@@ -3033,7 +3055,11 @@ export function startWebUi(
             const key = [fm.id, tgt].sort().join('||');
             if (!seen.has(key)) {
               seen.add(key);
-              edges.push({ source: fm.id, target: tgt });
+              edges.push({
+                source: fm.id,
+                target: tgt,
+                supersedes: supersedesPairs.has(key) || undefined,
+              });
             }
           }
         }

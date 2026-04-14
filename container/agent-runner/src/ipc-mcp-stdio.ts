@@ -95,7 +95,11 @@ server.tool(
       type: 'message',
       chatJid,
       text: args.text,
-      sender: args.sender || undefined,
+      sender:
+        args.sender ||
+        (isSpecialist && specialistType
+          ? specialistType.charAt(0).toUpperCase() + specialistType.slice(1)
+          : undefined),
       groupFolder,
       timestamp: new Date().toISOString(),
     };

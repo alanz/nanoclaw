@@ -944,7 +944,7 @@ document.addEventListener('DOMContentLoaded', function() {
       keyEl.textContent = key;
       var valEl = document.createElement('div');
       valEl.className = 'fm-val';
-      if (key === 'links' && filePath) {
+      if ((key === 'links' || key === 'supersedes' || key === 'superseded_by') && filePath) {
         var baseDir = filePath.replace(/[^/]+$/, '');
         valEl.style.display = 'flex';
         valEl.style.flexDirection = 'column';
@@ -953,9 +953,9 @@ document.addEventListener('DOMContentLoaded', function() {
           id = id.trim();
           if (!id) return;
           var a = document.createElement('a');
-          a.href = '#';
           a.className = 'link-internal';
           a.textContent = id;
+          if (currentGroup) a.href = '#groups/' + currentGroup.folder + '/files/memory/notes/' + id + '.md';
           a.addEventListener('click', function(e) {
             e.preventDefault();
             var notePath = baseDir + id + '.md';

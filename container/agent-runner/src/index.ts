@@ -568,6 +568,7 @@ async function runQuery(
         'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
+        'mcp__qmd__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -591,6 +592,10 @@ async function runQuery(
               ? { BRAVE_API_KEY: process.env.BRAVE_API_KEY }
               : {}),
           },
+        },
+        qmd: {
+          type: 'http',
+          url: 'http://host.docker.internal:8182/mcp',
         },
       },
       hooks: containerInput.isThrowaway

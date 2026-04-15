@@ -3,7 +3,15 @@
  * Covers: request_session_archive, spawn_throwaway_session, spawnThrowaway,
  * getSessionJsonlPath, and placeholder/archive writing helpers.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+  vi,
+} from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
@@ -81,6 +89,21 @@ afterEach(() => {
     }
   } catch {
     /* ignore */
+  }
+});
+
+afterAll(() => {
+  try {
+    for (const entry of fs.readdirSync(GROUPS_DIR)) {
+      if (entry.includes(TEST_SUFFIX)) {
+        fs.rmSync(path.join(GROUPS_DIR, entry), {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
+  } catch {
+    /* ignore — dir may not exist */
   }
 });
 

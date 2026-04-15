@@ -15,7 +15,7 @@
  * Spec: docs/project/specs/session-warm-start.allium
  * Plan: allium plan docs/project/specs/session-warm-start.allium
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
@@ -60,7 +60,8 @@ const createdDirs: string[] = [];
 function ensureDir(...parts: string[]): string {
   const p = path.join(...parts);
   fs.mkdirSync(p, { recursive: true });
-  const topLevel = path.join(GROUPS_DIR, parts[1] ?? '');
+  const rel = path.relative(GROUPS_DIR, p);
+  const topLevel = path.join(GROUPS_DIR, rel.split(path.sep)[0]);
   if (!createdDirs.includes(topLevel)) createdDirs.push(topLevel);
   return p;
 }
@@ -72,6 +73,21 @@ afterEach(() => {
     } catch {
       /* ignore */
     }
+  }
+});
+
+afterAll(() => {
+  try {
+    for (const entry of fs.readdirSync(GROUPS_DIR)) {
+      if (entry.includes(TEST_SUFFIX)) {
+        fs.rmSync(path.join(GROUPS_DIR, entry), {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
+  } catch {
+    /* ignore — dir may not exist */
   }
 });
 

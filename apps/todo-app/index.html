@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Todo</title>
+  <script src="webxdc.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #fff;
+      color: #1a1a1a;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    #status-bar {
+      font-size: 11px;
+      font-family: monospace;
+      color: #666;
+      background: #f8f8f8;
+      border-bottom: 1px solid #e0e0e0;
+      padding: 4px 10px;
+      flex-shrink: 0;
+    }
+
+    #main {
+      flex: 1;
+      padding: 1em;
+      max-width: 640px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 1.2em;
+      margin: 0 0 1em;
+      color: #333;
+    }
+
+    .section-heading {
+      font-size: 0.75em;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #888;
+      margin: 1.2em 0 0.3em;
+      padding-bottom: 0.2em;
+      border-bottom: 1px solid #eee;
+    }
+
+    .item {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.6em;
+      padding: 0.35em 0;
+    }
+
+    .item input[type="checkbox"] {
+      margin-top: 0.15em;
+      flex-shrink: 0;
+      width: 1.1em;
+      height: 1.1em;
+      cursor: pointer;
+      accent-color: #4a90d9;
+    }
+
+    .item.readonly input[type="checkbox"] {
+      cursor: not-allowed;
+      opacity: 0.4;
+    }
+
+    .item span {
+      line-height: 1.45;
+      flex: 1;
+    }
+
+    .item.checked span {
+      text-decoration: line-through;
+      color: #aaa;
+    }
+
+    .item.readonly span {
+      color: #aaa;
+    }
+
+    #empty {
+      color: #aaa;
+      margin-top: 2em;
+      font-style: italic;
+    }
+
+    #footer {
+      font-size: 11px;
+      color: #888;
+      text-align: right;
+      background: #fff;
+      border-top: 1px solid #e0e0e0;
+      padding: 4px 12px;
+      flex-shrink: 0;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body { background: #1c1c1e; color: #e5e5e7; }
+      #status-bar { background: #2a2a2a; color: #888; border-color: #3a3a3a; }
+      #footer { background: #1c1c1e; color: #555; border-color: #3a3a3a; }
+      .section-heading { color: #888; border-color: #333; }
+      .item.checked span { color: #666; }
+      .item.readonly span { color: #666; }
+      h1 { color: #e5e5e7; }
+    }
+  </style>
+</head>
+<body>
+  <div id="status-bar">initialising…</div>
+  <div id="main">
+    <h1>Todo</h1>
+    <div id="app"><p id="empty">Waiting for data…</p></div>
+  </div>
+  <div id="footer"></div>
+
+  <script>
+    'use strict';
+
+    var statusBar = document.getElementById('status-bar');
+    var footer    = document.getElementById('footer');
+
+    function setStatus(msg) { statusBar.textContent = msg; }
+
+    // ── Rendering (no webxdc dependency) ─────────────────────────────────────
+
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function render(state) {
+      setStatus('✅ received at ' + new Date().toLocaleTimeString());
+
+      var app = document.getElementById('app');
+      if (!state || !Array.isArray(state.items) || state.items.length === 0) {
+        app.innerHTML = '<p id="empty">No items.</p>';
+        return;
+      }
+
+      var order = [], groups = {};
+      for (var i = 0; i < state.items.length; i++) {
+        var item = state.items[i];
+        var s = item.section || 'root';
+        if (!groups[s]) { groups[s] = []; order.push(s); }
+        groups[s].push(item);
+      }
+
+      var html = '';
+      for (var si = 0; si < order.length; si++) {
+        var section = order[si];
+        if (section !== 'root') {
+          html += '<div class="section-heading">' + escHtml(section) + '</div>';
+        }
+        var items = groups[section];
+        for (var ii = 0; ii < items.length; ii++) {
+          var it = items[ii];
+          html +=
+            '<div class="item ' + (it.checked ? 'checked' : '') + ' ' + (it.readonly ? 'readonly' : '') + '">' +
+            '<input type="checkbox" ' + (it.checked ? 'checked' : '') + ' ' + (it.readonly ? 'disabled' : '') +
+            ' data-id="' + escHtml(it.id || '') + '" onchange="onToggle(this)">' +
+            '<span>' + escHtml(it.text) + '</span>' +
+            '</div>';
+        }
+      }
+      app.innerHTML = html;
+    }
+
+    // ── Toggle (called from inline onchange — needs global scope) ─────────────
+
+    function onToggle(checkbox) {
+      var id = checkbox.dataset.id;
+      if (!id) { checkbox.checked = !checkbox.checked; return; }
+      var checked = checkbox.checked;
+      var div = checkbox.closest('.item');
+      if (div) div.classList.toggle('checked', checked);
+      window.webxdc.sendUpdate({
+        payload: { type: 'action', actionId: 'todo_toggle',
+                   value: { id: id, checked: checked }, surfaceId: 'todo' },
+      }, 'Todo: ' + (checked ? 'checked' : 'unchecked') + ' item');
+    }
+
+    // ── Payload handling (no webxdc dependency) ───────────────────────────────
+
+    function extractState(p) {
+      if (!p) return null;
+      if (p.type === 'state' && Array.isArray(p.items)) return p;
+      if (p.type === 'message' && typeof p.content === 'string') {
+        try {
+          var parsed = JSON.parse(p.content);
+          if (parsed && parsed.type === 'state' && Array.isArray(parsed.items)) return parsed;
+        } catch (_) {}
+      }
+      return null;
+    }
+
+    function handlePayload(p) {
+      if (!p) return;
+      if (p.type === 'up_to_date') { setStatus('✅ up to date'); return; }
+      if (p.type === 'ping') return;
+      if (p.type === 'meta') {
+        var maxSize = window.webxdc.sendUpdateMaxSize || Infinity;
+        var parts = ['ID\u00a0' + p.msgId];
+        if (maxSize !== Infinity) parts.push('max\u00a0' + Math.round(maxSize / 1024) + '\u00a0KB');
+        footer.textContent = parts.join(' \u00b7 ');
+        return;
+      }
+      var state = extractState(p);
+      if (state) render(state);
+    }
+
+    // ── WebXDC init — poll until API is available, exactly like nanoclaw.xdc ──
+
+    var attempts = 0;
+    function initWebxdc() {
+      attempts++;
+      if (typeof window.webxdc === 'undefined') {
+        setStatus('waiting for webxdc API… (attempt ' + attempts + ')');
+        if (attempts < 20) setTimeout(initWebxdc, 300);
+        else setStatus('❌ webxdc API not available');
+        return;
+      }
+
+      setStatus('✅ webxdc ready');
+
+      var enc = new TextEncoder();
+      var dec = new TextDecoder();
+
+      // Realtime channel — announce presence so host drains queue immediately
+      try {
+        var rt = window.webxdc.joinRealtimeChannel();
+        rt.setListener(function (data) {
+          try { handlePayload(JSON.parse(dec.decode(data))); } catch (_) {}
+        });
+        rt.send(enc.encode(JSON.stringify({ type: 'ready' })));
+        setStatus('📡 realtime channel open');
+      } catch (_) {
+        setStatus('⚠️ realtime not available, using poll fallback');
+      }
+
+      // Replay all stored updates, then ping for any freshly queued content
+      window.webxdc.setUpdateListener(function (update) {
+        if (!update.payload) return;
+        handlePayload(update.payload);
+      }, 0).then(function () {
+        setStatus('🔄 catching up…');
+        window.webxdc.sendUpdate({ payload: { type: 'ping' } }, '');
+      }).catch(function () {
+        // Older DC clients don't return a Promise — fall through to interval
+      });
+
+      // Re-ping when app comes back to foreground
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+          window.webxdc.sendUpdate({ payload: { type: 'ping' } }, '');
+          setStatus('🔄 catching up…');
+        }
+      });
+
+      // 30-second poll fallback
+      setInterval(function () {
+        window.webxdc.sendUpdate({ payload: { type: 'ping' } }, '');
+      }, 30000);
+    }
+
+    initWebxdc();
+  </script>
+</body>
+</html>

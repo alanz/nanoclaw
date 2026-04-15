@@ -248,8 +248,15 @@ export interface Channel {
   editMessage?(jid: string, messageId: string, text: string): Promise<void>;
   // Optional: send the WebXDC chat surface app to a chat (DeltaChat only).
   sendWebxdcApp?(jid: string): Promise<void>;
+  // Optional: send the Todo WebXDC app to a chat (DeltaChat only).
+  sendTodoWebxdcApp?(jid: string): Promise<void>;
   // Optional: push a content update to a running WebXDC app session.
-  sendWebxdcUpdate?(jid: string, payload: WebxdcUpdatePayload): Promise<void>;
+  // sessionName: targets a named session (e.g. 'todo') instead of the default nanoclaw.xdc session.
+  sendWebxdcUpdate?(
+    jid: string,
+    payload: WebxdcUpdatePayload,
+    sessionName?: string,
+  ): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

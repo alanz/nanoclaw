@@ -1248,6 +1248,7 @@ describe('processWebxdcUpdateIpc', () => {
     expect(deps.sendWebxdcUpdate).toHaveBeenCalledWith(
       SUB_GROUP_JID,
       expect.objectContaining({ content: 'hello' }),
+      undefined,
     );
   });
 
@@ -1264,6 +1265,7 @@ describe('processWebxdcUpdateIpc', () => {
     expect(deps.sendWebxdcUpdate).toHaveBeenCalledWith(
       SUB_GROUP_JID,
       expect.objectContaining({ content: 'reply' }),
+      undefined,
     );
   });
 
@@ -1333,6 +1335,29 @@ describe('processWebxdcUpdateIpc', () => {
         surfaceId: 'main-menu',
         description: 'Choose an option',
       }),
+      undefined,
+    );
+  });
+
+  it('passes sessionName through to sendWebxdcUpdate', async () => {
+    const deps = makeWebxdcDeps();
+
+    await processWebxdcUpdateIpc(
+      {
+        type: 'webxdc_update',
+        chatJid: SUB_GROUP_JID,
+        content: '{"type":"state","items":[]}',
+        sessionName: 'todo',
+      },
+      'sub',
+      false,
+      deps,
+    );
+
+    expect(deps.sendWebxdcUpdate).toHaveBeenCalledWith(
+      SUB_GROUP_JID,
+      expect.objectContaining({ content: '{"type":"state","items":[]}' }),
+      'todo',
     );
   });
 });

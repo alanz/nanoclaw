@@ -1437,10 +1437,10 @@ async function main(): Promise<void> {
         throw new Error(`Channel does not support file sending`);
       return channel.sendFile(jid, filePath, caption);
     },
-    sendWebxdcUpdate: async (jid, payload) => {
+    sendWebxdcUpdate: async (jid, payload, sessionName) => {
       const channel = findChannel(channels, jid);
       if (channel?.sendWebxdcUpdate) {
-        await channel.sendWebxdcUpdate(jid, payload);
+        await channel.sendWebxdcUpdate(jid, payload, sessionName);
       }
     },
     registeredGroups: () => registeredGroups,

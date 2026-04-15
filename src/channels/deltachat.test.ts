@@ -380,6 +380,21 @@ describe('DeltaChatChannel', () => {
       );
     });
 
+    it('includes /app and /todo in the command list', async () => {
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/help' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      const call = dc.rpc.sendMsg.mock.calls[0];
+      const text: string = call[2].text;
+      expect(text).toContain('/app');
+      expect(text).toContain('/todo');
+    });
+
     it('does not route /help to onMessage', async () => {
       const { opts, dc } = await buildConnectedChannel({ registered: true });
       dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/help' }));
@@ -1501,6 +1516,72 @@ describe('DeltaChatChannel', () => {
     });
   });
 
+  describe('/todo command', () => {
+    it('sends todo.xdc and records the session with :todo suffix', async () => {
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/todo' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({
+          file: expect.stringContaining('todo.xdc'),
+        }),
+      );
+      expect(webxdcStoreMock.setActiveWebxdcSession).toHaveBeenCalledWith(
+        `${JID}:todo`,
+        42, // sendMsg mock returns 42
+      );
+    });
+
+    it('injects a synthetic state-push message to the agent after sending', async () => {
+      const { opts, dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/todo' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        JID,
+        expect.objectContaining({
+          sender: 'system',
+          content: expect.stringContaining('session_name='),
+        }),
+      );
+    });
+
+    it('sends error message when todo.xdc is not built', async () => {
+      const fsMock = fs as unknown as { existsSync: ReturnType<typeof vi.fn> };
+      fsMock.existsSync.mockImplementation(
+        (p: unknown) => typeof p === 'string' && !p.includes('todo.xdc'),
+      );
+
+      const { dc } = await buildConnectedChannel({ registered: true });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: '/todo' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({
+          text: expect.stringContaining('build:todo-xdc'),
+        }),
+      );
+      expect(webxdcStoreMock.setActiveWebxdcSession).not.toHaveBeenCalled();
+    });
+  });
+
   describe('WebxdcStatusUpdate event', () => {
     it('drains queue via email on ping', async () => {
       webxdcStoreMock.dequeueWebxdcUpdates.mockReturnValueOnce([
@@ -1732,6 +1813,20 @@ describe('DeltaChatChannel', () => {
       );
     });
 
+    it('also calls sendWebxdcStatusUpdate directly so the update survives without a ping', async () => {
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(99);
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendWebxdcUpdate(JID, { content: 'persist me' });
+
+      expect(dc.rpc.sendWebxdcStatusUpdate).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        99,
+        expect.stringContaining('"content":"persist me"'),
+        null,
+      );
+    });
+
     it('does NOT dequeue after realtime send (fire-and-forget cannot confirm delivery)', async () => {
       // Regression: previously sendWebxdcUpdate called dequeueWebxdcUpdates after
       // sendWebxdcRealtimeData, which always succeeds even when the app isn't connected.
@@ -1742,6 +1837,46 @@ describe('DeltaChatChannel', () => {
       await channel.sendWebxdcUpdate(JID, { content: 'will this arrive?' });
 
       expect(webxdcStoreMock.dequeueWebxdcUpdates).not.toHaveBeenCalled();
+    });
+
+    it('uses composite session key when sessionName is provided', async () => {
+      // When session_name='todo' is passed, the store should be looked up
+      // with key "dc:42:todo" (not just "dc:42").
+      webxdcStoreMock.getActiveWebxdcMsgId.mockImplementation((key: string) =>
+        key === `${JID}:todo` ? 77 : undefined,
+      );
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendWebxdcUpdate(JID, { content: 'state json' }, 'todo');
+
+      expect(webxdcStoreMock.getActiveWebxdcMsgId).toHaveBeenCalledWith(
+        `${JID}:todo`,
+      );
+      expect(webxdcStoreMock.enqueueWebxdcUpdate).toHaveBeenCalledWith(
+        77,
+        expect.objectContaining({ content: 'state json' }),
+      );
+      expect(dc.rpc.sendWebxdcRealtimeAdvertisement).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        77,
+      );
+    });
+
+    it('falls back to sendMessage when sessionName session has no active msgId', async () => {
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(undefined);
+      const { channel, dc } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendWebxdcUpdate(
+        JID,
+        { content: 'no todo session' },
+        'todo',
+      );
+
+      expect(dc.rpc.sendMsg).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        CHAT_ID,
+        expect.objectContaining({ text: 'no todo session' }),
+      );
     });
   });
 

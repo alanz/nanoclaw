@@ -106,6 +106,7 @@ export interface IpcDeps {
   sendWebxdcUpdate?: (
     jid: string,
     payload: import('./types.js').WebxdcUpdatePayload,
+    sessionName?: string,
   ) => Promise<void>;
   /** Called when a background container (e.g. throwaway) spawns, so it can be
    *  registered with the queue for web UI visibility. */
@@ -339,6 +340,8 @@ export async function processWebxdcUpdateIpc(
     surfaceId?: string;
     components?: unknown[];
     description?: string;
+    /** Named session to target (e.g. 'todo'). Omit for the default nanoclaw.xdc session. */
+    sessionName?: string;
   },
   sourceGroup: string,
   isMain: boolean,
@@ -358,16 +361,25 @@ export async function processWebxdcUpdateIpc(
     return;
   }
 
-  await deps.sendWebxdcUpdate(data.chatJid, {
-    content: data.content,
-    title: data.title,
-    type: (data.surfaceType as 'message' | 'interactive') ?? 'message',
-    surfaceId: data.surfaceId,
-    components: data.components,
-    description: data.description,
-  });
+  await deps.sendWebxdcUpdate(
+    data.chatJid,
+    {
+      content: data.content,
+      title: data.title,
+      type: (data.surfaceType as 'message' | 'interactive') ?? 'message',
+      surfaceId: data.surfaceId,
+      components: data.components,
+      description: data.description,
+    },
+    data.sessionName,
+  );
   logger.info(
-    { chatJid: data.chatJid, sourceGroup, surfaceId: data.surfaceId },
+    {
+      chatJid: data.chatJid,
+      sourceGroup,
+      surfaceId: data.surfaceId,
+      sessionName: data.sessionName,
+    },
     'IPC webxdc update sent',
   );
 }

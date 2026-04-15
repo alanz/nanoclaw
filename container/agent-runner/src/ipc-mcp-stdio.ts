@@ -1785,7 +1785,7 @@ Write the content to a file under /workspace/ipc/ first, then pass its path here
 
 server.tool(
   'webxdc_update',
-  `Send content to the NanoClaw WebXDC chat surface app.
+  `Send content to a NanoClaw WebXDC app session.
 
 Use this tool to deliver responses when the user is interacting via the in-app WebXDC viewer (the message will say "[Surface: WebXDC in-app chat viewer]"). Content is rendered as markdown cards inside the app.
 
@@ -1793,6 +1793,7 @@ Use this tool to deliver responses when the user is interacting via the in-app W
 - For interactive UI (buttons, inputs): set type='interactive' and provide components.
 - To update a card in-place instead of appending: set surface_id to a stable ID.
 - For images: use webxdc_send_image instead.
+- To target the Todo WebXDC app instead of the main chat surface: set session_name='todo'.
 
 Component types: { id, type: 'button'|'text'|'select'|'submit', label, style: 'primary'|'secondary'|'danger', placeholder, options }
 User taps a button → bot receives "[Action: id = value]".`,
@@ -1816,6 +1817,10 @@ User taps a button → bot receives "[Action: id = value]".`,
         .array(z.record(z.string(), z.unknown()))
         .optional()
         .describe('Interactive component definitions (required when type is interactive)'),
+      session_name: z
+        .string()
+        .optional()
+        .describe("Named WebXDC session to target. Use 'todo' to push state to the Todo app. Omit for the default NanoClaw chat surface."),
     },
     async (args) => {
       writeIpcFile(MESSAGES_DIR, {
@@ -1827,6 +1832,7 @@ User taps a button → bot receives "[Action: id = value]".`,
         surfaceType: args.type ?? 'message',
         surfaceId: args.surface_id,
         components: args.components,
+        sessionName: args.session_name,
         timestamp: Date.now(),
       });
       return { content: [{ type: 'text' as const, text: 'WebXDC update queued.' }] };

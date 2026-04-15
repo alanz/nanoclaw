@@ -111,6 +111,76 @@ WebXDC apps run in a sandboxed iframe with strict CSP that blocks all external n
 - Use `webxdc_update` interactive components (buttons) for follow-up actions instead of navigation links
 - Use `webxdc_send_image` to embed images as base64 data URIs rather than `<img src="https://...">` tags
 
+### Todo WebXDC App
+
+The todo app (`todo.xdc`) is a standalone WebXDC app for managing `/workspace/group/todo.md` interactively.
+
+#### Sending the app
+
+The user types `/todo` in chat — NanoClaw delivers the `.xdc` file automatically. You don't need to send it.
+
+#### Pushing state (todo.md → app)
+
+When `todo.md` changes, or when the user asks you to sync the todo app, serialise the file and push it:
+
+```
+mcp__nanoclaw__webxdc_update(
+  content = JSON.stringify({ type: "state", items: [...] }),
+  session_name = "todo"
+)
+```
+
+**Serialisation rules:**
+1. Read `/workspace/group/todo.md`
+2. Track the current `##` section heading (items before the first heading → `section: "root"`)
+3. For each `- [ ]` or `- [x]` line:
+   - `text`: the item text (strip leading `- [ ] ` / `- [x] ` and trailing HTML comment)
+   - `checked`: `true` if `[x]`, `false` if `[ ]`
+   - `id`: extract from trailing `<!-- id:NNNN -->` comment (string); if absent → `null`
+   - `readonly`: `true` when `id` is null (no ID = not interactive)
+   - `section`: the current `##` heading, or `"root"`
+4. Emit: `{ type: "state", items: [ { id, text, checked, section, readonly }, ... ] }`
+
+**Example:**
+```markdown
+- [ ] Integrate calendar <!-- id:1744742400 -->
+## Work
+- [x] Write report <!-- id:1744655820 -->
+- [ ] Old item without ID
+```
+→
+```json
+{ "type": "state", "items": [
+  { "id": "1744742400", "text": "Integrate calendar", "checked": false, "section": "root", "readonly": false },
+  { "id": "1744655820", "text": "Write report",       "checked": true,  "section": "Work", "readonly": false },
+  { "id": null,          "text": "Old item without ID","checked": false, "section": "Work", "readonly": true  }
+] }
+```
+
+#### Receiving toggles (app → you)
+
+When the user checks or unchecks an item, you receive:
+
+```
+[Action: todo_toggle = {"id":"1744742400","checked":true}] (surface: todo)
+```
+
+Handle it:
+1. Parse the JSON value to get `id` and `checked`
+2. Find the line in `todo.md` matching `<!-- id:NNNN -->` where NNNN = id
+3. Replace `- [ ]` with `- [x]` (or vice versa) on that line only
+4. Re-serialise and push fresh state: `webxdc_update(content=JSON.stringify(state), session_name="todo")`
+
+Do NOT use `send_message` — respond via `webxdc_update` with `session_name="todo"`.
+
+#### Backfilling IDs
+
+For existing items without IDs that need to be interactive, run a one-off pass:
+- Read `todo.md`
+- For every `- [ ]` or `- [x]` line without `<!-- id:... -->`, append `<!-- id:UNIX_TS -->`
+- Increment the timestamp by 1 for each item to avoid collisions
+- Then push state to the app
+
 ---
 
 ## Admin Context

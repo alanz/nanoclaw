@@ -34,6 +34,15 @@ const AVATAR_SOURCE = path.resolve(
 /** Path to the built WebXDC chat surface app (.xdc = zip). */
 const XDC_PATH = path.resolve(DATA_DIR, '..', 'assets', 'nanoclaw.xdc');
 
+/** Path to the built Todo WebXDC app (.xdc = zip). */
+const TODO_XDC_PATH = path.resolve(DATA_DIR, '..', 'assets', 'todo.xdc');
+
+/**
+ * Session name used to key the todo.xdc webxdc session within the store.
+ * The store key is `jid + ':' + TODO_SESSION_NAME`.
+ */
+const TODO_SESSION_NAME = 'todo';
+
 /** Note injected into inbound messages coming from the WebXDC app. */
 const WEBXDC_SURFACE_NOTE = `
 
@@ -45,6 +54,18 @@ const WEBXDC_SURFACE_NOTE = `
 - Do NOT use send_message for this reply — it goes to the main chat, not the app.]`;
 
 /** Copy the NanoClaw avatar into the DC data directory and return its path, or null on failure. */
+/** Build the JSON payload sent to the WebXDC app (realtime and email paths). */
+function buildWebxdcPayload(item: WebxdcUpdateItem): Record<string, unknown> {
+  return {
+    type: item.type ?? 'message',
+    content: item.content,
+    title: item.title,
+    timestamp: item.timestamp,
+    ...(item.surfaceId ? { surfaceId: item.surfaceId } : {}),
+    ...(item.components ? { components: item.components } : {}),
+  };
+}
+
 function copyAvatarToDataDir(dataDir: string): string | null {
   try {
     if (!fs.existsSync(AVATAR_SOURCE)) return null;
@@ -371,7 +392,8 @@ export class DeltaChatChannel implements Channel {
             return;
           }
 
-          // /help works in any chat (registered or not)
+          // /help works in any chat (registered or not).
+          // IMPORTANT: every slash command added below must also be listed here.
           if (text.trim() === '/help') {
             const helpGroups = this.opts.registeredGroups();
             const helpGroup = helpGroups[jid];
@@ -383,6 +405,8 @@ export class DeltaChatChannel implements Channel {
               '/compact — compact the conversation to free up context',
               '/reset — summarise session to memory, then start a fresh session',
             ];
+            lines.push('/app — open the NanoClaw WebXDC chat surface');
+            lines.push('/todo — open the Todo WebXDC app');
             if (isMain) {
               lines.push(
                 '/remote-control — start a remote Claude Code session (mobile/laptop)',
@@ -437,6 +461,12 @@ export class DeltaChatChannel implements Channel {
             } else {
               await this.sendWebxdcApp(jid);
             }
+            return;
+          }
+
+          // /todo command: send the Todo WebXDC app to this chat
+          if (text.trim() === '/todo') {
+            await this.sendTodoWebxdcApp(jid);
             return;
           }
 
@@ -660,14 +690,7 @@ export class DeltaChatChannel implements Channel {
     const encodeRealtime = (obj: unknown): number[] =>
       Array.from(new TextEncoder().encode(JSON.stringify(obj)));
 
-    const buildRealtimePayload = (item: WebxdcUpdateItem) => ({
-      type: item.type ?? 'message',
-      content: item.content,
-      title: item.title,
-      timestamp: item.timestamp,
-      ...(item.surfaceId ? { surfaceId: item.surfaceId } : {}),
-      ...(item.components ? { components: item.components } : {}),
-    });
+    const buildRealtimePayload = buildWebxdcPayload;
 
     // When the app opens the realtime channel, drain any queued content immediately.
     emitter.on(
@@ -1059,20 +1082,90 @@ export class DeltaChatChannel implements Channel {
   }
 
   /**
+   * Send the Todo WebXDC app to a chat.
+   * Registers the resulting message as the active 'todo' session for the JID.
+   */
+  async sendTodoWebxdcApp(jid: string): Promise<void> {
+    const chatId = chatIdFromJid(jid);
+    if (chatId === null || !this.dc || this.accountId === null) return;
+
+    if (!fs.existsSync(TODO_XDC_PATH)) {
+      logger.error(
+        { xdcPath: TODO_XDC_PATH },
+        'DeltaChat: todo.xdc not found — run "npm run build:todo-xdc" first',
+      );
+      await this.sendMessage(
+        jid,
+        'Todo WebXDC app not built. Run `npm run build:todo-xdc` on the server first.',
+      );
+      return;
+    }
+
+    try {
+      const msgId = await this.dc.rpc.sendMsg(this.accountId, chatId, {
+        text: null,
+        html: null,
+        viewtype: null,
+        file: TODO_XDC_PATH,
+        filename: 'todo.xdc',
+        location: null,
+        overrideSenderName: null,
+        quotedMessageId: null,
+        quotedText: null,
+      });
+      setActiveWebxdcSession(`${jid}:${TODO_SESSION_NAME}`, msgId);
+      logger.info({ jid, msgId }, 'DeltaChat: Todo WebXDC app sent');
+
+      // Push a meta update immediately so the footer shows the msgId on first
+      // open (via replay) without waiting for a ping-triggered meta response.
+      const metaUpdate = JSON.stringify({
+        payload: { type: 'meta', msgId, timestamp: Date.now() },
+      });
+      await this.dc.rpc
+        .sendWebxdcStatusUpdate(this.accountId, msgId, metaUpdate, 'meta')
+        .catch(() => {});
+
+      // Immediately trigger the agent to push the initial state so the app
+      // doesn't sit on "Waiting for data…" after opening.
+      this.opts.onMessage(jid, {
+        id: `todo-init-${Date.now()}`,
+        chat_jid: jid,
+        sender: 'system',
+        sender_name: 'System',
+        content:
+          '[System: The Todo WebXDC app was just sent to this chat. ' +
+          'Read /workspace/group/todo.md, serialise it per the Todo WebXDC App ' +
+          'instructions in CLAUDE.md, and push the state via webxdc_update with ' +
+          "session_name='todo'. Do not reply in chat — just push the state silently.]",
+        timestamp: new Date().toISOString(),
+        is_from_me: false,
+        is_bot_message: false,
+      });
+    } catch (err) {
+      logger.error({ err, jid }, 'DeltaChat: failed to send Todo WebXDC app');
+      await this.sendMessage(jid, 'Failed to send Todo app. Check the logs.');
+    }
+  }
+
+  /**
    * Push a content update to the active WebXDC app session for a JID.
    * Uses two delivery paths:
    *   1. Realtime (P2P) — near-instant if the app is open
    *   2. Email queue — reliable fallback, drained on the next ping from the app
+   *
+   * @param sessionName - Optional named session (e.g. 'todo'). Omit for the default nanoclaw.xdc session.
    */
   async sendWebxdcUpdate(
     jid: string,
     payload: WebxdcUpdatePayload,
+    sessionName?: string,
   ): Promise<void> {
-    const msgId = getActiveWebxdcMsgId(jid);
+    const sessionKey = sessionName ? `${jid}:${sessionName}` : jid;
+    const msgId = getActiveWebxdcMsgId(sessionKey);
     if (msgId === undefined || !this.dc || this.accountId === null) {
       // No active webxdc session — fall back to a plain text message
       logger.debug(
-        { jid },
+        { jid, sessionKey },
         'DeltaChat: sendWebxdcUpdate called but no active webxdc session',
       );
       await this.sendMessage(jid, payload.content);
@@ -1095,14 +1188,7 @@ export class DeltaChatChannel implements Channel {
     const encoded = (obj: unknown): number[] =>
       Array.from(new TextEncoder().encode(JSON.stringify(obj)));
 
-    const realtimePayload = {
-      type: item.type ?? 'message',
-      content: item.content,
-      title: item.title,
-      timestamp: item.timestamp,
-      ...(item.surfaceId ? { surfaceId: item.surfaceId } : {}),
-      ...(item.components ? { components: item.components } : {}),
-    };
+    const realtimePayload = buildWebxdcPayload(item);
 
     // Attempt realtime delivery (best-effort — may not be connected yet).
     // NOTE: sendWebxdcRealtimeData is fire-and-forget — it succeeds even when
@@ -1125,6 +1211,32 @@ export class DeltaChatChannel implements Channel {
       logger.debug(
         { jid, msgId },
         'DeltaChat: WebXDC realtime unavailable, update queued for email fallback',
+      );
+    }
+
+    // Also persist the update via sendWebxdcStatusUpdate so it lands in DeltaChat's
+    // DB immediately. This means setUpdateListener(serial=0) replay will include it
+    // even if the app was not open during the realtime window and never sends a ping
+    // after the update arrives. The item remains in the JSON queue too; if a ping
+    // drains it again the app will receive a duplicate, which is harmless (idempotent
+    // state render).
+    try {
+      const statusUpdate = JSON.stringify({ payload: realtimePayload });
+      await this.dc.rpc.sendWebxdcStatusUpdate(
+        this.accountId,
+        msgId,
+        statusUpdate,
+        item.description ?? null,
+      );
+      logger.debug(
+        { jid, msgId, sessionKey },
+        'DeltaChat: WebXDC status update persisted directly',
+      );
+    } catch (err) {
+      // Not fatal — item stays queued, will be delivered on next ping
+      logger.debug(
+        { jid, msgId, err },
+        'DeltaChat: WebXDC direct status update failed, relying on queue',
       );
     }
   }

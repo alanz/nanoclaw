@@ -5,9 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "bash scripts/build-webxdc.sh && tsc && node scripts/check-webui-script.mjs",
-    "build:webxdc": "bash scripts/build-webxdc.sh",
-    "build:todo-xdc": "bash scripts/build-todo-xdc.sh",
+    "build": "make assets/nanoclaw.xdc && tsc && node scripts/check-webui-script.mjs",
+    "build:webxdc": "make assets/nanoclaw.xdc",
+    "build:todo-xdc": "make assets/todo.xdc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",

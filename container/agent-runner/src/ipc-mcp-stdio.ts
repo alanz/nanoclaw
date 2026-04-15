@@ -1779,9 +1779,13 @@ Write the content to a file under /workspace/ipc/ first, then pass its path here
       };
     },
   );
-  server.tool(
-    'webxdc_update',
-    `Send content to the NanoClaw WebXDC chat surface app.
+}
+
+// ── WebXDC tools (available to all containers) ────────────────────────────────
+
+server.tool(
+  'webxdc_update',
+  `Send content to the NanoClaw WebXDC chat surface app.
 
 Use this tool to deliver responses when the user is interacting via the in-app WebXDC viewer (the message will say "[Surface: WebXDC in-app chat viewer]"). Content is rendered as markdown cards inside the app.
 
@@ -1829,8 +1833,8 @@ User taps a button → bot receives "[Action: id = value]".`,
     },
   );
 
-  server.tool(
-    'webxdc_send_image',
+server.tool(
+  'webxdc_send_image',
     `Send an image to the NanoClaw WebXDC chat surface app.
 
 Embeds the image as a base64 data URI in a markdown card (required because WebXDC apps run sandboxed without external network access).
@@ -1906,7 +1910,6 @@ Embeds the image as a base64 data URI in a markdown card (required because WebXD
       return { content: [{ type: 'text' as const, text: 'WebXDC image queued.' }] };
     },
   );
-}
 
 // Start the stdio transport
 const transport = new StdioServerTransport();

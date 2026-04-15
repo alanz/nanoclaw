@@ -859,7 +859,16 @@ export class DeltaChatChannel implements Channel {
 
           // Drain the queue, delivering each item with push notification
           const queued = dequeueWebxdcUpdates(msgId);
-          if (queued.length === 0) return;
+          if (queued.length === 0) {
+            // Nothing queued — send an explicit ack so the app can exit "catching up"
+            const ackUpdate = JSON.stringify({
+              payload: { type: 'up_to_date', timestamp: Date.now() },
+            });
+            await dc.rpc
+              .sendWebxdcStatusUpdate(aid, msgId, ackUpdate, '')
+              .catch(() => {});
+            return;
+          }
 
           for (const item of queued) {
             const notifyText = (item.content || '')
@@ -1095,7 +1104,11 @@ export class DeltaChatChannel implements Channel {
       ...(item.components ? { components: item.components } : {}),
     };
 
-    // Attempt realtime delivery (best-effort — may not be connected yet)
+    // Attempt realtime delivery (best-effort — may not be connected yet).
+    // NOTE: sendWebxdcRealtimeData is fire-and-forget — it succeeds even when
+    // the app is not connected. Do NOT dequeue here; the item must remain queued
+    // so it can be reliably drained by the event handlers (WebxdcRealtimeAdvertisementReceived,
+    // WebxdcRealtimeData 'ready', or WebxdcStatusUpdate 'ping').
     try {
       await this.dc.rpc.sendWebxdcRealtimeAdvertisement(this.accountId, msgId);
       await this.dc.rpc.sendWebxdcRealtimeData(
@@ -1103,15 +1116,12 @@ export class DeltaChatChannel implements Channel {
         msgId,
         encoded(realtimePayload),
       );
-      // On successful realtime delivery, drain the queue
-      dequeueWebxdcUpdates(msgId);
       logger.debug(
         { jid, msgId },
-        'DeltaChat: WebXDC update delivered via realtime',
+        'DeltaChat: WebXDC realtime send attempted (item stays queued until ack)',
       );
     } catch {
-      // Realtime not available — the item stays queued and will be sent on the
-      // next ping from the app (email fallback path in WebxdcStatusUpdate handler)
+      // Realtime not available — item stays queued for email fallback on next ping
       logger.debug(
         { jid, msgId },
         'DeltaChat: WebXDC realtime unavailable, update queued for email fallback',

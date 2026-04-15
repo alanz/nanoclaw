@@ -1503,7 +1503,7 @@ describe('DeltaChatChannel', () => {
 
   describe('WebxdcStatusUpdate event', () => {
     it('drains queue via email on ping', async () => {
-      webxdcStoreMock.dequeueWebxdcUpdates.mockReturnValue([
+      webxdcStoreMock.dequeueWebxdcUpdates.mockReturnValueOnce([
         { content: 'hi', title: 'Andy', timestamp: 1000 },
       ]);
       const { dc } = await buildConnectedChannel({ registered: true });
@@ -1640,7 +1640,7 @@ describe('DeltaChatChannel', () => {
 
   describe('WebxdcRealtimeAdvertisementReceived event', () => {
     it('drains queue via realtime when items are queued', async () => {
-      webxdcStoreMock.peekWebxdcUpdates.mockReturnValue([
+      webxdcStoreMock.peekWebxdcUpdates.mockReturnValueOnce([
         { content: 'realtime!', title: 'Andy', timestamp: 1000 },
       ]);
       const { dc } = await buildConnectedChannel({ registered: true });
@@ -1729,6 +1729,103 @@ describe('DeltaChatChannel', () => {
           surfaceId: 'main-menu',
           components: expect.any(Array),
         }),
+      );
+    });
+
+    it('does NOT dequeue after realtime send (fire-and-forget cannot confirm delivery)', async () => {
+      // Regression: previously sendWebxdcUpdate called dequeueWebxdcUpdates after
+      // sendWebxdcRealtimeData, which always succeeds even when the app isn't connected.
+      // This silently dropped messages — the queue was empty when the app later pinged.
+      webxdcStoreMock.getActiveWebxdcMsgId.mockReturnValue(99);
+      const { channel } = await buildConnectedChannel({ registered: true });
+
+      await channel.sendWebxdcUpdate(JID, { content: 'will this arrive?' });
+
+      expect(webxdcStoreMock.dequeueWebxdcUpdates).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('WebxdcRealtimeData event', () => {
+    it('drains queue via realtime on "ready" ping from app', async () => {
+      webxdcStoreMock.peekWebxdcUpdates.mockReturnValue([
+        { content: 'queued!', title: 'Andy', timestamp: 2000 },
+      ]);
+      const { dc } = await buildConnectedChannel({ registered: true });
+
+      const encoded = Array.from(
+        new TextEncoder().encode(JSON.stringify({ type: 'ready' })),
+      );
+      emitterRef.current.emit('WebxdcRealtimeData', {
+        msgId: 55,
+        data: encoded,
+      });
+      await settle();
+
+      expect(dc.rpc.sendWebxdcRealtimeData).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        55,
+        expect.any(Array),
+      );
+      expect(webxdcStoreMock.dequeueWebxdcUpdates).toHaveBeenCalledWith(55);
+    });
+
+    it('does nothing on "ready" when queue is empty', async () => {
+      webxdcStoreMock.peekWebxdcUpdates.mockReturnValue([]);
+      const { dc } = await buildConnectedChannel({ registered: true });
+
+      const encoded = Array.from(
+        new TextEncoder().encode(JSON.stringify({ type: 'ready' })),
+      );
+      emitterRef.current.emit('WebxdcRealtimeData', {
+        msgId: 55,
+        data: encoded,
+      });
+      await settle();
+
+      expect(dc.rpc.sendWebxdcRealtimeData).not.toHaveBeenCalled();
+      expect(webxdcStoreMock.dequeueWebxdcUpdates).not.toHaveBeenCalled();
+    });
+
+    it('ignores non-ready realtime data', async () => {
+      webxdcStoreMock.peekWebxdcUpdates.mockReturnValue([
+        { content: 'item', title: 'Andy', timestamp: 3000 },
+      ]);
+      const { dc } = await buildConnectedChannel({ registered: true });
+
+      const encoded = Array.from(
+        new TextEncoder().encode(JSON.stringify({ type: 'something_else' })),
+      );
+      emitterRef.current.emit('WebxdcRealtimeData', {
+        msgId: 55,
+        data: encoded,
+      });
+      await settle();
+
+      expect(dc.rpc.sendWebxdcRealtimeData).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('WebxdcStatusUpdate ping with empty queue', () => {
+    it('sends up_to_date ack when queue is empty so app exits "catching up"', async () => {
+      // dequeueWebxdcUpdates returns [] by default (mock initialiser)
+      const { dc } = await buildConnectedChannel({ registered: true });
+
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([{ payload: { type: 'ping' } }]),
+      );
+
+      emitterRef.current.emit('WebxdcStatusUpdate', {
+        msgId: 77,
+        statusUpdateSerial: 1,
+      });
+      await settle();
+
+      // Should have sent the up_to_date ack
+      expect(dc.rpc.sendWebxdcStatusUpdate).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        77,
+        expect.stringContaining('"type":"up_to_date"'),
+        '',
       );
     });
   });

@@ -582,6 +582,8 @@
           if (footer) {
             footer.textContent = `ID: ${payload.msgId}${maxSize !== Infinity ? ` · max ${Math.round(maxSize/1024)}KB` : ''}`;
           }
+        } else if (payload.type === 'up_to_date') {
+          setStatus('✅ up to date');
         }
       }
 

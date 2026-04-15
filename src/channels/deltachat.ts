@@ -645,6 +645,7 @@ export class DeltaChatChannel implements Channel {
     // Connectivity monitoring — debounce bursts, then log with status label
     let connectivityDebounce: ReturnType<typeof setTimeout> | null = null;
     let connectivityCount = 0;
+    let lastConnectivityLabel: string | null = null;
     const CONNECTIVITY_DEBOUNCE_MS = 500;
 
     const logConnectivity = async () => {
@@ -656,9 +657,15 @@ export class DeltaChatChannel implements Channel {
         else if (level >= 3000) label = 'working';
         else if (level >= 2000) label = 'connecting';
         else label = 'not connected';
-        logger.info(`DeltaChat: connectivity changed (${label})`);
+        if (label !== lastConnectivityLabel) {
+          lastConnectivityLabel = label;
+          logger.info(`DeltaChat: connectivity changed (${label})`);
+        }
       } catch {
-        logger.info('DeltaChat: connectivity changed');
+        if (lastConnectivityLabel !== null) {
+          lastConnectivityLabel = null;
+          logger.info('DeltaChat: connectivity changed');
+        }
       }
     };
 
@@ -670,15 +677,23 @@ export class DeltaChatChannel implements Channel {
         CONNECTIVITY_DEBOUNCE_MS,
       );
     });
+    // DeltaChat fires ImapInboxIdle once per monitored folder; debounce to one log entry.
+    // Suppress repeated identical state — only log the first time idle is reached after a connect.
+    let imapIdleDebounce: ReturnType<typeof setTimeout> | null = null;
+    let imapIdleLogged = false;
     emitter.on('ImapConnected', () => {
+      imapIdleLogged = false;
       logger.info('DeltaChat: IMAP connected');
     });
-    // DeltaChat fires ImapInboxIdle once per monitored folder; debounce to one log entry.
-    let imapIdleDebounce: ReturnType<typeof setTimeout> | null = null;
     emitter.on('ImapInboxIdle', () => {
       if (imapIdleDebounce) clearTimeout(imapIdleDebounce);
       imapIdleDebounce = setTimeout(() => {
-        logger.info('DeltaChat: IMAP inbox idle (ready for instant delivery)');
+        if (!imapIdleLogged) {
+          imapIdleLogged = true;
+          logger.info(
+            'DeltaChat: IMAP inbox idle (ready for instant delivery)',
+          );
+        }
       }, CONNECTIVITY_DEBOUNCE_MS);
     });
     emitter.on('SmtpConnected', () => {

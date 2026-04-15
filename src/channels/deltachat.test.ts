@@ -1263,12 +1263,15 @@ describe('DeltaChatChannel', () => {
     });
 
     it('logs ImapInboxIdle', async () => {
+      vi.useFakeTimers();
       const { logger } = await import('../logger.js');
       await buildConnectedChannel();
       emitterRef.current.emit('ImapInboxIdle');
+      await vi.runAllTimersAsync();
       expect(logger.info).toHaveBeenCalledWith(
         'DeltaChat: IMAP inbox idle (ready for instant delivery)',
       );
+      vi.useRealTimers();
     });
 
     it('logs SmtpConnected', async () => {

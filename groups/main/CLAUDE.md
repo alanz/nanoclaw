@@ -102,6 +102,15 @@ Keep messages clean and readable.
 
 When reporting a newly created A-MEM note to the user, always include the web UI link to the note. Use `mcp__nanoclaw__get_file_url` to generate it and include it in the message.
 
+### WebXDC Cards
+
+WebXDC apps run in a sandboxed iframe with strict CSP that blocks all external network requests, including link navigation (`net::ERR_BLOCKED_BY_CSP`). Cards must be fully self-contained:
+
+- Do NOT include external links — they will fail silently or show a CSP error on mobile
+- Render key content inline (text, data, summaries) rather than linking out
+- Use `webxdc_update` interactive components (buttons) for follow-up actions instead of navigation links
+- Use `webxdc_send_image` to embed images as base64 data URIs rather than `<img src="https://...">` tags
+
 ---
 
 ## Admin Context

@@ -643,8 +643,13 @@ export class DeltaChatChannel implements Channel {
     emitter.on('ImapConnected', () => {
       logger.info('DeltaChat: IMAP connected');
     });
+    // DeltaChat fires ImapInboxIdle once per monitored folder; debounce to one log entry.
+    let imapIdleDebounce: ReturnType<typeof setTimeout> | null = null;
     emitter.on('ImapInboxIdle', () => {
-      logger.info('DeltaChat: IMAP inbox idle (ready for instant delivery)');
+      if (imapIdleDebounce) clearTimeout(imapIdleDebounce);
+      imapIdleDebounce = setTimeout(() => {
+        logger.info('DeltaChat: IMAP inbox idle (ready for instant delivery)');
+      }, CONNECTIVITY_DEBOUNCE_MS);
     });
     emitter.on('SmtpConnected', () => {
       logger.info('DeltaChat: SMTP connected');

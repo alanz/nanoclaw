@@ -484,6 +484,114 @@ describe('request_session_archive IPC task', () => {
     expect(content).not.toMatch(/\*\*Assistant\*\*:/);
     expect(content).toMatch(/\*\*\w+\*\*: Assistant reply/);
   });
+
+  it('excludes messages already captured by a prior compact archive', async () => {
+    const folder = testFolder('ra-dedup');
+    const group = makeGroup(folder);
+    const setReaction = vi.fn().mockResolvedValue(undefined);
+
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    // The "compact" happened at a known time; only messages after it are new.
+    const compactAt = new Date('2026-04-15T19:16:21.000Z');
+    const oldTs = new Date('2026-04-15T09:00:00.000Z').toISOString();
+    const newTs = new Date('2026-04-15T20:00:00.000Z').toISOString();
+
+    // Write a prior compact archive for the same session
+    const priorArchive = [
+      '---',
+      'session_id: sess-dedup',
+      `archived_at: ${compactAt.toISOString()}`,
+      'source_jsonl: /some/path.jsonl',
+      'is_placeholder: false',
+      '---',
+      '',
+      '# Conversation',
+      '',
+      '**User**: Old message',
+      '',
+      '**Andy**: Old reply',
+      '',
+    ].join('\n');
+    fs.writeFileSync(
+      path.join(convDir, '2026-04-15-1916-compact.md'),
+      priorArchive,
+    );
+
+    // Write JSONL with one old message (before compact) and one new message (after compact)
+    const jonlPath = getSessionJsonlPath(folder, 'sess-dedup');
+    fs.mkdirSync(path.dirname(jonlPath), { recursive: true });
+    createdDirs.push(path.join(DATA_DIR, 'sessions', folder));
+    const lines = [
+      JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: 'Old message' },
+        session_id: 'sess-dedup',
+        timestamp: oldTs,
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Old reply' }],
+        },
+        session_id: 'sess-dedup',
+        timestamp: oldTs,
+      }),
+      JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: 'New message after compact' },
+        session_id: 'sess-dedup',
+        timestamp: newTs,
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'New reply after compact' }],
+        },
+        session_id: 'sess-dedup',
+        timestamp: newTs,
+      }),
+    ];
+    fs.writeFileSync(jonlPath, lines.join('\n') + '\n');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    const deps = makeDeps({
+      registeredGroups: () => ({ 'g@test': group }),
+      setReaction,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'request_session_archive',
+        jid: 'g@test',
+        sessionId: 'sess-dedup',
+        groupFolder: folder,
+      },
+      folder,
+      false,
+      deps,
+    );
+
+    const resetFile = fs
+      .readdirSync(convDir)
+      .find((f) => f.endsWith('-reset.md'));
+    expect(resetFile).toBeDefined();
+    const content = fs.readFileSync(path.join(convDir, resetFile!), 'utf-8');
+
+    // Only new content should appear
+    expect(content).toContain('New message after compact');
+    expect(content).toContain('New reply after compact');
+    // Old content from before the compact must be excluded
+    expect(content).not.toContain('Old message');
+    expect(content).not.toContain('Old reply');
+  });
 });
 
 // ---------------------------------------------------------------------------

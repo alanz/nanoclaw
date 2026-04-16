@@ -1847,12 +1847,20 @@ export async function processTaskIpc(
       // ArchiveAndStartThrowawayOnReset: write real archive and spawn throwaway.
       // The archive is written synchronously first; the throwaway reads it instead of
       // the raw JSONL so long sessions don't exceed the throwaway's context window.
+
+      // Exclude messages already captured by a prior compact (or reset) archive
+      // for this session so the file only contains new content.
+      const priorAt = findLatestArchiveTimestamp(conversationsDir, sessionId);
+      const newMessages = priorAt
+        ? messages.filter((m) => !m.timestamp || m.timestamp > priorAt)
+        : messages;
+
       const archiveFilename = `${date}-${timestamp}-reset.md`;
       writeConversationArchive(
         conversationsDir,
         sessionId,
         jsonlPath,
-        messages,
+        newMessages,
         date,
         timestamp,
         ASSISTANT_NAME,
@@ -1898,6 +1906,7 @@ export function getSessionJsonlPath(
 interface SessionParsedMessage {
   role: 'user' | 'assistant';
   content: string;
+  timestamp?: string;
 }
 
 /** Parse a JSONL transcript into messages (same logic as container parseTranscript). */
@@ -1914,7 +1923,12 @@ function parseSessionJsonl(content: string): SessionParsedMessage[] {
             : entry.message.content
                 .map((c: { text?: string }) => c.text || '')
                 .join('');
-        if (text) messages.push({ role: 'user', content: text });
+        if (text)
+          messages.push({
+            role: 'user',
+            content: text,
+            timestamp: entry.timestamp,
+          });
       } else if (entry.type === 'assistant' && entry.message?.content) {
         const textParts = (
           entry.message.content as Array<{ type: string; text?: string }>
@@ -1922,13 +1936,52 @@ function parseSessionJsonl(content: string): SessionParsedMessage[] {
           .filter((c) => c.type === 'text')
           .map((c) => c.text ?? '');
         const text = textParts.join('');
-        if (text) messages.push({ role: 'assistant', content: text });
+        if (text)
+          messages.push({
+            role: 'assistant',
+            content: text,
+            timestamp: entry.timestamp,
+          });
       }
     } catch {
       // skip malformed lines
     }
   }
   return messages;
+}
+
+/**
+ * Scan conversationsDir for non-placeholder archives with the given sessionId
+ * and return the most recent archived_at timestamp, or null if none exist.
+ * Used to avoid re-archiving content already captured by a prior compact.
+ */
+function findLatestArchiveTimestamp(
+  conversationsDir: string,
+  sessionId: string,
+): string | null {
+  if (!fs.existsSync(conversationsDir)) return null;
+  let latest: string | null = null;
+  for (const file of fs.readdirSync(conversationsDir)) {
+    if (!file.endsWith('.md')) continue;
+    try {
+      const raw = fs.readFileSync(path.join(conversationsDir, file), 'utf-8');
+      // Extract YAML frontmatter block
+      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+      if (!fmMatch) continue;
+      const fm = fmMatch[1];
+      const sidMatch = fm.match(/^session_id:\s*(.+)$/m);
+      const atMatch = fm.match(/^archived_at:\s*(.+)$/m);
+      const phMatch = fm.match(/^is_placeholder:\s*(.+)$/m);
+      if (!sidMatch || !atMatch) continue;
+      if (sidMatch[1].trim() !== sessionId) continue;
+      if (phMatch && phMatch[1].trim() === 'true') continue;
+      const archivedAt = atMatch[1].trim();
+      if (!latest || archivedAt > latest) latest = archivedAt;
+    } catch {
+      // skip unreadable files
+    }
+  }
+  return latest;
 }
 
 /** Write a real conversation archive from parsed messages. */

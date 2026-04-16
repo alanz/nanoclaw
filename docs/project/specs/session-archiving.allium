@@ -35,10 +35,15 @@ use "./scheduling.allium" as scheduling
 entity ConversationArchive {
     session_id: String
     group: core.Group
-    path: String              -- /workspace/group/conversations/{date}-{name}.md
+    path: String              -- /workspace/group/conversations/{date}-{HHmm}-{name}.md
     archived_at: Timestamp
     source_jsonl: String      -- JSONL file read to produce this archive
     is_placeholder: Boolean   -- true when JSONL was missing or session had no messages
+    -- Lower bound of the message timestamp range captured in this archive (exclusive).
+    -- Null means the archive contains the full transcript from session start.
+    -- A non-null value points at a prior non-placeholder archive's archived_at for
+    -- the same session_id; only messages timestamped strictly later are included.
+    messages_since: Timestamp?
 }
 
 -- An AI-generated summary of a completed session.
@@ -84,10 +89,11 @@ rule ArchiveOnPreCompact {
     ensures: ConversationArchive.created(
         session_id: session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-{name}.md",
+        path: "/workspace/group/conversations/{date}-{HHmm}-{name}.md",
         archived_at: now,
         source_jsonl: jsonl_path,
-        is_placeholder: false
+        is_placeholder: false,
+        messages_since: null
     )
     ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
 
@@ -106,10 +112,11 @@ rule ArchiveOnPreCompactJonlMissing {
     ensures: ConversationArchive.created(
         session_id: session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-missing.md",
+        path: "/workspace/group/conversations/{date}-{HHmm}-missing.md",
         archived_at: now,
         source_jsonl: jsonl_path,
-        is_placeholder: true
+        is_placeholder: true,
+        messages_since: null
     )
     ensures: core.HostLogRecorded(
         level: error,
@@ -129,7 +136,7 @@ rule StartThrowawayOnPostCompact {
         for_session_id: session_id,
         group: group,
         source_jsonl: jsonl_path,
-        status: queued,
+        status: running,
         started_at: now
     )
     ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "📝")
@@ -140,6 +147,12 @@ rule StartThrowawayOnPostCompact {
 -- When /reset is issued on a session with messages and the JSONL is present,
 -- archive the transcript programmatically (same code as PreCompact), then start
 -- a throwaway session. The ConversationSession is cleared.
+--
+-- The archive is incremental: if a prior non-placeholder archive already exists
+-- for this session_id (from an earlier auto-compact or reset), the new archive
+-- contains only the messages timestamped strictly after that archive's
+-- archived_at. Otherwise it contains the full transcript. This prevents the
+-- same content from appearing in multiple archives for the same session.
 rule ArchiveAndStartThrowawayOnReset {
     when: core.SessionCommandApplied(group, command: reset)
 
@@ -149,23 +162,40 @@ rule ArchiveAndStartThrowawayOnReset {
     requires: cs.message_count > 0
     requires: file_exists(session_jsonl_path(cs))
 
+    let prior_archives = ConversationArchive
+        where session_id = cs.session_id and not is_placeholder
+    let latest_prior_at =
+        if prior_archives.count > 0:
+            latest_archived_at(prior_archives)
+        else:
+            null
+
     ensures: ConversationArchive.created(
         session_id: cs.session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-{name}.md",
+        path: "/workspace/group/conversations/{date}-{HHmm}-{name}.md",
         archived_at: now,
         source_jsonl: session_jsonl_path(cs),
-        is_placeholder: false
+        is_placeholder: false,
+        messages_since: latest_prior_at
     )
     ensures: ThrowawaySession.created(
         for_session_id: cs.session_id,
         group: group,
         source_jsonl: session_jsonl_path(cs),
-        status: queued,
+        status: running,
         started_at: now
     )
     ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
     ensures: not exists cs
+
+    @guidance
+        -- latest_archived_at returns the archived_at of the most recent entry in
+        -- the given set. Implementation scans the conversations directory,
+        -- parses each archive's YAML frontmatter, filters by session_id and
+        -- is_placeholder = false, and selects the max archived_at.
+        -- The incremental filter is applied to parsed messages before writing;
+        -- messages lacking a timestamp are included (no safe way to exclude).
 }
 
 -- If /reset is issued on a session with messages but the JSONL is missing,
@@ -182,10 +212,11 @@ rule ResetJonlMissing {
     ensures: ConversationArchive.created(
         session_id: cs.session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-missing.md",
+        path: "/workspace/group/conversations/{date}-{HHmm}-missing.md",
         archived_at: now,
         source_jsonl: session_jsonl_path(cs),
-        is_placeholder: true
+        is_placeholder: true,
+        messages_since: null
     )
     ensures: SessionSummary.created(
         session_id: cs.session_id,
@@ -214,10 +245,11 @@ rule ResetOnEmptySession {
     ensures: ConversationArchive.created(
         session_id: cs.session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-empty.md",
+        path: "/workspace/group/conversations/{date}-{HHmm}-empty.md",
         archived_at: now,
         source_jsonl: session_jsonl_path(cs),
-        is_placeholder: true
+        is_placeholder: true,
+        messages_since: null
     )
     ensures: SessionSummary.created(
         session_id: cs.session_id,
@@ -322,7 +354,7 @@ rule RecoverOrphanedArchives {
             for_session_id: archive.session_id,
             group: archive.group,
             source_jsonl: archive.source_jsonl,
-            status: queued,
+            status: running,
             started_at: now
         )
 
@@ -353,6 +385,23 @@ invariant ArchiveEventuallyHasSummary {
     for archive in ConversationArchive where not archive.is_placeholder:
         exists SessionSummary{ session_id: archive.session_id }
         or exists ThrowawaySession{ for_session_id: archive.session_id }
+}
+
+-- Non-placeholder archives for the same session never overlap. For any two such
+-- archives a (earlier) and b (later, archived_at strictly greater), the later
+-- archive's messages_since must be at least the earlier archive's archived_at,
+-- meaning b's content starts where (or after) a's content ended. No message
+-- timestamp falls inside both ranges.
+invariant NonOverlappingArchivesPerSession {
+    for a in ConversationArchive:
+        for b in ConversationArchive:
+            a != b
+                and a.session_id = b.session_id
+                and not a.is_placeholder
+                and not b.is_placeholder
+                and a.archived_at < b.archived_at
+                implies b.messages_since != null
+                    and b.messages_since >= a.archived_at
 }
 
 ------------------------------------------------------------

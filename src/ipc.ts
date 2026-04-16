@@ -4,6 +4,7 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import {
+  ASSISTANT_NAME,
   DATA_DIR,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
@@ -1854,6 +1855,7 @@ export async function processTaskIpc(
         messages,
         date,
         timestamp,
+        ASSISTANT_NAME,
       );
       spawnThrowaway(
         raGroup,
@@ -1937,6 +1939,7 @@ function writeConversationArchive(
   messages: SessionParsedMessage[],
   date: string,
   timestamp: string,
+  assistantName?: string,
 ): void {
   fs.mkdirSync(conversationsDir, { recursive: true });
   const filename = `${date}-${timestamp}-reset.md`;
@@ -1957,7 +1960,7 @@ function writeConversationArchive(
     '',
   ];
   for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'Assistant';
+    const sender = msg.role === 'user' ? 'User' : assistantName || 'Assistant';
     const content =
       msg.content.length > 2000
         ? msg.content.slice(0, 2000) + '...'

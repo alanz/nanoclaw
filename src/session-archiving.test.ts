@@ -442,6 +442,48 @@ describe('request_session_archive IPC task', () => {
     expect(archiveContent).toContain('session_id: sess-real');
     expect(archiveContent).toContain('is_placeholder: false');
   });
+
+  it('uses the assistant name (not "Assistant") in archive speaker labels', async () => {
+    const folder = testFolder('ra-name');
+    const group = makeGroup(folder);
+    const setReaction = vi.fn().mockResolvedValue(undefined);
+
+    ensureDir(GROUPS_DIR, folder, 'conversations');
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeJonl(folder, 'sess-name', 1);
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    const deps = makeDeps({
+      registeredGroups: () => ({ 'g@test': group }),
+      setReaction,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'request_session_archive',
+        jid: 'g@test',
+        sessionId: 'sess-name',
+        groupFolder: folder,
+      },
+      folder,
+      false,
+      deps,
+    );
+
+    const convDir = groupDir(path.join(folder, 'conversations'));
+    const archiveFile = fs
+      .readdirSync(convDir)
+      .find((f) => f.endsWith('-reset.md'));
+    expect(archiveFile).toBeDefined();
+    const content = fs.readFileSync(path.join(convDir, archiveFile!), 'utf-8');
+    // Must use the configured assistant name, not the generic "Assistant"
+    expect(content).not.toMatch(/\*\*Assistant\*\*:/);
+    expect(content).toMatch(/\*\*\w+\*\*: Assistant reply/);
+  });
 });
 
 // ---------------------------------------------------------------------------

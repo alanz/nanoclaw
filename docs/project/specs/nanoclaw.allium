@@ -772,6 +772,41 @@ rule PendingDepthSet {
 --   or (b) be made durable. Silent additions of behaviour-affecting in-memory
 --   state are regressions against this property.
 
+-- ---- Slash Command Help Listing ----
+-- Every slash command exposed to users in any channel must appear in the output
+-- of the /help command. /help is the single discoverable source of truth for
+-- available commands: users should never need to read source, documentation, or
+-- release notes to learn what commands exist. Adding a new user-facing slash
+-- command without listing it in /help is a regression against this property.
+--
+-- Scope: any command the user can type in a chat and have the system act on.
+-- This includes host-level commands intercepted by the channel adapter before
+-- agent dispatch (e.g. /ping, /chatid, /help, /app, /todo, /remote-control)
+-- and forwarded container commands handled inside the agent (e.g. /compact,
+-- /reset, /esc — see SlashCommandDispatched in container-protocol.allium).
+-- Commands whose availability is conditional on chat role (e.g. main-only
+-- commands like /remote-control) must still be listed by /help for the chats
+-- in which they are available; /help itself is responsible for filtering its
+-- output to the caller's context.
+--
+-- Exemption: /help need not list itself as a command that takes an argument,
+-- but by convention it lists itself at the end of its own output so users
+-- discover it is itself a command. No other command is exempt.
+--
+-- This property is a development-process completeness obligation over the
+-- prose definition of /help's output, not a property of entity state at any
+-- single moment, so it cannot be written as an expression-bearing invariant
+-- (see the language reference on expressible invariants). It is asserted in
+-- prose and enforced by review whenever a new slash command is added.
+--
+-- @guidance
+--   The canonical /help implementation lives in src/channels/deltachat.ts and
+--   hard-codes the command list. A comment at that site reminds implementors
+--   that every new slash command must be added to the help output. If /help is
+--   ever ported to another channel or refactored to draw from a registry, the
+--   obligation stated here still applies: the /help output must enumerate every
+--   user-facing slash command the system accepts on that channel.
+
 -- Bot-generated messages are never included in the context sent to the agent.
 -- This prevents the agent from re-processing its own previous replies.
 invariant BotMessagesExcludedFromContext {

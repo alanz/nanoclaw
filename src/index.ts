@@ -1105,7 +1105,7 @@ async function startTodoStateWatcher(): Promise<void> {
                 'todo-state.json watcher: failed to push state',
               );
             });
-            logger.debug(
+            logger.info(
               { jid },
               'todo-state.json watcher: pushed state to todo app',
             );
@@ -1117,6 +1117,33 @@ async function startTodoStateWatcher(): Promise<void> {
       logger.warn({ err, groupDir }, 'Failed to start todo-state.json watcher');
     }
   }
+
+  // Startup resync: after the channel has had time to initialize, push the
+  // current todo-state.json to any active todo sessions. This ensures the app
+  // is up-to-date after a reboot even if the realtime channel was not
+  // re-established (e.g. the app was already open when NanoClaw restarted).
+  setTimeout(() => {
+    for (const [jid, group] of Object.entries(registeredGroups)) {
+      const sessionKey = `${jid}:todo`;
+      if (getActiveWebxdcMsgId(sessionKey) === undefined) continue;
+
+      const stateFile = path.join(GROUPS_DIR, group.folder, 'todo-state.json');
+      let content: string;
+      try {
+        content = fs.readFileSync(stateFile, 'utf8');
+      } catch {
+        continue;
+      }
+
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendWebxdcUpdate) continue;
+
+      channel.sendWebxdcUpdate(jid, { content }, 'todo').catch((err) => {
+        logger.warn({ err, jid }, 'todo-state.json startup resync: failed');
+      });
+      logger.info({ jid }, 'todo-state.json startup resync: pushed state');
+    }
+  }, 20_000);
 }
 
 /** Extract a single YAML frontmatter field value from a markdown file's content. */

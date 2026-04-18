@@ -112,7 +112,10 @@ config {
     ipc_poll_interval: Integer = 1000      -- host polling cadence for IPC directories (milliseconds)
     query_timeout: Duration = 15.seconds   -- default timeout for transcript + memory queries
     eval_timeout: Duration = 180.seconds   -- timeout for skill_eval (longer: runs a full agent)
-    file_path_prefix: String = "/workspace/ipc-out/"  -- send_file paths must be under this prefix (see container-ipc-transfer.allium)
+    -- send_file paths must be under this prefix. Value equals
+    -- container-ipc-transfer.config.ipc_out_container_path with a trailing "/" appended
+    -- (see container-ipc-transfer.allium).
+    file_path_prefix: String = "/workspace/ipc-out/"
 }
 
 ------------------------------------------------------------
@@ -468,7 +471,7 @@ rule AgentSetGroupTrusted {
 -- Only the main group agent may start a Claude Code remote control session.
 -- The host responds in chat with the session URL.
 rule AgentStartedRemoteControl {
-    when: AgentMcpCall(author, "start_remote_control")
+    when: AgentMcpCall(author, "remote_control")
 
     requires: author.is_main
 
@@ -477,7 +480,7 @@ rule AgentStartedRemoteControl {
 
 -- Only the main group agent may stop the active remote control session.
 rule AgentStoppedRemoteControl {
-    when: AgentMcpCall(author, "stop_remote_control")
+    when: AgentMcpCall(author, "remote_control_stop")
 
     requires: author.is_main
 

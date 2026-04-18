@@ -275,14 +275,17 @@ rule TaskUserProfileDispatched {
 }
 
 -- A claimed prompt task that cannot dispatch immediately because the
--- concurrency cap is full. The task is held by enqueuing a WaitingGroup with
--- kind = task, which is drained ahead of message-kind entries when an agent
--- slot frees (see nanoclaw.AgentSlotFreed). Only non-main groups can queue:
--- the main group bypasses the cap and never reaches this rule.
+-- concurrency cap is full. The task is held by enqueuing a WaitingGroup
+-- entry for the group, recording that the group has held work awaiting a
+-- slot. The group's per-JID GroupQueue separately tracks which kinds of
+-- work are pending (tasks vs messages); when the slot frees, pending tasks
+-- within the group are drained before pending messages. Only non-main
+-- groups can queue: the main group bypasses the cap and never reaches
+-- this rule.
 --
 -- TaskClaimed has already advanced next_run by this point, so the task will
--- not re-fire from the scheduler tick. The held work is carried by the
--- WaitingGroup entry until the slot frees.
+-- not re-fire from the scheduler tick. The held work is carried on the
+-- group's pending-task list inside GroupQueue until the slot frees.
 rule TaskQueued {
     when: TaskClaimReady(task)
 
@@ -293,18 +296,25 @@ rule TaskQueued {
 
     ensures: nanoclaw.WaitingGroup.created(
         group: task.group,
-        queued_at: now,
-        kind: task
+        queued_at: now
     )
 
     @guidance
         -- Code reference: task-scheduler.ts dispatches via GroupQueue.enqueueTask,
-        -- which serialises by JID. When the global concurrency cap is reached, the
-        -- scheduler holds the task on its per-JID queue rather than launching a
-        -- container. The next scheduler tick re-checks capacity; once a slot
-        -- frees, AgentSlotFreed (in nanoclaw.allium) drains task-kind WaitingGroups
-        -- before message-kind ones, so scheduled tasks take priority over
-        -- pending message dispatches.
+        -- which serialises by JID. The GroupQueue maintains two per-group lists:
+        -- pendingTasks and pendingMessages. When the global concurrency cap is
+        -- reached, the scheduler appends to pendingTasks rather than launching a
+        -- container, and creates (or leaves in place) a single WaitingGroup entry
+        -- marking the group as having work awaiting a slot. The WaitingGroup
+        -- entity itself does not distinguish tasks from messages; it only records
+        -- "this group has held work". The task-vs-message distinction lives on
+        -- the group's pending lists.
+        --
+        -- The next scheduler tick re-checks capacity; once a slot frees,
+        -- AgentSlotFreed (in nanoclaw.allium) picks the next waiting group in
+        -- FIFO order, and within that group the GroupQueue drain always empties
+        -- pendingTasks before pendingMessages. This gives scheduled tasks
+        -- priority over pending message dispatches within the same group.
         --
         -- session_reset and user_profile tasks never reach this rule:
         -- session_reset does not spawn a container at all, and user_profile only

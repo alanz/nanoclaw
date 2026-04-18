@@ -115,8 +115,52 @@ Body text here.
     }
   });
 
+  it('returns empty array for synthesises when absent', () => {
+    const result = parseNoteFrontmatter(NOTE);
+    expect(result!.synthesises).toEqual([]);
+  });
+
   it('returns null for non-note text', () => {
     expect(parseNoteFrontmatter('no frontmatter here')).toBeNull();
+  });
+
+  const SYN_NOTE = `---
+id: SYN-2026-04-18-agent-memory-three-problems
+created: 2026-04-18
+keywords: [agent-memory, synthesis]
+tags: [memory-systems, synthesis]
+links: []
+supersedes: null
+synthesises: [MEM-2026-04-01-memory-decay, MEM-2026-04-02-retrieval-failure]
+---
+
+Synthesis body here.
+`;
+
+  it('parses SYN note id', () => {
+    const result = parseNoteFrontmatter(SYN_NOTE);
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe('SYN-2026-04-18-agent-memory-three-problems');
+  });
+
+  it('parses synthesises list from SYN note', () => {
+    const result = parseNoteFrontmatter(SYN_NOTE);
+    expect(result!.synthesises).toEqual([
+      'MEM-2026-04-01-memory-decay',
+      'MEM-2026-04-02-retrieval-failure',
+    ]);
+  });
+
+  it('no synthesises ID starts with [', () => {
+    const result = parseNoteFrontmatter(SYN_NOTE);
+    for (const id of result!.synthesises) {
+      expect(id).not.toMatch(/^\[/);
+    }
+  });
+
+  it('parses synthesis tag in SYN note', () => {
+    const result = parseNoteFrontmatter(SYN_NOTE);
+    expect(result!.tags).toContain('synthesis');
   });
 });
 

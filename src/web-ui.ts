@@ -949,7 +949,7 @@ document.addEventListener('DOMContentLoaded', function() {
       keyEl.textContent = key;
       var valEl = document.createElement('div');
       valEl.className = 'fm-val';
-      if ((key === 'links' || key === 'supersedes' || key === 'superseded_by') && filePath) {
+      if ((key === 'links' || key === 'supersedes' || key === 'superseded_by' || key === 'synthesises') && filePath) {
         var baseDir = filePath.replace(/[^/]+$/, '');
         valEl.style.display = 'flex';
         valEl.style.flexDirection = 'column';
@@ -1204,8 +1204,8 @@ document.addEventListener('DOMContentLoaded', function() {
       var r = await fetch('/api/file?path='+encodeURIComponent(filePath));
       if (!r.ok) { view.innerHTML = '<div class="empty">Could not read file</div>'; return; }
       var text = await r.text();
-      var isNote = filePath.indexOf('/memory/notes/MEM-') !== -1;
-      var noteIdMatch = filePath.match(/(MEM-[^/]+)\.md$/);
+      var isNote = filePath.indexOf('/memory/notes/MEM-') !== -1 || filePath.indexOf('/memory/notes/SYN-') !== -1;
+      var noteIdMatch = filePath.match(/((MEM|SYN)-[^/]+)\.md$/);
       var graphBtnHash = (currentGroup && noteIdMatch ? '#groups/'+currentGroup.folder+'/notes/'+noteIdMatch[1] : currentGroup ? '#groups/'+currentGroup.folder+'/notes' : '#');
       var graphBtn = isNote ? ' <a href="'+graphBtnHash+'" class="graph-file-btn" data-path="'+esc(filePath)+'" style="color:#58a6ff;font-size:11px;margin-left:8px;text-decoration:none">\u29BF Show in Graph</a>' : '';
       var header = '<div class="dim" style="margin-bottom:12px">'+esc(filePath)+graphBtn+'</div>';
@@ -1391,7 +1391,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // d3 simulation nodes — seed with random positions
     var simNodes = nodes.map(function(n) {
-      return { id: n.id, label: n.label, tags: n.tags, keywords: n.keywords, created: n.created, path: n.path, color: tagColor(dominantTag(n.tags)), x: Math.random() * 800 - 400, y: Math.random() * 600 - 300 };
+      return { id: n.id, label: n.label, tags: n.tags, keywords: n.keywords, created: n.created, path: n.path, color: tagColor(dominantTag(n.tags)), isSynthesis: n.isSynthesis||false, x: Math.random() * 800 - 400, y: Math.random() * 600 - 300 };
     });
     var simLinks = [];
     edges.forEach(function(e) {
@@ -1441,10 +1441,10 @@ document.addEventListener('DOMContentLoaded', function() {
     var elements = [];
     simNodes.forEach(function(n) {
       var faded = highlightIds && highlightIds.size > 0 && !highlightIds.has(n.id);
-      elements.push({ group:'nodes', data:{ id:n.id, label:n.label, tags:n.tags, keywords:n.keywords, created:n.created, path:n.path, color:n.color }, classes: faded ? 'faded' : '', position:{ x:n.x, y:n.y } });
+      elements.push({ group:'nodes', data:{ id:n.id, label:n.label, tags:n.tags, keywords:n.keywords, created:n.created, path:n.path, color:n.color, isSynthesis:n.isSynthesis||false }, classes: faded ? 'faded' : '', position:{ x:n.x, y:n.y } });
     });
     edges.forEach(function(e, i) {
-      elements.push({ group:'edges', data:{ id:'e'+i, source:e.source, target:e.target, supersedes:e.supersedes||false } });
+      elements.push({ group:'edges', data:{ id:'e'+i, source:e.source, target:e.target, supersedes:e.supersedes||false, synthesises:e.synthesises||false } });
     });
 
     // Legend — clickable tag filters
@@ -1470,14 +1470,18 @@ document.addEventListener('DOMContentLoaded', function() {
       elements: elements,
       style: [
         { selector:'node', style:{ shape:'ellipse', width:18, height:18, 'background-color':'data(color)', 'border-width':1, 'border-color':'rgba(255,255,255,0.15)', 'text-opacity':0, label:'data(label)', color:'#e6edf3', 'font-size':11, 'text-valign':'bottom', 'text-halign':'center', 'text-margin-y':4, 'text-wrap':'wrap', 'text-max-width':120 } },
+        { selector:'node[?isSynthesis]', style:{ shape:'diamond', width:22, height:22, 'border-color':'rgba(188,140,255,0.5)', 'border-width':1.5 } },
         { selector:'node.faded', style:{ opacity:0.25 } },
         { selector:'node.hovered', style:{ 'text-opacity':1, width:22, height:22, 'border-color':'#8b949e', 'border-width':2, opacity:1 } },
+        { selector:'node[?isSynthesis].hovered', style:{ width:26, height:26 } },
         { selector:'node:selected', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#f0f6fc', width:24, height:24 } },
+        { selector:'node[?isSynthesis]:selected', style:{ width:28, height:28 } },
         { selector:'node.dimmed', style:{ opacity:0.12 } },
         { selector:'node.dimmed.hovered', style:{ opacity:1, 'text-opacity':1 } },
         { selector:'node.neighbor', style:{ 'text-opacity':1, 'border-width':2, 'border-color':'#58a6ff', width:22, height:22 } },
         { selector:'edge', style:{ width:1, 'line-color':'#6e7681', 'curve-style':'bezier', opacity:0.6 } },
         { selector:'edge[?supersedes]', style:{ 'line-color':'#d29922', 'line-style':'dashed', 'line-dash-pattern':[6,3], opacity:0.7, 'target-arrow-shape':'triangle', 'target-arrow-color':'#d29922', 'arrow-scale':1.2 } },
+        { selector:'edge[?synthesises]', style:{ 'line-color':'#bc8cff', 'line-style':'dashed', 'line-dash-pattern':[3,4], opacity:0.65, 'target-arrow-shape':'triangle', 'target-arrow-color':'#bc8cff', 'arrow-scale':1.0 } },
         { selector:'edge.dimmed', style:{ opacity:0.06 } },
         { selector:'edge.highlighted', style:{ width:2, 'line-color':'#58a6ff', opacity:0.8 } },
         { selector:'node.hover-neighbor', style:{ 'text-opacity':1, 'border-color':'rgba(88,166,255,0.5)', 'border-width':2, opacity:1 } },
@@ -1578,7 +1582,8 @@ document.addEventListener('DOMContentLoaded', function() {
       var fileRel = (d.path && currentGroup && d.path.startsWith(currentGroup.folder+'/')) ? d.path.slice(currentGroup.folder.length+1) : d.path;
       var fileHash = (fileRel && currentGroup) ? '#groups/'+currentGroup.folder+'/files/'+fileRel : '#';
       var titleEl = document.getElementById('graph-node-id');
-      titleEl.innerHTML = '<a href="'+fileHash+'" id="graph-open-link" style="color:inherit;text-decoration:none">'+esc(d.id)+'</a>';
+      var synthBadge = d.isSynthesis ? ' <span style="font-size:10px;background:#21262d;border:1px solid #bc8cff;border-radius:8px;padding:1px 6px;color:#bc8cff;vertical-align:middle">synthesis</span>' : '';
+      titleEl.innerHTML = '<a href="'+fileHash+'" id="graph-open-link" style="color:inherit;text-decoration:none">'+esc(d.id)+'</a>'+synthBadge;
       document.getElementById('graph-node-meta').innerHTML =
         '<div class="fm-key">Created</div><div class="fm-val">'+esc(d.created)+'</div>'
         +(tagsHtml ? '<div class="fm-key">Tags</div><div class="fm-val">'+tagsHtml+'</div>' : '')
@@ -2714,6 +2719,7 @@ export function parseNoteFrontmatter(text: string): {
   links: string[];
   supersedes: string[];
   superseded_by: string[];
+  synthesises: string[];
   source_report_path: string | null;
 } | null {
   if (!text.startsWith('---')) return null;
@@ -2758,6 +2764,7 @@ export function parseNoteFrontmatter(text: string): {
     links: parseList(fields['links']),
     supersedes: parseList(fields['supersedes']),
     superseded_by: parseList(fields['superseded_by']),
+    synthesises: parseList(fields['synthesises']),
     source_report_path,
   };
 }
@@ -3024,6 +3031,7 @@ export function startWebUi(
           created: string;
           path: string;
           source_task_id: string | null;
+          isSynthesis: boolean;
         };
         const nodes: NoteNode[] = [];
         const nodeIds = new Set<string>();
@@ -3056,13 +3064,14 @@ export function startWebUi(
           nodes.push({
             id: fm.id,
             label: fm.id
-              .replace(/^MEM-\d{4}-\d{2}-\d{2}-/, '')
+              .replace(/^(?:MEM|SYN)-\d{4}-\d{2}-\d{2}-/, '')
               .replace(/-/g, ' '),
             tags: fm.tags,
             keywords: fm.keywords,
             created: fm.created,
             path: folder + '/memory/notes/' + file,
             source_task_id,
+            isSynthesis: fm.id.startsWith('SYN-'),
           });
           nodeIds.add(fm.id);
         }
@@ -3070,6 +3079,7 @@ export function startWebUi(
           source: string;
           target: string;
           supersedes?: boolean;
+          synthesises?: boolean;
         }> = [];
         const seen = new Set<string>();
         // Build a set of supersedes pairs (normalised: older||newer)
@@ -3095,6 +3105,14 @@ export function startWebUi(
                 target: tgt,
                 supersedes: supersedesPairs.has(key) || undefined,
               });
+            }
+          }
+          for (const tgt of fm.synthesises) {
+            if (!nodeIds.has(fm.id) || !nodeIds.has(tgt)) continue;
+            const key = fm.id + '||SYN||' + tgt;
+            if (!seen.has(key)) {
+              seen.add(key);
+              edges.push({ source: fm.id, target: tgt, synthesises: true });
             }
           }
         }

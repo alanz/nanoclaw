@@ -114,8 +114,10 @@ export function buildZoteroSyncPrompt(
 
 /**
  * Cheap pre-check: ask Zotero if the library version has advanced since
- * lastVersion. Returns true if there are new/modified items (or if the check
- * can't be performed — fail open so a full sync still runs).
+ * lastVersion. Returns true if there are new/modified items. Returns false
+ * (fail-closed) on missing credentials, non-OK response, or network error —
+ * the caller skips the container spawn and relies on the already-advanced
+ * nextCheck to retry at the next scheduled interval.
  * Exported for testing.
  */
 export async function hasNewZoteroItems(lastVersion: number): Promise<boolean> {
@@ -124,10 +126,8 @@ export async function hasNewZoteroItems(lastVersion: number): Promise<boolean> {
   const userId = env.ZOTERO_USER_ID;
 
   if (!apiKey || !userId) {
-    logger.debug(
-      'Zotero credentials not available for pre-check, assuming new items',
-    );
-    return true;
+    logger.warn('Zotero credentials not configured, skipping sync');
+    return false;
   }
 
   const url =
@@ -146,9 +146,9 @@ export async function hasNewZoteroItems(lastVersion: number): Promise<boolean> {
     if (!res.ok) {
       logger.warn(
         { status: res.status },
-        'Zotero version pre-check failed, assuming new items',
+        'Zotero version pre-check failed, skipping sync',
       );
-      return true;
+      return false;
     }
 
     const serverVersion = parseInt(
@@ -162,8 +162,8 @@ export async function hasNewZoteroItems(lastVersion: number): Promise<boolean> {
     );
     return hasNew;
   } catch (err) {
-    logger.warn({ err }, 'Zotero version pre-check error, assuming new items');
-    return true;
+    logger.warn({ err }, 'Zotero version pre-check error, skipping sync');
+    return false;
   }
 }
 

@@ -113,22 +113,22 @@ describe('hasNewZoteroItems', () => {
     expect(result).toBe(false);
   });
 
-  it('returns true (fail open) when the API call fails', async () => {
+  it('returns false (fail closed) when the API call fails', async () => {
     vi.stubGlobal('fetch', async () => {
       throw new Error('network error');
     });
     const result = await hasNewZoteroItems(3239);
-    expect(result).toBe(true);
+    expect(result).toBe(false);
   });
 
-  it('returns true (fail open) when the API returns a non-OK status', async () => {
+  it('returns false (fail closed) when the API returns a non-OK status', async () => {
     vi.stubGlobal('fetch', async () => ({
       ok: false,
       status: 403,
       headers: { get: () => null },
     }));
     const result = await hasNewZoteroItems(3239);
-    expect(result).toBe(true);
+    expect(result).toBe(false);
   });
 });
 

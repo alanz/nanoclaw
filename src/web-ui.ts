@@ -409,36 +409,72 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── URL routing ─────────────────────────────────────────────────────────────
   // URL scheme:
-  //   #groups                        → group list
-  //   #groups/{folder}               → group chat tab (default)
-  //   #groups/{folder}/tasks         → group tasks tab
-  //   #groups/{folder}/files         → group files tab, no file selected
-  //   #groups/{folder}/files/{path}  → group files tab, file open
-  //                                    ({path} is relative within the group folder)
-  //   #groups/{folder}/notes         → group graph tab
-  //   #groups/{folder}/notes/{id}    → group graph tab, note selected
-  //   #feeds                         → feeds
-  //   #system                        → system
+  //   #groups                                        → group list
+  //   #groups/{folder}                               → group chat tab (default)
+  //   #groups/{folder}/tasks                         → group tasks tab
+  //   #groups/{folder}/tasks/{taskId}                → group tasks tab, task detail open
+  //   #groups/{folder}/tasks/{taskId}/log/{logId}    → group tasks tab, task result open
+  //   #groups/{folder}/files                         → group files tab, no file selected
+  //   #groups/{folder}/files/{path}                  → group files tab, file open
+  //                                                    ({path} is relative within the group folder)
+  //   #groups/{folder}/notes                         → group graph tab
+  //   #groups/{folder}/notes/{id}                    → group graph tab, note selected
+  //   #feeds                                         → feeds
+  //   #system                                        → system
+  //   #specialists/task/{taskId}                     → specialists, task detail open
+  //   #specialists/submission/{id}                   → specialists, submission detail open
+  //   #database/{table}                              → database, table selected
+  //   #database/{table}?page={n}&search={q}          → database, table selected with pagination/search
 
   function pushHash(hash) {
     if (!skipHashUpdate) history.pushState(null, '', '#' + hash);
   }
 
   function parseHash(hash) {
-    hash = (hash || '').replace(/^#/, '') || 'groups';
+    // Split off query string before processing the hash fragment
+    var qIdx = hash.indexOf('?');
+    var query = qIdx !== -1 ? hash.slice(qIdx + 1) : '';
+    hash = (qIdx !== -1 ? hash.slice(0, qIdx) : hash).replace(/^#/, '') || 'groups';
     var parts = hash.split('/');
     var section = parts[0] || 'groups';
     if (section === 'overview') return { section: 'overview' };
-    if (section === 'specialists') return { section: 'specialists' };
+    if (section === 'specialists') {
+      var specSub = parts[1] || null;
+      if (specSub === 'task') return { section: 'specialists', taskId: parts[2] || null };
+      if (specSub === 'submission') return { section: 'specialists', submissionId: parts[2] || null };
+      return { section: 'specialists' };
+    }
     if (section === 'feeds') return { section: 'feeds' };
     if (section === 'system') return { section: 'system' };
-    if (section === 'database') return { section: 'database' };
+    if (section === 'database') {
+      var dbTable = parts[1] || null;
+      var dbPage = 0;
+      var dbSearch = '';
+      if (query) {
+        query.split('&').forEach(function(kv) {
+          var eq = kv.indexOf('=');
+          if (eq === -1) return;
+          var k = decodeURIComponent(kv.slice(0, eq));
+          var v = decodeURIComponent(kv.slice(eq + 1));
+          if (k === 'page') dbPage = Math.max(0, parseInt(v, 10) || 0);
+          if (k === 'search') dbSearch = v;
+        });
+      }
+      return { section: 'database', table: dbTable, page: dbPage, search: dbSearch };
+    }
     var folder = parts[1] || null;
     if (!folder) return { section: 'groups', folder: null };
     var tab = parts[2] || 'chat';
     var filePath = (tab === 'files' && parts.length > 3) ? parts.slice(3).join('/') : null;
     var noteId = (tab === 'notes' && parts.length > 3) ? parts[3] : null;
-    return { section: 'groups', folder: folder, tab: tab, filePath: filePath, noteId: noteId };
+    // tasks/{taskId} and tasks/{taskId}/log/{logId}
+    var taskId = null;
+    var logId = null;
+    if (tab === 'tasks' && parts.length > 3) {
+      taskId = parts[3];
+      if (parts[4] === 'log' && parts[5]) logId = parts[5];
+    }
+    return { section: 'groups', folder: folder, tab: tab, filePath: filePath, noteId: noteId, taskId: taskId, logId: logId };
   }
 
   async function restoreFromHash() {
@@ -451,7 +487,25 @@ document.addEventListener('DOMContentLoaded', function() {
       stopOverview();
       stopSpecialists();
       if (state.section === 'specialists') {
-        activateSection('specialists'); clearInterval(pollTimer); pollTimer = null; startSpecialists(); return;
+        activateSection('specialists'); clearInterval(pollTimer); pollTimer = null;
+        startSpecialists();
+        // Defer-select a task or submission once the cache is populated
+        if (state.taskId) {
+          var pendingSpecTaskId = state.taskId;
+          var waitSpec = setInterval(function() {
+            var t = specialistAllTasksCache.find(function(x) { return x.id === pendingSpecTaskId; });
+            if (t) { clearInterval(waitSpec); showSpecialistDetail(t); }
+          }, 200);
+          setTimeout(function() { clearInterval(waitSpec); }, 5000);
+        } else if (state.submissionId) {
+          var pendingSubId = state.submissionId;
+          var waitSub = setInterval(function() {
+            var s = submissionAllCache.find(function(x) { return x.id === pendingSubId; });
+            if (s) { clearInterval(waitSub); showSubmissionDetail(s); }
+          }, 200);
+          setTimeout(function() { clearInterval(waitSub); }, 5000);
+        }
+        return;
       }
       if (state.section === 'feeds') {
         activateSection('feeds'); clearInterval(pollTimer); pollTimer = null; loadFeeds(); return;
@@ -460,7 +514,13 @@ document.addEventListener('DOMContentLoaded', function() {
         activateSection('system'); clearInterval(pollTimer); pollTimer = null; loadSystem(); return;
       }
       if (state.section === 'database') {
-        activateSection('database'); clearInterval(pollTimer); pollTimer = null; loadDbTables(); return;
+        activateSection('database'); clearInterval(pollTimer); pollTimer = null;
+        if (state.table) {
+          pendingDbTable = state.table;
+          pendingDbPage = state.page || 0;
+          pendingDbSearch = state.search || '';
+        }
+        loadDbTables(); return;
       }
       activateSection('groups');
       clearInterval(pollTimer); pollTimer = null;
@@ -477,6 +537,7 @@ document.addEventListener('DOMContentLoaded', function() {
         + '<span class="badge bg">'+esc(g.channel)+'</span>'
         + ' <code style="font-size:11px">'+esc(g.jid)+'</code>';
       if (state.noteId) pendingGraphSelect = state.noteId;
+      if (state.taskId) { pendingTaskSelect = state.taskId; pendingLogSelect = state.logId || null; }
       switchTab(state.tab || 'chat', state.filePath);
     } finally {
       skipHashUpdate = false;
@@ -733,6 +794,28 @@ document.addEventListener('DOMContentLoaded', function() {
             +'<tr id="logs-'+esc(t.id)+'"><td colspan="6" class="log-body"><div id="logs-inner-'+esc(t.id)+'" class="dim">Loading\u2026</div></td></tr>';
         }).join('')
         + '</tbody></table></div>';
+      // Deferred open from URL hash (mirrors pendingGraphSelect pattern)
+      if (pendingTaskSelect) {
+        var targetTask = groupTasksData[pendingTaskSelect];
+        var capturedLogId = pendingLogSelect;
+        pendingTaskSelect = null;
+        pendingLogSelect = null;
+        if (targetTask) {
+          // Highlight the row
+          var targetRow = el.querySelector('[data-task-id="'+targetTask.id+'"]');
+          if (targetRow) {
+            document.querySelectorAll('.log-row.task-selected').forEach(function(r) { r.classList.remove('task-selected'); });
+            targetRow.classList.add('task-selected');
+          }
+          openTaskDetail(targetTask).then(function() {
+            if (capturedLogId) {
+              var logIdNum = parseInt(capturedLogId, 10);
+              var log = taskDetailLogs.find(function(l) { return l.id === logIdNum; });
+              if (log) openTaskResult(log);
+            }
+          });
+        }
+      }
     } catch(e) { el.innerHTML = '<div class="empty">Error loading tasks</div>'; }
   }
 
@@ -765,6 +848,7 @@ document.addEventListener('DOMContentLoaded', function() {
     panel.style.display = '';
     document.getElementById('group-task-result').style.display = 'none';
     taskDetailLogs = [];
+    if (currentGroup) pushHash('groups/' + currentGroup.folder + '/tasks/' + task.id);
     var sc = task.status==='active' ? 'bg' : task.status==='paused' ? 'by' : 'br';
     content.innerHTML = '<div class="dim" style="margin-bottom:12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Task Detail</div>'
       +'<div class="fm-card">'
@@ -812,6 +896,11 @@ document.addEventListener('DOMContentLoaded', function() {
     var panel = document.getElementById('group-task-result');
     var content = document.getElementById('group-task-result-content');
     panel.style.display = '';
+    // Find the task whose logs contain this log entry
+    var taskForLog = Object.values(groupTasksData).find(function(t) {
+      return taskDetailLogs && taskDetailLogs.some(function(l) { return l.id === log.id; });
+    });
+    if (currentGroup && taskForLog) pushHash('groups/' + currentGroup.folder + '/tasks/' + taskForLog.id + '/log/' + log.id);
     var lsc = log.status === 'success' ? 'bg' : 'br';
     content.innerHTML = '<div class="dim" style="margin-bottom:12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px">Run Result</div>'
       +'<div class="fm-card">'
@@ -1271,6 +1360,8 @@ document.addEventListener('DOMContentLoaded', function() {
   });
   var pendingGraphSelect = null;
   var pendingGraphTag = null;
+  var pendingTaskSelect = null;
+  var pendingLogSelect = null;
 
   // ── Graph tab ──────────────────────────────────────────────────────────────
 
@@ -1576,6 +1667,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     graphCy.on('tap', 'node', function(evt) {
       var d = evt.target.data();
+      if (currentGroup) pushHash('groups/' + currentGroup.folder + '/notes/' + d.id);
       var panel = document.getElementById('graph-node-panel');
       var tagsHtml = (d.tags||[]).map(function(t){ return '<span class="fm-tag" style="background:'+tagColor(t)+';color:#0d1117;border-color:transparent">'+esc(t)+'</span>'; }).join(' ');
       var kwHtml = (d.keywords||[]).map(function(k){ return '<span class="fm-tag">'+esc(k)+'</span>'; }).join(' ');
@@ -2002,10 +2094,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
   function showSpecialistDetail(t) {
     specialistDetailId = t.id;
+    submissionDetailId = null;
     var panel = document.getElementById('specialists-detail');
     var content = document.getElementById('specialists-detail-content');
     if (!panel || !content) return;
     panel.style.display = '';
+    pushHash('specialists/task/' + t.id);
 
     var statusColors = { queued: 'bb', running: 'bg', awaiting_sub_task: 'by', awaiting_restart: 'br', completed: 'bg', failed: 'br' };
     var sc = statusColors[t.status] || 'bb';
@@ -2108,6 +2202,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var content = document.getElementById('specialists-detail-content');
     if (!panel || !content) return;
     panel.style.display = '';
+    pushHash('specialists/submission/' + m.id);
 
     var isStaged = m.status === 'staged';
     var statusColor = isStaged ? '#d29922' : '#3fb950';
@@ -2337,6 +2432,9 @@ document.addEventListener('DOMContentLoaded', function() {
   var dbLimit = 50;
   var dbTotal = 0;
   var dbSearchTimer = null;
+  var pendingDbTable = null;
+  var pendingDbPage = 0;
+  var pendingDbSearch = '';
 
   async function loadDbTables() {
     var el = document.getElementById('db-table-list');
@@ -2359,10 +2457,29 @@ document.addEventListener('DOMContentLoaded', function() {
           dbCurrentTable = t.name;
           dbOffset = 0;
           document.getElementById('db-search').value = '';
+          pushHash('database/' + t.name);
           loadDbTable();
         });
         el.appendChild(item);
       });
+      // Restore pre-selected table from URL hash
+      if (pendingDbTable) {
+        var target = pendingDbTable;
+        var targetPage = pendingDbPage;
+        var targetSearch = pendingDbSearch;
+        pendingDbTable = null;
+        pendingDbPage = 0;
+        pendingDbSearch = '';
+        var targetItem = el.querySelector('[data-table="'+CSS.escape(target)+'"]');
+        if (targetItem) {
+          document.querySelectorAll('.db-table-item').forEach(function(x) { x.classList.remove('active'); });
+          targetItem.classList.add('active');
+        }
+        dbCurrentTable = target;
+        dbOffset = targetPage * dbLimit;
+        document.getElementById('db-search').value = targetSearch;
+        loadDbTable();
+      }
     } catch(e) {
       el.innerHTML += '<div class="empty">Error loading tables</div>';
     }
@@ -2420,15 +2537,27 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
+  function pushDbHash() {
+    if (!dbCurrentTable) return;
+    var page = Math.floor(dbOffset / dbLimit);
+    var search = document.getElementById('db-search').value.trim();
+    var h = 'database/' + dbCurrentTable;
+    var params = [];
+    if (page > 0) params.push('page=' + page);
+    if (search) params.push('search=' + encodeURIComponent(search));
+    if (params.length) h += '?' + params.join('&');
+    pushHash(h);
+  }
+
   document.getElementById('db-prev').addEventListener('click', function() {
-    if (dbOffset > 0) { dbOffset = Math.max(0, dbOffset - dbLimit); loadDbTable(); }
+    if (dbOffset > 0) { dbOffset = Math.max(0, dbOffset - dbLimit); pushDbHash(); loadDbTable(); }
   });
   document.getElementById('db-next').addEventListener('click', function() {
-    if (dbOffset + dbLimit < dbTotal) { dbOffset += dbLimit; loadDbTable(); }
+    if (dbOffset + dbLimit < dbTotal) { dbOffset += dbLimit; pushDbHash(); loadDbTable(); }
   });
   document.getElementById('db-search').addEventListener('input', function() {
     clearTimeout(dbSearchTimer);
-    dbSearchTimer = setTimeout(function() { dbOffset = 0; loadDbTable(); }, 350);
+    dbSearchTimer = setTimeout(function() { dbOffset = 0; pushDbHash(); loadDbTable(); }, 350);
   });
 
   // ── Boot ───────────────────────────────────────────────────────────────────

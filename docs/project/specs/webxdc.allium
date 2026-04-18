@@ -1,0 +1,489 @@
+-- allium: 3
+-- webxdc.allium
+--
+-- NanoClaw WebXDC integration: interactive mini-apps delivered inside DeltaChat conversations.
+--
+-- WebXDC is an HTML/JavaScript app format that runs sandboxed inside DeltaChat with no
+-- external network access. NanoClaw ships two WebXDC apps:
+--
+--   nanoclaw.xdc — chat surface: renders agent responses as markdown cards and lets the user
+--                  send messages back to the agent from within the app.
+--   todo.xdc     — todo list viewer: displays the group agent's todo-state.json as a read-only
+--                  checked list, updated automatically whenever the file changes in the workspace.
+--
+-- Multiple apps can coexist in the same chat via named sessions:
+--   default session (session_name = null)   → nanoclaw.xdc chat surface
+--   session name "todo"                     → todo.xdc todo list viewer
+--
+-- Updates are delivered via two paths:
+--   Realtime     — P2P, near-instant. Fire-and-forget; cannot confirm delivery.
+--                  Queued items are drained (and dequeued) when the app opens its realtime channel.
+--   Status update — email-backed, reliable. Every update is written to DeltaChat's internal status
+--                  update DB immediately. The app replays all updates from history via
+--                  setUpdateListener(serial=0) on any open, regardless of realtime availability.
+--
+-- Subscription signal: DeltaChat only emails status update notifications to a user's device
+-- after the app has sent at least one sendUpdate (the subscription signal). The update is
+-- always in DC's DB and will be replayed on app open; subscription affects only email push,
+-- not DB storage.
+--
+-- Scope: session lifecycle (launch/reset), update queuing and dual-path delivery, named sessions,
+--        todo-state.json file watcher, startup resync, agent IPC bridge,
+--        user messages from within nanoclaw.xdc
+-- Excludes:
+--   - DeltaChat wire protocol (RPC method names, account IDs, internal chat IDs)
+--   - App-internal rendering (HTML, CSS, markdown parsing, component rendering)
+--   - Build tooling (scripts/build-*.sh, npm run build:*-xdc)
+--   - CSP sandbox enforcement (DeltaChat platform concern, not host logic)
+--   - Non-DeltaChat channels (WebXDC is DeltaChat-only)
+
+use "./nanoclaw.allium" as nanoclaw
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+-- The two WebXDC apps shipped with NanoClaw.
+enum WebxdcAppKind {
+    nanoclaw_app    -- chat surface: agent responses as markdown cards + user input
+  | todo_app        -- read-only todo list viewer fed from the group agent's todo-state.json
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The payload of a single update pushed to a WebXDC app.
+value WebxdcUpdate {
+    content: String               -- markdown text, JSON state blob, or base64-embedded image
+    title: String                 -- sender display name shown in the card header
+    type: message | interactive   -- message: markdown card; interactive: card with UI components
+    surface_id: String?           -- when set, replaces an existing named surface card in-place
+    description: String?          -- short label used as the DC status update notification summary
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- An active WebXDC app instance in a DeltaChat chat.
+-- Created when the user sends /app (nanoclaw_app) or /todo (todo_app).
+-- Destroyed by /app reset or when a replacement app of the same kind is sent to the same chat.
+-- Multiple sessions may coexist in the same chat provided their session names differ.
+entity WebxdcSession {
+    chat: nanoclaw.Chat
+    app_kind: WebxdcAppKind
+    session_name: String?     -- null for nanoclaw_app (default); "todo" for todo_app
+    meta_sent: Boolean        -- true once the meta update has been pushed for this session
+
+    -- allium-ignore allium.field.unused
+    queue: WebxdcQueuedUpdate with session = this
+
+    invariant DefaultSessionIsNanoclawApp {
+        session_name = null implies app_kind = nanoclaw_app
+    }
+
+    invariant TodoSessionIsTodoApp {
+        session_name = "todo" implies app_kind = todo_app
+    }
+}
+
+-- A single update pending realtime delivery to a WebXDC session.
+-- Created when the agent produces output or todo-state.json changes.
+-- Destroyed only when the host drains items via QueueDrainedOnRealtimeReady.
+-- Updates are also written to DC's status update DB at creation time; this entity
+-- exists solely to drive near-instant realtime delivery when the app re-opens.
+entity WebxdcQueuedUpdate {
+    -- allium-ignore allium.field.unused
+    session: WebxdcSession
+    update: WebxdcUpdate
+    -- allium-ignore allium.field.unused
+    enqueued_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    todo_state_debounce: Duration = 2.seconds        -- quiet period after last write before pushing state
+    todo_startup_resync_delay: Duration = 20.seconds -- delay after startup before syncing todo sessions
+    assistant_name: String = "Andy"                  -- display name used as the title on pushed updates
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Session Launch ----
+
+-- /app sends nanoclaw.xdc to the chat and registers a default (unnamed) session.
+-- Any previous default session is replaced; its queue is abandoned.
+rule NanoclawAppLaunched {
+    when: DeltaChatCommand(chat, command)
+
+    requires: command = "/app"
+
+    ensures: WebxdcSession.created(
+        chat: chat,
+        app_kind: nanoclaw_app,
+        session_name: null,
+        meta_sent: false
+    )
+
+    @guidance
+        -- This rule also fires for "/app reset" (see NanoclawAppReset) and "/app <subcommand>";
+        -- the host checks the subcommand first and dispatches accordingly. The requires clause
+        -- matches any command starting with "/app" — the actual filtering is host-side.
+        -- If the nanoclaw.xdc binary is absent (not yet built), the command sends an error
+        -- to the chat and no session is created.
+}
+
+-- /todo sends todo.xdc to the chat, registers the named "todo" session, pushes a meta update
+-- immediately (so the app footer shows the session ID on first replay without a ping), and
+-- triggers the agent to push the initial todo state.
+rule TodoAppLaunched {
+    when: DeltaChatCommand(chat, command)
+
+    requires: command = "/todo"
+
+    ensures: WebxdcSession.created(
+        chat: chat,
+        app_kind: todo_app,
+        session_name: "todo",
+        meta_sent: true
+    )
+    ensures: WebxdcStatusUpdateEmitted(chat: chat, session_name: "todo", update_kind: meta)
+    ensures: nanoclaw.Message.created(
+        chat: chat,
+        content: "[System: Todo app sent. Serialise todo.md and push state via webxdc_update(session_name=todo).]",
+        sent_at: now,
+        is_from_me: false,
+        is_bot_response: false
+    )
+
+    @guidance
+        -- meta_sent is initialised to true because the meta update is pushed synchronously
+        -- inside the launch handler, so MetaSentOnFirstPing never fires for todo sessions.
+        -- The synthetic system message triggers the agent to push initial state, preventing
+        -- the app from showing "Waiting for data..." on first open.
+        -- The agent must set session_name="todo" on webxdc_update calls so updates route
+        -- to the todo session rather than the default nanoclaw.xdc session.
+}
+
+-- ---- Session Reset ----
+
+-- /app reset sends a clear payload to the chat surface app (resetting all open instances'
+-- card feeds) then destroys the session and its queue.
+rule NanoclawAppReset {
+    when: DeltaChatCommand(chat, command)
+
+    let session = WebxdcSession{chat: chat, session_name: null}
+
+    requires: command = "/app reset"
+    requires: exists session
+
+    ensures: WebxdcStatusUpdateEmitted(chat: chat, session_name: null, update_kind: clear)
+    ensures: not exists session
+    ensures: for u in session.queue: not exists u
+
+    @guidance
+        -- The clear update type tells nanoclaw.xdc to remove all cards from its feed.
+        -- Any open instance of the app resets immediately on receiving the clear.
+        -- Queue items are abandoned; they were already written to DC's status update DB
+        -- at enqueue time and remain there, but are no longer relevant after a reset.
+        -- If no session exists, an error message is sent to chat; no state changes.
+}
+
+-- ---- Update Delivery ----
+
+-- When the agent calls webxdc_update via the IPC/MCP bridge, the update is enqueued for
+-- realtime delivery and simultaneously written to DC's status update DB (email-backed path).
+-- Both paths are triggered for every update; they deliver the same content independently.
+rule AgentUpdateProduced {
+    when: AgentMcpCall(author, "webxdc_update", chat_jid, content, title?, surface_id?, description?, session_name?)
+
+    let chat = nanoclaw.Chat{jid: chat_jid}
+    let session = WebxdcSession{chat: chat, session_name: session_name}
+
+    requires: exists session
+    requires: author.is_main or chat_jid = own_chat_jid(author)
+
+    let update = WebxdcUpdate(
+        content: content,
+        title: title ?? config.assistant_name,
+        type: message,
+        surface_id: surface_id,
+        description: description
+    )
+
+    ensures: WebxdcQueuedUpdate.created(
+        session: session,
+        update: update,
+        enqueued_at: now
+    )
+    ensures: RealtimeDeliveryAttempted(session: session, update: update)
+    ensures: WebxdcStatusUpdateEmitted(chat: chat, session_name: session_name, update_kind: content_update)
+
+    @guidance
+        -- RealtimeDeliveryAttempted is fire-and-forget via sendWebxdcRealtimeData.
+        -- The item stays in the queue whether or not the realtime send reaches the app.
+        -- Items are dequeued only by QueueDrainedOnRealtimeReady.
+        --
+        -- WebxdcStatusUpdateEmitted writes the update to DC's status update DB via
+        -- sendWebxdcStatusUpdate. If this call fails (DC not connected), the item
+        -- remains queued and will be delivered via realtime drain on next channel open.
+        --
+        -- If the app receives the same item twice (once via status update replay,
+        -- once via realtime drain), todo.xdc overwrites its state (idempotent); nanoclaw.xdc
+        -- may show a duplicate card, but this is rare since the queue drains quickly on open.
+        --
+        -- The webxdc_send_image tool follows the same path but encodes the image as a
+        -- base64 data URI embedded in content (required because CSP blocks external URLs).
+        --
+        -- Note: the "type" parameter (message vs interactive) from the MCP call is
+        -- not bound here for brevity; the host passes it through to the WebxdcUpdate.
+        -- Interactive updates include a components array for buttons/inputs/selects.
+        -- Authorization: non-main agents can only push to their own chat's sessions.
+}
+
+-- When the agent calls webxdc_update but no session exists for that chat and session name,
+-- the content is sent as a plain chat message so output is not silently dropped.
+rule NoSessionFallback {
+    when: AgentMcpCall(author, "webxdc_update", chat_jid, content, session_name?)
+
+    let chat = nanoclaw.Chat{jid: chat_jid}
+    let session = WebxdcSession{chat: chat, session_name: session_name}
+
+    requires: not exists session
+
+    ensures: nanoclaw.Message.created(
+        chat: chat,
+        content: content,
+        sent_at: now,
+        is_from_me: true,
+        is_bot_response: true
+    )
+
+    @guidance
+        -- This fallback prevents output loss when the user has not opened an app,
+        -- has reset the session, or the agent targets a session that was never launched.
+}
+
+-- ---- Realtime Queue Draining ----
+
+-- When the WebXDC app opens its realtime channel or sends its ready announcement,
+-- all queued updates for that session are sent immediately via realtime and dequeued.
+-- This is the only path that removes items from the queue.
+rule QueueDrainedOnRealtimeReady {
+    when: AppRealtimeReady(session)
+
+    let queued = session.queue
+
+    requires: queued.count > 0
+
+    ensures: for u in queued: RealtimeDelivered(session: session, update: u.update)
+    ensures: for u in queued: not exists u
+
+    @guidance
+        -- AppRealtimeReady fires on two DC events received by the host:
+        --   WebxdcRealtimeAdvertisementReceived (msgId) — the app opened its realtime channel
+        --   WebxdcRealtimeData (msgId, data: {type:"ready"}) — the app sent its ready announcement
+        -- Both trigger an identical drain: all items sent via sendWebxdcRealtimeData, then dequeued.
+        -- Items were already written to DC's status update DB at enqueue time; realtime delivery
+        -- here may create duplicates, which are harmless as described in AgentUpdateProduced.
+}
+
+-- ---- Meta Update ----
+
+-- On the first ping received from a nanoclaw.xdc session (the first sendUpdate from the app),
+-- the host sends a meta update carrying the DC message ID so the app can display it in the footer.
+rule MetaSentOnFirstPing {
+    when: AppPinged(session)
+
+    requires: session.app_kind = nanoclaw_app
+    requires: not session.meta_sent
+
+    ensures: session.meta_sent = true
+    ensures: WebxdcStatusUpdateEmitted(chat: session.chat, session_name: null, update_kind: meta)
+
+    @guidance
+        -- Sending meta via the status update DB ensures it lands in replay history; the app
+        -- footer populates on any subsequent open without another ping.
+        -- meta_sent is tracked in-memory (webxdcInitSent set) and does not persist across
+        -- host restarts. The spec models it as persistent for clarity; in practice the app
+        -- re-receives a meta on its first ping after each restart, which is harmless.
+        -- For todo_app sessions, meta_sent is initialised to true in TodoAppLaunched;
+        -- this rule never fires for todo_app.
+}
+
+-- ---- User Messages from nanoclaw.xdc ----
+
+-- When the user sends a message from inside the nanoclaw.xdc app (via the in-app input field),
+-- it is stored as an inbound message with a surface note instructing the agent to reply via
+-- webxdc_update. An echo of the user's text is emitted immediately so it appears in all open
+-- instances without waiting for the agent.
+rule WebxdcUserMessageRouted {
+    when: AppUserMessage(session, text)
+
+    requires: session.app_kind = nanoclaw_app
+
+    let group = nanoclaw.Group{chat: session.chat}
+
+    requires: exists group
+
+    ensures: nanoclaw.Message.created(
+        chat: session.chat,
+        content: text,
+        sent_at: now,
+        is_from_me: false,
+        is_bot_response: false
+    )
+    ensures: WebxdcStatusUpdateEmitted(chat: session.chat, session_name: null, update_kind: user_echo)
+
+    @guidance
+        -- The content stored in the Message is the raw user text plus the WEBXDC_SURFACE_NOTE
+        -- suffix (injected by the host). The suffix instructs the agent to reply via
+        -- webxdc_update rather than send_message, and describes the available tools and surface type.
+        -- The user_echo update makes the user's own message visible in all open app instances
+        -- immediately, before the agent has responded.
+        -- Dedup: messages from the same session seen via AppUserMessage within a short window
+        -- are suppressed to prevent double-routing when DC delivers the same update twice.
+        -- This dedup is in-memory only and does not persist across restarts.
+        -- todo_app messages are not routed to the agent; the todo app is read-only.
+}
+
+-- ---- Todo State Sync ----
+
+-- When todo-state.json is written in a group's workspace, the host detects the change and
+-- pushes the new state to the group's active todo session (if any), debounced.
+rule TodoStateFileChanged {
+    when: GroupFileChanged(group, "todo-state.json", content)
+
+    let session = WebxdcSession{chat: group.chat, session_name: "todo"}
+
+    requires: exists session
+
+    let update = WebxdcUpdate(
+        content: content,
+        title: config.assistant_name,
+        type: message
+    )
+
+    ensures: WebxdcQueuedUpdate.created(
+        session: session,
+        update: update,
+        enqueued_at: now
+    )
+    ensures: RealtimeDeliveryAttempted(session: session, update: update)
+    ensures: WebxdcStatusUpdateEmitted(chat: group.chat, session_name: "todo", update_kind: content_update)
+
+    @guidance
+        -- Writes are debounced: only the last write within a quiet window (todo_state_debounce)
+        -- triggers a push; rapid successive writes coalesce to one update.
+        -- If no todo session is active for the group, the file change is silently ignored.
+        -- The content is the raw JSON of todo-state.json. todo.xdc parses it as
+        -- {type:"state", items:[...]} after stripping the outer message envelope wrapper
+        -- that the host adds to all WebxdcStatusUpdateEmitted calls.
+}
+
+-- On host startup, after channels have initialised, the current todo-state.json is pushed
+-- to every active todo session. This ensures apps are current after a reboot even if the
+-- realtime channel was not re-established while the host was down.
+rule TodoStateResynced {
+    when: NanoclawStarted(started_at)
+
+    ensures:
+        for session in WebxdcSessions where app_kind = todo_app and exists todo_state_for(session):
+            WebxdcQueuedUpdate.created(
+                session: session,
+                update: WebxdcUpdate(
+                    content: todo_state_content(session),
+                    title: config.assistant_name,
+                    type: message
+                ),
+                enqueued_at: now
+            )
+
+    @guidance
+        -- The resync is delayed by todo_startup_resync_delay to allow the DeltaChat
+        -- channel adapter to connect and register before the push is attempted.
+        -- todo_state_for(session) looks up {GROUPS_DIR}/{group.folder}/todo-state.json.
+        -- If the file is absent (no todos yet), the session is skipped silently.
+        -- todo_state_content(session) reads the file contents.
+        -- After creating the queue items, realtime delivery is attempted and a status
+        -- update is emitted for each session (same dual-path as AgentUpdateProduced).
+}
+
+------------------------------------------------------------
+-- System Triggers
+------------------------------------------------------------
+
+-- DeltaChatCommand(chat: nanoclaw.Chat, command: String)
+-- Emitted by the DeltaChat channel adapter when a message begins with a slash
+-- and is intercepted before being passed to the main orchestrator.
+-- Binding: chat is the Chat for the incoming message; command is the full slash command text.
+
+-- AppRealtimeReady(session: WebxdcSession)
+-- Emitted by the DeltaChat channel adapter when the host receives either:
+--   WebxdcRealtimeAdvertisementReceived (msgId) — the app opened its realtime channel
+--   WebxdcRealtimeData (msgId, {type:"ready"}) — the app sent its ready announcement
+-- Both events look up the session by msgId and emit AppRealtimeReady.
+
+-- AppPinged(session: WebxdcSession)
+-- Emitted by the DeltaChat channel adapter when a WebxdcStatusUpdate is received
+-- from DeltaChat with payload {type:"ping"} — the app's subscription signal and keepalive.
+-- The app sends a ping on startup, on foreground resume, and every 30 seconds.
+
+-- AppUserMessage(session: WebxdcSession, text: String)
+-- Emitted by the DeltaChat channel adapter when a WebxdcStatusUpdate payload contains
+-- a user-authored message from inside the nanoclaw.xdc app.
+
+-- GroupFileChanged(group: nanoclaw.Group, filename: String, content: String)
+-- Emitted by the host file watcher when a file in the group's workspace is written.
+-- Used by TodoStateFileChanged to watch todo-state.json.
+
+-- NanoclawStarted(started_at: Timestamp)
+-- See nanoclaw.allium. Reused here for the startup todo resync.
+
+-- WebxdcStatusUpdateEmitted(chat: nanoclaw.Chat, session_name: String?, update_kind: content_update | meta | clear | user_echo)
+-- Emitted when the host calls sendWebxdcStatusUpdate on the DeltaChat RPC.
+-- Writes the update to DC's internal status update DB so it is replayed by setUpdateListener(serial=0).
+
+-- RealtimeDeliveryAttempted(session: WebxdcSession, update: WebxdcUpdate)
+-- Emitted when the host calls sendWebxdcRealtimeData. Fire-and-forget;
+-- delivery to the app is not confirmed by this event.
+
+-- RealtimeDelivered(session: WebxdcSession, update: WebxdcUpdate)
+-- Emitted when the host successfully sends an update via the realtime channel
+-- as part of a QueueDrainedOnRealtimeReady drain.
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- At most one session per (chat, session_name) pair.
+-- Named sessions allow multiple apps per chat without collision.
+invariant AtMostOneSessionPerChatAndName {
+    for a in WebxdcSessions:
+        for b in WebxdcSessions:
+            (a != b and a.chat = b.chat) implies a.session_name != b.session_name
+}
+
+-- Only the known session names are in use. The session name scheme is extensible but
+-- the current set of shipped apps uses null (nanoclaw_app) and "todo" (todo_app).
+-- allium-ignore allium.invariant.noKnownViolations
+invariant KnownSessionNames {
+    for s in WebxdcSessions:
+        s.session_name = null or s.session_name = "todo"
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Subscription timing: should the host suppress WebxdcStatusUpdateEmitted calls until AppPinged has fired for a session? Currently all calls proceed regardless; emails may not arrive on the user's device until the first ping. The update is always in DC's DB so replay is unaffected, but the user may miss a push notification for updates produced before the first ping."
+
+open question "Duplicate cards in nanoclaw.xdc: when a queued update is drained by QueueDrainedOnRealtimeReady after already being delivered via the status update DB path, nanoclaw.xdc may append a duplicate card. Should the app deduplicate by timestamp or a content hash? Or should the queue be cleared immediately after a successful WebxdcStatusUpdateEmitted so realtime drain never re-delivers?"
+
+open question "Named sessions beyond todo: the jid:sessionName scheme supports arbitrary named sessions. Is a third app (e.g. a calendar or graph viewer) planned? Establishing a naming convention and registration pattern before adding new apps would prevent key collisions."

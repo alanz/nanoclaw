@@ -45,22 +45,23 @@ config {
 ------------------------------------------------------------
 
 -- A node in the rendered knowledge graph.
--- Derived at display time from MemoryNote frontmatter; not persisted.
+-- Derived at display time from note frontmatter (MemoryNote or SynthesisNote); not persisted.
 -- allium-ignore allium.definition.unused
 value NoteNode {
-    id: String                             -- MemoryNote.id
-    title: String
+    id: String                             -- MemoryNote.id or SynthesisNote.id
     tags: Set<String>
     keywords: Set<String>
     created: Timestamp
+    isSynthesis: Boolean                   -- true when id starts with SYN-; drives diamond shape
 }
 
 -- A directed edge in the rendered knowledge graph.
--- Source note links to target note.
+-- Source note links to target note; kind determines visual style.
 -- allium-ignore allium.definition.unused
 value NoteEdge {
-    source_id: String                      -- MemoryNote.id
-    target_id: String                      -- MemoryNote.id
+    source_id: String                      -- MemoryNote.id or SynthesisNote.id
+    target_id: String                      -- MemoryNote.id or SynthesisNote.id
+    kind: link | supersedes | synthesises  -- link: standard; supersedes: dashed gold arrow; synthesises: dashed purple arrow
 }
 
 ------------------------------------------------------------
@@ -84,6 +85,16 @@ surface Overview {
         specialists.SpecialistTask.depth
         specialists.SpecialistTask.delegated_at
         specialists.SpecialistTask.prompt
+
+    @guarantee LinksCarryFullViewState
+        -- Every link this surface exposes is openable in a new page:
+        -- the URL alone must carry enough context to fully reproduce the
+        -- view and state it represents (active group, sub-view, selected
+        -- task row, expanded run log, file path, selected note, etc.).
+        -- No view depends on ephemeral in-memory state such as the
+        -- currently focused tab, prior navigation history, scroll
+        -- position, or client-only selection that is not reflected
+        -- in the URL.
 
     @guidance
         -- The overview surface is polled by the client at config.status_poll_interval.
@@ -119,6 +130,16 @@ surface GroupDashboard {
         OperatorRequestsFile(group, path: String)
         OperatorViewsNoteGraph(group)
 
+    @guarantee LinksCarryFullViewState
+        -- Every link this surface exposes is openable in a new page:
+        -- the URL alone must carry enough context to fully reproduce the
+        -- view and state it represents (active group, sub-view, selected
+        -- task row, expanded run log, file path, selected note, etc.).
+        -- No view depends on ephemeral in-memory state such as the
+        -- currently focused tab, prior navigation history, scroll
+        -- position, or client-only selection that is not reflected
+        -- in the URL.
+
     @guidance
         -- Chat sub-view loads the last config.messages_load_limit messages on open
         -- and re-polls at config.chat_poll_interval while the tab is active.
@@ -137,6 +158,16 @@ surface Feeds {
         scheduling.RssFeed.interest
         scheduling.RssFeed.status
 
+    @guarantee LinksCarryFullViewState
+        -- Every link this surface exposes is openable in a new page:
+        -- the URL alone must carry enough context to fully reproduce the
+        -- view and state it represents (active group, sub-view, selected
+        -- task row, expanded run log, file path, selected note, etc.).
+        -- No view depends on ephemeral in-memory state such as the
+        -- currently focused tab, prior navigation history, scroll
+        -- position, or client-only selection that is not reflected
+        -- in the URL.
+
     @guidance
         -- Read-only view. No operator actions are provided on this surface.
 }
@@ -146,6 +177,16 @@ surface System {
     exposes:
         nanoclaw.ConversationSession.group
         nanoclaw.ConversationSession.session_id
+
+    @guarantee LinksCarryFullViewState
+        -- Every link this surface exposes is openable in a new page:
+        -- the URL alone must carry enough context to fully reproduce the
+        -- view and state it represents (active group, sub-view, selected
+        -- task row, expanded run log, file path, selected note, etc.).
+        -- No view depends on ephemeral in-memory state such as the
+        -- currently focused tab, prior navigation history, scroll
+        -- position, or client-only selection that is not reflected
+        -- in the URL.
 
     @guidance
         -- Also exposes router_state key-value pairs, which are not a typed entity
@@ -171,6 +212,16 @@ surface Specialists {
         specialists.RawMemorySubmission.submitted_at
         specialists.RawMemorySubmission.overdue_alerted_at
 
+    @guarantee LinksCarryFullViewState
+        -- Every link this surface exposes is openable in a new page:
+        -- the URL alone must carry enough context to fully reproduce the
+        -- view and state it represents (active group, sub-view, selected
+        -- task row, expanded run log, file path, selected note, etc.).
+        -- No view depends on ephemeral in-memory state such as the
+        -- currently focused tab, prior navigation history, scroll
+        -- position, or client-only selection that is not reflected
+        -- in the URL.
+
     @guidance
         -- Depth is rendered with visual indentation (└─ prefix) to indicate
         -- sub-task nesting within a chain. Root tasks have depth 0.
@@ -183,6 +234,16 @@ surface Specialists {
 -- with pagination and text search.
 -- Returns at most config.db_page_max rows per request; default page size is config.db_page_size.
 surface Database {
+    @guarantee LinksCarryFullViewState
+        -- Every link this surface exposes is openable in a new page:
+        -- the URL alone must carry enough context to fully reproduce the
+        -- view and state it represents (active group, sub-view, selected
+        -- task row, expanded run log, file path, selected note, etc.).
+        -- No view depends on ephemeral in-memory state such as the
+        -- currently focused tab, prior navigation history, scroll
+        -- position, or client-only selection that is not reflected
+        -- in the URL.
+
     @guidance
         -- No typed entity access: this surface reflects raw SQLite tables.
         -- Provides table list, paginated row data, and a text search filter.
@@ -252,13 +313,17 @@ rule NoteGraphBuilt {
     )
 
     @guidance
-        -- note_graph_nodes(group) collects all active memgraph.MemoryNotes for the group
-        -- and maps each to a NoteNode (id, title, tags, keywords, created).
-        -- note_graph_edges(group) collects all directed edges from note.links across
-        -- active notes. These are black box functions.
-        -- Back-links are present because BackLinksWritten (memory-graph.allium) ensures
-        -- bidirectional consistency; the client renders edges as undirected.
-        -- Only active notes are included; superseded and archived notes do not appear.
+        -- note_graph_nodes(group) collects all active memgraph.MemoryNotes and
+        -- memgraph.SynthesisNotes for the group. Each maps to a NoteNode; isSynthesis
+        -- is set when the note id starts with SYN-. SynthesisNotes render as diamonds
+        -- in the client; MemoryNotes render as circles.
+        -- note_graph_edges(group) produces three edge kinds:
+        --   link: from note.links (deduplicated; rendered as undirected by the client)
+        --   supersedes: from note.supersedes / note.superseded_by pairs (directed gold arrows)
+        --   synthesises: from SynthesisNote.synthesises (directed purple arrows; not back-linked)
+        -- Back-links for link edges are present because BackLinksWritten ensures bidirectional
+        -- consistency; synthesis edges are intentionally one-directional.
+        -- Only active notes appear; superseded and archived notes are excluded.
 }
 
 ------------------------------------------------------------

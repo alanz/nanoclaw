@@ -181,6 +181,11 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .graph-legend-item.active{color:#e6edf3;border-color:currentColor;background:rgba(255,255,255,0.08)}
 .graph-legend-item.node-highlighted{color:#e6edf3;border-color:currentColor;background:rgba(88,166,255,0.15);box-shadow:0 0 0 1px rgba(88,166,255,0.4)}
 .graph-legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+#graph-legend-footer{display:none;align-items:center;gap:8px;margin-top:2px;margin-bottom:8px}
+.graph-legend-more{font-size:11px;color:#58a6ff;cursor:pointer;user-select:none}
+.graph-legend-more:hover{text-decoration:underline}
+#graph-legend-filter{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:2px 8px;color:#8b949e;font-size:11px;outline:none;width:110px}
+#graph-legend-filter:focus{border-color:#58a6ff;color:#e6edf3}
 #graph-node-panel{display:none;position:absolute;bottom:12px;right:12px;width:320px;background:rgba(22,27,34,0.95);border:1px solid #30363d;border-radius:8px;padding:14px;z-index:10;backdrop-filter:blur(8px)}
 #graph-node-panel h3{font-size:13px;font-weight:600;color:#f0f6fc;margin:0 0 10px;word-break:break-all}
 #graph-node-panel h3 a:hover{text-decoration:underline}
@@ -284,6 +289,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
           <span id="graph-status"></span>
         </div>
         <div id="graph-legend"></div>
+        <div id="graph-legend-footer">
+          <span class="graph-legend-more" id="graph-legend-more"></span>
+          <input id="graph-legend-filter" type="text" placeholder="filter tags&#x2026;">
+        </div>
         <div id="graph-wrap" style="position:relative">
           <div id="graph-container"></div>
           <div id="graph-node-panel">
@@ -1538,22 +1547,47 @@ document.addEventListener('DOMContentLoaded', function() {
       elements.push({ group:'edges', data:{ id:'e'+i, source:e.source, target:e.target, supersedes:e.supersedes||false, synthesises:e.synthesises||false } });
     });
 
-    // Legend — clickable tag filters
-    legend.innerHTML = '';
-    Object.keys(graphTagMap).forEach(function(tag) {
-      var item = document.createElement('div');
-      item.className = 'graph-legend-item' + (graphActiveTag === tag ? ' active' : '');
-      item.dataset.tag = tag;
-      item.innerHTML = '<div class="graph-legend-dot" style="background:'+graphTagMap[tag]+'"></div>'+esc(tag);
-      item.addEventListener('click', function() {
-        graphActiveTag = graphActiveTag === tag ? null : tag;
-        document.querySelectorAll('.graph-legend-item').forEach(function(el) {
-          el.classList.toggle('active', el.dataset.tag === graphActiveTag);
+    // Legend — clickable tag filters with frequency threshold + text filter
+    var legendFooter = document.getElementById('graph-legend-footer');
+    var legendMore = document.getElementById('graph-legend-more');
+    var legendFilterEl = document.getElementById('graph-legend-filter');
+    var FREQ_MIN = 2;
+    var allLegendTags = Object.keys(graphTagMap).sort();
+    var freqTags = allLegendTags.filter(function(t) { return (tagFreq[t]||0) >= FREQ_MIN; });
+    var rareTags = allLegendTags.filter(function(t) { return (tagFreq[t]||0) < FREQ_MIN; });
+    var legendShowAll = false;
+
+    function buildLegendItems() {
+      legend.innerHTML = '';
+      var q = legendFilterEl.value.trim().toLowerCase();
+      var pool = (legendShowAll || q) ? allLegendTags : freqTags;
+      pool.forEach(function(tag) {
+        if (q && tag.toLowerCase().indexOf(q) === -1) return;
+        var item = document.createElement('div');
+        item.className = 'graph-legend-item' + (graphActiveTag === tag ? ' active' : '');
+        item.dataset.tag = tag;
+        item.innerHTML = '<div class="graph-legend-dot" style="background:'+graphTagMap[tag]+'"></div>'+esc(tag);
+        item.addEventListener('click', function() {
+          graphActiveTag = graphActiveTag === tag ? null : tag;
+          document.querySelectorAll('.graph-legend-item').forEach(function(el) {
+            el.classList.toggle('active', el.dataset.tag === graphActiveTag);
+          });
+          applyGraphFilter();
         });
-        applyGraphFilter();
+        legend.appendChild(item);
       });
-      legend.appendChild(item);
-    });
+      if (rareTags.length > 0) {
+        legendFooter.style.display = 'flex';
+        legendMore.textContent = legendShowAll ? 'show fewer' : rareTags.length + ' more\u2026';
+      } else {
+        legendFooter.style.display = 'none';
+      }
+    }
+
+    legendMore.onclick = function() { legendShowAll = !legendShowAll; buildLegendItems(); };
+    legendFilterEl.value = '';
+    legendFilterEl.oninput = function() { buildLegendItems(); };
+    buildLegendItems();
 
     // Create cytoscape with preset layout (positions set by d3)
     graphCy = cytoscape({

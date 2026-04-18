@@ -52,7 +52,7 @@ rule NullChannelRegistered {
         -- sendMessage, which discards them.
 }
 
--- Each specialist task receives a synthetic JID derived from its task ID.
+-- Each specialist task is addressable by a synthetic JID derived from its task ID.
 -- This JID is passed to GroupQueue as a normal groupJid, so specialist containers
 -- slot into the existing concurrency model with no routing changes.
 rule SyntheticJidAssigned {
@@ -60,14 +60,17 @@ rule SyntheticJidAssigned {
 
     let synthetic_jid = config.jid_prefix + task_id(task)
 
-    ensures: task.group_jid = synthetic_jid
+    ensures: SpecialistJidAssigned(task: task, jid: synthetic_jid)
 
     @guidance
-        -- The synthetic JID format is "specialist:{task-id}" where task-id is the
-        -- unique identifier assigned at dispatch time. This JID is ephemeral: it
-        -- exists only for the task's lifetime and is never persisted in the chat
-        -- or group registries. GroupQueue treats it as any other groupJid for
-        -- concurrency slot management.
+        -- The synthetic JID is not stored on the task entity. It is deterministically
+        -- derived on demand from the task's ID using a fixed prefix (the
+        -- makeSpecialistJid helper in the implementation), producing
+        -- "specialist:{task-id}" wherever the JID is needed for routing or
+        -- GroupQueue slot management. Because the derivation is total and pure,
+        -- any component holding a task reference can reconstruct the JID without
+        -- consulting shared state. The JID is ephemeral: it exists only for the
+        -- task's lifetime and is never persisted in the chat or group registries.
 }
 
 -- Messages sent to a specialist JID are silently discarded.

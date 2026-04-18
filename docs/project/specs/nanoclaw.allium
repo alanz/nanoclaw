@@ -509,10 +509,15 @@ rule AgentInterrupted {
 
 -- Agent output is delivered to the chat and stored as a bot message.
 -- Delivery updates the idle timer, resetting the timeout clock.
+--
+-- Progress-placeholder deliveries are handled separately (see
+-- AgentProgressPlaceholderUpdated): they are transient UI feedback, not a
+-- new conversational turn, and are intentionally not persisted.
 rule AgentResponded {
-    when: AgentOutput(session, text)
+    when: AgentOutput(session, text, via_progress_placeholder)
 
     requires: session.status = active
+    requires: not via_progress_placeholder
 
     ensures: Message.created(
         chat: session.group.chat,
@@ -522,6 +527,45 @@ rule AgentResponded {
         is_bot_response: true
     )
     ensures: session.last_output_at = now
+
+    @guidance
+        -- A response is "stored" when it represents a new, durable turn in the
+        -- conversation: the user sees a new chat message and the system records
+        -- it for later context assembly, audit, and recovery. The via_progress_placeholder
+        -- flag distinguishes stored responses from transient streaming updates
+        -- handled by AgentProgressPlaceholderUpdated.
+}
+
+-- Agent output delivered by editing an earlier placeholder message in place
+-- is transient UI feedback, not a stored conversational turn. The visible
+-- effect on the user is an in-place edit of a message the system already
+-- owns; no new Message entity is created. The idle timer is still reset
+-- because output — stored or not — is evidence the agent is still doing work.
+--
+-- This is intentional design, not a gap. Streaming progress updates and the
+-- final edit that replaces them are all presentational: the meaningful content
+-- of the agent's turn (if any separate, non-placeholder output is produced)
+-- is stored via AgentResponded. Persisting the placeholder text would pollute
+-- the conversation history with partial or intermediate output.
+rule AgentProgressPlaceholderUpdated {
+    when: AgentOutput(session, text, via_progress_placeholder)
+
+    requires: session.status = active
+    requires: via_progress_placeholder
+
+    ensures: session.last_output_at = now
+
+    @guidance
+        -- Only channels that support in-place message editing (e.g. DeltaChat
+        -- via sendMessageAndGetId + editMessage) can deliver progress
+        -- placeholders. On channels without edit support, the host falls back
+        -- to a single non-placeholder send, in which case AgentResponded fires
+        -- and the response is stored as usual.
+        --
+        -- The placeholder message itself is sent by the host, not an agent —
+        -- it is UI chrome owned by the routing layer. Treating it as
+        -- conversational state would confuse later context assembly (the
+        -- agent would see its own progress chatter echoed back).
 }
 
 -- ---- Agent Session Lifecycle ----
@@ -679,10 +723,12 @@ rule OutboundMessageRouted {
         -- existed. Reconnection is a channel-level concern outside this rule.
         --
         -- Before delivery, <internal>…</internal> blocks are stripped from the
-        -- outbound content by stripInternalTags in src/router.ts. These blocks
-        -- are an agent-side convention for private reasoning that should never
-        -- reach the user; the routing layer enforces the redaction centrally so
-        -- individual channels do not need to re-implement it.
+        -- outbound content at the two points where agent output enters the
+        -- routing layer: the streaming agent-output callback in src/index.ts
+        -- and resultToText in src/session-commands.ts. These blocks are an
+        -- agent-side convention for private reasoning that should never reach
+        -- the user; stripping at both ingress points prevents leakage without
+        -- each channel having to re-implement the redaction.
 }
 
 -- ---- Group Registration ----

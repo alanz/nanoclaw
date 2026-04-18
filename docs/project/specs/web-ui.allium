@@ -119,11 +119,11 @@ surface GroupDashboard {
     exposes:
         group.name
         group.folder
-        group.trigger
-        group.requiresTrigger
-        group.isMain
-        group.trustedGroup
-        group.channel
+        group.trigger_pattern
+        group.requires_trigger
+        group.is_main
+        group.is_trusted
+        group.chat.channel
 
     provides:
         OperatorSendsMessage(group, text: String)
@@ -261,10 +261,8 @@ surface Database {
 rule MessageInjected {
     when: OperatorSendsMessage(group, text)
 
-    requires: group.status = registered
-
     let effective_text =
-        if group.requiresTrigger: group.trigger + " " + text
+        if group.requires_trigger: group.trigger_pattern + " " + text
         else: text
 
     ensures: nanoclaw.Message.created(
@@ -275,9 +273,12 @@ rule MessageInjected {
     ensures: MessageEchoedToChannel(group: group, text: effective_text)
 
     @guidance
+        -- The surface's context binding scopes this rule to known Groups;
+        -- nanoclaw.Group entities exist only for registered groups, so no
+        -- additional registration guard is required.
         -- MessageEchoedToChannel calls the channel's sendMessage callback so the
         -- message appears in the native app and is picked up by any listening agent.
-        -- The trigger is prepended unconditionally when requiresTrigger is set;
+        -- The trigger is prepended unconditionally when requires_trigger is set;
         -- the operator's raw text is never stored or delivered without it.
 }
 
@@ -340,8 +341,13 @@ invariant FileAccessWithinBoundary {
 -- Every message injected via the web UI is echoed to the group's native channel.
 -- The web UI is never a write-only sink; delivery to the channel is required so
 -- the message is visible in the native app and triggerable by listening agents.
-invariant InjectedMessageAlwaysEchoed {
-    for msg in nanoclaw.Messages where msg.is_from_me:
-        msg.injected_via_web_ui implies
-            exists MessageEchoedToChannel { group: msg.chat.group, text: msg.content }
-}
+--
+-- This obligation is enforced structurally by the MessageInjected rule: its
+-- ensures clause atomically creates the stored Message and emits the
+-- MessageEchoedToChannel event. A separate expression-bearing invariant is not
+-- expressible here because injected messages are stored with is_from_me = true
+-- and are otherwise indistinguishable from other bot-authored messages in
+-- nanoclaw.Message; there is no field over which to quantify the assertion.
+-- MessageEchoedToChannel is a trigger emission (not stored state), so it cannot
+-- be the target of an existence predicate in an invariant expression. See the
+-- language reference on expressible vs prose-only invariants.

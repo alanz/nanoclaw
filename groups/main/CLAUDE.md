@@ -513,6 +513,28 @@ File location: `memory/notes/MEM-YYYY-MM-DD-{slug}.md` in your workspace. Chokid
 
 *Sources field* — always populate `sources:` with the origin of the note material. For `type: file`, record the `mtime` at the time of note creation so a future sweep can detect when source material has changed and the note needs revisiting. For `type: url`, record `last_fetched`. For `type: conversation`, record the `date`. A sweep cron can stat `type: file` entries and flag any where current mtime differs from recorded mtime.
 
+### Synthesis Note Process
+
+Synthesis notes (SYN-) are human-driven. The Saturday cron surfaces candidates; Alan
+decides whether and what to synthesise. The workflow:
+
+1. **Draft** — write to `memory/drafts/DRAFT-SYN-YYYY-MM-DD-{slug}-v1.md`. Each revision
+   gets its own file (`-v2.md`, `-v3.md`). Drafts stay in the workspace as a record.
+2. **Review** — share the draft with Alan in chat. Wait for feedback before proceeding.
+3. **Finalise** — once Alan approves, write the final note to
+   `memory/notes/SYN-YYYY-MM-DD-{slug}.md`. Draft files remain in `memory/drafts/` as a record.
+
+*Naming:* `DRAFT-SYN-YYYY-MM-DD-{slug}-v{N}.md` — slug matches the intended final note
+slug; N increments per revision.
+
+*Grow-only applies to finalised notes only.* Draft files may be revised freely.
+
+*Known gap:* `memory/drafts/` is currently indexed by chokidar alongside `memory/notes/`.
+Draft content will appear in `memory_search` results until the indexer is configured to
+exclude that path (requires project access to fix).
+
+---
+
 ### Grow-only constraint
 
 The A-MEM note space is a grow-only medium, modelled on Zettelkasten. This is a hard constraint:

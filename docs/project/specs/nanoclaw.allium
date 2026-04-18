@@ -730,6 +730,48 @@ rule PendingDepthSet {
 -- Invariants
 ------------------------------------------------------------
 
+-- ---- State Survives Orderly Restart ----
+-- Any in-memory state that affects observable system behaviour must be persisted
+-- (to SQLite, the filesystem, or another durable store) such that after an orderly
+-- shutdown and restart of the NanoClaw host, the system is indistinguishable from
+-- what it would have been had the shutdown not occurred.
+--
+-- Purely derived or cached state that can be fully reconstructed from persisted
+-- primary state is exempt. "Indistinguishable" is scoped to observable behaviour,
+-- not to memory addresses, ordering of in-memory collections, or other incidental
+-- artefacts of a given process lifetime.
+--
+-- This property is counterfactual (it compares the restarted system to a
+-- hypothetical un-restarted one) and therefore cannot be written as an
+-- expression-bearing invariant over current entity state; see the language
+-- reference on expressible invariants. It is asserted here in prose and
+-- enforced by review of each new piece of in-memory state introduced to the
+-- host.
+--
+-- @guidance
+--   Known and accepted deviations from this property, each documented at its
+--   point of declaration:
+--     • WaitingGroup (this spec) — queue entries are not persisted. On restart
+--       the queue is fully reconstructed from primary state (DB-backed pending
+--       messages plus 'claimed' tasks re-enqueued via recovery paths). FIFO
+--       ordering across groups is not preserved across restarts; this is an
+--       accepted loss of incidental ordering, not of observable outcome.
+--     • OrchestrationCycle (orchestration.allium) — in-flight delegation
+--       cycles are cleared on restart and not recovered. Accepted as
+--       transitional behaviour until specialists supersede sub-group delegation.
+--     • WebXDC dedup window (webxdc.allium) — the short-window dedup set is
+--       in-memory only; at worst a duplicate user echo appears once after
+--       restart, which is tolerable for this surface.
+--     • Scheduling delivery records (scheduling.allium) — individual delivery
+--       history is not persisted; seen_guids on RssFeed is the authoritative
+--       record and is persisted.
+--
+--   Any new in-memory-only state must either (a) reduce to one of the above
+--   forms (derivable from persisted state on restart, or an accepted
+--   observable-but-trivial deviation), and be documented where it is declared,
+--   or (b) be made durable. Silent additions of behaviour-affecting in-memory
+--   state are regressions against this property.
+
 -- Bot-generated messages are never included in the context sent to the agent.
 -- This prevents the agent from re-processing its own previous replies.
 invariant BotMessagesExcludedFromContext {

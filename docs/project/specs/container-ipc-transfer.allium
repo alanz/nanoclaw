@@ -29,7 +29,10 @@ use "./nanoclaw.allium" as nanoclaw
 ------------------------------------------------------------
 
 config {
-    ipc_out_container_path: String = "/workspace/ipc-out"  -- container-side mount for outbound staging
+    -- container-side mount for outbound staging.
+    -- ipc.config.file_path_prefix appends a trailing "/" to this value
+    -- for use as a send_file path prefix.
+    ipc_out_container_path: String = "/workspace/ipc-out"
     ipc_in_container_path:  String = "/workspace/ipc-in"   -- container-side mount for inbound files
 }
 

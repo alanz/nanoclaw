@@ -1,6 +1,82 @@
 import { describe, expect, it } from 'vitest';
 
-import { orgInlineMarkup, parseNoteFrontmatter } from './web-ui.js';
+import { orgInlineMarkup, parseHash, parseNoteFrontmatter } from './web-ui.js';
+
+describe('parseHash', () => {
+  it('parses bare group list', () => {
+    expect(parseHash('#groups')).toEqual({ section: 'groups', folder: null });
+  });
+
+  it('parses group chat tab (default)', () => {
+    expect(parseHash('#groups/main')).toMatchObject({
+      section: 'groups',
+      folder: 'main',
+      tab: 'chat',
+    });
+  });
+
+  it('parses notes tab without note ID', () => {
+    expect(parseHash('#groups/main/notes')).toMatchObject({
+      section: 'groups',
+      folder: 'main',
+      tab: 'notes',
+      noteId: null,
+    });
+  });
+
+  it('parses notes tab with note ID', () => {
+    expect(
+      parseHash(
+        '#groups/main/notes/MEM-2026-03-25-mozilla-cq-knowledge-commons',
+      ),
+    ).toMatchObject({
+      section: 'groups',
+      folder: 'main',
+      tab: 'notes',
+      noteId: 'MEM-2026-03-25-mozilla-cq-knowledge-commons',
+    });
+  });
+
+  it('parses files tab without path', () => {
+    expect(parseHash('#groups/main/files')).toMatchObject({
+      section: 'groups',
+      folder: 'main',
+      tab: 'files',
+      filePath: null,
+    });
+  });
+
+  it('parses files tab with path', () => {
+    expect(
+      parseHash('#groups/main/files/memory/notes/MEM-2026-03-25-example.md'),
+    ).toMatchObject({
+      section: 'groups',
+      folder: 'main',
+      tab: 'files',
+      filePath: 'memory/notes/MEM-2026-03-25-example.md',
+    });
+  });
+
+  it('parses top-level sections', () => {
+    expect(parseHash('#specialists')).toEqual({ section: 'specialists' });
+    expect(parseHash('#feeds')).toEqual({ section: 'feeds' });
+    expect(parseHash('#system')).toEqual({ section: 'system' });
+    expect(parseHash('#overview')).toEqual({ section: 'overview' });
+    expect(parseHash('#database')).toEqual({ section: 'database' });
+  });
+
+  it('does not set noteId for files tab', () => {
+    const result = parseHash(
+      '#groups/main/files/memory/notes/MEM-2026-03-25-example.md',
+    );
+    expect(result.noteId).toBeNull();
+  });
+
+  it('does not set filePath for notes tab', () => {
+    const result = parseHash('#groups/main/notes/MEM-2026-03-25-example');
+    expect(result.filePath).toBeNull();
+  });
+});
 
 describe('parseNoteFrontmatter', () => {
   const NOTE = `---

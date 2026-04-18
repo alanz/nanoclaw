@@ -415,6 +415,8 @@ document.addEventListener('DOMContentLoaded', function() {
   //   #groups/{folder}/files         → group files tab, no file selected
   //   #groups/{folder}/files/{path}  → group files tab, file open
   //                                    ({path} is relative within the group folder)
+  //   #groups/{folder}/notes         → group graph tab
+  //   #groups/{folder}/notes/{id}    → group graph tab, note selected
   //   #feeds                         → feeds
   //   #system                        → system
 
@@ -435,7 +437,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!folder) return { section: 'groups', folder: null };
     var tab = parts[2] || 'chat';
     var filePath = (tab === 'files' && parts.length > 3) ? parts.slice(3).join('/') : null;
-    return { section: 'groups', folder: folder, tab: tab, filePath: filePath };
+    var noteId = (tab === 'notes' && parts.length > 3) ? parts[3] : null;
+    return { section: 'groups', folder: folder, tab: tab, filePath: filePath, noteId: noteId };
   }
 
   async function restoreFromHash() {
@@ -473,6 +476,7 @@ document.addEventListener('DOMContentLoaded', function() {
         (g.isMain ? '<span class="badge bb">main</span> ' : '')
         + '<span class="badge bg">'+esc(g.channel)+'</span>'
         + ' <code style="font-size:11px">'+esc(g.jid)+'</code>';
+      if (state.noteId) pendingGraphSelect = state.noteId;
       switchTab(state.tab || 'chat', state.filePath);
     } finally {
       skipHashUpdate = false;
@@ -645,6 +649,7 @@ document.addEventListener('DOMContentLoaded', function() {
       var base = 'groups/' + currentGroup.folder;
       if (tab === 'chat') pushHash(base);
       else if (tab === 'files' && autoFilePath) pushHash(base + '/files/' + autoFilePath);
+      else if (tab === 'notes' && pendingGraphSelect) pushHash(base + '/notes/' + pendingGraphSelect);
       else pushHash(base + '/' + tab);
     }
     if (tab === 'chat')  loadGroupChat();
@@ -1200,7 +1205,8 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!r.ok) { view.innerHTML = '<div class="empty">Could not read file</div>'; return; }
       var text = await r.text();
       var isNote = filePath.indexOf('/memory/notes/MEM-') !== -1;
-      var graphBtnHash = (currentGroup ? '#groups/'+currentGroup.folder+'/notes' : '#');
+      var noteIdMatch = filePath.match(/(MEM-[^/]+)\.md$/);
+      var graphBtnHash = (currentGroup && noteIdMatch ? '#groups/'+currentGroup.folder+'/notes/'+noteIdMatch[1] : currentGroup ? '#groups/'+currentGroup.folder+'/notes' : '#');
       var graphBtn = isNote ? ' <a href="'+graphBtnHash+'" class="graph-file-btn" data-path="'+esc(filePath)+'" style="color:#58a6ff;font-size:11px;margin-left:8px;text-decoration:none">\u29BF Show in Graph</a>' : '';
       var header = '<div class="dim" style="margin-bottom:12px">'+esc(filePath)+graphBtn+'</div>';
       var ext = name.split('.').pop();
@@ -1335,6 +1341,7 @@ document.addEventListener('DOMContentLoaded', function() {
           var node = graphCy.getElementById(targetId);
           if (node.length) {
             node.select();
+            node.emit('tap');
             graphCy.animate({ fit: { eles: node.union(node.neighborhood()), padding: 60 }, duration: 400 });
           }
         }, 900);
@@ -2753,6 +2760,34 @@ export function parseNoteFrontmatter(text: string): {
     superseded_by: parseList(fields['superseded_by']),
     source_report_path,
   };
+}
+
+/**
+ * Exported TypeScript mirror of the client-side parseHash() function.
+ * Kept in sync manually; used by tests.
+ */
+export function parseHash(hash: string): {
+  section: string;
+  folder?: string | null;
+  tab?: string;
+  filePath?: string | null;
+  noteId?: string | null;
+} {
+  hash = (hash || '').replace(/^#/, '') || 'groups';
+  const parts = hash.split('/');
+  const section = parts[0] || 'groups';
+  if (section === 'overview') return { section: 'overview' };
+  if (section === 'specialists') return { section: 'specialists' };
+  if (section === 'feeds') return { section: 'feeds' };
+  if (section === 'system') return { section: 'system' };
+  if (section === 'database') return { section: 'database' };
+  const folder = parts[1] || null;
+  if (!folder) return { section: 'groups', folder: null };
+  const tab = parts[2] || 'chat';
+  const filePath =
+    tab === 'files' && parts.length > 3 ? parts.slice(3).join('/') : null;
+  const noteId = tab === 'notes' && parts.length > 3 ? parts[3] : null;
+  return { section: 'groups', folder, tab, filePath, noteId };
 }
 
 /**

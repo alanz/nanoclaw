@@ -130,6 +130,7 @@ import {
   saveUserProfile,
   type UserProfile,
 } from './session-warm-start.js';
+import { getActiveWebxdcMsgId } from './channels/webxdc-store.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -1051,6 +1052,73 @@ async function startUserMdWatcher(): Promise<void> {
   }
 }
 
+const TODO_STATE_DEBOUNCE_MS = 3000;
+
+/**
+ * Watches each registered group's workspace for changes to todo-state.json.
+ * After 3 seconds of quiescence, pushes the new state to the todo WebXDC app
+ * if a session is active. This covers the case where the agent updates the
+ * file directly (via a hook) without calling webxdc_update itself.
+ */
+async function startTodoStateWatcher(): Promise<void> {
+  const parcelWatcher = await import('@parcel/watcher');
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    const groupDir = path.join(GROUPS_DIR, group.folder);
+    if (!fs.existsSync(groupDir)) continue;
+
+    try {
+      await parcelWatcher.subscribe(groupDir, (_err, events) => {
+        if (_err) return;
+        const changed = events.some(
+          (e) =>
+            e.type !== 'delete' && path.basename(e.path) === 'todo-state.json',
+        );
+        if (!changed) return;
+
+        const existing = timers.get(jid);
+        if (existing) clearTimeout(existing);
+        timers.set(
+          jid,
+          setTimeout(() => {
+            timers.delete(jid);
+
+            // Skip push if no active todo session — avoids sending raw JSON to chat.
+            const sessionKey = `${jid}:todo`;
+            if (getActiveWebxdcMsgId(sessionKey) === undefined) return;
+
+            const stateFile = path.join(groupDir, 'todo-state.json');
+            let content: string;
+            try {
+              content = fs.readFileSync(stateFile, 'utf8');
+            } catch {
+              return;
+            }
+
+            const channel = findChannel(channels, jid);
+            if (!channel?.sendWebxdcUpdate) return;
+
+            channel.sendWebxdcUpdate(jid, { content }, 'todo').catch((err) => {
+              logger.warn(
+                { err, jid },
+                'todo-state.json watcher: failed to push state',
+              );
+            });
+            logger.debug(
+              { jid },
+              'todo-state.json watcher: pushed state to todo app',
+            );
+          }, TODO_STATE_DEBOUNCE_MS),
+        );
+      });
+      logger.info({ groupDir }, 'todo-state.json watcher started');
+    } catch (err) {
+      logger.warn({ err, groupDir }, 'Failed to start todo-state.json watcher');
+    }
+  }
+}
+
 /** Extract a single YAML frontmatter field value from a markdown file's content. */
 function parseFrontmatterField(
   content: string,
@@ -1081,6 +1149,7 @@ async function main(): Promise<void> {
   warmStartProfile = loadUserProfile();
   logger.info({ status: warmStartProfile.status }, 'UserProfile loaded');
   void startUserMdWatcher();
+  void startTodoStateWatcher();
 
   // Eagerly initialize memory managers for groups with an existing index.
   // This triggers the startup sync (including any forced re-index from config

@@ -45,6 +45,36 @@ value ThrowawayFailureSignals {
     -- terminal from the automatic retry loop (manual retry possible once a
     -- transcript is generated).
     input_too_large: Boolean
+
+    @guidance
+        -- These fields are retrospective diagnostics, read from the throwaway
+        -- container's session log after it exits, via
+        -- observe_failure_signals(log_path). They record what the host can see
+        -- of the failure after the fact; they are not inputs to a live
+        -- monitoring loop.
+        --
+        -- Two of the fields are the post-hoc evidence of failure modes that
+        -- nanoclaw.allium models actively for regular AgentSession instances:
+        --   - timed_out_without_output is the evidence left by a hard-timeout
+        --     kill, the mechanism nanoclaw.allium models for AgentSession via
+        --     ContainerHardTimedOut (force-kill after the no-output deadline).
+        --   - api_error is the evidence left by a failure driven by a
+        --     non-transient API error, the mechanism nanoclaw.allium models
+        --     for AgentSession via ApiErrorGraceExpired (force-kill after the
+        --     API-error grace period).
+        -- The active monitoring lives only on AgentSession; for a
+        -- ThrowawaySession the same underlying host-level kills manifest here
+        -- as retrospective signals rather than as observed state transitions.
+        --
+        -- The remaining two fields are throwaway-specific failure modes with
+        -- no active-monitoring counterpart in nanoclaw.allium:
+        --   - triggered_own_compact: the throwaway's own context window
+        --     filled and the SDK auto-compacted mid-run, which we treat as a
+        --     failure because the summariser cannot reason reliably past that
+        --     point.
+        --   - input_too_large: the pre-launch size guard refused the raw
+        --     JSONL; no container was run, so this signal is set at creation
+        --     time rather than read from a log.
 }
 
 ------------------------------------------------------------
@@ -946,6 +976,31 @@ rule RecoverOrphanedFailedPlaceholders {
 -- Emitted by the host when a throwaway agent container terminates.
 -- success=true if the container exited cleanly (exit code 0, SessionSummary written).
 -- success=false on error exit, timeout, or missing SessionSummary after exit.
+--
+-- The "timeout" case covered by success=false is produced by the same
+-- host-level container monitoring that nanoclaw.allium models for regular
+-- AgentSession instances via ContainerHardTimedOut (30min hard deadline on
+-- streaming output) and ApiErrorGraceExpired (2min grace period after a
+-- non-transient API error). The underlying monitoring logic is the same; only
+-- the entity type the host is watching differs.
+--
+-- Unlike AgentSession, where that monitoring expresses itself as direct state
+-- transitions on the session entity, for a ThrowawaySession the host-level
+-- kill surfaces here as ThrowawayContainerExited(success: false). The
+-- retryable- and exhausted-failure rules in this spec
+-- (ThrowawaySessionFailedRetryable, ThrowawaySessionFailedExhausted) then
+-- pick up the failure; the retrospective evidence of which kind of kill
+-- occurred is captured on the throwaway's failure_signals
+-- (timed_out_without_output for a hard-timeout kill, api_error for an
+-- API-error-driven kill). See the @guidance on ThrowawayFailureSignals for
+-- the mapping.
+--
+-- The active monitoring rules declared in nanoclaw.allium
+-- (ContainerHardTimedOut, ApiErrorGraceExpired, ContainerDrainTimedOut) are
+-- scoped to AgentSession and do NOT apply to ThrowawaySession. Throwaway
+-- monitoring is an implementation-level concern of the host and surfaces in
+-- this spec only through this trigger and through the retrospective signals
+-- in ThrowawayFailureSignals.
 
 -- RetrySessionSummaryRequested(group: core.Group, session_id: String)
 -- Emitted when a manual retry of a failed session summary is requested, either

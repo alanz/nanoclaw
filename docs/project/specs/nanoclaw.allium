@@ -191,6 +191,8 @@ entity AgentSession {
     group: Group
     started_at: Timestamp
     last_output_at: Timestamp?
+    first_result_at: Timestamp?         -- set on first streaming output; null before that
+    pending_api_error_at: Timestamp?    -- set when a non-transient API error is observed in session logs
     retry_count: Integer
     dispatch_depth: Integer             -- nesting level from orchestration chain; 0 for user-initiated runs
     -- 'active' is the initial status set via AgentSession.created(... status: active) in the
@@ -201,6 +203,8 @@ entity AgentSession {
 
     -- Derived
     is_idle: last_output_at != null and now - last_output_at > config.idle_timeout
+    is_hard_timed_out: first_result_at = null and now - (last_output_at ?? started_at) > config.container_timeout
+    is_drain_timed_out: status = closing and now - (last_output_at ?? first_result_at) > config.container_post_completion_drain
 
     transitions status {
         active -> closing           -- graceful shutdown (idle timeout or /esc)
@@ -220,6 +224,10 @@ config {
     max_messages_per_prompt: Integer = 10
     max_agent_retries: Integer = 5
     max_dispatch_depth: Integer = 5     -- prevents infinite agent-to-agent loops
+    container_timeout: Duration = 30.minutes
+    container_post_completion_drain: Duration = 30.seconds
+    api_error_grace: Duration = 2.minutes
+    api_error_poll_interval: Integer = 5000     -- milliseconds
 }
 
 ------------------------------------------------------------
@@ -668,6 +676,125 @@ rule AgentGaveUp {
     ensures: session.status = closed
 }
 
+-- ---- Container Hard Timeout ----
+
+-- The first streaming output from the agent is recorded so the hard timeout
+-- can distinguish "never produced anything" from "working, then stalled".
+-- Fires on the same event as AgentResponded and AgentProgressPlaceholderUpdated;
+-- the three rules are complementary — one captures the first-result timestamp,
+-- the other two handle persistence/idle-timer reset based on the placeholder flag.
+rule AgentFirstOutputObserved {
+    when: AgentOutput(session, text, via_progress_placeholder)
+
+    requires: session.status = active
+    requires: session.first_result_at = null
+
+    ensures: session.first_result_at = now
+}
+
+-- A container that has produced no output within container_timeout is presumed
+-- wedged and is force-killed. Each streaming output chunk effectively resets the
+-- clock because last_output_at is updated by AgentResponded /
+-- AgentProgressPlaceholderUpdated, so is_hard_timed_out is measured from the most
+-- recent output (or started_at if none).
+rule ContainerHardTimedOut {
+    when: session: AgentSession.is_hard_timed_out
+
+    requires: session.status = active
+
+    ensures: session.status = closed
+
+    @guidance
+        -- Implementation force-kills the container; no _close sentinel is sent
+        -- because a stuck container would not respond to it. At this point
+        -- first_result_at = null, so the caller can distinguish this from an
+        -- idle shutdown (which requires at least one prior output). The lack of
+        -- streaming output is the signal that the run failed rather than
+        -- completed.
+}
+
+-- A container that has received _close (status = closing) but has not exited
+-- within the post-completion drain window is force-killed. The effective
+-- post-completion allowance is idle_timeout + container_post_completion_drain
+-- (default 5m + 30s): AgentIdleTimeout sends _close at idle_timeout, this rule
+-- force-kills at idle_timeout + container_post_completion_drain if the process
+-- has not exited. In practice containers exit promptly after _close; this rule
+-- only fires for unresponsive processes.
+rule ContainerDrainTimedOut {
+    when: session: AgentSession.is_drain_timed_out
+
+    requires: session.status = closing
+
+    ensures: session.status = closed
+
+    @guidance
+        -- Force-kill path for containers that did not honour _close. Under normal
+        -- operation AgentSessionClosed fires and moves the session to closed
+        -- before this rule's condition becomes true. Only reaches this point when
+        -- the container process is unresponsive to its close signal.
+}
+
+-- ---- API Error Detection ----
+
+-- The host polls each active container's session JSONL log files every
+-- api_error_poll_interval milliseconds for API error entries. Transient errors
+-- (overloaded, rate_limit_error) are ignored because the SDK retries them
+-- automatically. The first non-transient error starts a grace window; subsequent
+-- errors before new output arrives do not reset it.
+rule ApiErrorDetected {
+    when: ApiErrorFoundInLogs(session, error_type, error_text)
+
+    requires: session.status = active
+    requires: error_type not in { overloaded, rate_limit_error }
+    requires: session.pending_api_error_at = null
+
+    ensures: session.pending_api_error_at = now
+
+    @guidance
+        -- The host scans session JSONL files every api_error_poll_interval ms
+        -- (default 5000ms). Only the first error within a grace window arms the
+        -- timer; further errors observed while pending_api_error_at is already set
+        -- are ignored so that a run of errors does not indefinitely extend the
+        -- grace period.
+}
+
+-- Any streaming output arriving after an API error is treated as evidence the
+-- agent recovered without host intervention, and the pending grace is cleared.
+rule ApiErrorRecovered {
+    when: AgentOutput(session, text, via_progress_placeholder)
+
+    requires: session.status = active
+    requires: session.pending_api_error_at != null
+
+    ensures: session.pending_api_error_at = null
+
+    @guidance
+        -- Any output arriving after the error — stored reply or placeholder
+        -- edit — proves the agent is making progress again and the host does not
+        -- need to intervene. Fires alongside AgentResponded /
+        -- AgentProgressPlaceholderUpdated / AgentFirstOutputObserved on the same
+        -- event; the rules are complementary.
+}
+
+-- If the grace window expires with no recovering output, the container is
+-- force-killed. The session goes directly to closed (not closing) so that
+-- AgentSessionFailed fires and AgentRetried can reschedule if retries remain.
+rule ApiErrorGraceExpired {
+    when: session: AgentSession.pending_api_error_at + config.api_error_grace <= now
+
+    requires: session.status = active
+    requires: session.pending_api_error_at != null
+
+    ensures: session.status = closed
+
+    @guidance
+        -- The 2-minute grace is intentionally generous because brief upstream
+        -- outages often self-resolve. Force-kill goes directly to closed (not
+        -- closing) so AgentSessionFailed fires and AgentRetried can reschedule
+        -- when retries remain. A graceful _close would risk the container
+        -- hanging on a blocked API call.
+}
+
 -- ---- IPC Actions from Agents ----
 
 -- An agent can post messages to chats via IPC.
@@ -954,6 +1081,12 @@ invariant WorkspaceIsolation {
 -- HostLogRecorded(level: debug | info | warning | error, text: String)
 -- Emitted when the host process writes a structured log entry.
 -- Used for audit trails, retry records, and observability.
+
+-- ApiErrorFoundInLogs(session: AgentSession, error_type: String, error_text: String)
+-- Emitted by the host's JSONL log poller (every api_error_poll_interval ms)
+-- when it finds an API error entry in the container's session logs. Transient
+-- error_type values (overloaded, rate_limit_error) are filtered at the ApiErrorDetected
+-- rule because the SDK retries them automatically.
 
 ------------------------------------------------------------
 -- Open Questions

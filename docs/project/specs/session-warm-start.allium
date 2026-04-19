@@ -225,7 +225,7 @@ rule AssembleSessionContext {
         -- prior_session_tail(main, N) returns a String? by reading the most recent
         --   non-placeholder archiving.ConversationArchive for the main group (ordered by
         --   archived_at desc) and extracting the last N user/assistant turns from
-        --   its path file (e.g. conversations/YYYY-MM-DD-conversation-HHMM.md).
+        --   its path file (e.g. conversations/YYYY-MM-DD-HHmm-{name}.md).
         --   The main group is used regardless of which group triggered the spawn — prior
         --   session context is always sourced from the user's primary conversation history.
         --   If the extracted tail is below config.prior_session_search_min_chars, the

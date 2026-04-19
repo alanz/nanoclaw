@@ -329,10 +329,17 @@ rule ThrowawaySessionBlockedByInputSizeOnPostCompact {
         -- throwaway_input_too_large_notice produces the user-facing message
         -- body, naming the affected session and explaining that summarisation
         -- cannot proceed until the transcript is generated.
-        -- archive_datetime(session_id) uses the archived_at of the non-placeholder
-        -- ConversationArchive for session_id (formatted YYYY-MM-DD-HHmm). Here no
-        -- such archive exists at the time this rule fires; if a ConversationArchive
-        -- later appears, placeholder filenames should be resolved against it.
+        -- archive_datetime resolution here: no throwaway is yet in scope (it is
+        -- being created by this rule's ensures clause, and in the failed state),
+        -- so the scan-by-session_id fallback applies. Scan the conversations
+        -- directory for non-placeholder ConversationArchives with matching
+        -- session_id and format the archived_at as YYYY-MM-DD-HHmm. The guard
+        -- `not archive_exists` ensures at most one such archive exists at
+        -- firing time (in practice zero — hence the placeholder suffix
+        -- -oversized — but a concurrent archive write cannot produce more than
+        -- one for this session_id), so "most recent" is not ambiguous here.
+        -- If a ConversationArchive later appears, placeholder filenames should
+        -- be resolved against it.
 }
 
 -- ---- /reset path ----
@@ -497,6 +504,17 @@ rule ThrowawaySessionBlockedByInputSizeOnReset {
         -- log exists. A subsequent RecoverOrphanedArchives run on this archive
         -- will not fire because a ThrowawaySession with status = failed for
         -- this session_id already exists.
+        -- archive_datetime resolution here: no throwaway is yet in scope (it is
+        -- being created by this rule's ensures clause, and in the failed
+        -- state), so the scan-by-session_id fallback applies. Scan the
+        -- conversations directory for non-placeholder ConversationArchives
+        -- with matching session_id and format the archived_at as
+        -- YYYY-MM-DD-HHmm. At firing time exactly one such archive exists: the
+        -- ConversationArchive this rule just creates in its ensures clause —
+        -- the pre-state had none (guarded by `not exists
+        -- ConversationArchive{..., is_placeholder: false}`) and the new one is
+        -- the archive of the session being reset. "Most recent" is therefore
+        -- unambiguous.
 }
 
 -- If /reset is issued on a session with messages but the JSONL is missing,
@@ -621,12 +639,26 @@ rule ThrowawaySessionSucceeded {
         -- SessionSummary with YAML frontmatter to memory/sessions/.
         -- Only one session may be active per group at a time; user messages queue
         -- behind the throwaway automatically.
-        -- archive_datetime(session_id) resolves to the archived_at field of the
-        -- non-placeholder ConversationArchive for session_id, formatted as
-        -- YYYY-MM-DD-HHmm. Using the archive's timestamp (rather than now) for
-        -- the filename prefix keeps retried summaries aligned with the original
-        -- session's identity; the "-processed-at-{now}" suffix disambiguates
-        -- multiple summary files produced for the same session.
+        -- archive_datetime resolution, when a throwaway is in scope: resolve from
+        -- throwaway.source_input, not by scanning all archives for the session.
+        -- If source_input is a ConversationArchive path, read its archived_at
+        -- frontmatter field and format as YYYY-MM-DD-HHmm. This is stable across
+        -- retries because source_input is set at throwaway creation time and
+        -- never changes thereafter, regardless of how many other archives exist
+        -- for the same session_id. If source_input is a raw JSONL path (no
+        -- archive was available at creation time), fall back to scanning the
+        -- conversations directory for non-placeholder archives with matching
+        -- session_id.
+        -- Anchoring to source_input matters because a session can accumulate
+        -- multiple non-placeholder archives (e.g. one from an auto-compact and a
+        -- later one from an explicit /reset). Picking "the most recent" archive
+        -- at retry time would name a retry summary after the wrong session
+        -- boundary — a compact-triggered throwaway retried after a subsequent
+        -- reset must still be named for the compact's archive, not the reset's.
+        -- Using the archive's timestamp (rather than now) for the filename
+        -- prefix keeps retried summaries aligned with the original session's
+        -- identity; the "-processed-at-{now}" suffix disambiguates multiple
+        -- summary files produced for the same session.
 }
 
 -- If the throwaway container fails and automatic retries remain, queue it for
@@ -708,6 +740,23 @@ rule ThrowawaySessionFailedExhausted {
         -- throwaway_retry_exhausted_notice produces the user-facing message body,
         -- naming the failed session and advising that a manual retry is possible
         -- from the main group.
+        -- archive_datetime resolution, when a throwaway is in scope: resolve from
+        -- throwaway.source_input, not by scanning all archives for the session.
+        -- If source_input is a ConversationArchive path, read its archived_at
+        -- frontmatter field and format as YYYY-MM-DD-HHmm. This is stable across
+        -- retries because source_input is set at throwaway creation time and
+        -- never changes thereafter, regardless of how many other archives exist
+        -- for the same session_id. If source_input is a raw JSONL path (no
+        -- archive was available at creation time), fall back to scanning the
+        -- conversations directory for non-placeholder archives with matching
+        -- session_id.
+        -- Anchoring to source_input matters because a session can accumulate
+        -- multiple non-placeholder archives (e.g. one from an auto-compact and a
+        -- later one from an explicit /reset). Picking "the most recent" archive
+        -- when naming the placeholder would align the file with the wrong
+        -- session boundary — the placeholder belongs to the session the
+        -- throwaway was created to summarise, not to any archive that arrived
+        -- afterwards.
 }
 
 -- When a ThrowawaySession transitions into the pending state in a running
@@ -827,6 +876,66 @@ rule RecoverOrphanedPendingThrowaways {
         -- retry_count is not modified here: the retry budget is tied to automatic
         -- retry attempts, not to process restarts. A throwaway re-dispatched after
         -- a restart still has the same number of remaining attempts it had before.
+}
+
+-- On startup, reconcile placeholder SessionSummary files on disk (-failed.md
+-- and -oversized.md) with the throwaway_sessions store. If a placeholder
+-- exists but no ThrowawaySession row is present for its session_id, fabricate
+-- a row that records the failure in its terminal, exhausted state so that
+-- manual retry (via /retry-summary or the retry_session_summary MCP tool) can
+-- subsequently locate and re-queue it.
+rule RecoverOrphanedFailedPlaceholders {
+    when: NanoclawStarted(_)
+    for group in core.Groups:
+        for placeholder in legacy_failed_placeholders(group):
+
+            requires: not exists ThrowawaySession{ for_session_id: placeholder.session_id }
+
+            let throwaway_group_id = new_throwaway_group_id()
+
+            ensures: ThrowawaySession.created(
+                for_session_id: placeholder.session_id,
+                group: group,
+                source_input: placeholder.path,
+                ephemeral_group_id: throwaway_group_id,
+                log_path: null,
+                retry_count: config.max_throwaway_retries,
+                failure_signals: null,
+                status: failed,
+                started_at: now,
+                was_manual_retry: false,
+                trigger_type: compact
+            )
+
+    @guidance
+        -- This rule closes the gap where a placeholder SessionSummary file
+        -- (-failed.md or -oversized.md) exists on disk without a matching
+        -- throwaway_sessions row. Two known legacy scenarios produce this
+        -- state: (a) the placeholder was written by an older NanoClaw that
+        -- predated the throwaway_sessions table, and (b) the database was
+        -- reset or migrated while the placeholder files on disk survived.
+        -- Without a DB row, the RetrySessionSummaryRequested flow (the
+        -- /retry-summary chat command and the retry_session_summary MCP
+        -- tool) cannot find the session and the user is stuck.
+        --
+        -- legacy_failed_placeholders(group) scans
+        -- /workspace/group/memory/sessions/ for files ending in -failed.md or
+        -- -oversized.md, parses the YAML frontmatter of each, and returns a
+        -- record per file carrying at minimum session_id and the placeholder
+        -- file's path. Files whose frontmatter cannot be parsed or whose
+        -- session_id is absent are skipped (an error is logged via the
+        -- implementation's normal channels; surfacing that here would
+        -- duplicate diagnostics the rule cannot act on).
+        --
+        -- retry_count is set to config.max_throwaway_retries so the automatic
+        -- retry loop treats the fabricated row as already exhausted: the only
+        -- legitimate path forward is a manual retry, which resets retry_count
+        -- to 0. failure_signals is null because the original run's log is
+        -- unavailable from the placeholder alone, and observe_failure_signals
+        -- has nothing to inspect. trigger_type defaults to compact because
+        -- the originating trigger (compact vs reset) is not recoverable from
+        -- a legacy placeholder file; a best-effort default is preferable to
+        -- omitting the row and leaving manual retry broken.
 }
 
 ------------------------------------------------------------

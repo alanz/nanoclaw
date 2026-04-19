@@ -360,6 +360,16 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+  // Add source_input column so retry/recovery dispatch can reference the specific
+  // ConversationArchive (or JSONL) this throwaway was created to summarise, rather
+  // than re-scanning all archives for the session and picking the wrong one.
+  try {
+    database.exec(
+      `ALTER TABLE throwaway_sessions ADD COLUMN source_input TEXT NOT NULL DEFAULT ''`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -1843,6 +1853,10 @@ export interface ThrowawaySessionRecord {
   started_at: string;
   was_manual_retry: number; // 0 = false, 1 = true
   trigger_type: 'compact' | 'reset';
+  // Host filesystem path of the ConversationArchive (.md) or raw JSONL this throwaway
+  // was created to summarise. Stable across retries so archive_datetime resolution
+  // always references the original archive, not the most recent one for the session.
+  source_input: string;
 }
 
 export function insertThrowawaySession(row: ThrowawaySessionRecord): void {
@@ -1850,8 +1864,8 @@ export function insertThrowawaySession(row: ThrowawaySessionRecord): void {
     `INSERT INTO throwaway_sessions
        (id, for_session_id, group_folder, chat_jid, ephemeral_group_id,
         log_path, retry_count, failure_signals, status, started_at,
-        was_manual_retry, trigger_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        was_manual_retry, trigger_type, source_input)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.for_session_id,
@@ -1865,6 +1879,7 @@ export function insertThrowawaySession(row: ThrowawaySessionRecord): void {
     row.started_at,
     row.was_manual_retry,
     row.trigger_type,
+    row.source_input,
   );
 }
 

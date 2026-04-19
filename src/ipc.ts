@@ -1776,6 +1776,7 @@ export async function processTaskIpc(
           started_at: now.toISOString(),
           was_manual_retry: 0,
           trigger_type: 'compact',
+          source_input: jsonlPath ?? '',
         });
         fs.mkdirSync(sessionsDir, { recursive: true });
         writeSummaryPlaceholder(
@@ -1983,6 +1984,7 @@ export async function processTaskIpc(
           started_at: now.toISOString(),
           was_manual_retry: 0,
           trigger_type: 'reset',
+          source_input: path.join(conversationsDir, archiveFilename),
         });
         writeSummaryPlaceholder(
           sessionsDir,
@@ -2063,12 +2065,10 @@ export async function processTaskIpc(
         failure_signals: null,
         was_manual_retry: 1,
       });
-      const rtConversationsDir = path.join(
-        resolveGroupFolderPath(rtGroup.folder),
-        'conversations',
-      );
-      const rtArchiveFilename =
-        findLatestArchiveFilename(rtConversationsDir, sessionId) ?? undefined;
+      const rtSourceInput = existingRow.source_input;
+      const rtArchiveFilename = rtSourceInput.endsWith('.md')
+        ? path.basename(rtSourceInput)
+        : undefined;
       const rtJsonlPath = getSessionJsonlPath(rtGroup.folder, sessionId);
       _runThrowaway(
         rtGroup,
@@ -2097,7 +2097,11 @@ export async function processTaskIpc(
       const payload = {
         failed_summaries: failedRows.map((r) => ({
           session_id: r.for_session_id,
-          archive_datetime: resolveArchiveDatetime(convDir, r.for_session_id),
+          archive_datetime: resolveArchiveDatetime(
+            r.source_input,
+            convDir,
+            r.for_session_id,
+          ),
           trigger_type: r.trigger_type,
           retry_count: r.retry_count,
           failure_signals: r.failure_signals
@@ -2339,14 +2343,41 @@ function observeFailureSignals(
 }
 
 /**
- * Resolve archive_datetime(sessionId): finds the most recent non-placeholder
- * ConversationArchive for the session and formats its archived_at as YYYY-MM-DD-HHmm.
- * Falls back to the current time if no archive exists.
+ * Resolve archive_datetime for a throwaway: formats the archived_at timestamp of
+ * the specific ConversationArchive (or JSONL) this throwaway was created to summarise.
+ *
+ * If sourceInput is a .md path (a ConversationArchive), its archived_at frontmatter
+ * field is used directly — this is the stable, correct anchor for the summary filename
+ * regardless of how many other archives have since been written for the same session.
+ *
+ * Falls back to scanning conversationsDir by sessionId (original behaviour) only when
+ * sourceInput is a JSONL path or the archive file cannot be read.
+ * Falls back to the current time if no archive is found at all.
  */
 function resolveArchiveDatetime(
+  sourceInput: string,
   conversationsDir: string,
   sessionId: string,
 ): string {
+  // Primary: read archived_at from the specific archive this throwaway targets.
+  if (sourceInput.endsWith('.md') && fs.existsSync(sourceInput)) {
+    try {
+      const raw = fs.readFileSync(sourceInput, 'utf-8');
+      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+      if (fmMatch) {
+        const atMatch = fmMatch[1].match(/^archived_at:\s*(.+)$/m);
+        if (atMatch) {
+          const ts = new Date(atMatch[1].trim());
+          const date = ts.toISOString().split('T')[0];
+          const timeStr = ts.toISOString().slice(11, 16).replace(':', '');
+          return `${date}-${timeStr}`;
+        }
+      }
+    } catch {
+      // fall through to scan
+    }
+  }
+  // Fallback: scan all archives for the session (used when sourceInput is a JSONL).
   let latestAt: string | null = null;
   if (fs.existsSync(conversationsDir)) {
     for (const file of fs.readdirSync(conversationsDir)) {
@@ -2526,6 +2557,11 @@ export async function spawnThrowaway(
 ): Promise<void> {
   const ephemeralGroupId = newThrowawayGroupId();
   const dbId = crypto.randomUUID();
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const conversationsDir = path.join(groupDir, 'conversations');
+  const sourceInput = archiveFilename
+    ? path.join(conversationsDir, archiveFilename)
+    : (jsonlPath ?? '');
   insertThrowawaySession({
     id: dbId,
     for_session_id: sessionId,
@@ -2539,6 +2575,7 @@ export async function spawnThrowaway(
     started_at: new Date().toISOString(),
     was_manual_retry: 0,
     trigger_type: triggerType,
+    source_input: sourceInput,
   });
   await _runThrowaway(
     group,
@@ -2569,15 +2606,20 @@ async function _runThrowaway(
   const sessionsDir = path.join(groupDir, 'memory', 'sessions');
   const logPath = throwawayLogPath(ephemeralGroupId);
 
-  // Resolve filename from archive_datetime(sessionId) so retried summaries stay
-  // aligned with the original session's identity (spec: ThrowawaySessionSucceeded).
-  const archiveDatetime = resolveArchiveDatetime(conversationsDir, sessionId);
-
-  // Fetch current row to determine if this is a retry run
+  // Fetch current row first — needed for source_input and retry status.
   const currentRow = getThrowawaySessionById(dbId);
   const isRetryRun =
     (currentRow?.retry_count ?? 0) > 0 ||
     (currentRow?.was_manual_retry ?? 0) === 1;
+
+  // Resolve filename from the throwaway's own source_input so retried summaries stay
+  // aligned with the specific archive that was originally targeted, not the most recent
+  // archive for the session (spec: ThrowawaySessionSucceeded, archive_datetime).
+  const archiveDatetime = resolveArchiveDatetime(
+    currentRow?.source_input ?? '',
+    conversationsDir,
+    sessionId,
+  );
 
   const nowStr = `${now.toISOString().split('T')[0]}-${now.toISOString().slice(11, 16).replace(':', '')}`;
   const summaryFilename = isRetryRun
@@ -2732,21 +2774,20 @@ async function handleThrowawayFailure(
       },
       'Throwaway summarisation failed, queuing retry',
     );
-    // ThrowawaySessionRetryDispatched: re-dispatch immediately
-    const conversationsDir = path.join(
-      resolveGroupFolderPath(group.folder),
-      'conversations',
-    );
-    const archiveFilename =
-      findLatestArchiveFilename(conversationsDir, row.for_session_id) ??
-      undefined;
+    // ThrowawaySessionRetryDispatched: re-dispatch immediately using the stored
+    // source_input so archive_datetime resolves to the original archive, not
+    // the most recent one for the session.
+    const retrySourceInput = row.source_input;
+    const retryArchiveFilename = retrySourceInput.endsWith('.md')
+      ? path.basename(retrySourceInput)
+      : undefined;
     const jsonlPath = getSessionJsonlPath(group.folder, row.for_session_id);
     _runThrowaway(
       group,
       chatJid,
       row.for_session_id,
       jsonlPath,
-      archiveFilename,
+      retryArchiveFilename,
       dbId,
       row.ephemeral_group_id,
       deps,
@@ -2829,13 +2870,10 @@ export async function recoverOrphanedPendingThrowaways(
       );
       continue;
     }
-    const conversationsDir = path.join(
-      resolveGroupFolderPath(group.folder),
-      'conversations',
-    );
-    const archiveFilename =
-      findLatestArchiveFilename(conversationsDir, row.for_session_id) ??
-      undefined;
+    const recoverySourceInput = row.source_input;
+    const archiveFilename = recoverySourceInput.endsWith('.md')
+      ? path.basename(recoverySourceInput)
+      : undefined;
     const jsonlPath = getSessionJsonlPath(group.folder, row.for_session_id);
     logger.info(
       { groupFolder: group.folder, sessionId: row.for_session_id },

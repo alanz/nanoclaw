@@ -1347,6 +1347,7 @@ describe('trigger_type and was_manual_retry DB fields', () => {
       started_at: new Date().toISOString(),
       was_manual_retry: 0,
       trigger_type: 'compact',
+      source_input: '',
     });
 
     mockRunContainerAgent.mockResolvedValue({
@@ -1582,6 +1583,7 @@ describe('query_failed_summaries IPC handler', () => {
       started_at: new Date().toISOString(),
       was_manual_retry: 0,
       trigger_type: 'compact',
+      source_input: '',
     });
 
     const requestId = 'test-req-1';
@@ -1628,6 +1630,7 @@ describe('query_failed_summaries IPC handler', () => {
       started_at: new Date().toISOString(),
       was_manual_retry: 0,
       trigger_type: 'reset',
+      source_input: '',
     });
 
     const requestId = 'test-req-b';

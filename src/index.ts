@@ -71,7 +71,7 @@ import {
   resolveGroupFolderPath,
   resolveSpecialistGroupFolderPath,
 } from './group-folder.js';
-import { startIpcWatcher, getSessionJsonlPath, spawnThrowaway } from './ipc.js';
+import { startIpcWatcher, spawnThrowaway } from './ipc.js';
 import { placeFilesForInvocation } from './ipc-transfer.js';
 import {
   findChannel,
@@ -981,12 +981,11 @@ async function recoverOrphanedArchives(
         if (!sessionId) continue;
         if (summarisedSessionIds.has(sessionId)) continue;
 
-        const jsonlPath = getSessionJsonlPath(group.folder, sessionId);
         logger.info(
           { groupFolder: group.folder, sessionId, file },
           'Recovering orphaned archive — spawning throwaway',
         );
-        spawnThrowaway(group, groupJid, sessionId, jsonlPath, undefined, {
+        spawnThrowaway(group, groupJid, sessionId, undefined, file, {
           sendMessage: async () => {},
           sendFile: async () => {},
           registeredGroups: () => ({}),

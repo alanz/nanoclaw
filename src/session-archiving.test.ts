@@ -627,7 +627,7 @@ describe('spawnThrowaway', () => {
     expect(input.chatJid).toBe('g@test');
   });
 
-  it('emits ✅ reaction when container succeeds and summary file is written', async () => {
+  it('emits 💭 reaction when container succeeds and summary file is written', async () => {
     const setReaction = vi.fn().mockResolvedValue(undefined);
     const folder = testFolder('tw-success');
     const group = makeGroup(folder);
@@ -657,7 +657,7 @@ describe('spawnThrowaway', () => {
       deps,
     );
 
-    expect(setReaction).toHaveBeenCalledWith('g@test', '✅');
+    expect(setReaction).toHaveBeenCalledWith('g@test', '💭');
   });
 
   it('writes failed placeholder and emits 💭 when container returns error', async () => {

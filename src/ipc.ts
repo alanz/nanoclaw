@@ -1794,6 +1794,7 @@ export async function processTaskIpc(
           date,
           timestamp,
           'missing',
+          jsonlPath,
         );
         writeSummaryPlaceholder(
           sessionsDir,
@@ -1820,6 +1821,7 @@ export async function processTaskIpc(
           date,
           timestamp,
           'missing',
+          jsonlPath,
         );
         writeSummaryPlaceholder(
           sessionsDir,
@@ -1844,6 +1846,7 @@ export async function processTaskIpc(
           date,
           timestamp,
           'empty',
+          jsonlPath,
         );
         writeSummaryPlaceholder(
           sessionsDir,
@@ -1875,6 +1878,7 @@ export async function processTaskIpc(
         newMessages,
         date,
         timestamp,
+        priorAt ?? undefined,
         ASSISTANT_NAME,
       );
       spawnThrowaway(
@@ -2041,6 +2045,7 @@ function writeConversationArchive(
   messages: SessionParsedMessage[],
   date: string,
   timestamp: string,
+  messagesSince?: string,
   assistantName?: string,
 ): void {
   fs.mkdirSync(conversationsDir, { recursive: true });
@@ -2051,6 +2056,7 @@ function writeConversationArchive(
     `session_id: ${sessionId}`,
     `archived_at: ${now.toISOString()}`,
     `source_jsonl: ${jsonlPath}`,
+    ...(messagesSince ? [`messages_since: ${messagesSince}`] : []),
     'is_placeholder: false',
     '---',
     '',
@@ -2080,6 +2086,7 @@ function writeArchivePlaceholder(
   date: string,
   timestamp: string,
   suffix: 'missing' | 'empty',
+  jsonlPath?: string,
 ): void {
   fs.mkdirSync(conversationsDir, { recursive: true });
   const filename = `${date}-${timestamp}-${suffix}.md`;
@@ -2088,6 +2095,7 @@ function writeArchivePlaceholder(
     '---',
     `session_id: ${sessionId}`,
     `archived_at: ${now.toISOString()}`,
+    ...(jsonlPath ? [`source_jsonl: ${jsonlPath}`] : []),
     'is_placeholder: true',
     '---',
     '',
@@ -2246,7 +2254,6 @@ export async function spawnThrowaway(
     writeSummaryPlaceholder(sessionsDir, sessionId, date, timeStr, 'failed');
   }
 
-  // ✅ = summary written; 💭 = failed (session still needs summarising)
-  const reaction = summaryExists ? '✅' : '💭';
-  if (deps.setReaction) await deps.setReaction(chatJid, reaction);
+  // 💭 signals session boundary is complete (whether or not summarisation succeeded)
+  if (deps.setReaction) await deps.setReaction(chatJid, '💭');
 }

@@ -25,6 +25,7 @@
 --   - Brave Search and Zotero search (third-party: treated as read-only lookups)
 
 use "./nanoclaw.allium" as nanoclaw
+use "./session-archiving.allium" as session_archiving
 
 ------------------------------------------------------------
 -- Enumerations
@@ -37,6 +38,7 @@ enum QueryKind {
   | memory_get        -- memory_get: full content of a specific memory file
   | memory_list       -- memory_list: list indexed files by path prefix
   | skill_eval        -- skill_eval: run an eval case for a skill (main only)
+  | failed_summaries   -- list ThrowawaySession rows where status = failed for the caller's group
 }
 
 ------------------------------------------------------------
@@ -753,6 +755,61 @@ rule AgentQueriedSkillEval {
         -- with the given prompt (optionally excluding the named skill), grades the assertions
         -- using an LLM grader, and writes the response file when done.
         -- The response payload includes: status, passed, assertionResults, output, durationMs, totalTokens.
+}
+
+-- The agent requests the list of failed throwaway summaries for its own group.
+-- The host responds with one entry per ThrowawaySession in status = failed whose
+-- group matches the caller's group, giving the agent enough context to present
+-- actionable information to the user before calling retry_session_summary.
+rule AgentQueriedFailedSummaries {
+    when: AgentMcpCall(author, "failed_summaries", request_id)
+
+    ensures: IpcQuery.created(
+        author: author,
+        kind: failed_summaries,
+        request_id: request_id,
+        issued_at: now,
+        status: pending
+    )
+    ensures: FailedSummariesQueryIssued(author: author, request_id: request_id)
+}
+
+rule HostFulfilledFailedSummariesQuery {
+    when: FailedSummariesQueryIssued(author, request_id)
+
+    let q = IpcQuery{request_id: request_id}
+    let caller_group = nanoclaw.Group{folder: author.group_folder}
+
+    requires: exists q
+    requires: q.status = pending
+    requires: exists caller_group
+
+    ensures: q.status = fulfilled
+    ensures: ResponseFileWritten(
+        request_id: request_id,
+        payload: {
+            failed_summaries:
+                session_archiving.ThrowawaySession
+                    where group = caller_group and status = failed
+        }
+    )
+
+    @guidance
+        -- One response payload entry is included per ThrowawaySession in
+        -- status = failed belonging to the caller's group. Each entry carries:
+        --   session_id       — the throwaway's for_session_id field
+        --   archive_datetime — session_archiving.archive_datetime(session_id),
+        --                      which resolves to the archived_at field of the
+        --                      non-placeholder ConversationArchive for
+        --                      session_id, formatted as YYYY-MM-DD-HHmm
+        --   trigger_type     — compact or reset, propagated from the throwaway
+        --   retry_count      — how many automatic retries were attempted before
+        --                      the retry budget was exhausted
+        --   failure_signals  — the ThrowawayFailureSignals captured from the
+        --                      last failed run (or null if never populated)
+        -- The agent uses this list to present actionable context to the user
+        -- (which session failed, how, when) before calling the
+        -- retry_session_summary tool to re-queue a specific failed throwaway.
 }
 
 -- A query times out if the host has not written a response file within the timeout window.

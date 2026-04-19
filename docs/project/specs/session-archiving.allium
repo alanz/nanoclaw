@@ -17,6 +17,7 @@
 --   - Session log visibility via ephemeral group identity
 --   - Health signal capture (churn detection, compact detection, API errors)
 --   - Manual re-run from main group
+--   - MCP container skills for agent-driven discovery (via ipc.allium failed_summaries query) and retry of failed summaries
 -- Excludes:
 --   - Session lifecycle management (see nanoclaw.allium)
 --   - SDK compaction mechanics (see container-claude-sdk.allium)
@@ -67,6 +68,12 @@ entity ConversationArchive {
     -- A non-null value points at a prior non-placeholder archive's archived_at for
     -- the same session_id; only messages timestamped strictly later are included.
     messages_since: Timestamp?
+    -- Which session-end path produced this archive: compact (from an SDK auto-compact
+    -- hook) or reset (from an explicit /reset command). Propagated onto the
+    -- ThrowawaySession created for this archive so downstream rules and the MCP
+    -- list_failed_summaries tool can surface the original trigger, including after
+    -- a crash-recovery re-summarisation.
+    trigger_type: compact | reset
 }
 
 -- An AI-generated summary of a completed session.
@@ -76,7 +83,9 @@ entity ConversationArchive {
 entity SessionSummary {
     session_id: String
     group: core.Group
-    path: String              -- /workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}.md
+    path: String              -- /workspace/group/memory/sessions/{archive_datetime(session_id)}.md on initial run;
+                              -- /workspace/group/memory/sessions/{archive_datetime(session_id)}-processed-at-{YYYY-MM-DD-HHmm}.md on retry;
+                              -- placeholders retain their existing suffixes (-failed, -oversized, -missing, -empty).
     created_at: Timestamp
     is_placeholder: Boolean   -- true when summary could not be generated
 }
@@ -121,6 +130,15 @@ entity ThrowawaySession {
     -- allium-ignore allium.status.unreachableValue, allium.status.noExit
     status: pending | running | completed | failed
     started_at: Timestamp
+    -- Whether this throwaway was re-queued via a manual retry command after
+    -- the automatic retry loop had exhausted its attempts and set status = failed.
+    -- False on initial creation; set true by ManualRetryThrowawaySession.
+    -- Used with retry_count to select the correct SessionSummary filename suffix.
+    was_manual_retry: Boolean
+    -- Whether this throwaway was triggered by an auto-compact (compact) or an
+    -- explicit /reset command (reset). Exposed to the list_failed_summaries tool
+    -- so the agent can surface meaningful context to the user.
+    trigger_type: compact | reset
 }
 
 ------------------------------------------------------------
@@ -168,7 +186,8 @@ rule ArchiveOnPreCompact {
         archived_at: now,
         source_jsonl: jsonl_path,
         is_placeholder: false,
-        messages_since: null
+        messages_since: null,
+        trigger_type: compact
     )
     ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
 
@@ -187,11 +206,12 @@ rule ArchiveOnPreCompactJonlMissing {
     ensures: ConversationArchive.created(
         session_id: session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-{HHmm}-missing.md",
+        path: "/workspace/group/conversations/{YYYY-MM-DD}-{HHmm}-missing.md",
         archived_at: now,
         source_jsonl: jsonl_path,
         is_placeholder: true,
-        messages_since: null
+        messages_since: null,
+        trigger_type: compact
     )
     ensures: core.HostLogRecorded(
         level: error,
@@ -227,7 +247,9 @@ rule StartThrowawayOnPostCompact {
         retry_count: 0,
         failure_signals: null,
         status: running,
-        started_at: now
+        started_at: now,
+        was_manual_retry: false,
+        trigger_type: compact
     )
     ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "📝")
 
@@ -273,12 +295,14 @@ rule ThrowawaySessionBlockedByInputSizeOnPostCompact {
             api_error: null
         },
         status: failed,
-        started_at: now
+        started_at: now,
+        was_manual_retry: false,
+        trigger_type: compact
     )
     ensures: SessionSummary.created(
         session_id: session_id,
         group: group,
-        path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-oversized.md",
+        path: "/workspace/group/memory/sessions/{archive_datetime(session_id)}-oversized.md",
         created_at: now,
         is_placeholder: true
     )
@@ -305,6 +329,10 @@ rule ThrowawaySessionBlockedByInputSizeOnPostCompact {
         -- throwaway_input_too_large_notice produces the user-facing message
         -- body, naming the affected session and explaining that summarisation
         -- cannot proceed until the transcript is generated.
+        -- archive_datetime(session_id) uses the archived_at of the non-placeholder
+        -- ConversationArchive for session_id (formatted YYYY-MM-DD-HHmm). Here no
+        -- such archive exists at the time this rule fires; if a ConversationArchive
+        -- later appears, placeholder filenames should be resolved against it.
 }
 
 -- ---- /reset path ----
@@ -353,7 +381,8 @@ rule ArchiveAndStartThrowawayOnReset {
         archived_at: now,
         source_jsonl: jsonl_path,
         is_placeholder: false,
-        messages_since: latest_prior_at
+        messages_since: latest_prior_at,
+        trigger_type: reset
     )
     ensures: ThrowawaySession.created(
         for_session_id: cs.session_id,
@@ -364,7 +393,9 @@ rule ArchiveAndStartThrowawayOnReset {
         retry_count: 0,
         failure_signals: null,
         status: running,
-        started_at: now
+        started_at: now,
+        was_manual_retry: false,
+        trigger_type: reset
     )
     ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
     ensures: not exists cs
@@ -414,7 +445,8 @@ rule ThrowawaySessionBlockedByInputSizeOnReset {
         archived_at: now,
         source_jsonl: jsonl_path,
         is_placeholder: false,
-        messages_since: null
+        messages_since: null,
+        trigger_type: reset
     )
     ensures: ThrowawaySession.created(
         for_session_id: cs.session_id,
@@ -430,12 +462,14 @@ rule ThrowawaySessionBlockedByInputSizeOnReset {
             api_error: null
         },
         status: failed,
-        started_at: now
+        started_at: now,
+        was_manual_retry: false,
+        trigger_type: reset
     )
     ensures: SessionSummary.created(
         session_id: cs.session_id,
         group: group,
-        path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-oversized.md",
+        path: "/workspace/group/memory/sessions/{archive_datetime(cs.session_id)}-oversized.md",
         created_at: now,
         is_placeholder: true
     )
@@ -479,11 +513,12 @@ rule ResetJonlMissing {
     ensures: ConversationArchive.created(
         session_id: cs.session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-{HHmm}-missing.md",
+        path: "/workspace/group/conversations/{YYYY-MM-DD}-{HHmm}-missing.md",
         archived_at: now,
         source_jsonl: session_jsonl_path(cs),
         is_placeholder: true,
-        messages_since: null
+        messages_since: null,
+        trigger_type: reset
     )
     ensures: SessionSummary.created(
         session_id: cs.session_id,
@@ -512,11 +547,12 @@ rule ResetOnEmptySession {
     ensures: ConversationArchive.created(
         session_id: cs.session_id,
         group: group,
-        path: "/workspace/group/conversations/{date}-{HHmm}-empty.md",
+        path: "/workspace/group/conversations/{YYYY-MM-DD}-{HHmm}-empty.md",
         archived_at: now,
         source_jsonl: session_jsonl_path(cs),
         is_placeholder: true,
-        messages_since: null
+        messages_since: null,
+        trigger_type: reset
     )
     ensures: SessionSummary.created(
         session_id: cs.session_id,
@@ -561,11 +597,19 @@ rule ThrowawaySessionSucceeded {
     when: ThrowawayContainerExited(exited_session_id, success: true)
     for throwaway in ThrowawaySession where for_session_id = exited_session_id and status = running:
 
+        let is_retry_run = throwaway.retry_count > 0 or throwaway.was_manual_retry = true
+        let summary_path =
+            if is_retry_run:
+                "/workspace/group/memory/sessions/{archive_datetime(throwaway.for_session_id)}"
+                    + "-processed-at-{now as YYYY-MM-DD-HHmm}.md"
+            else:
+                "/workspace/group/memory/sessions/{archive_datetime(throwaway.for_session_id)}.md"
+
         ensures: throwaway.status = completed
         ensures: SessionSummary.created(
             session_id: throwaway.for_session_id,
             group: throwaway.group,
-            path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}.md",
+            path: summary_path,
             created_at: now,
             is_placeholder: false
         )
@@ -577,6 +621,12 @@ rule ThrowawaySessionSucceeded {
         -- SessionSummary with YAML frontmatter to memory/sessions/.
         -- Only one session may be active per group at a time; user messages queue
         -- behind the throwaway automatically.
+        -- archive_datetime(session_id) resolves to the archived_at field of the
+        -- non-placeholder ConversationArchive for session_id, formatted as
+        -- YYYY-MM-DD-HHmm. Using the archive's timestamp (rather than now) for
+        -- the filename prefix keeps retried summaries aligned with the original
+        -- session's identity; the "-processed-at-{now}" suffix disambiguates
+        -- multiple summary files produced for the same session.
 }
 
 -- If the throwaway container fails and automatic retries remain, queue it for
@@ -633,7 +683,7 @@ rule ThrowawaySessionFailedExhausted {
             -- Placeholder frontmatter includes log_path, failure_signals,
             -- retry_count and source_jsonl so the dashboard can surface diagnostic
             -- detail and offer a manual retry affordance.
-            path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-failed.md",
+            path: "/workspace/group/memory/sessions/{archive_datetime(throwaway.for_session_id)}-failed.md",
             created_at: now,
             is_placeholder: true
         )
@@ -700,6 +750,7 @@ rule ManualRetryThrowawaySession {
     ensures: throwaway.retry_count = 0
     ensures: throwaway.failure_signals = null
     ensures: throwaway.status = pending
+    ensures: throwaway.was_manual_retry = true
 
     @guidance
         -- Resetting retry_count to 0 gives the throwaway a fresh allocation of
@@ -708,6 +759,10 @@ rule ManualRetryThrowawaySession {
         -- group (accessed via throwaway.group) is the conversation group the
         -- failed summarisation belonged to and is used by downstream rules for
         -- reaction and notification routing.
+        -- was_manual_retry is latched true so that ThrowawaySessionSucceeded
+        -- selects the "-processed-at-{now}" suffix for the SessionSummary path,
+        -- preventing the retry from overwriting any existing summary file that
+        -- shares the archive's datetime prefix.
 }
 
 -- ---- Startup recovery ----
@@ -737,7 +792,9 @@ rule RecoverOrphanedArchives {
             retry_count: 0,
             failure_signals: null,
             status: running,
-            started_at: now
+            started_at: now,
+            was_manual_retry: false,
+            trigger_type: archive.trigger_type
         )
 
     @guidance
@@ -782,8 +839,11 @@ rule RecoverOrphanedPendingThrowaways {
 -- success=false on error exit, timeout, or missing SessionSummary after exit.
 
 -- RetrySessionSummaryRequested(group: core.Group, session_id: String)
--- Emitted when the user issues a manual retry command from the main group.
--- The group parameter is the main group the command was issued in; session_id
+-- Emitted when a manual retry of a failed session summary is requested, either
+-- by the user via the /retry-summary chat command in the main group, or by the
+-- agent calling the retry_session_summary container skill MCP tool (typically
+-- after inspecting the list returned by list_failed_summaries). The group
+-- parameter is the group from which the request was issued; session_id
 -- identifies the session whose failed ThrowawaySession should be re-queued.
 
 ------------------------------------------------------------

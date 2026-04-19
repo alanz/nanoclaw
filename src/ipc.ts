@@ -2266,7 +2266,10 @@ function findLatestArchiveTimestamp(
 }
 
 function newThrowawayGroupId(): string {
-  return `throwaway-${crypto.randomUUID()}`;
+  // Use only the first UUID segment (8 hex chars) to keep container names
+  // under Apple Container's 64-character limit.
+  // Full name: "nanoclaw-throwaway-XXXXXXXX-{13-digit-timestamp}" = 41 chars.
+  return `throwaway-${crypto.randomUUID().split('-')[0]}`;
 }
 
 function throwawayLogPath(ephemeralGroupId: string): string {

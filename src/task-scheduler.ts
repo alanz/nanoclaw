@@ -12,6 +12,7 @@ import {
 } from './config.js';
 import {
   generateUserProfile,
+  loadUserProfile,
   PROFILE_GENERATION_PROMPT,
   ProfileGenerationRunner,
 } from './session-warm-start.js';
@@ -221,6 +222,30 @@ async function runUserProfileGeneration(
     }
   } catch {
     // file not found — use default
+  }
+
+  // Back up existing USER.md before overwriting, named by its generation date.
+  const userMdPath = path.join(GROUPS_DIR, group.folder, 'memory', 'USER.md');
+  if (fs.existsSync(userMdPath)) {
+    const existingProfile = loadUserProfile();
+    const dateTag = existingProfile.generated_at
+      ? existingProfile.generated_at.toISOString().slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+    const backupPath = path.join(
+      GROUPS_DIR,
+      group.folder,
+      'memory',
+      `USER-${dateTag}.md`,
+    );
+    try {
+      fs.copyFileSync(userMdPath, backupPath);
+      logger.info(
+        { backup: backupPath },
+        'Backed up USER.md before regeneration',
+      );
+    } catch (err) {
+      logger.warn({ err, backup: backupPath }, 'Failed to back up USER.md');
+    }
   }
 
   const runner: ProfileGenerationRunner = { runContainerAgent };

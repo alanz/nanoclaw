@@ -57,6 +57,7 @@ import {
   getRouterState,
   getSpecialistSession,
   getSpecialistTask,
+  getThrowawaySessionByForSessionId,
   initDatabase,
   setRegisteredGroup,
   setPendingDispatchDepthDb,
@@ -71,7 +72,11 @@ import {
   resolveGroupFolderPath,
   resolveSpecialistGroupFolderPath,
 } from './group-folder.js';
-import { startIpcWatcher, spawnThrowaway } from './ipc.js';
+import {
+  startIpcWatcher,
+  spawnThrowaway,
+  recoverOrphanedPendingThrowaways,
+} from './ipc.js';
 import { placeFilesForInvocation } from './ipc-transfer.js';
 import {
   findChannel,
@@ -981,6 +986,12 @@ async function recoverOrphanedArchives(
         if (!sessionId) continue;
         if (summarisedSessionIds.has(sessionId)) continue;
 
+        // Skip archives where a non-completed throwaway already exists — it will
+        // complete, retry, or was exhausted and needs a manual retry.
+        const existingThrowaway = getThrowawaySessionByForSessionId(sessionId);
+        if (existingThrowaway && existingThrowaway.status !== 'completed')
+          continue;
+
         logger.info(
           { groupFolder: group.folder, sessionId, file },
           'Recovering orphaned archive — spawning throwaway',
@@ -1777,6 +1788,20 @@ async function main(): Promise<void> {
   // Recover orphaned archives (archives without a SessionSummary)
   recoverOrphanedArchives(setReactionFn).catch((err) =>
     logger.error({ err }, 'Orphaned archive recovery failed'),
+  );
+
+  // Re-dispatch throwaway sessions that were left in pending/running state at shutdown
+  recoverOrphanedPendingThrowaways(registeredGroups, {
+    setReaction: setReactionFn,
+    sendMessage: async (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (channel) await channel.sendMessage(jid, text);
+    },
+    registeredGroups: () => registeredGroups,
+    onProcess: undefined,
+    onProcessExit: undefined,
+  }).catch((err) =>
+    logger.error({ err }, 'Orphaned pending throwaway recovery failed'),
   );
 
   // Start periodic check for specialist tasks exceeding overall duration limit

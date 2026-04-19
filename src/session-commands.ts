@@ -13,6 +13,7 @@ export function extractSessionCommand(
   text = text.replace(triggerPattern, '').trim();
   if (text === '/compact') return '/compact';
   if (text === '/reset') return '/reset';
+  if (text.startsWith('/retry-summary')) return text;
   return null;
 }
 
@@ -120,6 +121,29 @@ export async function handleSessionCommand(opts: {
 
   // AUTHORIZED: process pre-compact messages first, then run the command
   logger.info({ group: groupName, command }, 'Session command');
+
+  // Handle /retry-summary: re-queue a failed throwaway session summary via IPC.
+  if (command?.startsWith('/retry-summary')) {
+    const targetSessionId = command.slice('/retry-summary'.length).trim();
+    if (!targetSessionId) {
+      await deps.sendMessage('Usage: /retry-summary <session_id>');
+      deps.advanceCursor(cmdMsg.timestamp);
+      return { handled: true, success: true };
+    }
+    deps.writeIpcTask({
+      type: 'retry_throwaway_summary',
+      jid: deps.chatJid,
+      sessionId: targetSessionId,
+      groupFolder: deps.groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    logger.info(
+      { group: groupName, targetSessionId },
+      'Requested throwaway retry via IPC',
+    );
+    deps.advanceCursor(cmdMsg.timestamp);
+    return { handled: true, success: true };
+  }
 
   // Handle /reset: archive the transcript and clear the session immediately.
   // A throwaway agent session is spawned asynchronously by the host via IPC

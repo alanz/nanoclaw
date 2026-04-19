@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -9,7 +10,10 @@ import {
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAX_DISPATCH_DEPTH,
+  MAX_THROWAWAY_RETRIES,
   MEMORY_SEARCH_ENABLED,
+  THROWAWAY_CONTEXT_LIMIT_TOKENS,
+  THROWAWAY_MAX_INPUT_FRACTION,
   TIMEZONE,
 } from './config.js';
 import { getOrCreateMemoryManager } from './memory/manager.js';
@@ -32,6 +36,11 @@ import {
   updateContainerTransfer,
   updateTask,
   updateTransferFile,
+  insertThrowawaySession,
+  getThrowawaySessionById,
+  getThrowawaySessionByForSessionId,
+  getThrowawaySessionsByStatus,
+  updateThrowawaySession,
 } from './db.js';
 import {
   isValidGroupFolder,
@@ -1729,10 +1738,68 @@ export async function processTaskIpc(
       }
       const groupDir = resolveGroupFolderPath(tsGroup.folder);
       const conversationsDir = path.join(groupDir, 'conversations');
+      const sessionsDir = path.join(groupDir, 'memory', 'sessions');
       const existingArchive = findLatestArchiveFilename(
         conversationsDir,
         sessionId,
       );
+      // ThrowawaySessionBlockedByInputSizeOnPostCompact: refuse launch when the raw
+      // JSONL is the only input and exceeds the configured context fraction.
+      if (
+        !existingArchive &&
+        jsonlPath &&
+        jsonlSizeTokens(jsonlPath) >
+          THROWAWAY_CONTEXT_LIMIT_TOKENS * THROWAWAY_MAX_INPUT_FRACTION
+      ) {
+        const now = new Date();
+        const date = now.toISOString().split('T')[0];
+        const timeStr = now.toISOString().slice(11, 16).replace(':', '');
+        const ephemeralGroupId = newThrowawayGroupId();
+        const dbId = crypto.randomUUID();
+        insertThrowawaySession({
+          id: dbId,
+          for_session_id: sessionId,
+          group_folder: tsGroup.folder,
+          chat_jid: jid,
+          ephemeral_group_id: ephemeralGroupId,
+          log_path: null,
+          retry_count: MAX_THROWAWAY_RETRIES,
+          failure_signals: JSON.stringify({
+            timed_out_without_output: false,
+            triggered_own_compact: false,
+            api_error: null,
+            input_too_large: true,
+          }),
+          status: 'failed',
+          started_at: now.toISOString(),
+        });
+        fs.mkdirSync(sessionsDir, { recursive: true });
+        writeSummaryPlaceholder(
+          sessionsDir,
+          sessionId,
+          date,
+          timeStr,
+          'oversized',
+          {
+            source_jsonl: jsonlPath,
+          },
+        );
+        if (deps.setReaction) await deps.setReaction(jid, '💭');
+        logger.error(
+          { sessionId, jsonlPath },
+          'Throwaway summarisation refused: raw JSONL exceeds context fraction and no archive available',
+        );
+        const mainEntry = Object.entries(deps.registeredGroups()).find(
+          ([, g]) => g.isMain,
+        );
+        if (mainEntry) {
+          await deps.sendMessage(
+            mainEntry[0],
+            `Session summary for ${sessionId} could not be generated: transcript too large. Use /retry-summary ${sessionId} once an archive is available.`,
+          );
+        }
+        break;
+      }
       spawnThrowaway(
         tsGroup,
         jid,
@@ -1859,9 +1926,8 @@ export async function processTaskIpc(
         break;
       }
 
-      // ArchiveAndStartThrowawayOnReset: write real archive and spawn throwaway.
-      // The archive is written synchronously first; the throwaway reads it instead of
-      // the raw JSONL so long sessions don't exceed the throwaway's context window.
+      // ArchiveAndStartThrowawayOnReset / ThrowawaySessionBlockedByInputSizeOnReset:
+      // Always write the archive first; then decide whether to launch the throwaway.
 
       // Exclude messages already captured by a prior compact (or reset) archive
       // for this session so the file only contains new content.
@@ -1881,6 +1947,61 @@ export async function processTaskIpc(
         priorAt ?? undefined,
         ASSISTANT_NAME,
       );
+
+      // ThrowawaySessionBlockedByInputSizeOnReset: refuse throwaway launch when there
+      // was no prior non-placeholder archive AND the JSONL exceeds the context fraction.
+      // The archive was still written above so a subsequent /retry-summary can use it.
+      if (
+        priorAt === null &&
+        jsonlSizeTokens(jsonlPath) >
+          THROWAWAY_CONTEXT_LIMIT_TOKENS * THROWAWAY_MAX_INPUT_FRACTION
+      ) {
+        const ephemeralGroupId = newThrowawayGroupId();
+        const dbId = crypto.randomUUID();
+        insertThrowawaySession({
+          id: dbId,
+          for_session_id: sessionId,
+          group_folder: raGroup.folder,
+          chat_jid: jid,
+          ephemeral_group_id: ephemeralGroupId,
+          log_path: null,
+          retry_count: MAX_THROWAWAY_RETRIES,
+          failure_signals: JSON.stringify({
+            timed_out_without_output: false,
+            triggered_own_compact: false,
+            api_error: null,
+            input_too_large: true,
+          }),
+          status: 'failed',
+          started_at: now.toISOString(),
+        });
+        writeSummaryPlaceholder(
+          sessionsDir,
+          sessionId,
+          date,
+          timestamp,
+          'oversized',
+          {
+            source_jsonl: jsonlPath,
+          },
+        );
+        if (deps.setReaction) await deps.setReaction(jid, '💭');
+        logger.error(
+          { sessionId, jsonlPath },
+          'Throwaway summarisation refused on reset: raw JSONL exceeds context fraction and no prior archive',
+        );
+        const mainEntry = Object.entries(deps.registeredGroups()).find(
+          ([, g]) => g.isMain,
+        );
+        if (mainEntry) {
+          await deps.sendMessage(
+            mainEntry[0],
+            `Session summary for ${sessionId} could not be generated: transcript too large. An archive was written — use /retry-summary ${sessionId} to retry.`,
+          );
+        }
+        break;
+      }
+
       spawnThrowaway(
         raGroup,
         jid,
@@ -1890,6 +2011,64 @@ export async function processTaskIpc(
         deps,
       ).catch((err) =>
         logger.error({ err, sessionId }, 'Throwaway session failed on reset'),
+      );
+      break;
+    }
+
+    case 'retry_throwaway_summary': {
+      // Emitted by the host-side /retry-summary handler.
+      // Fields: jid (chatJid), sessionId, groupFolder
+      const { jid, sessionId, groupFolder } = data;
+      if (!jid || !sessionId || !groupFolder) {
+        logger.warn(
+          { data },
+          'retry_throwaway_summary: missing required fields',
+        );
+        break;
+      }
+      const rtGroup = Object.values(registeredGroups).find(
+        (g) => g.folder === groupFolder,
+      );
+      if (!rtGroup) {
+        logger.warn(
+          { groupFolder },
+          'retry_throwaway_summary: group not registered',
+        );
+        break;
+      }
+      const existingRow = getThrowawaySessionByForSessionId(sessionId);
+      if (!existingRow || existingRow.status !== 'failed') {
+        logger.warn(
+          { sessionId, status: existingRow?.status },
+          'retry_throwaway_summary: no failed throwaway session found',
+        );
+        if (deps.setReaction) await deps.setReaction(jid, '❌');
+        break;
+      }
+      // ManualRetryThrowawaySession: reset retry budget and re-dispatch
+      updateThrowawaySession(existingRow.id, {
+        status: 'pending',
+        retry_count: 0,
+        failure_signals: null,
+      });
+      const rtConversationsDir = path.join(
+        resolveGroupFolderPath(rtGroup.folder),
+        'conversations',
+      );
+      const rtArchiveFilename =
+        findLatestArchiveFilename(rtConversationsDir, sessionId) ?? undefined;
+      const rtJsonlPath = getSessionJsonlPath(rtGroup.folder, sessionId);
+      _runThrowaway(
+        rtGroup,
+        jid,
+        sessionId,
+        rtJsonlPath,
+        rtArchiveFilename,
+        existingRow.id,
+        existingRow.ephemeral_group_id,
+        deps,
+      ).catch((err) =>
+        logger.error({ err, sessionId }, 'Manual retry throwaway failed'),
       );
       break;
     }
@@ -2037,6 +2216,22 @@ function findLatestArchiveTimestamp(
   return latest;
 }
 
+function newThrowawayGroupId(): string {
+  return `throwaway-${crypto.randomUUID()}`;
+}
+
+function throwawayLogPath(ephemeralGroupId: string): string {
+  return path.join(DATA_DIR, 'sessions', ephemeralGroupId);
+}
+
+function jsonlSizeTokens(jsonlPath: string): number {
+  try {
+    return Math.round(fs.statSync(jsonlPath).size / 4);
+  } catch {
+    return 0;
+  }
+}
+
 /** Write a real conversation archive from parsed messages. */
 function writeConversationArchive(
   conversationsDir: string,
@@ -2118,15 +2313,20 @@ function writeSummaryPlaceholder(
   sessionId: string,
   date: string,
   timestamp: string,
-  suffix: 'missing' | 'empty' | 'failed',
+  suffix: 'missing' | 'empty' | 'failed' | 'oversized',
+  extraFrontmatter?: Record<string, string>,
 ): void {
   fs.mkdirSync(sessionsDir, { recursive: true });
   const filename = `${date}-${timestamp}-${suffix}.md`;
   const now = new Date();
+  const extraLines = extraFrontmatter
+    ? Object.entries(extraFrontmatter).map(([k, v]) => `${k}: ${v}`)
+    : [];
   const content = [
     '---',
     `session_id: ${sessionId}`,
     `created_at: ${now.toISOString()}`,
+    ...extraLines,
     'is_placeholder: true',
     '---',
     '',
@@ -2136,7 +2336,9 @@ function writeSummaryPlaceholder(
       ? 'Session JSONL was not found — no summary could be generated.'
       : suffix === 'empty'
         ? 'Session had no messages — no summary was needed.'
-        : 'Throwaway summarisation failed. Retry by running the throwaway manually.',
+        : suffix === 'oversized'
+          ? 'Session JSONL exceeded the throwaway context limit and no archive was available. Use /retry-summary once an archive exists.'
+          : 'Throwaway summarisation failed. Use /retry-summary to retry.',
   ].join('\n');
   fs.writeFileSync(path.join(sessionsDir, filename), content);
   logger.info(
@@ -2145,9 +2347,10 @@ function writeSummaryPlaceholder(
   );
 }
 
-/** Parse session_id and is_placeholder from a markdown file's YAML frontmatter. */
 /**
  * Spawn a throwaway agent container to produce a SessionSummary from a JSONL transcript.
+ * Inserts a ThrowawaySession DB row, runs the container with an ephemeral group for
+ * .claude/ isolation, and retries on failure up to MAX_THROWAWAY_RETRIES times.
  * Non-blocking: caller should .catch() the returned promise.
  */
 export async function spawnThrowaway(
@@ -2156,6 +2359,43 @@ export async function spawnThrowaway(
   sessionId: string,
   jsonlPath: string | undefined,
   archiveFilename: string | undefined,
+  deps: IpcDeps,
+): Promise<void> {
+  const ephemeralGroupId = newThrowawayGroupId();
+  const dbId = crypto.randomUUID();
+  insertThrowawaySession({
+    id: dbId,
+    for_session_id: sessionId,
+    group_folder: group.folder,
+    chat_jid: chatJid,
+    ephemeral_group_id: ephemeralGroupId,
+    log_path: null,
+    retry_count: 0,
+    failure_signals: null,
+    status: 'pending',
+    started_at: new Date().toISOString(),
+  });
+  await _runThrowaway(
+    group,
+    chatJid,
+    sessionId,
+    jsonlPath,
+    archiveFilename,
+    dbId,
+    ephemeralGroupId,
+    deps,
+  );
+}
+
+/** Run the throwaway container for an existing DB row (initial dispatch or retry). */
+async function _runThrowaway(
+  group: RegisteredGroup,
+  chatJid: string,
+  sessionId: string,
+  jsonlPath: string | undefined,
+  archiveFilename: string | undefined,
+  dbId: string,
+  ephemeralGroupId: string,
   deps: IpcDeps,
 ): Promise<void> {
   const now = new Date();
@@ -2169,10 +2409,16 @@ export async function spawnThrowaway(
     'sessions',
     summaryFilename,
   );
+  const sessionsDir = path.join(groupDir, 'memory', 'sessions');
+  const logPath = throwawayLogPath(ephemeralGroupId);
 
-  // Prefer the conversation archive (clean markdown, already written by the host) over
-  // the raw JSONL. The JSONL can be hundreds of KB of complex SDK JSON that exceeds the
-  // throwaway's effective context window for long sessions.
+  updateThrowawaySession(dbId, {
+    status: 'running',
+    log_path: logPath,
+    started_at: now.toISOString(),
+  });
+
+  // Prefer the conversation archive (clean markdown) over the raw JSONL.
   const transcriptSource = archiveFilename
     ? `Read the conversation archive at: /workspace/group/conversations/${archiveFilename}`
     : jsonlPath
@@ -2191,6 +2437,14 @@ export async function spawnThrowaway(
     `open questions, and tasks completed or started. Write in markdown. ` +
     `After writing the file, stop immediately without doing anything else.`;
 
+  // Use an ephemeral group so the throwaway's .claude/ session log is isolated
+  // from the main group's session directory. /workspace/group is overridden via
+  // hostGroupDir to point at the real group's workspace so the throwaway can read
+  // the archive and write the summary to the right place.
+  const ephemeralGroup: RegisteredGroup = {
+    ...group,
+    folder: ephemeralGroupId,
+  };
   const containerInput: ContainerInput = {
     prompt,
     sessionId: undefined, // fresh session — no resume
@@ -2198,6 +2452,7 @@ export async function spawnThrowaway(
     chatJid,
     isMain: false,
     isThrowaway: true, // prevents PreCompact/PostCompact hooks from spawning more throwaways
+    hostGroupDir: groupDir, // /workspace/group → real group workspace
   };
 
   let throwawayContainerName: string | null = null;
@@ -2224,13 +2479,15 @@ export async function spawnThrowaway(
     }, 5_000);
   };
 
+  let containerError: string | null = null;
   try {
-    await runContainerAgent(group, containerInput, (proc, name) => {
+    await runContainerAgent(ephemeralGroup, containerInput, (proc, name) => {
       throwawayContainerName = name;
       deps.onProcess?.(chatJid, proc, name, group.folder);
       startSummaryPoller();
     });
   } catch (err) {
+    containerError = String(err);
     logger.debug(
       { sessionId, err },
       'Throwaway container exited (expected on early stop)',
@@ -2245,15 +2502,203 @@ export async function spawnThrowaway(
 
   const summaryExists = fs.existsSync(summaryFullPath);
   if (summaryExists) {
-    // ThrowawaySessionSucceeded (container may have been stopped early)
     logger.info({ sessionId, summaryFilename }, 'Throwaway session succeeded');
+    updateThrowawaySession(dbId, { status: 'completed' });
+    if (deps.setReaction) await deps.setReaction(chatJid, '💭');
   } else {
-    // ThrowawaySessionFailed
-    logger.error({ sessionId, summaryExists }, 'Throwaway session failed');
-    const sessionsDir = path.join(groupDir, 'memory', 'sessions');
-    writeSummaryPlaceholder(sessionsDir, sessionId, date, timeStr, 'failed');
+    logger.error({ sessionId }, 'Throwaway session failed');
+    await handleThrowawayFailure(
+      dbId,
+      group,
+      chatJid,
+      sessionsDir,
+      date,
+      timeStr,
+      containerError,
+      deps,
+    );
+  }
+}
+
+/** Handle a throwaway container failure: retry if budget remains, else exhaust. */
+async function handleThrowawayFailure(
+  dbId: string,
+  group: RegisteredGroup,
+  chatJid: string,
+  sessionsDir: string,
+  date: string,
+  timeStr: string,
+  containerError: string | null,
+  deps: IpcDeps,
+): Promise<void> {
+  const row = getThrowawaySessionById(dbId);
+  if (!row) {
+    logger.error({ dbId }, 'handleThrowawayFailure: DB row missing');
+    if (deps.setReaction) await deps.setReaction(chatJid, '💭');
+    return;
   }
 
-  // 💭 signals session boundary is complete (whether or not summarisation succeeded)
-  if (deps.setReaction) await deps.setReaction(chatJid, '💭');
+  const failureSignals = JSON.stringify({
+    timed_out_without_output: false,
+    triggered_own_compact: false,
+    api_error: containerError || null,
+    input_too_large: false,
+  });
+
+  if (row.retry_count < MAX_THROWAWAY_RETRIES) {
+    const newRetryCount = row.retry_count + 1;
+    updateThrowawaySession(dbId, {
+      status: 'pending',
+      retry_count: newRetryCount,
+      failure_signals: failureSignals,
+    });
+    logger.warn(
+      {
+        sessionId: row.for_session_id,
+        retryCount: newRetryCount,
+        max: MAX_THROWAWAY_RETRIES,
+      },
+      'Throwaway summarisation failed, queuing retry',
+    );
+    // ThrowawaySessionRetryDispatched: re-dispatch immediately
+    const conversationsDir = path.join(
+      resolveGroupFolderPath(group.folder),
+      'conversations',
+    );
+    const archiveFilename =
+      findLatestArchiveFilename(conversationsDir, row.for_session_id) ??
+      undefined;
+    const jsonlPath = getSessionJsonlPath(group.folder, row.for_session_id);
+    _runThrowaway(
+      group,
+      chatJid,
+      row.for_session_id,
+      jsonlPath,
+      archiveFilename,
+      dbId,
+      row.ephemeral_group_id,
+      deps,
+    ).catch((err) =>
+      logger.error(
+        { err, sessionId: row.for_session_id },
+        'Throwaway retry failed unexpectedly',
+      ),
+    );
+  } else {
+    // ThrowawaySessionFailedExhausted
+    updateThrowawaySession(dbId, {
+      status: 'failed',
+      failure_signals: failureSignals,
+    });
+    writeSummaryPlaceholder(
+      sessionsDir,
+      row.for_session_id,
+      date,
+      timeStr,
+      'failed',
+      { retry_count: String(row.retry_count) },
+    );
+    if (deps.setReaction) await deps.setReaction(chatJid, '💭');
+
+    logger.error(
+      { sessionId: row.for_session_id, retries: MAX_THROWAWAY_RETRIES },
+      'Throwaway summarisation failed after max retries; placeholder summary written',
+    );
+
+    // Notify the main group so the user can issue a manual retry
+    const mainEntry = Object.entries(deps.registeredGroups()).find(
+      ([, g]) => g.isMain,
+    );
+    if (mainEntry) {
+      const [mainJid] = mainEntry;
+      await deps.sendMessage(
+        mainJid,
+        `Session summary for ${row.for_session_id} failed after ${MAX_THROWAWAY_RETRIES} retries. ` +
+          `Use /retry-summary ${row.for_session_id} to try again.`,
+      );
+    }
+  }
+}
+
+/**
+ * Re-dispatch all throwaway sessions that were left in pending or running state
+ * when NanoClaw was last shut down.  Called once at startup, before accepting messages.
+ */
+export async function recoverOrphanedPendingThrowaways(
+  groups: Record<string, RegisteredGroup>,
+  deps: Pick<
+    IpcDeps,
+    | 'setReaction'
+    | 'sendMessage'
+    | 'registeredGroups'
+    | 'onProcess'
+    | 'onProcessExit'
+  >,
+): Promise<void> {
+  const orphans = getThrowawaySessionsByStatus('pending', 'running');
+  if (orphans.length === 0) return;
+  logger.info(
+    { count: orphans.length },
+    'Recovering orphaned pending/running throwaway sessions',
+  );
+  for (const row of orphans) {
+    const group = Object.values(groups).find(
+      (g) => g.folder === row.group_folder,
+    );
+    if (!group) {
+      logger.warn(
+        { groupFolder: row.group_folder, sessionId: row.for_session_id },
+        'recoverOrphanedPendingThrowaways: group not registered, skipping',
+      );
+      continue;
+    }
+    const conversationsDir = path.join(
+      resolveGroupFolderPath(group.folder),
+      'conversations',
+    );
+    const archiveFilename =
+      findLatestArchiveFilename(conversationsDir, row.for_session_id) ??
+      undefined;
+    const jsonlPath = getSessionJsonlPath(group.folder, row.for_session_id);
+    logger.info(
+      { groupFolder: group.folder, sessionId: row.for_session_id },
+      'Recovering orphaned throwaway — re-dispatching',
+    );
+    _runThrowaway(
+      group,
+      row.chat_jid,
+      row.for_session_id,
+      jsonlPath,
+      archiveFilename,
+      row.id,
+      row.ephemeral_group_id,
+      {
+        sendMessage: deps.sendMessage,
+        sendFile: async () => {},
+        registeredGroups: deps.registeredGroups,
+        registerGroup: () => {},
+        setGroupTrusted: () => {},
+        syncGroups: async () => {},
+        startRemoteControl: async () => ({
+          ok: false as const,
+          error: 'recovery',
+        }),
+        stopRemoteControl: async () => {},
+        getAvailableGroups: () => [],
+        writeGroupsSnapshot: () => {},
+        onTasksChanged: () => {},
+        setPendingDispatchDepth: () => {},
+        setReaction: deps.setReaction,
+        onProcess: deps.onProcess,
+        onProcessExit: deps.onProcessExit,
+      },
+    ).catch((err) =>
+      logger.error(
+        { err, sessionId: row.for_session_id },
+        'Startup throwaway recovery failed',
+      ),
+    );
+    // Brief stagger so containers don't all race at startup
+    await new Promise((r) => setTimeout(r, 200));
+  }
 }

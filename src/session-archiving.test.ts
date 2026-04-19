@@ -1,7 +1,8 @@
 /**
  * Tests for session-archiving IPC task handlers and helpers.
  * Covers: request_session_archive, spawn_throwaway_session, spawnThrowaway,
- * getSessionJsonlPath, and placeholder/archive writing helpers.
+ * getSessionJsonlPath, placeholder/archive writing helpers, retry lifecycle,
+ * input-size guard, and DB-backed ThrowawaySession persistence.
  */
 import {
   describe,
@@ -15,14 +16,20 @@ import {
 import fs from 'fs';
 import path from 'path';
 
-import { _initTestDatabase } from './db.js';
+import { _initTestDatabase, getThrowawaySessionByForSessionId } from './db.js';
 import {
   processTaskIpc,
   IpcDeps,
   getSessionJsonlPath,
   spawnThrowaway,
 } from './ipc.js';
-import { DATA_DIR, GROUPS_DIR } from './config.js';
+import {
+  DATA_DIR,
+  GROUPS_DIR,
+  MAX_THROWAWAY_RETRIES,
+  THROWAWAY_CONTEXT_LIMIT_TOKENS,
+  THROWAWAY_MAX_INPUT_FRACTION,
+} from './config.js';
 import { RegisteredGroup } from './types.js';
 
 // Mock container-runner so spawnThrowaway doesn't spawn real containers
@@ -221,11 +228,19 @@ describe('spawn_throwaway_session IPC task', () => {
     const folder = testFolder('tw-spawn');
     const group = makeGroup(folder);
 
-    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
-    mockRunContainerAgent.mockResolvedValue({
-      status: 'success',
-      result: null,
-    });
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const match = input.prompt.match(/memory\/sessions\/([\d-]+\.md)/);
+        if (match) {
+          fs.writeFileSync(
+            path.join(sessDir, match[1]),
+            `---\nsession_id: sess-1\ncreated_at: ${new Date().toISOString()}\nis_placeholder: false\n---\n\n# Summary\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
 
     const deps = makeDeps({
       registeredGroups: () => ({ 'g@test': group }),
@@ -249,7 +264,10 @@ describe('spawn_throwaway_session IPC task', () => {
 
     expect(mockRunContainerAgent).toHaveBeenCalledOnce();
     const [calledGroup, calledInput] = mockRunContainerAgent.mock.calls[0];
-    expect(calledGroup.folder).toBe(folder);
+    // Container runs under ephemeral group for .claude/ isolation; real folder via hostGroupDir
+    expect(calledGroup.folder).toMatch(/^throwaway-/);
+    expect(calledInput.groupFolder).toBe(folder); // ContainerInput.groupFolder = real folder
+    expect(calledInput.hostGroupDir).toContain(folder);
     expect(calledInput.sessionId).toBeUndefined(); // fresh session
     expect(calledInput.isMain).toBe(false);
     expect(calledInput.prompt).toContain('sess-1');
@@ -402,13 +420,21 @@ describe('request_session_archive IPC task', () => {
     const setReaction = vi.fn().mockResolvedValue(undefined);
 
     ensureDir(GROUPS_DIR, folder, 'conversations');
-    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
     writeJonl(folder, 'sess-real', 3);
 
-    mockRunContainerAgent.mockResolvedValue({
-      status: 'success',
-      result: null,
-    });
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const match = input.prompt.match(/memory\/sessions\/([\d-]+\.md)/);
+        if (match) {
+          fs.writeFileSync(
+            path.join(sessDir, match[1]),
+            `---\nsession_id: sess-real\ncreated_at: ${new Date().toISOString()}\nis_placeholder: false\n---\n\n# Summary\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
 
     const deps = makeDeps({
       registeredGroups: () => ({ 'g@test': group }),
@@ -602,12 +628,20 @@ describe('spawnThrowaway', () => {
   it('uses a fresh container session (no sessionId)', async () => {
     const folder = testFolder('tw-fresh');
     const group = makeGroup(folder);
-    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
 
-    mockRunContainerAgent.mockResolvedValue({
-      status: 'success',
-      result: null,
-    });
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const match = input.prompt.match(/memory\/sessions\/([\d-]+\.md)/);
+        if (match) {
+          fs.writeFileSync(
+            path.join(sessDir, match[1]),
+            `---\nsession_id: sess-tw\ncreated_at: ${new Date().toISOString()}\nis_placeholder: false\n---\n\n# Summary\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
 
     const deps = makeDeps();
     await spawnThrowaway(
@@ -620,10 +654,12 @@ describe('spawnThrowaway', () => {
     );
 
     expect(mockRunContainerAgent).toHaveBeenCalledOnce();
-    const [, input] = mockRunContainerAgent.mock.calls[0];
+    const [calledGroup, input] = mockRunContainerAgent.mock.calls[0];
+    // Container runs under ephemeral group for .claude/ isolation
+    expect(calledGroup.folder).toMatch(/^throwaway-/);
     expect(input.sessionId).toBeUndefined();
     expect(input.isMain).toBe(false);
-    expect(input.groupFolder).toBe(folder);
+    expect(input.groupFolder).toBe(folder); // ContainerInput.groupFolder = real folder
     expect(input.chatJid).toBe('g@test');
   });
 
@@ -749,5 +785,326 @@ describe('spawnThrowaway', () => {
     );
     expect(input.prompt).not.toContain('.jsonl');
     expect(input.prompt).not.toContain('/home/node/.claude');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retry lifecycle
+// ---------------------------------------------------------------------------
+
+describe('throwaway retry lifecycle', () => {
+  it('retries up to MAX_THROWAWAY_RETRIES times when container never writes summary', async () => {
+    const folder = testFolder('retry-exhaust');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    // Container always returns success but never writes the summary file
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    const setReaction = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({ setReaction });
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-retry',
+      '/path.jsonl',
+      undefined,
+      deps,
+    );
+
+    // Initial + MAX_THROWAWAY_RETRIES retries = MAX_THROWAWAY_RETRIES + 1 total calls
+    expect(mockRunContainerAgent).toHaveBeenCalledTimes(
+      MAX_THROWAWAY_RETRIES + 1,
+    );
+  });
+
+  it('writes a failed placeholder summary after retries are exhausted', async () => {
+    const folder = testFolder('retry-placeholder');
+    const group = makeGroup(folder);
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    const deps = makeDeps();
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-exhaust',
+      '/path.jsonl',
+      undefined,
+      deps,
+    );
+
+    const files = fs.readdirSync(sessDir);
+    expect(files.some((f) => f.endsWith('-failed.md'))).toBe(true);
+    const placeholder = fs.readFileSync(
+      path.join(sessDir, files.find((f) => f.endsWith('-failed.md'))!),
+      'utf-8',
+    );
+    expect(placeholder).toContain('is_placeholder: true');
+    expect(placeholder).toContain('sess-exhaust');
+  });
+
+  it('sets ThrowawaySession DB row status=failed after exhausting retries', async () => {
+    const folder = testFolder('retry-db');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    const deps = makeDeps();
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-db-fail',
+      '/path.jsonl',
+      undefined,
+      deps,
+    );
+
+    const row = getThrowawaySessionByForSessionId('sess-db-fail');
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('failed');
+    expect(row!.retry_count).toBe(MAX_THROWAWAY_RETRIES);
+  });
+
+  it('sets ThrowawaySession DB row status=completed on success', async () => {
+    const folder = testFolder('retry-db-ok');
+    const group = makeGroup(folder);
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const match = input.prompt.match(/memory\/sessions\/([\d-]+\.md)/);
+        if (match) {
+          fs.writeFileSync(
+            path.join(sessDir, match[1]),
+            `---\nsession_id: sess-db-ok\ncreated_at: ${new Date().toISOString()}\nis_placeholder: false\n---\n\n# Summary\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
+
+    const deps = makeDeps();
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-db-ok',
+      '/path.jsonl',
+      undefined,
+      deps,
+    );
+
+    const row = getThrowawaySessionByForSessionId('sess-db-ok');
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('completed');
+    expect(row!.retry_count).toBe(0);
+  });
+
+  it('notifies main group when retries exhausted', async () => {
+    const mainFolder = testFolder('retry-main');
+    const mainGroup = makeGroup(mainFolder);
+    (mainGroup as RegisteredGroup & { isMain: boolean }).isMain = true;
+    const targetFolder = testFolder('retry-target');
+    const targetGroup = makeGroup(targetFolder);
+    ensureDir(GROUPS_DIR, targetFolder, 'memory', 'sessions');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      sendMessage,
+      registeredGroups: () => ({
+        'main@test': mainGroup,
+        'g@test': targetGroup,
+      }),
+    });
+    await spawnThrowaway(
+      targetGroup,
+      'g@test',
+      'sess-notify',
+      '/path.jsonl',
+      undefined,
+      deps,
+    );
+    // sendMessage is two awaits deep in the exhaustion path (after setReaction);
+    // flush all pending microtasks via a macrotask boundary before asserting.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      'main@test',
+      expect.stringContaining('sess-notify'),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Input-size guard
+// ---------------------------------------------------------------------------
+
+describe('input-size guard', () => {
+  const oversizedBytes = Math.ceil(
+    THROWAWAY_CONTEXT_LIMIT_TOKENS * THROWAWAY_MAX_INPUT_FRACTION * 4 + 1000,
+  );
+
+  function writeOversizedJonl(folder: string, sessionId: string): string {
+    const jonlPath = getSessionJsonlPath(folder, sessionId);
+    fs.mkdirSync(path.dirname(jonlPath), { recursive: true });
+    const sessionGroupDir = path.join(DATA_DIR, 'sessions', folder);
+    if (!createdDirs.includes(sessionGroupDir))
+      createdDirs.push(sessionGroupDir);
+    fs.writeFileSync(jonlPath, 'x'.repeat(oversizedBytes));
+    return jonlPath;
+  }
+
+  it('spawn_throwaway_session: blocks throwaway and writes oversized placeholder when JSONL too large and no archive', async () => {
+    const folder = testFolder('size-guard-post');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeOversizedJonl(folder, 'sess-oversized');
+
+    const setReaction = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      registeredGroups: () => ({ 'g@test': group }),
+      setReaction,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'spawn_throwaway_session',
+        jid: 'g@test',
+        sessionId: 'sess-oversized',
+        groupFolder: folder,
+        jsonlPath: getSessionJsonlPath(folder, 'sess-oversized'),
+      },
+      folder,
+      false,
+      deps,
+    );
+
+    expect(mockRunContainerAgent).not.toHaveBeenCalled();
+    expect(setReaction).toHaveBeenCalledWith('g@test', '💭');
+
+    const sessDir = path.join(GROUPS_DIR, folder, 'memory', 'sessions');
+    const files = fs.readdirSync(sessDir);
+    expect(files.some((f) => f.endsWith('-oversized.md'))).toBe(true);
+
+    const row = getThrowawaySessionByForSessionId('sess-oversized');
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('failed');
+    expect(row!.retry_count).toBe(MAX_THROWAWAY_RETRIES);
+    const signals = JSON.parse(row!.failure_signals!);
+    expect(signals.input_too_large).toBe(true);
+  });
+
+  it('request_session_archive: blocks throwaway when JSONL too large and no prior archive', async () => {
+    const folder = testFolder('size-guard-reset');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'conversations');
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeOversizedJonl(folder, 'sess-reset-big');
+    // Write a real JSONL with messages so the archive write path is taken
+    // (overwrite with oversized content to trigger the guard)
+    const jonlPath = getSessionJsonlPath(folder, 'sess-reset-big');
+    const msg = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+      session_id: 'sess-reset-big',
+    });
+    fs.writeFileSync(jonlPath, msg + '\n' + 'x'.repeat(oversizedBytes));
+
+    const setReaction = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      registeredGroups: () => ({ 'g@test': group }),
+      setReaction,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'request_session_archive',
+        jid: 'g@test',
+        sessionId: 'sess-reset-big',
+        groupFolder: folder,
+      },
+      folder,
+      false,
+      deps,
+    );
+
+    // Container must not be launched
+    expect(mockRunContainerAgent).not.toHaveBeenCalled();
+    expect(setReaction).toHaveBeenCalledWith('g@test', '💭');
+
+    // Archive is still written (the guard doesn't block the archive)
+    const convDir = path.join(GROUPS_DIR, folder, 'conversations');
+    const archiveFiles = fs.readdirSync(convDir);
+    expect(archiveFiles.some((f) => f.endsWith('-reset.md'))).toBe(true);
+
+    // Oversized placeholder summary is written
+    const sessDir = path.join(GROUPS_DIR, folder, 'memory', 'sessions');
+    const sessFiles = fs.readdirSync(sessDir);
+    expect(sessFiles.some((f) => f.endsWith('-oversized.md'))).toBe(true);
+  });
+
+  it('spawn_throwaway_session: launches throwaway normally when archive already exists', async () => {
+    const folder = testFolder('size-guard-with-archive');
+    const group = makeGroup(folder);
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeOversizedJonl(folder, 'sess-has-archive');
+
+    // Write an existing (non-placeholder) archive
+    const archiveFile = '2026-01-01-1200-reset.md';
+    fs.writeFileSync(
+      path.join(convDir, archiveFile),
+      `---\nsession_id: sess-has-archive\narchived_at: ${new Date().toISOString()}\nsource_jsonl: /path\nis_placeholder: false\n---\n\n# Conversation\n`,
+    );
+
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const match = input.prompt.match(/memory\/sessions\/([\d-]+\.md)/);
+        if (match) {
+          fs.writeFileSync(
+            path.join(sessDir, match[1]),
+            `---\nsession_id: sess-has-archive\ncreated_at: ${new Date().toISOString()}\nis_placeholder: false\n---\n\n# Summary\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
+
+    const deps = makeDeps({
+      registeredGroups: () => ({ 'g@test': group }),
+    });
+
+    await processTaskIpc(
+      {
+        type: 'spawn_throwaway_session',
+        jid: 'g@test',
+        sessionId: 'sess-has-archive',
+        groupFolder: folder,
+        jsonlPath: getSessionJsonlPath(folder, 'sess-has-archive'),
+      },
+      folder,
+      false,
+      deps,
+    );
+
+    await new Promise((r) => setTimeout(r, 0));
+    // Archive exists → no size check → throwaway launched
+    expect(mockRunContainerAgent).toHaveBeenCalledOnce();
   });
 });

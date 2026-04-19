@@ -175,6 +175,21 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_transfer_files_transfer ON transfer_files(transfer_id);
     CREATE INDEX IF NOT EXISTS idx_transfer_files_status ON transfer_files(status);
+
+    CREATE TABLE IF NOT EXISTS throwaway_sessions (
+      id TEXT PRIMARY KEY,
+      for_session_id TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      ephemeral_group_id TEXT NOT NULL,
+      log_path TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      failure_signals TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      started_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_throwaway_for_session ON throwaway_sessions(for_session_id);
+    CREATE INDEX IF NOT EXISTS idx_throwaway_status ON throwaway_sessions(status);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -1785,4 +1800,99 @@ export function expireTransfersForTask(taskId: string): void {
   db.prepare(
     `UPDATE container_transfers SET status = ? WHERE recipient_task_id = ? AND status = ?`,
   ).run(expiredStatus, taskId, inTransit);
+}
+
+// ---------------------------------------------------------------------------
+// ThrowawaySession
+// ---------------------------------------------------------------------------
+
+export type ThrowawaySessionStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed';
+
+export interface ThrowawaySessionRecord {
+  id: string;
+  for_session_id: string;
+  group_folder: string;
+  chat_jid: string;
+  ephemeral_group_id: string;
+  log_path: string | null;
+  retry_count: number;
+  failure_signals: string | null; // JSON-encoded ThrowawayFailureSignals
+  status: ThrowawaySessionStatus;
+  started_at: string;
+}
+
+export function insertThrowawaySession(row: ThrowawaySessionRecord): void {
+  db.prepare(
+    `INSERT INTO throwaway_sessions
+       (id, for_session_id, group_folder, chat_jid, ephemeral_group_id,
+        log_path, retry_count, failure_signals, status, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    row.id,
+    row.for_session_id,
+    row.group_folder,
+    row.chat_jid,
+    row.ephemeral_group_id,
+    row.log_path,
+    row.retry_count,
+    row.failure_signals,
+    row.status,
+    row.started_at,
+  );
+}
+
+export function getThrowawaySessionById(
+  id: string,
+): ThrowawaySessionRecord | undefined {
+  return db.prepare(`SELECT * FROM throwaway_sessions WHERE id = ?`).get(id) as
+    | ThrowawaySessionRecord
+    | undefined;
+}
+
+export function getThrowawaySessionByForSessionId(
+  forSessionId: string,
+): ThrowawaySessionRecord | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM throwaway_sessions
+       WHERE for_session_id = ?
+       ORDER BY started_at DESC LIMIT 1`,
+    )
+    .get(forSessionId) as ThrowawaySessionRecord | undefined;
+}
+
+export function getThrowawaySessionsByStatus(
+  ...statuses: ThrowawaySessionStatus[]
+): ThrowawaySessionRecord[] {
+  const placeholders = statuses.map(() => '?').join(', ');
+  return db
+    .prepare(
+      `SELECT * FROM throwaway_sessions
+       WHERE status IN (${placeholders})
+       ORDER BY started_at ASC`,
+    )
+    .all(...statuses) as ThrowawaySessionRecord[];
+}
+
+export function updateThrowawaySession(
+  id: string,
+  updates: Partial<
+    Pick<
+      ThrowawaySessionRecord,
+      'status' | 'log_path' | 'retry_count' | 'failure_signals' | 'started_at'
+    >
+  >,
+): void {
+  const entries = Object.entries(updates).filter(([, v]) => v !== undefined);
+  if (entries.length === 0) return;
+  const fields = entries.map(([k]) => `${k} = ?`).join(', ');
+  const values = entries.map(([, v]) => v);
+  db.prepare(`UPDATE throwaway_sessions SET ${fields} WHERE id = ?`).run(
+    ...values,
+    id,
+  );
 }

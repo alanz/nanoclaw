@@ -16,7 +16,11 @@ import {
 import fs from 'fs';
 import path from 'path';
 
-import { _initTestDatabase, getThrowawaySessionByForSessionId } from './db.js';
+import {
+  _initTestDatabase,
+  getThrowawaySessionByForSessionId,
+  insertThrowawaySession,
+} from './db.js';
 import {
   processTaskIpc,
   IpcDeps,
@@ -1106,5 +1110,566 @@ describe('input-size guard', () => {
     await new Promise((r) => setTimeout(r, 0));
     // Archive exists → no size check → throwaway launched
     expect(mockRunContainerAgent).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// archive_datetime-based summary filenames (gap 4)
+// ---------------------------------------------------------------------------
+
+describe('archive_datetime-based summary filename', () => {
+  /** Write a non-placeholder archive with a specific archived_at timestamp. */
+  function writeArchive(
+    convDir: string,
+    sessionId: string,
+    archivedAt: string,
+    filename: string,
+  ): void {
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(convDir, filename),
+      `---\nsession_id: ${sessionId}\narchived_at: ${archivedAt}\nmessages_since: null\ntrigger_type: compact\nis_placeholder: false\n---\n\n# Conversation\n`,
+    );
+  }
+
+  it('uses archived_at of existing archive as summary filename prefix', async () => {
+    const folder = testFolder('tw-archdt');
+    const group = makeGroup(folder);
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeArchive(
+      convDir,
+      'sess-archdt',
+      '2026-01-15T14:30:00.000Z',
+      '2026-01-15-1430-compact.md',
+    );
+
+    let capturedFilename: string | null = null;
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const m = input.prompt.match(/memory\/sessions\/(\S+\.md)/);
+        if (m) {
+          capturedFilename = m[1];
+          fs.writeFileSync(
+            path.join(sessDir, m[1]),
+            `---\nsession_id: sess-archdt\nis_placeholder: false\n---\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
+
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-archdt',
+      undefined,
+      undefined,
+      deps(),
+    );
+    expect(capturedFilename).toBe('2026-01-15-1430.md');
+
+    function deps() {
+      return makeDeps();
+    }
+  });
+
+  it('adds -processed-at- suffix on second run (retry_count > 0)', async () => {
+    const folder = testFolder('tw-archdt-retry');
+    const group = makeGroup(folder);
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeArchive(
+      convDir,
+      'sess-archdt-retry',
+      '2026-01-15T14:30:00.000Z',
+      '2026-01-15-1430-compact.md',
+    );
+
+    const filenames: string[] = [];
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const m = input.prompt.match(/memory\/sessions\/(\S+\.md)/);
+        if (m) filenames.push(m[1]);
+        // never write file → forces retries
+        return { status: 'success', result: null };
+      },
+    );
+
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-archdt-retry',
+      undefined,
+      undefined,
+      makeDeps(),
+    );
+
+    // First attempt uses the plain archive_datetime filename
+    expect(filenames[0]).toBe('2026-01-15-1430.md');
+    // All subsequent attempts get the -processed-at- suffix
+    for (const f of filenames.slice(1)) {
+      expect(f).toMatch(/^2026-01-15-1430-processed-at-[\d-]+\.md$/);
+    }
+  });
+
+  it('falls back to current time when no archive exists', async () => {
+    const folder = testFolder('tw-archdt-fallback');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'conversations'); // empty
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    let capturedFilename: string | null = null;
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const m = input.prompt.match(/memory\/sessions\/(\S+\.md)/);
+        if (m) {
+          capturedFilename = m[1];
+          fs.writeFileSync(
+            path.join(sessDir, m[1]),
+            `---\nsession_id: sess-fallback\nis_placeholder: false\n---\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
+
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-fallback',
+      undefined,
+      undefined,
+      makeDeps(),
+    );
+    // Falls back to current date — just check it looks like a date-based filename
+    expect(capturedFilename).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}\.md$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// trigger_type and was_manual_retry DB fields (gaps 2 & 3)
+// ---------------------------------------------------------------------------
+
+describe('trigger_type and was_manual_retry DB fields', () => {
+  it('spawnThrowaway sets trigger_type=compact by default', async () => {
+    const folder = testFolder('tw-tt-compact');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-tt-compact',
+      undefined,
+      undefined,
+      makeDeps(),
+    );
+
+    const row = getThrowawaySessionByForSessionId('sess-tt-compact');
+    expect(row?.trigger_type).toBe('compact');
+    expect(row?.was_manual_retry).toBe(0);
+  });
+
+  it('spawnThrowaway stores trigger_type=reset when passed', async () => {
+    const folder = testFolder('tw-tt-reset');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-tt-reset',
+      undefined,
+      undefined,
+      makeDeps(),
+      'reset',
+    );
+
+    const row = getThrowawaySessionByForSessionId('sess-tt-reset');
+    expect(row?.trigger_type).toBe('reset');
+  });
+
+  it('request_session_archive stores trigger_type=reset in DB row', async () => {
+    const folder = testFolder('tw-tt-arc-reset');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'conversations');
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeJonl(folder, 'sess-arc-reset');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'request_session_archive',
+        jid: 'g@test',
+        sessionId: 'sess-arc-reset',
+        groupFolder: folder,
+      },
+      folder,
+      false,
+      makeDeps({ registeredGroups: () => ({ 'g@test': group }) }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const row = getThrowawaySessionByForSessionId('sess-arc-reset');
+    expect(row?.trigger_type).toBe('reset');
+  });
+
+  it('retry_throwaway_summary sets was_manual_retry=1 in DB', async () => {
+    const folder = testFolder('tw-manual-retry');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    // Insert a failed throwaway row directly
+    const rowId = 'test-manual-retry-id';
+    insertThrowawaySession({
+      id: rowId,
+      for_session_id: 'sess-manual',
+      group_folder: folder,
+      chat_jid: 'g@test',
+      ephemeral_group_id: 'throwaway-test',
+      log_path: null,
+      retry_count: MAX_THROWAWAY_RETRIES,
+      failure_signals: null,
+      status: 'failed',
+      started_at: new Date().toISOString(),
+      was_manual_retry: 0,
+      trigger_type: 'compact',
+    });
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'retry_throwaway_summary',
+        jid: 'g@test',
+        sessionId: 'sess-manual',
+        groupFolder: folder,
+      },
+      folder,
+      false,
+      makeDeps({ registeredGroups: () => ({ 'g@test': group }) }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const row = getThrowawaySessionByForSessionId('sess-manual');
+    expect(row?.was_manual_retry).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Enriched placeholder frontmatter (gaps 6 & 7)
+// ---------------------------------------------------------------------------
+
+describe('enriched placeholder frontmatter', () => {
+  it('failed placeholder contains log_path, failure_signals, source_jsonl, retry_count', async () => {
+    const folder = testFolder('tw-fail-fm');
+    const group = makeGroup(folder);
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    // Write archive so filename is deterministic
+    const archivedAt = '2026-02-10T10:00:00.000Z';
+    fs.writeFileSync(
+      path.join(convDir, '2026-02-10-1000-compact.md'),
+      `---\nsession_id: sess-fail-fm\narchived_at: ${archivedAt}\nis_placeholder: false\n---\n`,
+    );
+
+    // Container never writes summary → exhaust retries
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    await spawnThrowaway(
+      group,
+      'g@test',
+      'sess-fail-fm',
+      undefined,
+      undefined,
+      makeDeps(),
+    );
+
+    const files = fs.readdirSync(sessDir);
+    const failedFile = files.find((f) => f.endsWith('-failed.md'));
+    expect(failedFile).toBeDefined();
+    expect(failedFile).toBe('2026-02-10-1000-failed.md');
+
+    const content = fs.readFileSync(path.join(sessDir, failedFile!), 'utf-8');
+    expect(content).toContain('retry_count:');
+    expect(content).toContain('log_path:');
+    expect(content).toContain('source_jsonl:');
+    expect(content).toContain('failure_signals:');
+  });
+
+  it('oversized placeholder contains failure_signals and retry_count', async () => {
+    const folder = testFolder('tw-oversized-fm');
+    const group = makeGroup(folder);
+    ensureDir(GROUPS_DIR, folder, 'conversations');
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+
+    const oversizedBytes = Math.ceil(
+      THROWAWAY_CONTEXT_LIMIT_TOKENS * THROWAWAY_MAX_INPUT_FRACTION * 4 + 1000,
+    );
+    const jonlPath = getSessionJsonlPath(folder, 'sess-oversized-fm');
+    fs.mkdirSync(path.dirname(jonlPath), { recursive: true });
+    createdDirs.push(path.join(DATA_DIR, 'sessions', folder));
+    fs.writeFileSync(jonlPath, 'x'.repeat(oversizedBytes));
+
+    await processTaskIpc(
+      {
+        type: 'spawn_throwaway_session',
+        jid: 'g@test',
+        sessionId: 'sess-oversized-fm',
+        groupFolder: folder,
+        jsonlPath: jonlPath,
+      },
+      folder,
+      false,
+      makeDeps({ registeredGroups: () => ({ 'g@test': group }) }),
+    );
+
+    const files = fs.readdirSync(sessDir);
+    const oversizedFile = files.find((f) => f.endsWith('-oversized.md'));
+    expect(oversizedFile).toBeDefined();
+
+    const content = fs.readFileSync(
+      path.join(sessDir, oversizedFile!),
+      'utf-8',
+    );
+    expect(content).toContain('failure_signals:');
+    expect(content).toContain('retry_count:');
+    expect(content).toContain('source_jsonl:');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Archive frontmatter: messages_since and trigger_type (gap 8 & gap 2)
+// ---------------------------------------------------------------------------
+
+describe('archive frontmatter fields', () => {
+  it('writes messages_since: null and trigger_type: reset in reset archive', async () => {
+    const folder = testFolder('arc-fm-reset');
+    const group = makeGroup(folder);
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeJonl(folder, 'sess-arc-fm');
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'request_session_archive',
+        jid: 'g@test',
+        sessionId: 'sess-arc-fm',
+        groupFolder: folder,
+      },
+      folder,
+      false,
+      makeDeps({ registeredGroups: () => ({ 'g@test': group }) }),
+    );
+
+    const files = fs.readdirSync(convDir);
+    const archiveFile = files.find((f) => f.endsWith('-reset.md'));
+    expect(archiveFile).toBeDefined();
+
+    const content = fs.readFileSync(path.join(convDir, archiveFile!), 'utf-8');
+    expect(content).toContain('messages_since: null');
+    expect(content).toContain('trigger_type: reset');
+  });
+
+  it('writes messages_since with prior archive timestamp when prior archive exists', async () => {
+    const folder = testFolder('arc-fm-messages-since');
+    const group = makeGroup(folder);
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
+    writeJonl(folder, 'sess-arc-ms');
+
+    // Write a prior non-placeholder archive
+    const priorAt = '2026-03-01T09:00:00.000Z';
+    fs.writeFileSync(
+      path.join(convDir, '2026-03-01-0900-reset.md'),
+      `---\nsession_id: sess-arc-ms\narchived_at: ${priorAt}\nis_placeholder: false\n---\n`,
+    );
+
+    mockRunContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'request_session_archive',
+        jid: 'g@test',
+        sessionId: 'sess-arc-ms',
+        groupFolder: folder,
+      },
+      folder,
+      false,
+      makeDeps({ registeredGroups: () => ({ 'g@test': group }) }),
+    );
+
+    const files = fs.readdirSync(convDir);
+    const newArchive = files.filter(
+      (f) => f.endsWith('-reset.md') && !f.startsWith('2026-03-01'),
+    );
+    expect(newArchive).toHaveLength(1);
+
+    const content = fs.readFileSync(path.join(convDir, newArchive[0]), 'utf-8');
+    expect(content).toContain(`messages_since: ${priorAt}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// query_failed_summaries IPC handler (gap 1)
+// ---------------------------------------------------------------------------
+
+describe('query_failed_summaries IPC handler', () => {
+  afterEach(() => {
+    // Clean up any response files written under DATA_DIR/ipc/
+    try {
+      const ipcBase = path.join(DATA_DIR, 'ipc');
+      for (const entry of fs.readdirSync(ipcBase)) {
+        if (entry.includes(TEST_SUFFIX)) {
+          fs.rmSync(path.join(ipcBase, entry), {
+            recursive: true,
+            force: true,
+          });
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it('returns failed sessions for the requesting group', async () => {
+    const folder = testFolder('qfs-group');
+    ensureDir(GROUPS_DIR, folder, 'conversations');
+
+    insertThrowawaySession({
+      id: 'qfs-row-1',
+      for_session_id: 'sess-qfs-1',
+      group_folder: folder,
+      chat_jid: 'g@test',
+      ephemeral_group_id: 'throwaway-qfs',
+      log_path: null,
+      retry_count: MAX_THROWAWAY_RETRIES,
+      failure_signals: JSON.stringify({
+        timed_out_without_output: false,
+        triggered_own_compact: false,
+        api_error: null,
+        input_too_large: true,
+      }),
+      status: 'failed',
+      started_at: new Date().toISOString(),
+      was_manual_retry: 0,
+      trigger_type: 'compact',
+    });
+
+    const requestId = 'test-req-1';
+    await processTaskIpc(
+      { type: 'query_failed_summaries', requestId, groupFolder: folder },
+      folder,
+      false,
+      makeDeps(),
+    );
+
+    const responseFile = path.join(
+      DATA_DIR,
+      'ipc',
+      folder,
+      'responses',
+      `${requestId}.json`,
+    );
+    expect(fs.existsSync(responseFile)).toBe(true);
+
+    const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+    expect(result.failed_summaries).toHaveLength(1);
+    expect(result.failed_summaries[0].session_id).toBe('sess-qfs-1');
+    expect(result.failed_summaries[0].trigger_type).toBe('compact');
+    expect(result.failed_summaries[0].retry_count).toBe(MAX_THROWAWAY_RETRIES);
+    expect(result.failed_summaries[0].failure_signals).not.toBeNull();
+  });
+
+  it('does not include failed sessions from other groups', async () => {
+    const folderA = testFolder('qfs-a');
+    const folderB = testFolder('qfs-b');
+    ensureDir(GROUPS_DIR, folderA, 'conversations');
+    ensureDir(GROUPS_DIR, folderB, 'conversations');
+
+    insertThrowawaySession({
+      id: 'qfs-row-a',
+      for_session_id: 'sess-qfs-a',
+      group_folder: folderA,
+      chat_jid: 'ga@test',
+      ephemeral_group_id: 'throwaway-qfs-a',
+      log_path: null,
+      retry_count: MAX_THROWAWAY_RETRIES,
+      failure_signals: null,
+      status: 'failed',
+      started_at: new Date().toISOString(),
+      was_manual_retry: 0,
+      trigger_type: 'reset',
+    });
+
+    const requestId = 'test-req-b';
+    // Request from folderB — should get empty list
+    await processTaskIpc(
+      { type: 'query_failed_summaries', requestId, groupFolder: folderB },
+      folderB,
+      false,
+      makeDeps(),
+    );
+
+    const responseFile = path.join(
+      DATA_DIR,
+      'ipc',
+      folderB,
+      'responses',
+      `${requestId}.json`,
+    );
+    const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+    expect(result.failed_summaries).toHaveLength(0);
+  });
+
+  it('returns empty list when no failed sessions exist', async () => {
+    const folder = testFolder('qfs-empty');
+    ensureDir(GROUPS_DIR, folder, 'conversations');
+
+    const requestId = 'test-req-empty';
+    await processTaskIpc(
+      { type: 'query_failed_summaries', requestId, groupFolder: folder },
+      folder,
+      false,
+      makeDeps(),
+    );
+
+    const responseFile = path.join(
+      DATA_DIR,
+      'ipc',
+      folder,
+      'responses',
+      `${requestId}.json`,
+    );
+    const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+    expect(result.failed_summaries).toHaveLength(0);
   });
 });

@@ -321,6 +321,8 @@ function formatTranscriptMarkdown(
   sessionId?: string,
   transcriptPath?: string,
   isPlaceholder = false,
+  messagesSince?: string | null,
+  triggerType: 'compact' | 'reset' = 'compact',
 ): string {
   const now = new Date();
   const formatDateTime = (d: Date) =>
@@ -339,6 +341,10 @@ function formatTranscriptMarkdown(
   if (sessionId) lines.push(`session_id: ${sessionId}`);
   lines.push(`archived_at: ${now.toISOString()}`);
   if (transcriptPath) lines.push(`source_jsonl: ${transcriptPath}`);
+  lines.push(
+    messagesSince ? `messages_since: ${messagesSince}` : 'messages_since: null',
+  );
+  lines.push(`trigger_type: ${triggerType}`);
   lines.push(`is_placeholder: ${isPlaceholder}`);
   lines.push('---');
   lines.push('');

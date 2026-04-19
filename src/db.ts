@@ -186,7 +186,9 @@ function createSchema(database: Database.Database): void {
       retry_count INTEGER NOT NULL DEFAULT 0,
       failure_signals TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
-      started_at TEXT NOT NULL
+      started_at TEXT NOT NULL,
+      was_manual_retry INTEGER NOT NULL DEFAULT 0,
+      trigger_type TEXT NOT NULL DEFAULT 'compact'
     );
     CREATE INDEX IF NOT EXISTS idx_throwaway_for_session ON throwaway_sessions(for_session_id);
     CREATE INDEX IF NOT EXISTS idx_throwaway_status ON throwaway_sessions(status);
@@ -338,6 +340,22 @@ function createSchema(database: Database.Database): void {
   try {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN min_idle_minutes INTEGER`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add was_manual_retry and trigger_type columns to throwaway_sessions if they don't exist
+  try {
+    database.exec(
+      `ALTER TABLE throwaway_sessions ADD COLUMN was_manual_retry INTEGER NOT NULL DEFAULT 0`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(
+      `ALTER TABLE throwaway_sessions ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'compact'`,
     );
   } catch {
     /* column already exists */
@@ -1823,14 +1841,17 @@ export interface ThrowawaySessionRecord {
   failure_signals: string | null; // JSON-encoded ThrowawayFailureSignals
   status: ThrowawaySessionStatus;
   started_at: string;
+  was_manual_retry: number; // 0 = false, 1 = true
+  trigger_type: 'compact' | 'reset';
 }
 
 export function insertThrowawaySession(row: ThrowawaySessionRecord): void {
   db.prepare(
     `INSERT INTO throwaway_sessions
        (id, for_session_id, group_folder, chat_jid, ephemeral_group_id,
-        log_path, retry_count, failure_signals, status, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        log_path, retry_count, failure_signals, status, started_at,
+        was_manual_retry, trigger_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.for_session_id,
@@ -1842,6 +1863,8 @@ export function insertThrowawaySession(row: ThrowawaySessionRecord): void {
     row.failure_signals,
     row.status,
     row.started_at,
+    row.was_manual_retry,
+    row.trigger_type,
   );
 }
 
@@ -1878,12 +1901,29 @@ export function getThrowawaySessionsByStatus(
     .all(...statuses) as ThrowawaySessionRecord[];
 }
 
+export function getFailedThrowawaySessionsByGroup(
+  groupFolder: string,
+): ThrowawaySessionRecord[] {
+  return db
+    .prepare(
+      `SELECT * FROM throwaway_sessions
+       WHERE status = 'failed' AND group_folder = ?
+       ORDER BY started_at ASC`,
+    )
+    .all(groupFolder) as ThrowawaySessionRecord[];
+}
+
 export function updateThrowawaySession(
   id: string,
   updates: Partial<
     Pick<
       ThrowawaySessionRecord,
-      'status' | 'log_path' | 'retry_count' | 'failure_signals' | 'started_at'
+      | 'status'
+      | 'log_path'
+      | 'retry_count'
+      | 'failure_signals'
+      | 'started_at'
+      | 'was_manual_retry'
     >
   >,
 ): void {

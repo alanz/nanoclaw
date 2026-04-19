@@ -1917,6 +1917,84 @@ Embeds the image as a base64 data URI in a markdown card (required because WebXD
     },
   );
 
+server.tool(
+  'list_failed_summaries',
+  `List session summaries that failed to generate for this group.
+
+Returns one entry per failed ThrowawaySession with: session_id, archive_datetime
+(YYYY-MM-DD-HHmm of the original session), trigger_type (compact or reset),
+retry_count (automatic retries exhausted), and failure_signals (diagnostic data).
+
+Use this before calling retry_session_summary so you can present the user with
+context about which sessions need attention.`,
+  {},
+  async () => {
+    const requestId = `fs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'query_failed_summaries',
+      requestId,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+    const responseFile = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + 15000;
+
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      if (fs.existsSync(responseFile)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+          fs.unlinkSync(responseFile);
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (err) {
+          return {
+            content: [{ type: 'text' as const, text: `Error reading failed_summaries response: ${err instanceof Error ? err.message : String(err)}` }],
+            isError: true,
+          };
+        }
+      }
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Failed summaries query timed out. The host may be busy — try again.' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
+  'retry_session_summary',
+  `Request a manual retry of a failed session summary.
+
+Use list_failed_summaries first to discover which sessions need retrying and why.
+The host will re-queue the throwaway summarisation container for the given session_id.
+A new summary will be written with a -processed-at-{datetime} suffix to avoid
+overwriting any existing file.
+
+session_id: the session whose failed ThrowawaySession should be re-queued.`,
+  {
+    session_id: z.string().describe('Session ID whose failed summary should be retried'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'retry_throwaway_summary',
+      jid: chatJid,
+      sessionId: args.session_id,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: `Manual retry requested for session ${args.session_id}. The host will re-queue summarisation shortly.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

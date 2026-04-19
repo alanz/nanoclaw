@@ -40,6 +40,7 @@ import {
   getThrowawaySessionById,
   getThrowawaySessionByForSessionId,
   getThrowawaySessionsByStatus,
+  getFailedThrowawaySessionsByGroup,
   updateThrowawaySession,
 } from './db.js';
 import {
@@ -1756,6 +1757,12 @@ export async function processTaskIpc(
         const timeStr = now.toISOString().slice(11, 16).replace(':', '');
         const ephemeralGroupId = newThrowawayGroupId();
         const dbId = crypto.randomUUID();
+        const oversizedSignals = JSON.stringify({
+          timed_out_without_output: false,
+          triggered_own_compact: false,
+          api_error: null,
+          input_too_large: true,
+        });
         insertThrowawaySession({
           id: dbId,
           for_session_id: sessionId,
@@ -1764,24 +1771,22 @@ export async function processTaskIpc(
           ephemeral_group_id: ephemeralGroupId,
           log_path: null,
           retry_count: MAX_THROWAWAY_RETRIES,
-          failure_signals: JSON.stringify({
-            timed_out_without_output: false,
-            triggered_own_compact: false,
-            api_error: null,
-            input_too_large: true,
-          }),
+          failure_signals: oversizedSignals,
           status: 'failed',
           started_at: now.toISOString(),
+          was_manual_retry: 0,
+          trigger_type: 'compact',
         });
         fs.mkdirSync(sessionsDir, { recursive: true });
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
-          date,
-          timeStr,
+          `${date}-${timeStr}`,
           'oversized',
           {
-            source_jsonl: jsonlPath,
+            source_jsonl: jsonlPath ?? '',
+            retry_count: String(MAX_THROWAWAY_RETRIES),
+            failure_signals: oversizedSignals,
           },
         );
         if (deps.setReaction) await deps.setReaction(jid, '💭');
@@ -1862,12 +1867,12 @@ export async function processTaskIpc(
           timestamp,
           'missing',
           jsonlPath,
+          'reset',
         );
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
-          date,
-          timestamp,
+          `${date}-${timestamp}`,
           'missing',
         );
         if (deps.setReaction) await deps.setReaction(jid, '💭');
@@ -1889,12 +1894,12 @@ export async function processTaskIpc(
           timestamp,
           'missing',
           jsonlPath,
+          'reset',
         );
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
-          date,
-          timestamp,
+          `${date}-${timestamp}`,
           'missing',
         );
         if (deps.setReaction) await deps.setReaction(jid, '💭');
@@ -1914,12 +1919,12 @@ export async function processTaskIpc(
           timestamp,
           'empty',
           jsonlPath,
+          'reset',
         );
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
-          date,
-          timestamp,
+          `${date}-${timestamp}`,
           'empty',
         );
         if (deps.setReaction) await deps.setReaction(jid, '💭');
@@ -1946,6 +1951,7 @@ export async function processTaskIpc(
         timestamp,
         priorAt ?? undefined,
         ASSISTANT_NAME,
+        'reset',
       );
 
       // ThrowawaySessionBlockedByInputSizeOnReset: refuse throwaway launch when there
@@ -1958,6 +1964,12 @@ export async function processTaskIpc(
       ) {
         const ephemeralGroupId = newThrowawayGroupId();
         const dbId = crypto.randomUUID();
+        const resetOversizedSignals = JSON.stringify({
+          timed_out_without_output: false,
+          triggered_own_compact: false,
+          api_error: null,
+          input_too_large: true,
+        });
         insertThrowawaySession({
           id: dbId,
           for_session_id: sessionId,
@@ -1966,23 +1978,21 @@ export async function processTaskIpc(
           ephemeral_group_id: ephemeralGroupId,
           log_path: null,
           retry_count: MAX_THROWAWAY_RETRIES,
-          failure_signals: JSON.stringify({
-            timed_out_without_output: false,
-            triggered_own_compact: false,
-            api_error: null,
-            input_too_large: true,
-          }),
+          failure_signals: resetOversizedSignals,
           status: 'failed',
           started_at: now.toISOString(),
+          was_manual_retry: 0,
+          trigger_type: 'reset',
         });
         writeSummaryPlaceholder(
           sessionsDir,
           sessionId,
-          date,
-          timestamp,
+          `${date}-${timestamp}`,
           'oversized',
           {
             source_jsonl: jsonlPath,
+            retry_count: String(MAX_THROWAWAY_RETRIES),
+            failure_signals: resetOversizedSignals,
           },
         );
         if (deps.setReaction) await deps.setReaction(jid, '💭');
@@ -2009,6 +2019,7 @@ export async function processTaskIpc(
         jsonlPath,
         archiveFilename,
         deps,
+        'reset',
       ).catch((err) =>
         logger.error({ err, sessionId }, 'Throwaway session failed on reset'),
       );
@@ -2050,6 +2061,7 @@ export async function processTaskIpc(
         status: 'pending',
         retry_count: 0,
         failure_signals: null,
+        was_manual_retry: 1,
       });
       const rtConversationsDir = path.join(
         resolveGroupFolderPath(rtGroup.folder),
@@ -2069,6 +2081,39 @@ export async function processTaskIpc(
         deps,
       ).catch((err) =>
         logger.error({ err, sessionId }, 'Manual retry throwaway failed'),
+      );
+      break;
+    }
+
+    case 'query_failed_summaries': {
+      // Agent queries the list of failed throwaway summaries for its own group.
+      if (!data.requestId) {
+        logger.warn({ data }, 'query_failed_summaries: missing requestId');
+        break;
+      }
+      const failedRows = getFailedThrowawaySessionsByGroup(sourceGroup);
+      const groupDir = resolveGroupFolderPath(sourceGroup);
+      const convDir = path.join(groupDir, 'conversations');
+      const payload = {
+        failed_summaries: failedRows.map((r) => ({
+          session_id: r.for_session_id,
+          archive_datetime: resolveArchiveDatetime(convDir, r.for_session_id),
+          trigger_type: r.trigger_type,
+          retry_count: r.retry_count,
+          failure_signals: r.failure_signals
+            ? JSON.parse(r.failure_signals)
+            : null,
+        })),
+      };
+      const responseDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(responseDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(responseDir, `${data.requestId}.json`),
+        JSON.stringify(payload),
+      );
+      logger.info(
+        { requestId: data.requestId, sourceGroup, count: failedRows.length },
+        'Failed summaries query fulfilled',
       );
       break;
     }
@@ -2224,6 +2269,112 @@ function throwawayLogPath(ephemeralGroupId: string): string {
   return path.join(DATA_DIR, 'sessions', ephemeralGroupId);
 }
 
+function findJsonlFiles(dir: string): string[] {
+  const results: string[] = [];
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) results.push(...findJsonlFiles(fullPath));
+      else if (entry.isFile() && entry.name.endsWith('.jsonl'))
+        results.push(fullPath);
+    }
+  } catch {
+    // skip unreadable dirs
+  }
+  return results;
+}
+
+/** Inspect the throwaway session log to detect churn, self-compact, and API errors. */
+function observeFailureSignals(
+  logPath: string | null,
+  containerError: string | null,
+): string {
+  let timedOutWithoutOutput = false;
+  let triggeredOwnCompact = false;
+  let apiError: string | null = containerError || null;
+
+  if (logPath && fs.existsSync(logPath)) {
+    for (const jsonlFile of findJsonlFiles(logPath)) {
+      try {
+        const lines = fs
+          .readFileSync(jsonlFile, 'utf-8')
+          .split('\n')
+          .filter((l) => l.trim());
+        let hasAssistantOutput = false;
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line);
+            if (entry.type === 'assistant' || entry.role === 'assistant') {
+              hasAssistantOutput = true;
+            }
+            if (entry.type === 'system' && entry.subtype === 'auto_compact') {
+              triggeredOwnCompact = true;
+            }
+            if (
+              entry.type === 'result' &&
+              entry.subtype === 'error_during_execution' &&
+              entry.error_message
+            ) {
+              apiError = String(entry.error_message);
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
+        if (lines.length > 0 && !hasAssistantOutput) {
+          timedOutWithoutOutput = true;
+        }
+      } catch {
+        // skip unreadable files
+      }
+    }
+  }
+
+  return JSON.stringify({
+    timed_out_without_output: timedOutWithoutOutput,
+    triggered_own_compact: triggeredOwnCompact,
+    api_error: apiError,
+    input_too_large: false,
+  });
+}
+
+/**
+ * Resolve archive_datetime(sessionId): finds the most recent non-placeholder
+ * ConversationArchive for the session and formats its archived_at as YYYY-MM-DD-HHmm.
+ * Falls back to the current time if no archive exists.
+ */
+function resolveArchiveDatetime(
+  conversationsDir: string,
+  sessionId: string,
+): string {
+  let latestAt: string | null = null;
+  if (fs.existsSync(conversationsDir)) {
+    for (const file of fs.readdirSync(conversationsDir)) {
+      if (!file.endsWith('.md')) continue;
+      try {
+        const raw = fs.readFileSync(path.join(conversationsDir, file), 'utf-8');
+        const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+        if (!fmMatch) continue;
+        const fm = fmMatch[1];
+        const sidMatch = fm.match(/^session_id:\s*(.+)$/m);
+        const atMatch = fm.match(/^archived_at:\s*(.+)$/m);
+        const phMatch = fm.match(/^is_placeholder:\s*(.+)$/m);
+        if (!sidMatch || !atMatch) continue;
+        if (sidMatch[1].trim() !== sessionId) continue;
+        if (phMatch && phMatch[1].trim() === 'true') continue;
+        const at = atMatch[1].trim();
+        if (!latestAt || at > latestAt) latestAt = at;
+      } catch {
+        // skip unreadable files
+      }
+    }
+  }
+  const ts = latestAt ? new Date(latestAt) : new Date();
+  const date = ts.toISOString().split('T')[0];
+  const timeStr = ts.toISOString().slice(11, 16).replace(':', '');
+  return `${date}-${timeStr}`;
+}
+
 function jsonlSizeTokens(jsonlPath: string): number {
   try {
     return Math.round(fs.statSync(jsonlPath).size / 4);
@@ -2242,6 +2393,7 @@ function writeConversationArchive(
   timestamp: string,
   messagesSince?: string,
   assistantName?: string,
+  triggerType: 'compact' | 'reset' = 'reset',
 ): void {
   fs.mkdirSync(conversationsDir, { recursive: true });
   const filename = `${date}-${timestamp}-reset.md`;
@@ -2251,7 +2403,10 @@ function writeConversationArchive(
     `session_id: ${sessionId}`,
     `archived_at: ${now.toISOString()}`,
     `source_jsonl: ${jsonlPath}`,
-    ...(messagesSince ? [`messages_since: ${messagesSince}`] : []),
+    ...(messagesSince
+      ? [`messages_since: ${messagesSince}`]
+      : ['messages_since: null']),
+    `trigger_type: ${triggerType}`,
     'is_placeholder: false',
     '---',
     '',
@@ -2282,6 +2437,7 @@ function writeArchivePlaceholder(
   timestamp: string,
   suffix: 'missing' | 'empty',
   jsonlPath?: string,
+  triggerType: 'compact' | 'reset' = 'reset',
 ): void {
   fs.mkdirSync(conversationsDir, { recursive: true });
   const filename = `${date}-${timestamp}-${suffix}.md`;
@@ -2291,6 +2447,8 @@ function writeArchivePlaceholder(
     `session_id: ${sessionId}`,
     `archived_at: ${now.toISOString()}`,
     ...(jsonlPath ? [`source_jsonl: ${jsonlPath}`] : []),
+    'messages_since: null',
+    `trigger_type: ${triggerType}`,
     'is_placeholder: true',
     '---',
     '',
@@ -2307,17 +2465,21 @@ function writeArchivePlaceholder(
   );
 }
 
-/** Write a placeholder session summary. */
+/** Write a placeholder session summary.
+ * @param datetimePrefix Either a `YYYY-MM-DD-HHmm` archive_datetime string, or a legacy
+ *   `date` string — the suffix is always appended. For missing/empty/oversized placeholders
+ *   this is still now-based (no archive exists yet). For failed placeholders it uses
+ *   archive_datetime so the file aligns with the session identity.
+ */
 function writeSummaryPlaceholder(
   sessionsDir: string,
   sessionId: string,
-  date: string,
-  timestamp: string,
+  datetimePrefix: string,
   suffix: 'missing' | 'empty' | 'failed' | 'oversized',
   extraFrontmatter?: Record<string, string>,
 ): void {
   fs.mkdirSync(sessionsDir, { recursive: true });
-  const filename = `${date}-${timestamp}-${suffix}.md`;
+  const filename = `${datetimePrefix}-${suffix}.md`;
   const now = new Date();
   const extraLines = extraFrontmatter
     ? Object.entries(extraFrontmatter).map(([k, v]) => `${k}: ${v}`)
@@ -2360,6 +2522,7 @@ export async function spawnThrowaway(
   jsonlPath: string | undefined,
   archiveFilename: string | undefined,
   deps: IpcDeps,
+  triggerType: 'compact' | 'reset' = 'compact',
 ): Promise<void> {
   const ephemeralGroupId = newThrowawayGroupId();
   const dbId = crypto.randomUUID();
@@ -2374,6 +2537,8 @@ export async function spawnThrowaway(
     failure_signals: null,
     status: 'pending',
     started_at: new Date().toISOString(),
+    was_manual_retry: 0,
+    trigger_type: triggerType,
   });
   await _runThrowaway(
     group,
@@ -2399,18 +2564,32 @@ async function _runThrowaway(
   deps: IpcDeps,
 ): Promise<void> {
   const now = new Date();
-  const date = now.toISOString().split('T')[0];
-  const timeStr = now.toISOString().slice(11, 16).replace(':', '');
-  const summaryFilename = `${date}-${timeStr}.md`;
   const groupDir = resolveGroupFolderPath(group.folder);
+  const conversationsDir = path.join(groupDir, 'conversations');
+  const sessionsDir = path.join(groupDir, 'memory', 'sessions');
+  const logPath = throwawayLogPath(ephemeralGroupId);
+
+  // Resolve filename from archive_datetime(sessionId) so retried summaries stay
+  // aligned with the original session's identity (spec: ThrowawaySessionSucceeded).
+  const archiveDatetime = resolveArchiveDatetime(conversationsDir, sessionId);
+
+  // Fetch current row to determine if this is a retry run
+  const currentRow = getThrowawaySessionById(dbId);
+  const isRetryRun =
+    (currentRow?.retry_count ?? 0) > 0 ||
+    (currentRow?.was_manual_retry ?? 0) === 1;
+
+  const nowStr = `${now.toISOString().split('T')[0]}-${now.toISOString().slice(11, 16).replace(':', '')}`;
+  const summaryFilename = isRetryRun
+    ? `${archiveDatetime}-processed-at-${nowStr}.md`
+    : `${archiveDatetime}.md`;
+
   const summaryFullPath = path.join(
     groupDir,
     'memory',
     'sessions',
     summaryFilename,
   );
-  const sessionsDir = path.join(groupDir, 'memory', 'sessions');
-  const logPath = throwawayLogPath(ephemeralGroupId);
 
   updateThrowawaySession(dbId, {
     status: 'running',
@@ -2512,8 +2691,7 @@ async function _runThrowaway(
       group,
       chatJid,
       sessionsDir,
-      date,
-      timeStr,
+      archiveDatetime,
       containerError,
       deps,
     );
@@ -2526,8 +2704,7 @@ async function handleThrowawayFailure(
   group: RegisteredGroup,
   chatJid: string,
   sessionsDir: string,
-  date: string,
-  timeStr: string,
+  archiveDatetime: string,
   containerError: string | null,
   deps: IpcDeps,
 ): Promise<void> {
@@ -2538,12 +2715,7 @@ async function handleThrowawayFailure(
     return;
   }
 
-  const failureSignals = JSON.stringify({
-    timed_out_without_output: false,
-    triggered_own_compact: false,
-    api_error: containerError || null,
-    input_too_large: false,
-  });
+  const failureSignals = observeFailureSignals(row.log_path, containerError);
 
   if (row.retry_count < MAX_THROWAWAY_RETRIES) {
     const newRetryCount = row.retry_count + 1;
@@ -2590,13 +2762,18 @@ async function handleThrowawayFailure(
       status: 'failed',
       failure_signals: failureSignals,
     });
+    const sourceJsonl = getSessionJsonlPath(group.folder, row.for_session_id);
     writeSummaryPlaceholder(
       sessionsDir,
       row.for_session_id,
-      date,
-      timeStr,
+      archiveDatetime,
       'failed',
-      { retry_count: String(row.retry_count) },
+      {
+        retry_count: String(row.retry_count),
+        log_path: row.log_path ?? '',
+        source_jsonl: sourceJsonl,
+        failure_signals: failureSignals,
+      },
     );
     if (deps.setReaction) await deps.setReaction(chatJid, '💭');
 

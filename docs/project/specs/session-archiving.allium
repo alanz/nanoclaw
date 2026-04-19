@@ -13,6 +13,10 @@
 --   - Reaction signalling during archiving and summarising phases
 --   - Failure handling (failed throwaway, missing JSONL, empty session)
 --   - Startup recovery for orphaned archives
+--   - Retry lifecycle with configurable limit (max_throwaway_retries)
+--   - Session log visibility via ephemeral group identity
+--   - Health signal capture (churn detection, compact detection, API errors)
+--   - Manual re-run from main group
 -- Excludes:
 --   - Session lifecycle management (see nanoclaw.allium)
 --   - SDK compaction mechanics (see container-claude-sdk.allium)
@@ -22,6 +26,25 @@
 use "./nanoclaw.allium" as core
 use "./container-claude-sdk.allium" as sdk
 use "./scheduling.allium" as scheduling
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- Observed health signals captured from a failed throwaway run, used to
+-- enrich placeholder SessionSummaries and aid diagnosis of recurring failure
+-- modes. Populated by inspecting the session log at failure time.
+value ThrowawayFailureSignals {
+    timed_out_without_output: Boolean   -- container ran full timeout with no output (churn)
+    triggered_own_compact: Boolean      -- container triggered auto-compact (oversized input)
+    api_error: String?                  -- last API error observed, null if none
+    -- The raw JSONL the throwaway would have consumed was larger than the
+    -- configured fraction of context_limit_tokens, and no ConversationArchive
+    -- was available to substitute. The throwaway was never launched; failure is
+    -- terminal from the automatic retry loop (manual retry possible once a
+    -- transcript is generated).
+    input_too_large: Boolean
+}
 
 ------------------------------------------------------------
 -- Entities
@@ -61,15 +84,67 @@ entity SessionSummary {
 -- A short-lived agent session whose sole purpose is to write a SessionSummary
 -- from a completed session's JSONL. Discarded after completion.
 -- Idempotent: safe to re-run if a previous attempt was interrupted.
+--
+-- Retry lifecycle: a failed throwaway with retry_count < config.max_throwaway_retries
+-- moves to status = pending and is re-dispatched on the next NanoclawStarted event
+-- (or immediately if NanoClaw is running). Once retries are exhausted (retry_count
+-- reaches max_throwaway_retries), status = failed is terminal from the automatic
+-- retry loop's point of view; a manual retry (RetrySessionSummaryRequested) resets
+-- retry_count to 0 and gives the throwaway a fresh allocation of attempts.
 entity ThrowawaySession {
     for_session_id: String    -- ID of the session being summarised
     group: core.Group
-    source_jsonl: String      -- JSONL file the throwaway reads for summarisation
+    -- Path to the file the throwaway container is given for summarisation:
+    -- a ConversationArchive markdown transcript if one exists for the session,
+    -- otherwise the raw JSONL. See preferred_source() for the selection rule.
+    source_input: String
+    -- Ephemeral group name (e.g. "throwaway-<uuid>") that scopes the container's
+    -- session log directory. Stable across retries for the same throwaway entity.
+    -- Gives the container its own log location (data/sessions/<ephemeral_group_id>/)
+    -- so transcripts can be streamed without polluting the main group's log.
+    ephemeral_group_id: String
+    -- Filesystem path of the current (or most recent) container run's log directory,
+    -- under data/sessions/. Null until the container starts its first run.
+    log_path: String?
+    -- Number of automatic retries already attempted for this throwaway.
+    -- 0 on initial creation; incremented by ThrowawaySessionFailedRetryable.
+    retry_count: Integer
+    -- Observed failure signals from the most recent failed run. Null while the
+    -- throwaway has never failed or after a manual retry resets the state.
+    failure_signals: ThrowawayFailureSignals?
+    -- pending = queued for (re)dispatch, container not yet running
+    -- running  = container active
+    -- completed = exited successfully, SessionSummary written
+    -- failed    = exited unsuccessfully and retries are exhausted
     -- ThrowawayContainerExited is an external trigger with no local surface provider.
     -- The checker cascades unreachable-trigger → unreachable-rule → unobserved status assignment.
     -- allium-ignore allium.status.unreachableValue, allium.status.noExit
-    status: running | completed | failed
+    status: pending | running | completed | failed
     started_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Maximum number of automatic retries before the throwaway is marked failed
+    -- and a placeholder SessionSummary is written. A value of 3 means the
+    -- throwaway is attempted at most four times in total (initial + 3 retries).
+    max_throwaway_retries: Integer = 3
+
+    -- Effective context limit of the throwaway container, in tokens. Defaults
+    -- to the SDK's auto-compact threshold: a container that would trigger
+    -- self-compaction cannot meaningfully summarise a file that already
+    -- exceeds that threshold.
+    context_limit_tokens: Integer = sdk/config.auto_compact_window
+
+    -- Maximum fraction of context_limit_tokens that the raw JSONL is allowed
+    -- to occupy before the throwaway is refused at creation time. A decimal
+    -- approximation of 1/3: the summariser needs headroom for its own
+    -- reasoning, not just for reading the transcript. Applied only when no
+    -- ConversationArchive is available as a substitute.
+    max_input_fraction: Decimal = 0.333
 }
 
 ------------------------------------------------------------
@@ -132,14 +207,104 @@ rule ArchiveOnPreCompactJonlMissing {
 rule StartThrowawayOnPostCompact {
     when: sdk.SdkPostCompact(session_id, group, jsonl_path)
 
+    let throwaway_group_id = new_throwaway_group_id()
+    let archive_exists = exists ConversationArchive{ session_id: session_id, is_placeholder: false }
+
+    -- Only the normal path when we have a usable input: either a processed
+    -- transcript exists, or the raw JSONL is small enough to feed directly.
+    -- The oversized-JSONL-no-archive case is handled by
+    -- ThrowawaySessionBlockedByInputSizeOnPostCompact.
+    requires:
+        archive_exists
+        or jsonl_size_tokens(jsonl_path) <= config.context_limit_tokens * config.max_input_fraction
+
     ensures: ThrowawaySession.created(
         for_session_id: session_id,
         group: group,
-        source_jsonl: jsonl_path,
+        source_input: preferred_source(session_id, jsonl_path),
+        ephemeral_group_id: throwaway_group_id,
+        log_path: session_log_path(throwaway_group_id),
+        retry_count: 0,
+        failure_signals: null,
         status: running,
         started_at: now
     )
     ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "📝")
+
+    @guidance
+        -- new_throwaway_group_id() generates a stable UUID-based identifier of the
+        -- form "throwaway-<uuid>"; session_log_path(id) returns the corresponding
+        -- data/sessions/<id>/ directory path. Both are deterministic host helpers.
+        -- preferred_source prefers a non-placeholder ConversationArchive's path
+        -- over the raw JSONL: the archive is a processed markdown transcript
+        -- with tool calls stripped, which fits far more session content into the
+        -- same token budget than the raw JSONL would.
+}
+
+-- Refuse to launch the throwaway when the raw JSONL is the only available
+-- input and exceeds the configured fraction of context_limit_tokens. A
+-- container that would self-compact on its first read cannot produce a useful
+-- summary, so failure is recorded at creation time and a placeholder
+-- SessionSummary is written immediately. retry_count is set to the retry
+-- ceiling so the automatic retry loop treats this as already exhausted;
+-- recovery requires a ConversationArchive to appear (then a manual retry).
+rule ThrowawaySessionBlockedByInputSizeOnPostCompact {
+    when: sdk.SdkPostCompact(session_id, group, jsonl_path)
+
+    let throwaway_group_id = new_throwaway_group_id()
+    let archive_exists = exists ConversationArchive{ session_id: session_id, is_placeholder: false }
+
+    requires: not archive_exists
+    requires: jsonl_size_tokens(jsonl_path) > config.context_limit_tokens * config.max_input_fraction
+
+    let main_group = core.Groups where is_main = true .first
+
+    ensures: ThrowawaySession.created(
+        for_session_id: session_id,
+        group: group,
+        source_input: jsonl_path,
+        ephemeral_group_id: throwaway_group_id,
+        log_path: null,
+        retry_count: config.max_throwaway_retries,
+        failure_signals: ThrowawayFailureSignals{
+            input_too_large: true,
+            timed_out_without_output: false,
+            triggered_own_compact: false,
+            api_error: null
+        },
+        status: failed,
+        started_at: now
+    )
+    ensures: SessionSummary.created(
+        session_id: session_id,
+        group: group,
+        path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-oversized.md",
+        created_at: now,
+        is_placeholder: true
+    )
+    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "💭")
+    ensures:
+        if exists main_group:
+            core.HostMessagePosted(
+                target_chat: main_group.chat,
+                text: throwaway_input_too_large_notice(session_id, jsonl_path)
+            )
+    ensures: core.HostLogRecorded(
+        level: error,
+        text: "Throwaway summarisation refused for session {session_id}: "
+            + "raw JSONL exceeds {config.max_input_fraction} of context_limit_tokens "
+            + "and no ConversationArchive is available"
+    )
+
+    @guidance
+        -- The container is never launched; log_path is null because there is
+        -- no session log to reference. Placeholder frontmatter should record
+        -- the oversized-input signal so the dashboard can offer a manual
+        -- retry once a transcript becomes available (e.g. via a later
+        -- ConversationArchive for the same session_id).
+        -- throwaway_input_too_large_notice produces the user-facing message
+        -- body, naming the affected session and explaining that summarisation
+        -- cannot proceed until the transcript is generated.
 }
 
 -- ---- /reset path ----
@@ -157,10 +322,11 @@ rule ArchiveAndStartThrowawayOnReset {
     when: core.SessionCommandApplied(group, command: reset)
 
     let cs = core.ConversationSession{ group: group }
+    let jsonl_path = session_jsonl_path(cs)
 
     requires: exists cs
     requires: cs.message_count > 0
-    requires: file_exists(session_jsonl_path(cs))
+    requires: file_exists(jsonl_path)
 
     let prior_archives = ConversationArchive
         where session_id = cs.session_id and not is_placeholder
@@ -169,20 +335,34 @@ rule ArchiveAndStartThrowawayOnReset {
             latest_archived_at(prior_archives)
         else:
             null
+    let throwaway_group_id = new_throwaway_group_id()
+    let has_prior_archive = prior_archives.count > 0
+
+    -- Normal path only when we have a usable input: a prior non-placeholder
+    -- archive to substitute, or a raw JSONL small enough to feed directly.
+    -- The oversized-JSONL-no-prior-archive case is handled by
+    -- ThrowawaySessionBlockedByInputSizeOnReset.
+    requires:
+        has_prior_archive
+        or jsonl_size_tokens(jsonl_path) <= config.context_limit_tokens * config.max_input_fraction
 
     ensures: ConversationArchive.created(
         session_id: cs.session_id,
         group: group,
         path: "/workspace/group/conversations/{date}-{HHmm}-{name}.md",
         archived_at: now,
-        source_jsonl: session_jsonl_path(cs),
+        source_jsonl: jsonl_path,
         is_placeholder: false,
         messages_since: latest_prior_at
     )
     ensures: ThrowawaySession.created(
         for_session_id: cs.session_id,
         group: group,
-        source_jsonl: session_jsonl_path(cs),
+        source_input: preferred_source(cs.session_id, jsonl_path),
+        ephemeral_group_id: throwaway_group_id,
+        log_path: session_log_path(throwaway_group_id),
+        retry_count: 0,
+        failure_signals: null,
         status: running,
         started_at: now
     )
@@ -196,6 +376,93 @@ rule ArchiveAndStartThrowawayOnReset {
         -- is_placeholder = false, and selects the max archived_at.
         -- The incremental filter is applied to parsed messages before writing;
         -- messages lacking a timestamp are included (no safe way to exclude).
+        -- preferred_source prefers a non-placeholder ConversationArchive's path
+        -- over the raw JSONL; since this rule creates exactly such an archive,
+        -- the throwaway is launched against the processed markdown transcript
+        -- rather than the raw JSONL. Tool calls are stripped from that
+        -- transcript, which fits far more session content into the same token
+        -- budget.
+}
+
+-- /reset on a session whose raw JSONL exceeds the configured fraction of
+-- context_limit_tokens and which has no prior non-placeholder archive to
+-- substitute. The transcript is still archived programmatically (size does
+-- not affect the archive writer), but the throwaway is never launched: the
+-- container would self-compact on first read. A placeholder SessionSummary
+-- is written immediately with retry_count at the ceiling, so the auto-retry
+-- loop treats this as already exhausted. A manual retry becomes meaningful
+-- once a usable archive exists.
+rule ThrowawaySessionBlockedByInputSizeOnReset {
+    when: core.SessionCommandApplied(group, command: reset)
+
+    let cs = core.ConversationSession{ group: group }
+    let jsonl_path = session_jsonl_path(cs)
+
+    requires: exists cs
+    requires: cs.message_count > 0
+    requires: file_exists(jsonl_path)
+    requires: not exists ConversationArchive{ session_id: cs.session_id, is_placeholder: false }
+    requires: jsonl_size_tokens(jsonl_path) > config.context_limit_tokens * config.max_input_fraction
+
+    let throwaway_group_id = new_throwaway_group_id()
+    let main_group = core.Groups where is_main = true .first
+
+    ensures: ConversationArchive.created(
+        session_id: cs.session_id,
+        group: group,
+        path: "/workspace/group/conversations/{date}-{HHmm}-{name}.md",
+        archived_at: now,
+        source_jsonl: jsonl_path,
+        is_placeholder: false,
+        messages_since: null
+    )
+    ensures: ThrowawaySession.created(
+        for_session_id: cs.session_id,
+        group: group,
+        source_input: jsonl_path,
+        ephemeral_group_id: throwaway_group_id,
+        log_path: null,
+        retry_count: config.max_throwaway_retries,
+        failure_signals: ThrowawayFailureSignals{
+            input_too_large: true,
+            timed_out_without_output: false,
+            triggered_own_compact: false,
+            api_error: null
+        },
+        status: failed,
+        started_at: now
+    )
+    ensures: SessionSummary.created(
+        session_id: cs.session_id,
+        group: group,
+        path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-oversized.md",
+        created_at: now,
+        is_placeholder: true
+    )
+    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "💭")
+    ensures:
+        if exists main_group:
+            core.HostMessagePosted(
+                target_chat: main_group.chat,
+                text: throwaway_input_too_large_notice(cs.session_id, jsonl_path)
+            )
+    ensures: core.HostLogRecorded(
+        level: error,
+        text: "Throwaway summarisation refused for session {cs.session_id}: "
+            + "raw JSONL exceeds {config.max_input_fraction} of context_limit_tokens "
+            + "and no ConversationArchive is available"
+    )
+    ensures: not exists cs
+
+    @guidance
+        -- The archive is written programmatically (parse JSONL, emit markdown);
+        -- it is never too large for that path. messages_since is null because
+        -- the guard ensures no prior non-placeholder archive exists for this
+        -- session_id, so the full transcript is captured.
+        -- The container is never launched; log_path is null because no session
+        -- log exists. A subsequent RecoverOrphanedArchives run on this archive
+        -- will not fire because a ThrowawaySession with status = failed for
+        -- this session_id already exists.
 }
 
 -- If /reset is issued on a session with messages but the JSONL is missing,
@@ -312,48 +579,163 @@ rule ThrowawaySessionSucceeded {
         -- behind the throwaway automatically.
 }
 
--- If the throwaway container fails, the group still proceeds to a fresh session.
--- A placeholder SessionSummary marks the gap visibly; an error is logged.
--- The 💭 reaction fires so the user is not left in the 📝 state indefinitely.
-rule ThrowawaySessionFailed {
+-- If the throwaway container fails and automatic retries remain, queue it for
+-- re-dispatch. Capture observed failure signals from the session log so repeated
+-- failures can be diagnosed. No SessionSummary is written at this point — the
+-- placeholder is reserved for the exhausted-retries path below.
+rule ThrowawaySessionFailedRetryable {
     when: ThrowawayContainerExited(exited_session_id, success: false)
     for throwaway in ThrowawaySession where for_session_id = exited_session_id and status = running:
 
+        requires: throwaway.retry_count < config.max_throwaway_retries
+        -- input_too_large failures are created directly in status = failed
+        -- with retry_count = max (no container was ever launched), so this
+        -- guard is defensive; it pins the invariant that an auto-retry is
+        -- never attempted for a size-blocked throwaway.
+        requires: not (throwaway.failure_signals?.input_too_large = true)
+
+        ensures: throwaway.status = pending
+        ensures: throwaway.retry_count = throwaway.retry_count + 1
+        ensures: throwaway.failure_signals = observe_failure_signals(throwaway.log_path)
+        ensures: core.HostLogRecorded(
+            level: warning,
+            text: "Throwaway summarisation failed for session {throwaway.for_session_id}, "
+                + "retry {throwaway.retry_count + 1} of {config.max_throwaway_retries}"
+        )
+
+    @guidance
+        -- observe_failure_signals inspects the session log at log_path to detect
+        -- churn (full timeout with no output), container-initiated compaction and
+        -- the last API error, and returns a ThrowawayFailureSignals value.
+        -- Reaction 📝 is preserved — the group remains in the summarising state
+        -- until the retry completes or retries are exhausted.
+}
+
+-- If the throwaway container fails and retries are exhausted, mark the throwaway
+-- failed, write an enriched placeholder SessionSummary, notify the user that
+-- summarisation failed after max_throwaway_retries attempts and that a manual
+-- retry is possible, and move the group reaction from 📝 to 💭 so the user is
+-- not left in the summarising state indefinitely.
+rule ThrowawaySessionFailedExhausted {
+    when: ThrowawayContainerExited(exited_session_id, success: false)
+
+    let main_group = core.Groups where is_main = true .first
+
+    for throwaway in ThrowawaySession where for_session_id = exited_session_id and status = running:
+
+        requires: throwaway.retry_count >= config.max_throwaway_retries
+
         ensures: throwaway.status = failed
+        ensures: throwaway.failure_signals = observe_failure_signals(throwaway.log_path)
         ensures: SessionSummary.created(
             session_id: throwaway.for_session_id,
             group: throwaway.group,
+            -- Placeholder frontmatter includes log_path, failure_signals,
+            -- retry_count and source_jsonl so the dashboard can surface diagnostic
+            -- detail and offer a manual retry affordance.
             path: "/workspace/group/memory/sessions/{YYYY-MM-DD}-{HHmm}-failed.md",
             created_at: now,
             is_placeholder: true
         )
         ensures: sdk.ReactionTask.created(chat_jid: throwaway.group.chat_jid, emoji: "💭")
+        ensures:
+            if exists main_group:
+                core.HostMessagePosted(
+                    target_chat: main_group.chat,
+                    text: throwaway_retry_exhausted_notice(throwaway, config.max_throwaway_retries)
+                )
         ensures: core.HostLogRecorded(
             level: error,
-            text: "Throwaway summarisation failed for session {throwaway.for_session_id}"
+            text: "Throwaway summarisation failed for session {throwaway.for_session_id} "
+                + "after {config.max_throwaway_retries} retries; placeholder summary written"
         )
 
     @guidance
         -- A fresh user session starts after this rule fires — failure is non-blocking.
-        -- The placeholder file records session_id and failure timestamp so the gap
-        -- is visible in the dashboard and can be retried if needed.
+        -- The placeholder SessionSummary embeds the diagnostic context (log_path,
+        -- failure_signals, retry_count, source_jsonl) in its frontmatter; the
+        -- dashboard reads these to surface a retry affordance.
+        -- throwaway_retry_exhausted_notice produces the user-facing message body,
+        -- naming the failed session and advising that a manual retry is possible
+        -- from the main group.
+}
+
+-- When a ThrowawaySession transitions into the pending state in a running
+-- NanoClaw process, dispatch a fresh container run immediately. This handles
+-- the retry loop: ThrowawaySessionFailedRetryable sets status to pending, and
+-- this rule picks it up and moves it back to running with a new log path.
+--
+-- Note: this uses transitions_to rather than becomes because ThrowawaySessions
+-- are never created with status = pending; they are created with status =
+-- running and only enter pending via the retryable failure path.
+rule ThrowawaySessionRetryDispatched {
+    when: throwaway: ThrowawaySession.status transitions_to pending
+
+    let new_log = session_log_path(throwaway.ephemeral_group_id)
+
+    ensures: throwaway.status = running
+    ensures: throwaway.log_path = new_log
+    ensures: throwaway.started_at = now
+
+    @guidance
+        -- The ephemeral_group_id is stable across retries, so the log_path form
+        -- is deterministic; the host may version subdirectories under it to keep
+        -- each attempt's logs distinct (implementation detail).
+        -- Startup recovery for throwaways already in status = pending when
+        -- NanoClaw was last shut down is handled by RecoverOrphanedPendingThrowaways.
+}
+
+-- ---- Manual retry ----
+
+-- The user can request a manual retry of a failed throwaway from the main group.
+-- This resets retry_count to 0 and failure_signals to null, and moves the
+-- throwaway back to pending so ThrowawaySessionRetryDispatched picks it up.
+rule ManualRetryThrowawaySession {
+    when: RetrySessionSummaryRequested(group, session_id)
+
+    let throwaway = ThrowawaySession{ for_session_id: session_id, status: failed }
+
+    requires: exists throwaway
+
+    ensures: throwaway.retry_count = 0
+    ensures: throwaway.failure_signals = null
+    ensures: throwaway.status = pending
+
+    @guidance
+        -- Resetting retry_count to 0 gives the throwaway a fresh allocation of
+        -- config.max_throwaway_retries attempts. The group parameter identifies
+        -- the main group from which the command was issued; the throwaway's own
+        -- group (accessed via throwaway.group) is the conversation group the
+        -- failed summarisation belonged to and is used by downstream rules for
+        -- reaction and notification routing.
 }
 
 -- ---- Startup recovery ----
 
 -- On startup, any non-placeholder ConversationArchive without a corresponding
--- SessionSummary gets a new ThrowawaySession to produce the missing summary.
+-- SessionSummary gets a new ThrowawaySession to produce the missing summary,
+-- unless an existing ThrowawaySession for that session has already exhausted
+-- its retries. In that case the user must trigger a manual retry.
 -- Safe because the throwaway is idempotent — the only output is the SessionSummary file.
 rule RecoverOrphanedArchives {
     when: NanoclawStarted(_)
     for archive in ConversationArchive where
         not archive.is_placeholder
-        and not exists SessionSummary{ session_id: archive.session_id }:
+        and not exists SessionSummary{ session_id: archive.session_id }
+        and not exists ThrowawaySession{ for_session_id: archive.session_id, status: failed }
+        and not exists ThrowawaySession{ for_session_id: archive.session_id, status: pending }
+        and not exists ThrowawaySession{ for_session_id: archive.session_id, status: running }:
+
+        let throwaway_group_id = new_throwaway_group_id()
 
         ensures: ThrowawaySession.created(
             for_session_id: archive.session_id,
             group: archive.group,
-            source_jsonl: archive.source_jsonl,
+            source_input: archive.path,
+            ephemeral_group_id: throwaway_group_id,
+            log_path: session_log_path(throwaway_group_id),
+            retry_count: 0,
+            failure_signals: null,
             status: running,
             started_at: now
         )
@@ -363,6 +745,31 @@ rule RecoverOrphanedArchives {
         -- An archive is orphaned if no SessionSummary — not even a placeholder — exists
         -- for its session_id. Placeholder archives are excluded: they indicate the JSONL
         -- was missing and there is nothing to summarise.
+        -- source_input is the archive's markdown path: a non-placeholder archive
+        -- always exists at this call site (it is the loop subject), so the JSONL
+        -- fallback that preferred_source provides elsewhere is unnecessary here.
+        -- Existing ThrowawaySessions are respected: a running or pending one will
+        -- complete or retry via its own rules; a failed one (exhausted retries)
+        -- stays failed until the user issues a manual retry.
+}
+
+-- On startup, any ThrowawaySession left in status = pending (because NanoClaw
+-- was shut down mid-retry-loop) is re-dispatched. This complements
+-- ThrowawaySessionRetryDispatched, which only fires on in-process transitions.
+rule RecoverOrphanedPendingThrowaways {
+    when: NanoclawStarted(_)
+    for throwaway in ThrowawaySession where status = pending:
+
+        let new_log = session_log_path(throwaway.ephemeral_group_id)
+
+        ensures: throwaway.status = running
+        ensures: throwaway.log_path = new_log
+        ensures: throwaway.started_at = now
+
+    @guidance
+        -- retry_count is not modified here: the retry budget is tied to automatic
+        -- retry attempts, not to process restarts. A throwaway re-dispatched after
+        -- a restart still has the same number of remaining attempts it had before.
 }
 
 ------------------------------------------------------------
@@ -374,17 +781,27 @@ rule RecoverOrphanedArchives {
 -- success=true if the container exited cleanly (exit code 0, SessionSummary written).
 -- success=false on error exit, timeout, or missing SessionSummary after exit.
 
+-- RetrySessionSummaryRequested(group: core.Group, session_id: String)
+-- Emitted when the user issues a manual retry command from the main group.
+-- The group parameter is the main group the command was issued in; session_id
+-- identifies the session whose failed ThrowawaySession should be re-queued.
+
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
 
 -- Every non-placeholder ConversationArchive eventually has a corresponding SessionSummary.
--- The disjunction with a running ThrowawaySession captures the "eventually" — the summary
--- is in-flight rather than missing.
+-- The disjunction with a running or pending ThrowawaySession captures the "eventually" —
+-- the summary is in-flight (either actively running or queued for retry) rather than missing.
+-- The size-blocked path also satisfies the invariant immediately: it writes a
+-- placeholder SessionSummary at creation time (the throwaway is created in
+-- status = failed with retry_count at the ceiling), so the first disjunct
+-- holds without the throwaway ever reaching running or pending.
 invariant ArchiveEventuallyHasSummary {
     for archive in ConversationArchive where not archive.is_placeholder:
         exists SessionSummary{ session_id: archive.session_id }
-        or exists ThrowawaySession{ for_session_id: archive.session_id }
+        or exists ThrowawaySession{ for_session_id: archive.session_id, status: running }
+        or exists ThrowawaySession{ for_session_id: archive.session_id, status: pending }
 }
 
 -- Non-placeholder archives for the same session never overlap. For any two such

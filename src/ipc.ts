@@ -1727,12 +1727,24 @@ export async function processTaskIpc(
         );
         break;
       }
-      spawnThrowaway(tsGroup, jid, sessionId, jsonlPath, undefined, deps).catch(
-        (err) =>
-          logger.error(
-            { err, sessionId },
-            'Throwaway session failed unexpectedly',
-          ),
+      const groupDir = resolveGroupFolderPath(tsGroup.folder);
+      const conversationsDir = path.join(groupDir, 'conversations');
+      const existingArchive = findLatestArchiveFilename(
+        conversationsDir,
+        sessionId,
+      );
+      spawnThrowaway(
+        tsGroup,
+        jid,
+        sessionId,
+        jsonlPath,
+        existingArchive ?? undefined,
+        deps,
+      ).catch((err) =>
+        logger.error(
+          { err, sessionId },
+          'Throwaway session failed unexpectedly',
+        ),
       );
       break;
     }
@@ -1948,6 +1960,43 @@ function parseSessionJsonl(content: string): SessionParsedMessage[] {
     }
   }
   return messages;
+}
+
+/**
+ * Scan conversationsDir for non-placeholder archives with the given sessionId
+ * and return the filename of the most recent one, or null if none exist.
+ * Used to pass a pre-existing compact archive to spawnThrowaway instead of raw JSONL.
+ */
+function findLatestArchiveFilename(
+  conversationsDir: string,
+  sessionId: string,
+): string | null {
+  if (!fs.existsSync(conversationsDir)) return null;
+  let latestAt: string | null = null;
+  let latestFile: string | null = null;
+  for (const file of fs.readdirSync(conversationsDir)) {
+    if (!file.endsWith('.md')) continue;
+    try {
+      const raw = fs.readFileSync(path.join(conversationsDir, file), 'utf-8');
+      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+      if (!fmMatch) continue;
+      const fm = fmMatch[1];
+      const sidMatch = fm.match(/^session_id:\s*(.+)$/m);
+      const atMatch = fm.match(/^archived_at:\s*(.+)$/m);
+      const phMatch = fm.match(/^is_placeholder:\s*(.+)$/m);
+      if (!sidMatch || !atMatch) continue;
+      if (sidMatch[1].trim() !== sessionId) continue;
+      if (phMatch && phMatch[1].trim() === 'true') continue;
+      const archivedAt = atMatch[1].trim();
+      if (!latestAt || archivedAt > latestAt) {
+        latestAt = archivedAt;
+        latestFile = file;
+      }
+    } catch {
+      // skip unreadable files
+    }
+  }
+  return latestFile;
 }
 
 /**

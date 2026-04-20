@@ -1932,8 +1932,8 @@ export async function processTaskIpc(
         break;
       }
 
-      // ArchiveAndStartThrowawayOnReset / ThrowawaySessionBlockedByInputSizeOnReset:
-      // Always write the archive first; then decide whether to launch the throwaway.
+      // ArchiveAndStartThrowawayOnReset: always write the archive first, then spawn
+      // the throwaway using the archive (not the raw JSONL) as input.
 
       // Exclude messages already captured by a prior compact (or reset) archive
       // for this session so the file only contains new content.
@@ -1955,65 +1955,9 @@ export async function processTaskIpc(
         'reset',
       );
 
-      // ThrowawaySessionBlockedByInputSizeOnReset: refuse throwaway launch when there
-      // was no prior non-placeholder archive AND the JSONL exceeds the context fraction.
-      // The archive was still written above so a subsequent /retry-summary can use it.
-      if (
-        priorAt === null &&
-        jsonlSizeTokens(jsonlPath) >
-          THROWAWAY_CONTEXT_LIMIT_TOKENS * THROWAWAY_MAX_INPUT_FRACTION
-      ) {
-        const ephemeralGroupId = newThrowawayGroupId();
-        const dbId = crypto.randomUUID();
-        const resetOversizedSignals = JSON.stringify({
-          timed_out_without_output: false,
-          triggered_own_compact: false,
-          api_error: null,
-          input_too_large: true,
-        });
-        insertThrowawaySession({
-          id: dbId,
-          for_session_id: sessionId,
-          group_folder: raGroup.folder,
-          chat_jid: jid,
-          ephemeral_group_id: ephemeralGroupId,
-          log_path: null,
-          retry_count: MAX_THROWAWAY_RETRIES,
-          failure_signals: resetOversizedSignals,
-          status: 'failed',
-          started_at: now.toISOString(),
-          was_manual_retry: 0,
-          trigger_type: 'reset',
-          source_input: path.join(conversationsDir, archiveFilename),
-        });
-        writeSummaryPlaceholder(
-          sessionsDir,
-          sessionId,
-          `${date}-${timestamp}`,
-          'oversized',
-          {
-            source_jsonl: jsonlPath,
-            retry_count: String(MAX_THROWAWAY_RETRIES),
-            failure_signals: resetOversizedSignals,
-          },
-        );
-        if (deps.setReaction) await deps.setReaction(jid, '💭');
-        logger.error(
-          { sessionId, jsonlPath },
-          'Throwaway summarisation refused on reset: raw JSONL exceeds context fraction and no prior archive',
-        );
-        const mainEntry = Object.entries(deps.registeredGroups()).find(
-          ([, g]) => g.isMain,
-        );
-        if (mainEntry) {
-          await deps.sendMessage(
-            mainEntry[0],
-            `Session summary for ${sessionId} could not be generated: transcript too large. An archive was written — use /retry-summary ${sessionId} to retry.`,
-          );
-        }
-        break;
-      }
-
+      // Archive is always written above before spawning the throwaway.
+      // The throwaway reads the archive (compact markdown), not the raw JSONL,
+      // so the JSONL-size guard that existed here is no longer applicable.
       spawnThrowaway(
         raGroup,
         jid,

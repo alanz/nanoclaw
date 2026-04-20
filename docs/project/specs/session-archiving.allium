@@ -401,15 +401,10 @@ rule ArchiveAndStartThrowawayOnReset {
         else:
             null
     let throwaway_group_id = new_throwaway_group_id()
-    let has_prior_archive = prior_archives.count > 0
 
-    -- Normal path only when we have a usable input: a prior non-placeholder
-    -- archive to substitute, or a raw JSONL small enough to feed directly.
-    -- The oversized-JSONL-no-prior-archive case is handled by
-    -- ThrowawaySessionBlockedByInputSizeOnReset.
-    requires:
-        has_prior_archive
-        or jsonl_size_tokens(jsonl_path) <= config.context_limit_tokens * config.max_input_fraction
+    -- The throwaway reads the ConversationArchive this rule writes (markdown
+    -- transcript with tool calls stripped), not the raw JSONL, so JSONL size
+    -- is not a blocking condition on the reset path.
 
     ensures: ConversationArchive.created(
         session_id: cs.session_id,
@@ -450,101 +445,6 @@ rule ArchiveAndStartThrowawayOnReset {
         -- rather than the raw JSONL. Tool calls are stripped from that
         -- transcript, which fits far more session content into the same token
         -- budget.
-}
-
--- /reset on a session whose raw JSONL exceeds the configured fraction of
--- context_limit_tokens and which has no prior non-placeholder archive to
--- substitute. The transcript is still archived programmatically (size does
--- not affect the archive writer), but the throwaway is never launched: the
--- container would self-compact on first read. A placeholder SessionSummary
--- is written immediately with retry_count at the ceiling, so the auto-retry
--- loop treats this as already exhausted. A manual retry becomes meaningful
--- once a usable archive exists.
-rule ThrowawaySessionBlockedByInputSizeOnReset {
-    when: core.SessionCommandApplied(group, command: reset)
-
-    let cs = core.ConversationSession{ group: group }
-    let jsonl_path = session_jsonl_path(cs)
-
-    requires: exists cs
-    requires: cs.message_count > 0
-    requires: file_exists(jsonl_path)
-    requires: not exists ConversationArchive{ session_id: cs.session_id, is_placeholder: false }
-    requires: jsonl_size_tokens(jsonl_path) > config.context_limit_tokens * config.max_input_fraction
-
-    let throwaway_group_id = new_throwaway_group_id()
-    let main_group = core.Groups where is_main = true .first
-
-    ensures: ConversationArchive.created(
-        session_id: cs.session_id,
-        group: group,
-        path: "/workspace/group/conversations/{date}-{HHmm}-{name}.md",
-        archived_at: now,
-        source_jsonl: jsonl_path,
-        is_placeholder: false,
-        messages_since: null,
-        trigger_type: reset
-    )
-    ensures: ThrowawaySession.created(
-        for_session_id: cs.session_id,
-        group: group,
-        source_input: jsonl_path,
-        ephemeral_group_id: throwaway_group_id,
-        log_path: null,
-        retry_count: config.max_throwaway_retries,
-        failure_signals: ThrowawayFailureSignals{
-            input_too_large: true,
-            timed_out_without_output: false,
-            triggered_own_compact: false,
-            api_error: null
-        },
-        status: failed,
-        started_at: now,
-        was_manual_retry: false,
-        trigger_type: reset
-    )
-    ensures: SessionSummary.created(
-        session_id: cs.session_id,
-        group: group,
-        path: "/workspace/group/memory/sessions/{archive_datetime(cs.session_id)}-oversized.md",
-        created_at: now,
-        is_placeholder: true
-    )
-    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "💭")
-    ensures:
-        if exists main_group:
-            core.HostMessagePosted(
-                target_chat: main_group.chat,
-                text: throwaway_input_too_large_notice(cs.session_id, jsonl_path)
-            )
-    ensures: core.HostLogRecorded(
-        level: error,
-        text: "Throwaway summarisation refused for session {cs.session_id}: "
-            + "raw JSONL exceeds {config.max_input_fraction} of context_limit_tokens "
-            + "and no ConversationArchive is available"
-    )
-    ensures: not exists cs
-
-    @guidance
-        -- The archive is written programmatically (parse JSONL, emit markdown);
-        -- it is never too large for that path. messages_since is null because
-        -- the guard ensures no prior non-placeholder archive exists for this
-        -- session_id, so the full transcript is captured.
-        -- The container is never launched; log_path is null because no session
-        -- log exists. A subsequent RecoverOrphanedArchives run on this archive
-        -- will not fire because a ThrowawaySession with status = failed for
-        -- this session_id already exists.
-        -- archive_datetime resolution here: no throwaway is yet in scope (it is
-        -- being created by this rule's ensures clause, and in the failed
-        -- state), so the scan-by-session_id fallback applies. Scan the
-        -- conversations directory for non-placeholder ConversationArchives
-        -- with matching session_id and format the archived_at as
-        -- YYYY-MM-DD-HHmm. At firing time exactly one such archive exists: the
-        -- ConversationArchive this rule just creates in its ensures clause —
-        -- the pre-state had none (guarded by `not exists
-        -- ConversationArchive{..., is_placeholder: false}`) and the new one is
-        -- the archive of the session being reset. "Most recent" is therefore
-        -- unambiguous.
 }
 
 -- If /reset is issued on a session with messages but the JSONL is missing,

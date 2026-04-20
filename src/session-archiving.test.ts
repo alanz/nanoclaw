@@ -1014,15 +1014,15 @@ describe('input-size guard', () => {
     expect(signals.input_too_large).toBe(true);
   });
 
-  it('request_session_archive: blocks throwaway when JSONL too large and no prior archive', async () => {
+  it('request_session_archive: spawns throwaway using archive even when JSONL too large', async () => {
     const folder = testFolder('size-guard-reset');
     const group = makeGroup(folder);
-    ensureDir(GROUPS_DIR, folder, 'conversations');
-    ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
-    writeOversizedJonl(folder, 'sess-reset-big');
+    const convDir = ensureDir(GROUPS_DIR, folder, 'conversations');
+    const sessDir = ensureDir(GROUPS_DIR, folder, 'memory', 'sessions');
     // Write a real JSONL with messages so the archive write path is taken
-    // (overwrite with oversized content to trigger the guard)
+    // (overwrite with oversized content — but the throwaway reads the archive, not the JSONL)
     const jonlPath = getSessionJsonlPath(folder, 'sess-reset-big');
+    fs.mkdirSync(path.dirname(jonlPath), { recursive: true });
     const msg = JSON.stringify({
       type: 'user',
       message: { role: 'user', content: 'hi' },
@@ -1030,10 +1030,21 @@ describe('input-size guard', () => {
     });
     fs.writeFileSync(jonlPath, msg + '\n' + 'x'.repeat(oversizedBytes));
 
-    const setReaction = vi.fn().mockResolvedValue(undefined);
+    mockRunContainerAgent.mockImplementation(
+      async (_g: unknown, input: { prompt: string }) => {
+        const match = input.prompt.match(/memory\/sessions\/([\d-]+\.md)/);
+        if (match) {
+          fs.writeFileSync(
+            path.join(sessDir, match[1]),
+            `---\nsession_id: sess-reset-big\ncreated_at: ${new Date().toISOString()}\nis_placeholder: false\n---\n\n# Summary\n`,
+          );
+        }
+        return { status: 'success', result: null };
+      },
+    );
+
     const deps = makeDeps({
       registeredGroups: () => ({ 'g@test': group }),
-      setReaction,
     });
 
     await processTaskIpc(
@@ -1048,19 +1059,19 @@ describe('input-size guard', () => {
       deps,
     );
 
-    // Container must not be launched
-    expect(mockRunContainerAgent).not.toHaveBeenCalled();
-    expect(setReaction).toHaveBeenCalledWith('g@test', '💭');
-
-    // Archive is still written (the guard doesn't block the archive)
-    const convDir = path.join(GROUPS_DIR, folder, 'conversations');
+    // Archive is written
     const archiveFiles = fs.readdirSync(convDir);
     expect(archiveFiles.some((f) => f.endsWith('-reset.md'))).toBe(true);
 
-    // Oversized placeholder summary is written
-    const sessDir = path.join(GROUPS_DIR, folder, 'memory', 'sessions');
+    // Container IS launched (throwaway uses the archive, not the raw JSONL)
+    expect(mockRunContainerAgent).toHaveBeenCalled();
+    const promptArg = mockRunContainerAgent.mock.calls[0][1].prompt as string;
+    expect(promptArg).toContain('conversations/');
+    expect(promptArg).not.toContain('.jsonl');
+
+    // No oversized placeholder
     const sessFiles = fs.readdirSync(sessDir);
-    expect(sessFiles.some((f) => f.endsWith('-oversized.md'))).toBe(true);
+    expect(sessFiles.some((f) => f.endsWith('-oversized.md'))).toBe(false);
   });
 
   it('spawn_throwaway_session: launches throwaway normally when archive already exists', async () => {

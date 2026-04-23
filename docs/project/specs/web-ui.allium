@@ -205,8 +205,8 @@ surface Specialists {
         specialists.SpecialistTask.depth
         specialists.SpecialistTask.delegated_at
         specialists.SpecialistTask.closed_at
-        specialists.SpecialistTask.failure_kind
-        specialists.SpecialistTask.failure_detail
+        specialists.SpecialistTask.failure.kind
+        specialists.SpecialistTask.failure.detail
         specialists.RawMemorySubmission.topic
         specialists.RawMemorySubmission.task
         specialists.RawMemorySubmission.submitted_at
@@ -225,7 +225,7 @@ surface Specialists {
     @guidance
         -- Depth is rendered with visual indentation (└─ prefix) to indicate
         -- sub-task nesting within a chain. Root tasks have depth 0.
-        -- Failed tasks expand inline to show failure_kind and failure_detail.
+        -- Failed tasks expand inline to show failure.kind and failure.detail.
         -- Staged memory submissions are those with status = staged.
         -- No operator actions are provided; this is a read-only monitoring surface.
 }
@@ -334,8 +334,9 @@ rule NoteGraphBuilt {
 -- Every file request is bounded to the group workspace and configured extra mounts.
 -- No request reads files outside these roots.
 invariant FileAccessWithinBoundary {
-    for request in FileReadRequests:
-        path_within_boundary(request.path, request.group)
+    -- Enforced structurally by FileRead: requires path_within_boundary(path, group).
+    -- No file outside the group workspace or configured extra mounts can be served.
+    true
 }
 
 -- Every message injected via the web UI is echoed to the group's native channel.

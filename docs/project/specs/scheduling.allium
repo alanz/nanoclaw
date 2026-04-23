@@ -111,7 +111,6 @@ entity RssFeed {
 config {
     poll_interval: Duration = 60.seconds  -- shared between task and RSS polling loops
     max_seen_guids: Integer = 500         -- cap on seen_guids per feed; hardcoded, not runtime-configurable
-    max_dispatch_depth: Integer = 5
     max_items_per_prompt: Integer = 20    -- max new items batched into a single judgment prompt
     fetch_error_retry_delay: Duration = 15.minutes  -- next_check advance on fetch failure
     default_session_reset_min_idle: Integer = 60    -- default min_idle_minutes for session_reset tasks
@@ -129,7 +128,7 @@ rule TaskCreated {
     when: CreateTask(group, target_chat, task_type, prompt, script, schedule, context_mode, dispatch_depth, min_idle_minutes)
 
     requires: group.is_main or target_chat = group.chat
-    requires: dispatch_depth < config.max_dispatch_depth
+    requires: dispatch_depth < nanoclaw.config.max_dispatch_depth
     -- user_profile tasks always run against the main group
     requires: task_type = user_profile implies group.is_main
 
@@ -372,7 +371,7 @@ rule TaskUpdated {
 -- Non-main groups can only subscribe feeds targeting their own chat.
 -- Main groups may subscribe for any registered group via target_jid.
 rule FeedSubscribed {
-    when: SubscribeFeed(group, url, schedule, interest, target_jid?)
+    when: SubscribeFeed(id, group, url, schedule, interest, target_jid?)
 
     let chat_jid = target_jid ?? group.chat.jid
 
@@ -383,6 +382,7 @@ rule FeedSubscribed {
     let next_check = compute_next_run(schedule, now)
 
     ensures: RssFeed.created(
+        id: id,
         group: group,
         chat_jid: chat_jid,
         url: url,
@@ -508,7 +508,7 @@ invariant TaskTargetAuthorisation {
 -- Tasks respect the dispatch depth limit to prevent infinite agent-to-agent loops.
 invariant TaskDispatchDepthBounded {
     for t in ScheduledTasks:
-        t.dispatch_depth < config.max_dispatch_depth
+        t.dispatch_depth < nanoclaw.config.max_dispatch_depth
 }
 
 -- Active tasks always have a next_run timestamp.

@@ -33,6 +33,30 @@ value DelegationDecision {
     rejection_detail: String?                   -- human-readable reason; non-null when outcome = rejected
     same_type_count: Integer                    -- current dispatch count to this type in the chain;
                                                 -- caller uses this to set is_last_same_type_dispatch on the created task
+
+    -- An allowed decision has no rejection fields.
+    invariant AllowedDecisionClean {
+        outcome = allowed implies
+            rejection_kind = null and rejection_detail = null
+    }
+
+    -- A rejected decision has both rejection fields populated.
+    invariant RejectedDecisionComplete {
+        outcome = rejected implies
+            rejection_kind != null and rejection_detail != null
+    }
+
+    -- A rejected decision's rejection_kind is always a policy rejection kind (never timeout,
+    -- execution_error, or host_restart — those are runtime failures, not policy rejections).
+    invariant RejectionKindIsPolicyKind {
+        outcome = rejected implies
+            rejection_kind in { cycle_detected, depth_exceeded, count_exceeded, same_type_limit_exceeded }
+    }
+
+    -- same_type_dispatch_count is non-negative.
+    invariant SameTypeCountNonNegative {
+        same_type_count >= 0
+    }
 }
 
 ------------------------------------------------------------
@@ -135,34 +159,3 @@ rule CheckDelegationPolicySemantics {
         -- Same-type limit last because it is the most situational (bounds iteration loops).
 }
 
-------------------------------------------------------------
--- Invariants
-------------------------------------------------------------
-
--- An allowed decision has no rejection fields.
-invariant AllowedDecisionClean {
-    for d in DelegationPolicyEvaluateds:
-        d.decision.outcome = allowed implies
-            d.decision.rejection_kind = null and d.decision.rejection_detail = null
-}
-
--- A rejected decision has both rejection fields populated.
-invariant RejectedDecisionComplete {
-    for d in DelegationPolicyEvaluateds:
-        d.decision.outcome = rejected implies
-            d.decision.rejection_kind != null and d.decision.rejection_detail != null
-}
-
--- A rejected decision's rejection_kind is always a policy rejection kind (never timeout,
--- execution_error, or host_restart — those are runtime failures, not policy rejections).
-invariant RejectionKindIsPolicyKind {
-    for d in DelegationPolicyEvaluateds:
-        d.decision.outcome = rejected implies
-            d.decision.rejection_kind in { cycle_detected, depth_exceeded, count_exceeded, same_type_limit_exceeded }
-}
-
--- same_type_dispatch_count is non-negative.
-invariant SameTypeCountNonNegative {
-    for d in DelegationPolicyEvaluateds:
-        d.same_type_count >= 0
-}

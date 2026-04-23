@@ -13,6 +13,7 @@
 --   - sqlite-vec extension mechanics (implementation detail)
 
 use "./nanoclaw.allium" as nanoclaw
+use "./specialists.allium" as specialists
 
 ------------------------------------------------------------
 -- Value Types
@@ -24,6 +25,58 @@ value MemorySearchResult {
     score: Decimal                      -- 0.0 – 1.0; hybrid of vector and keyword scores
     snippet: String                     -- short excerpt for display
 }
+
+-- Caller-supplied parameters for memory_hybrid_search.
+-- All fields are optional; the host fills in defaults from config when absent.
+value MemorySearchParams {
+    limit: Integer?                     -- cap on results returned (defaults to config.search_top_k)
+    min_score: Decimal?                 -- minimum hybrid score (defaults to config.min_search_score)
+    path_prefix: String?                -- restrict search to files under this path prefix
+    source: String?                     -- restrict search to files from a named source
+    include_content: Boolean?           -- whether to include full chunk content alongside snippets
+}
+
+-- Caller-supplied parameters for memory_list_files.
+-- All fields are optional; the host fills in defaults when absent.
+value MemoryListParams {
+    path_prefix: String?                -- restrict listing to files under this path prefix
+    source: String?                     -- restrict listing to files from a named source
+    limit: Integer?                     -- cap on files returned
+    order_by: String?                   -- mtime | path | size
+    parse_frontmatter: Boolean?         -- whether to parse and include YAML frontmatter (limit ≤ 50 when true)
+}
+
+------------------------------------------------------------
+-- Host-Side Helpers
+------------------------------------------------------------
+
+-- The following three black-box functions are implemented by the host process and
+-- invoked from request-response rules in ipc.allium. They are referenced by bare
+-- (unqualified) names because Allium does not support module-qualified references
+-- to free functions; the memory_ prefix marks the module boundary instead.
+--
+--   memory_hybrid_search(group_folder: String, query: String, params: MemorySearchParams)
+--     → list of MemorySearchResult
+--     Combines vector similarity (sqlite-vec cosine distance) and FTS5 keyword match,
+--     weighted by config.vector_score_weight and config.keyword_score_weight. Falls
+--     back to keyword-only search when the vector index is unavailable.
+--
+--   memory_get_file_content(group_folder: String, path: String, parse_frontmatter: Boolean)
+--     → file content (optionally with parsed frontmatter metadata)
+--     Reads a single indexed memory file by path. Returns the raw content plus
+--     optional frontmatter fields when parse_frontmatter = true.
+--
+--   memory_list_files(group_folder: String, params: MemoryListParams)
+--     → list of indexed files matching the filter
+--     Enumerates MemoryFile records for the group, applying path_prefix, source,
+--     order_by, and limit filters from the params.
+--
+-- All three helpers are read-only with respect to the memory index: they do not
+-- create, mutate, or remove MemoryFile or MemoryChunk entities. They are invoked
+-- synchronously during IPC poll processing (see ipc.allium rules
+-- HostFulfilledMemorySearchQuery, HostFulfilledMemoryGetQuery,
+-- HostFulfilledMemoryListQuery) and their return values are written directly into
+-- the ResponseFileWritten payload.
 
 ------------------------------------------------------------
 -- Entities
@@ -118,6 +171,41 @@ rule FileDiscovered {
     )
 }
 
+-- ---- Submission Indexing ----
+
+-- When a memory submission is accepted and the final file is new to the index,
+-- register and queue it for initial indexing.
+-- Mirrors FileDiscovered but triggered by the authoritative specialist handoff
+-- rather than the file watcher, ensuring the file is indexed at its permanent path.
+rule SubmittedMemoryFileDiscovered {
+    when: specialists.RawMemoryFileReady(group, path)
+
+    let content_hash = read_content_hash(path)
+
+    requires: not exists MemoryFile{group: group, path: path}
+
+    ensures: MemoryFile.created(
+        group: group,
+        path: path,
+        content_hash: content_hash,
+        status: pending
+    )
+}
+
+-- When a memory submission replaces a previously indexed file, update
+-- the hash and queue it for re-indexing.
+rule SubmittedMemoryFileUpdated {
+    when: specialists.RawMemoryFileReady(group, path)
+
+    let file = MemoryFile{group: group, path: path}
+    let content_hash = read_content_hash(path)
+
+    requires: exists file
+
+    ensures: file.content_hash = content_hash
+    ensures: file.status = pending
+}
+
 -- When a file is removed from the workspace, its chunks are deleted and the file is marked removed.
 rule FileRemoved {
     when: WorkspaceFileRemoved(group, path)
@@ -176,16 +264,38 @@ rule FileSynced {
 rule MemorySearched {
     when: AgentMemorySearch(group, query, top_k?)
 
-    let k = top_k ?? config.search_top_k
-    let results = hybrid_search(group, query, k, config.min_search_score,
-                                config.vector_score_weight, config.keyword_score_weight)
+    let params = MemorySearchParams{
+        limit: top_k ?? config.search_top_k,
+        min_score: config.min_search_score,
+        path_prefix: null,
+        source: null,
+        include_content: null
+    }
+    let results = memory_hybrid_search(group, query, params)
 
     ensures: MemorySearchCompleted(group: group, query: query, results: results)
 
     @guidance
-        -- hybrid_search combines vector similarity (sqlite-vec cosine distance)
-        -- and FTS5 keyword match, weighted by vector_score_weight and keyword_score_weight.
-        -- If the vector index is unavailable, falls back to keyword-only search.
+        -- memory_hybrid_search combines vector similarity (sqlite-vec cosine distance)
+        -- and FTS5 keyword match, weighted by config.vector_score_weight and
+        -- config.keyword_score_weight. If the vector index is unavailable, falls back
+        -- to keyword-only search. Returns a list of MemorySearchResult values.
+}
+
+-- An agent lists files in its group's memory workspace.
+rule MemoryListed {
+    when: AgentMemoryList(group, list_params?)
+
+    let params = list_params ?? MemoryListParams{
+        path_prefix: null,
+        source: null,
+        limit: null,
+        order_by: null,
+        parse_frontmatter: null
+    }
+    let files = memory_list_files(group, params)
+
+    ensures: MemoryListCompleted(group: group, files: files)
 }
 
 ------------------------------------------------------------

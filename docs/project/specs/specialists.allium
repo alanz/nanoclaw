@@ -145,6 +145,7 @@ entity SpecialistTask {
     -- State-dependent fields
     pending_sub_task: SpecialistTask when status = awaiting_sub_task
     result: String when status = completed
+    file_paths: List<String>? when status = completed  -- committed memory paths from deliver_specialist_result
     failure: TaskFailure when status = failed
 
     -- Relationships
@@ -760,11 +761,12 @@ rule SpecialistSessionEstablished {
 -- the conversation session is cleared, and the requester is notified.
 -- The container is destroyed; no result remains in its workspace.
 rule SpecialistTaskCompleted {
-    when: SpecialistDeliveredResult(task, result_text)
+    when: SpecialistDeliveredResult(task, result_text, file_paths?)
 
     requires: task.status = running
 
     ensures: task.result = result_text
+    ensures: task.file_paths = file_paths
     ensures: task.status = completed
     ensures: task.closed_at = now
     ensures:
@@ -1035,10 +1037,12 @@ rule MemorySubmissionAccepted {
 
     requires: submission.status = staged
 
+    let main_group = nanoclaw.Groups where is_main .first
+
     ensures: submission.final_path = final_path
     ensures: submission.status = accepted
     ensures: submission.accepted_at = now
-    ensures: RawMemoryFileReady(path: final_path)
+    ensures: RawMemoryFileReady(group: main_group, path: final_path)
 
     @guidance
         -- RawMemoryFileReady is consumed by the embedding layer (see memory.allium).
@@ -1187,8 +1191,8 @@ rule RestartExhaustionReported {
 invariant SpecialistDispatchMainGroupOnly {
     -- Encoded in rule AgentDispatchedSpecialist: requires author.is_main.
     -- Restated here to make the constraint explicit as an invariant.
-    for q in AgentDispatchesSpecialistTasks:
-        q.main_group.is_main
+    for task in SpecialistTasks:
+        task.requester_group != null implies task.requester_group.is_main
 }
 
 -- Specialist type names are unique.
@@ -1271,6 +1275,9 @@ deferred RecoveryDashboard         -- see: web-ui/recovery-dashboard.allium
 deferred RawMemoryFileReady        -- see: memory.allium
                                    -- consumed by the embedding layer; triggers chunk extraction
                                    -- and vector indexing for the file at the given path.
+                                   -- Parameters: group (the owning group, needed to locate the
+                                   -- MemoryFile in the group-scoped index), path (the final
+                                   -- permanent location of the raw memory file).
                                    -- Only fires after final_path is set (MemorySubmissionAccepted),
                                    -- ensuring chunks are indexed against their permanent path
 

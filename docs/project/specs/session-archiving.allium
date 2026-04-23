@@ -24,8 +24,9 @@
 --   - IPC task wire formats (see ipc.allium)
 --   - Content and structure of the SessionSummary (agent's discretion)
 
-use "./nanoclaw.allium" as core
+use "./nanoclaw.allium" as nanoclaw
 use "./container-claude-sdk.allium" as sdk
+use "./container-claude-shared.allium" as shared
 use "./scheduling.allium" as scheduling
 
 ------------------------------------------------------------
@@ -88,7 +89,7 @@ value ThrowawayFailureSignals {
 -- a placeholder marks the gap visibly rather than silently dropping it.
 entity ConversationArchive {
     session_id: String
-    group: core.Group
+    group: nanoclaw.Group
     path: String              -- /workspace/group/conversations/{date}-{HHmm}-{name}.md
     archived_at: Timestamp
     source_jsonl: String      -- JSONL file read to produce this archive
@@ -112,7 +113,7 @@ entity ConversationArchive {
 -- is_placeholder is true when the throwaway failed or the JSONL was missing.
 entity SessionSummary {
     session_id: String
-    group: core.Group
+    group: nanoclaw.Group
     path: String              -- /workspace/group/memory/sessions/{archive_datetime(session_id)}.md on initial run;
                               -- /workspace/group/memory/sessions/{archive_datetime(session_id)}-processed-at-{YYYY-MM-DD-HHmm}.md on retry;
                               -- placeholders retain their existing suffixes (-failed, -oversized, -missing, -empty).
@@ -132,7 +133,7 @@ entity SessionSummary {
 -- retry_count to 0 and gives the throwaway a fresh allocation of attempts.
 entity ThrowawaySession {
     for_session_id: String    -- ID of the session being summarised
-    group: core.Group
+    group: nanoclaw.Group
     -- Path to the file the throwaway container is given for summarisation:
     -- a ConversationArchive markdown transcript if one exists for the session,
     -- otherwise the raw JSONL. See preferred_source() for the selection rule.
@@ -205,7 +206,9 @@ config {
 -- raw transcript immediately, before the context is discarded.
 -- Reaction ⏳ signals that archiving is in progress.
 rule ArchiveOnPreCompact {
-    when: sdk.SdkPreCompact(session_id, group, jsonl_path)
+    when: sdk.SdkPreCompact(session_id, chat_jid, jsonl_path)
+
+    let group = nanoclaw.Group{chat: nanoclaw.Chat{jid: chat_jid}}
 
     requires: file_exists(jsonl_path)
 
@@ -219,7 +222,7 @@ rule ArchiveOnPreCompact {
         messages_since: null,
         trigger_type: compact
     )
-    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
+    ensures: shared.ReactionTask.created(chat_jid: group.chat.jid, emoji: "⏳")
 
     @guidance
         -- Same archiving logic as the existing PreCompact hook in container-claude-sdk.allium.
@@ -229,7 +232,9 @@ rule ArchiveOnPreCompact {
 
 -- If the JSONL is missing at PreCompact time, write a placeholder archive and log.
 rule ArchiveOnPreCompactJonlMissing {
-    when: sdk.SdkPreCompact(session_id, group, jsonl_path)
+    when: sdk.SdkPreCompact(session_id, chat_jid, jsonl_path)
+
+    let group = nanoclaw.Group{chat: nanoclaw.Chat{jid: chat_jid}}
 
     requires: not file_exists(jsonl_path)
 
@@ -243,11 +248,11 @@ rule ArchiveOnPreCompactJonlMissing {
         messages_since: null,
         trigger_type: compact
     )
-    ensures: core.HostLogRecorded(
+    ensures: nanoclaw.HostLogRecorded(
         level: error,
         text: "Session JSONL missing at PreCompact for session {session_id}: {jsonl_path}"
     )
-    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
+    ensures: shared.ReactionTask.created(chat_jid: group.chat.jid, emoji: "⏳")
 }
 
 -- After compaction completes, start a throwaway session to produce the SessionSummary.
@@ -255,8 +260,9 @@ rule ArchiveOnPreCompactJonlMissing {
 -- The 💭 reaction moves to ThrowawaySessionSucceeded — it fires when the summary is
 -- done, not when compaction finishes.
 rule StartThrowawayOnPostCompact {
-    when: sdk.SdkPostCompact(session_id, group, jsonl_path)
+    when: sdk.SdkPostCompact(session_id, chat_jid, jsonl_path)
 
+    let group = nanoclaw.Group{chat: nanoclaw.Chat{jid: chat_jid}}
     let throwaway_group_id = new_throwaway_group_id()
     let archive_exists = exists ConversationArchive{ session_id: session_id, is_placeholder: false }
 
@@ -281,7 +287,7 @@ rule StartThrowawayOnPostCompact {
         was_manual_retry: false,
         trigger_type: compact
     )
-    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "📝")
+    ensures: shared.ReactionTask.created(chat_jid: group.chat.jid, emoji: "📝")
 
     @guidance
         -- new_throwaway_group_id() generates a stable UUID-based identifier of the
@@ -301,15 +307,16 @@ rule StartThrowawayOnPostCompact {
 -- ceiling so the automatic retry loop treats this as already exhausted;
 -- recovery requires a ConversationArchive to appear (then a manual retry).
 rule ThrowawaySessionBlockedByInputSizeOnPostCompact {
-    when: sdk.SdkPostCompact(session_id, group, jsonl_path)
+    when: sdk.SdkPostCompact(session_id, chat_jid, jsonl_path)
 
+    let group = nanoclaw.Group{chat: nanoclaw.Chat{jid: chat_jid}}
     let throwaway_group_id = new_throwaway_group_id()
     let archive_exists = exists ConversationArchive{ session_id: session_id, is_placeholder: false }
 
     requires: not archive_exists
     requires: jsonl_size_tokens(jsonl_path) > config.context_limit_tokens * config.max_input_fraction
 
-    let main_group = core.Groups where is_main = true .first
+    let main_group = nanoclaw.Groups where is_main = true .first
 
     ensures: ThrowawaySession.created(
         for_session_id: session_id,
@@ -336,14 +343,14 @@ rule ThrowawaySessionBlockedByInputSizeOnPostCompact {
         created_at: now,
         is_placeholder: true
     )
-    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "💭")
+    ensures: shared.ReactionTask.created(chat_jid: group.chat.jid, emoji: "💭")
     ensures:
         if exists main_group:
-            core.HostMessagePosted(
+            nanoclaw.HostMessagePosted(
                 target_chat: main_group.chat,
                 text: throwaway_input_too_large_notice(session_id, jsonl_path)
             )
-    ensures: core.HostLogRecorded(
+    ensures: nanoclaw.HostLogRecorded(
         level: error,
         text: "Throwaway summarisation refused for session {session_id}: "
             + "raw JSONL exceeds {config.max_input_fraction} of context_limit_tokens "
@@ -384,9 +391,9 @@ rule ThrowawaySessionBlockedByInputSizeOnPostCompact {
 -- archived_at. Otherwise it contains the full transcript. This prevents the
 -- same content from appearing in multiple archives for the same session.
 rule ArchiveAndStartThrowawayOnReset {
-    when: core.SessionCommandApplied(group, command: reset)
+    when: nanoclaw.SessionCommandApplied(group, command: reset)
 
-    let cs = core.ConversationSession{ group: group }
+    let cs = nanoclaw.ConversationSession{ group: group }
     let jsonl_path = session_jsonl_path(cs)
 
     requires: exists cs
@@ -429,7 +436,7 @@ rule ArchiveAndStartThrowawayOnReset {
         was_manual_retry: false,
         trigger_type: reset
     )
-    ensures: sdk.ReactionTask.created(chat_jid: group.chat_jid, emoji: "⏳")
+    ensures: shared.ReactionTask.created(chat_jid: group.chat.jid, emoji: "⏳")
     ensures: not exists cs
 
     @guidance
@@ -450,9 +457,9 @@ rule ArchiveAndStartThrowawayOnReset {
 -- If /reset is issued on a session with messages but the JSONL is missing,
 -- write placeholder files, log the error, and still clear the session.
 rule ResetJonlMissing {
-    when: core.SessionCommandApplied(group, command: reset)
+    when: nanoclaw.SessionCommandApplied(group, command: reset)
 
-    let cs = core.ConversationSession{ group: group }
+    let cs = nanoclaw.ConversationSession{ group: group }
 
     requires: exists cs
     requires: cs.message_count > 0
@@ -475,7 +482,7 @@ rule ResetJonlMissing {
         created_at: now,
         is_placeholder: true
     )
-    ensures: core.HostLogRecorded(
+    ensures: nanoclaw.HostLogRecorded(
         level: error,
         text: "Session JSONL missing at /reset for session {cs.session_id}"
     )
@@ -485,9 +492,9 @@ rule ResetJonlMissing {
 -- If /reset is issued on an empty session (no messages), write placeholder files
 -- and log. The user issued a command — it must not disappear silently.
 rule ResetOnEmptySession {
-    when: core.SessionCommandApplied(group, command: reset)
+    when: nanoclaw.SessionCommandApplied(group, command: reset)
 
-    let cs = core.ConversationSession{ group: group }
+    let cs = nanoclaw.ConversationSession{ group: group }
 
     requires: exists cs
     requires: cs.message_count = 0
@@ -509,7 +516,7 @@ rule ResetOnEmptySession {
         created_at: now,
         is_placeholder: true
     )
-    ensures: core.HostLogRecorded(
+    ensures: nanoclaw.HostLogRecorded(
         level: warning,
         text: "Reset issued on empty session for group {group.folder}"
     )
@@ -526,7 +533,7 @@ rule ResetOnEmptySession {
 rule ScheduledResetBridged {
     when: scheduling.SessionResetRequested(group, chat)
 
-    ensures: core.SessionCommandApplied(group: group, command: reset)
+    ensures: nanoclaw.SessionCommandApplied(group: group, command: reset)
 
     @guidance
         -- The scheduler writes an IPC task file of type request_session_archive
@@ -561,7 +568,7 @@ rule ThrowawaySessionSucceeded {
             created_at: now,
             is_placeholder: false
         )
-        ensures: sdk.ReactionTask.created(chat_jid: throwaway.group.chat_jid, emoji: "💭")
+        ensures: shared.ReactionTask.created(chat_jid: throwaway.group.chat.jid, emoji: "💭")
 
     @guidance
         -- The throwaway is a fresh agent invocation: no session_id, not resumed.
@@ -609,7 +616,7 @@ rule ThrowawaySessionFailedRetryable {
         ensures: throwaway.status = pending
         ensures: throwaway.retry_count = throwaway.retry_count + 1
         ensures: throwaway.failure_signals = observe_failure_signals(throwaway.log_path)
-        ensures: core.HostLogRecorded(
+        ensures: nanoclaw.HostLogRecorded(
             level: warning,
             text: "Throwaway summarisation failed for session {throwaway.for_session_id}, "
                 + "retry {throwaway.retry_count + 1} of {config.max_throwaway_retries}"
@@ -631,7 +638,7 @@ rule ThrowawaySessionFailedRetryable {
 rule ThrowawaySessionFailedExhausted {
     when: ThrowawayContainerExited(exited_session_id, success: false)
 
-    let main_group = core.Groups where is_main = true .first
+    let main_group = nanoclaw.Groups where is_main = true .first
 
     for throwaway in ThrowawaySession where for_session_id = exited_session_id and status = running:
 
@@ -649,14 +656,14 @@ rule ThrowawaySessionFailedExhausted {
             created_at: now,
             is_placeholder: true
         )
-        ensures: sdk.ReactionTask.created(chat_jid: throwaway.group.chat_jid, emoji: "💭")
+        ensures: shared.ReactionTask.created(chat_jid: throwaway.group.chat.jid, emoji: "💭")
         ensures:
             if exists main_group:
-                core.HostMessagePosted(
+                nanoclaw.HostMessagePosted(
                     target_chat: main_group.chat,
                     text: throwaway_retry_exhausted_notice(throwaway, config.max_throwaway_retries)
                 )
-        ensures: core.HostLogRecorded(
+        ensures: nanoclaw.HostLogRecorded(
             level: error,
             text: "Throwaway summarisation failed for session {throwaway.for_session_id} "
                 + "after {config.max_throwaway_retries} retries; placeholder summary written"
@@ -816,7 +823,7 @@ rule RecoverOrphanedPendingThrowaways {
 -- subsequently locate and re-queue it.
 rule RecoverOrphanedFailedPlaceholders {
     when: NanoclawStarted(_)
-    for group in core.Groups:
+    for group in nanoclaw.Groups:
         for placeholder in legacy_failed_placeholders(group):
 
             requires: not exists ThrowawaySession{ for_session_id: placeholder.session_id }
@@ -902,7 +909,7 @@ rule RecoverOrphanedFailedPlaceholders {
 -- this spec only through this trigger and through the retrospective signals
 -- in ThrowawayFailureSignals.
 
--- RetrySessionSummaryRequested(group: core.Group, session_id: String)
+-- RetrySessionSummaryRequested(group: nanoclaw.Group, session_id: String)
 -- Emitted when a manual retry of a failed session summary is requested, either
 -- by the user via the /retry-summary chat command in the main group, or by the
 -- agent calling the retry_session_summary container skill MCP tool (typically

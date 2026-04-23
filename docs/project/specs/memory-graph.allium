@@ -183,7 +183,7 @@ rule ResearchDispatched {
 rule SynthesisCandidatesScanned {
     when: WeeklySynthesisScan(group)
 
-    requires: group = nanoclaw.Groups.main
+    requires: group.is_main
 
     let tag_clusters = dense_tag_clusters(
         group: group,
@@ -379,9 +379,9 @@ invariant SynthesisesWithinActiveGraph {
 -- graph is a single shared resource; other registered groups do not maintain graphs.
 invariant NotesCreatedByMainAgentOnly {
     for note in MemoryNotes:
-        note.group = nanoclaw.Groups.main
+        note.group.is_main
     for note in SynthesisNotes:
-        note.group = nanoclaw.Groups.main
+        note.group.is_main
 }
 
 -- The researcher specialist container has no access to any existing group memory,

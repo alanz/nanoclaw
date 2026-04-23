@@ -33,6 +33,7 @@
 --   supports_agent_teams:        true  (--agents flag)
 
 use "./container-protocol.allium" as protocol
+use "./container-claude-shared.allium" as shared
 
 ------------------------------------------------------------
 -- Config
@@ -53,26 +54,6 @@ config {
 entity CliQuerySession {
     turn: protocol.QueryTurn
     session_id: String
-}
-
--- A reaction emoji written to the IPC task queue by the container runtime.
--- Processed by the host IPC watcher, which applies it to the last incoming message in the chat.
--- Used by compaction hooks to signal state to the user without going through the MCP tool surface.
-entity ReactionTask {
-    chat_jid: String
-    emoji: String
-    queued_at: Timestamp
-}
-
--- An archived transcript produced before context compaction.
--- Captures all user and assistant text turns up to the compaction point as Markdown.
--- The filename is derived from the session summary index when available;
--- a HHmm timestamp fallback is used otherwise.
-entity ArchivedTranscript {
-    session: CliQuerySession
-    path: String                    -- /workspace/group/conversations/{date}-{title}.md
-    title: String?                  -- from session summary index; null if unavailable
-    archived_at: Timestamp
 }
 
 ------------------------------------------------------------
@@ -252,14 +233,15 @@ rule PreCompactTriggered {
     when: CliPreCompactEvent(turn)
 
     requires: turn.status = active
+    requires: turn.session_id_out != null
 
-    ensures: ArchivedTranscript.created(
-        session: turn.session,
+    ensures: shared.ArchivedTranscript.created(
+        session_id: turn.session_id_out,
         path: "/workspace/group/conversations/{date}-{title}.md",
-        title: session_summary_if_available(turn.session),
+        title: session_summary_if_available(turn.session_id_out),
         archived_at: now
     )
-    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "⏳")
+    ensures: shared.ReactionTask.created(chat_jid: turn.chat_jid, emoji: "⏳")
 
     @guidance
         -- The transcript is parsed from the CLI's output stream or session files.
@@ -278,7 +260,7 @@ rule PostCompactTriggered {
 
     requires: turn.status = active
 
-    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "💭")
+    ensures: shared.ReactionTask.created(chat_jid: turn.chat_jid, emoji: "💭")
 }
 
 ------------------------------------------------------------
@@ -287,7 +269,9 @@ rule PostCompactTriggered {
 
 open question "The `[1m]` extended-context model shorthand is SDK-specific. What is the CLI equivalent for selecting the 1M context window? Does `--model sonnet` use the maximum available context, or is there a separate flag?"
 
-open question "`ReactionTask` and `ArchivedTranscript` are duplicated between container-claude-sdk.allium and container-claude-cli.allium. Should they be extracted to a container-claude-shared.allium that both import?"
+-- Resolved: `ReactionTask` and `ArchivedTranscript` have been extracted to
+-- container-claude-shared.allium; both container-claude-sdk.allium and
+-- container-claude-cli.allium import them via `use "./container-claude-shared.allium" as shared`.
 
 -- Resolved: `claude` is installed in the container image via
 -- `npm install -g @anthropic-ai/claude-code` in the Dockerfile.

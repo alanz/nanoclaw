@@ -1,0 +1,35 @@
+-- allium: 3
+-- container-claude-shared.allium
+--
+-- Entity types shared by the Claude Agent SDK and CLI container implementations.
+-- Both container-claude-sdk.allium and container-claude-cli.allium import this spec.
+--
+-- Scope: shared container entity types
+-- Includes: ReactionTask, ArchivedTranscript
+-- Excludes:
+--   - SDK-specific session types (see container-claude-sdk.allium)
+--   - CLI-specific session types (see container-claude-cli.allium)
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A reaction emoji written to the IPC task queue by the container runtime.
+-- Processed by the host IPC watcher, which applies it to the last incoming message in the chat.
+-- Used by compaction hooks to signal state to the user without going through the MCP tool surface.
+entity ReactionTask {
+    chat_jid: String
+    emoji: String
+    queued_at: Timestamp
+}
+
+-- An archived transcript produced before context compaction.
+-- Captures all user and assistant text turns up to the compaction point as Markdown.
+-- The filename is derived from the session summary index when available;
+-- a HHmm timestamp fallback is used otherwise.
+entity ArchivedTranscript {
+    session_id: String
+    path: String                    -- /workspace/group/conversations/{date}-{title}.md
+    title: String?                  -- from session summary index; null if unavailable
+    archived_at: Timestamp
+}

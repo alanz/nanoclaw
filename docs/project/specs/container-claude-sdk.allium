@@ -22,6 +22,7 @@
 --   supports_agent_teams:        true  (TeamCreate/TeamDelete SDK tools)
 
 use "./container-protocol.allium" as protocol
+use "./container-claude-shared.allium" as shared
 
 ------------------------------------------------------------
 -- Config
@@ -43,26 +44,6 @@ config {
 entity QuerySession {
     turn: protocol.QueryTurn
     session_id: String
-}
-
--- A reaction emoji written to the IPC task queue by the container runtime.
--- Processed by the host IPC watcher, which applies it to the last incoming message in the chat.
--- Used by compaction hooks to signal state to the user without going through the MCP tool surface.
-entity ReactionTask {
-    chat_jid: String
-    emoji: String
-    queued_at: Timestamp
-}
-
--- An archived transcript produced by the PreCompact hook before context compaction.
--- Captures all user and assistant text turns up to the compaction point as Markdown.
--- The filename is derived from the session summary index when available;
--- a HHmm timestamp fallback is used otherwise.
-entity ArchivedTranscript {
-    session: QuerySession
-    path: String                    -- /workspace/group/conversations/{date}-{title}.md
-    title: String?                  -- from session summary index; null if unavailable
-    archived_at: Timestamp
 }
 
 ------------------------------------------------------------
@@ -198,17 +179,19 @@ rule UnknownSlashCommandFallthrough {
 -- Before the SDK compacts the conversation, the full transcript is archived to disk
 -- and an hourglass reaction signals compaction is in progress.
 rule PreCompactTriggered {
-    when: SdkPreCompact(turn)
+    when: SdkPreCompact(session_id, chat_jid, jsonl_path)
 
-    requires: turn.status = active
+    let qs = QuerySession{session_id: session_id}
 
-    ensures: ArchivedTranscript.created(
-        session: turn.session,
+    requires: qs.turn.status = active
+
+    ensures: shared.ArchivedTranscript.created(
+        session_id: qs.session_id,
         path: "/workspace/group/conversations/{date}-{title}.md",
-        title: session_summary_if_available(turn.session),
+        title: session_summary_if_available(qs.session_id),
         archived_at: now
     )
-    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "⏳")
+    ensures: shared.ReactionTask.created(chat_jid: chat_jid, emoji: "⏳")
 
     @guidance
         -- The transcript is parsed from the SDK's transcript_path (JSONL format).
@@ -222,11 +205,13 @@ rule PreCompactTriggered {
 
 -- After the SDK completes context compaction, a thought-bubble reaction confirms success.
 rule PostCompactTriggered {
-    when: SdkPostCompact(turn)
+    when: SdkPostCompact(session_id, chat_jid, jsonl_path)
 
-    requires: turn.status = active
+    let qs = QuerySession{session_id: session_id}
 
-    ensures: ReactionTask.created(chat_jid: turn.chat_jid, emoji: "💭")
+    requires: qs.turn.status = active
+
+    ensures: shared.ReactionTask.created(chat_jid: chat_jid, emoji: "💭")
 }
 
 ------------------------------------------------------------

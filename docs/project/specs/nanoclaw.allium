@@ -154,6 +154,7 @@ entity Group {
 entity ConversationSession {
     group: Group
     session_id: String
+    message_count: Integer
 }
 
 -- A group whose agent invocation is queued because the system is at capacity.
@@ -612,21 +613,22 @@ rule AgentSessionClosed {
 -- When an agent session closes successfully, emit a group-scoped event carrying the new session ID.
 -- This gives downstream ConversationSession rules a direct `group` binding to look up against.
 rule AgentSessionCompletionDispatched {
-    when: AgentSessionCompleted(agent_session, new_session_id)
+    when: AgentSessionCompleted(agent_session, new_session_id, message_count)
 
     requires: agent_session.status = closed
 
-    ensures: GroupAgentCompleted(group: agent_session.group, new_session_id: new_session_id)
+    ensures: GroupAgentCompleted(group: agent_session.group, new_session_id: new_session_id, message_count: message_count)
 }
 
 -- When an agent completes successfully, upsert the conversation session for the group.
 -- Creates on first successful run; updates session_id on subsequent runs.
 rule ConversationSessionUpserted {
-    when: GroupAgentCompleted(group, new_session_id)
+    when: GroupAgentCompleted(group, new_session_id, message_count)
 
     ensures: ConversationSession.created(
         group: group,
-        session_id: new_session_id
+        session_id: new_session_id,
+        message_count: message_count
     )
     @guidance
         -- In practice this is an INSERT OR REPLACE on (group_folder, session_id).

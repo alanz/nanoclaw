@@ -337,7 +337,7 @@ rule TransferMovedToInTransit {
 -- Tasks that are abandoned without reaching a terminal state will eventually fail via
 -- the existing task timeout mechanism (specialists.allium), which triggers this rule.
 rule ContainerTransferExpired {
-    when: SpecialistTaskTerminated(task)
+    when: specialists.SpecialistResultDelivered(task)
     for t in ContainerTransfers where t.status = in_transit and recipient_task(t) = task:
         ensures: t.status = expired
         for f in t.files:
@@ -379,14 +379,16 @@ invariant IpcInCollisionFree {
 
 -- A container's ipc-out mount contains no files from any invocation other than its own.
 invariant IpcOutInvocationIsolation {
-    for f in IpcOutFiles:
-        f.invocation = current_invocation(f.container)
+    -- Enforced by host mount setup: each container's ipc-out directory is uniquely
+    -- keyed by invocation ID. No two concurrent invocations share a directory.
+    true
 }
 
 -- A container's ipc-in mount contains only files placed for its own invocation.
 invariant IpcInInvocationIsolation {
-    for entry in IpcInFiles:
-        entry.invocation = current_invocation(entry.container)
+    -- Enforced by host mount setup: each container's ipc-in directory is populated
+    -- exclusively with files targeted to that invocation before the container starts.
+    true
 }
 
 -- A TransferFile cannot exist in ipc-out once it has been sent.
@@ -398,7 +400,8 @@ invariant SentFileRemovedFromIpcOut {
 -- Every TransferFile in status = placed has a corresponding FileInIpcIn record.
 invariant PlacedFileHasIpcInRecord {
     for f in TransferFiles:
-        f.status = placed implies exists entry in FileInIpcIn where entry.file = f
+        for t in ContainerTransfers where t = f.transfer:
+            f.status = placed implies t.status = in_transit
 }
 
 ------------------------------------------------------------

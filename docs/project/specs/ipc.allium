@@ -26,6 +26,7 @@
 
 use "./nanoclaw.allium" as nanoclaw
 use "./session-archiving.allium" as session_archiving
+use "./memory.allium" as memory
 
 ------------------------------------------------------------
 -- Enumerations
@@ -111,7 +112,7 @@ entity IpcQuery {
 ------------------------------------------------------------
 
 config {
-    ipc_poll_interval: Integer = 1000      -- host polling cadence for IPC directories (milliseconds)
+    host_ipc_poll_interval: Integer = 1000 -- host polling cadence for IPC directories (milliseconds)
     query_timeout: Duration = 15.seconds   -- default timeout for transcript + memory queries
     eval_timeout: Duration = 180.seconds   -- timeout for skill_eval (longer: runs a full agent)
     -- send_file paths must be under this prefix. Value equals
@@ -147,7 +148,7 @@ rule AgentSentMessage {
     requires: author.is_main or chat_jid = own_chat_jid(author)
 
     ensures: nanoclaw.Message.created(
-        chat: Chat{jid: chat_jid},
+        chat: nanoclaw.Chat{jid: chat_jid},
         content: text,
         sent_at: now,
         is_from_me: true,
@@ -170,7 +171,7 @@ rule AgentSentFile {
 
     requires: author.is_main or chat_jid = own_chat_jid(author)
 
-    ensures: FileSent(chat: Chat{jid: chat_jid}, path: file_path, caption: caption)
+    ensures: FileSent(chat: nanoclaw.Chat{jid: chat_jid}, path: file_path, caption: caption)
 
     @guidance
         -- file_path must be an absolute path under /workspace/ipc-out/ (config.ipc_out_container_path
@@ -193,7 +194,7 @@ rule AgentSetReaction {
 
     requires: author.is_main or jid = own_chat_jid(author)
 
-    ensures: ReactionSet(chat: Chat{jid: jid}, emoji: emoji)
+    ensures: ReactionSet(chat: nanoclaw.Chat{jid: jid}, emoji: emoji)
 
     @guidance
         -- The reaction is applied to the last incoming message tracked by the channel
@@ -235,10 +236,11 @@ rule AgentScheduledTask {
     requires: valid_schedule(schedule)
     requires: task_type = session_reset or task_type = user_profile or prompt != null
 
-    ensures: scheduling.TaskCreated(
-        group: Group{folder: author.group_folder},
-        target_chat: Chat{jid: target_jid},
+    ensures: scheduling.CreateTask(
+        group: nanoclaw.Group{folder: author.group_folder},
+        target_chat: nanoclaw.Chat{jid: target_jid},
         prompt: prompt,
+        script: script,
         schedule: schedule,
         context_mode: context_mode,
         dispatch_depth: author.dispatch_depth + 1,
@@ -283,7 +285,7 @@ rule DelegationObserved {
     -- does not use them — its requires clauses fully constrain when it fires.
     when: AgentMcpCall(author, "schedule_task", task_id, target_jid, prompt?, schedule, context_mode, script?, task_type?, min_idle_minutes?)
 
-    let sub_group = nanoclaw.Group{chat: nanoclaw.Chat{jid: target_jid}}
+    let sub_group = nanoclaw.Group{chat: nanoclaw.nanoclaw.Chat{jid: target_jid}}
 
     requires: author.is_main
     requires: target_jid != own_chat_jid(author)
@@ -307,7 +309,7 @@ rule AgentPausedTask {
     requires: exists task
     requires: author.is_main or task.group.folder = author.group_folder
 
-    ensures: scheduling.TaskPaused(requesting_group: Group{folder: author.group_folder}, task: task)
+    ensures: scheduling.PauseTask(requesting_group: nanoclaw.Group{folder: author.group_folder}, task: task)
 }
 
 -- An agent resumes a paused task.
@@ -319,7 +321,7 @@ rule AgentResumedTask {
     requires: exists task
     requires: author.is_main or task.group.folder = author.group_folder
 
-    ensures: scheduling.TaskResumed(requesting_group: Group{folder: author.group_folder}, task: task)
+    ensures: scheduling.ResumeTask(requesting_group: nanoclaw.Group{folder: author.group_folder}, task: task)
 }
 
 -- An agent cancels a task.
@@ -331,7 +333,7 @@ rule AgentCancelledTask {
     requires: exists task
     requires: author.is_main or task.group.folder = author.group_folder
 
-    ensures: scheduling.TaskCancelled(requesting_group: Group{folder: author.group_folder}, task: task)
+    ensures: scheduling.CancelTask(requesting_group: nanoclaw.Group{folder: author.group_folder}, task: task)
 }
 
 -- An agent updates an existing task's prompt or schedule.
@@ -345,8 +347,8 @@ rule AgentUpdatedTask {
     requires: author.is_main or task.group.folder = author.group_folder
     requires: new_schedule = null or valid_schedule(new_schedule)
 
-    ensures: scheduling.TaskUpdated(
-        requesting_group: Group{folder: author.group_folder},
+    ensures: scheduling.UpdateTask(
+        requesting_group: nanoclaw.Group{folder: author.group_folder},
         task: task,
         new_prompt: new_prompt ?? task.prompt,
         new_schedule: new_schedule ?? task.schedule
@@ -364,13 +366,13 @@ rule AgentSubscribedFeed {
     requires: author.is_main or target = own_chat_jid(author)
     requires: valid_schedule(feed_schedule_type, feed_schedule_value)
 
-    ensures: scheduling.FeedSubscribed(
-        group: Group{folder: author.group_folder},
-        feed_id: feed_id,
-        feed_url: feed_url,
-        feed_schedule_type: feed_schedule_type,
-        feed_schedule_value: feed_schedule_value,
-        feed_interest: feed_interest
+    ensures: scheduling.SubscribeFeed(
+        group: nanoclaw.Group{folder: author.group_folder},
+        id: feed_id,
+        url: feed_url,
+        schedule: scheduling.Schedule{type: feed_schedule_type, value: feed_schedule_value},
+        interest: feed_interest,
+        target_jid: target_jid
     )
 
     @guidance
@@ -399,8 +401,8 @@ rule AgentUnsubscribedFeed {
     requires: exists feed
     requires: author.is_main or feed.group.folder = author.group_folder
 
-    ensures: scheduling.FeedCancelled(
-        group: Group{folder: author.group_folder},
+    ensures: scheduling.CancelFeed(
+        requesting_group: nanoclaw.Group{folder: author.group_folder},
         feed: feed
     )
 }
@@ -414,8 +416,8 @@ rule AgentPausedFeed {
     requires: exists feed
     requires: author.is_main or feed.group.folder = author.group_folder
 
-    ensures: scheduling.FeedPaused(
-        requesting_group: Group{folder: author.group_folder},
+    ensures: scheduling.PauseFeed(
+        requesting_group: nanoclaw.Group{folder: author.group_folder},
         feed: feed
     )
 }
@@ -429,8 +431,8 @@ rule AgentResumedFeed {
     requires: exists feed
     requires: author.is_main or feed.group.folder = author.group_folder
 
-    ensures: scheduling.FeedResumed(
-        requesting_group: Group{folder: author.group_folder},
+    ensures: scheduling.ResumeFeed(
+        requesting_group: nanoclaw.Group{folder: author.group_folder},
         feed: feed
     )
 }
@@ -446,7 +448,7 @@ rule AgentRegisteredGroup {
     requires: author.is_main
 
     ensures: nanoclaw.GroupRegistered(
-        chat: Chat{jid: jid},
+        chat: nanoclaw.Chat{jid: jid},
         folder: folder,
         trigger_pattern: trigger,
         is_main: false,   -- IPC can never elevate a group to main
@@ -467,7 +469,7 @@ rule AgentSetGroupTrusted {
 
     requires: author.is_main
 
-    ensures: nanoclaw.Group{chat: Chat{jid: jid}}.is_trusted = trusted
+    ensures: nanoclaw.Group{chat: nanoclaw.Chat{jid: jid}}.is_trusted = trusted
 }
 
 -- Only the main group agent may start a Claude Code remote control session.
@@ -477,7 +479,7 @@ rule AgentStartedRemoteControl {
 
     requires: author.is_main
 
-    ensures: RemoteControlStarted(chat: Chat{jid: own_chat_jid(author)})
+    ensures: RemoteControlStarted(chat: nanoclaw.Chat{jid: own_chat_jid(author)})
 }
 
 -- Only the main group agent may stop the active remote control session.
@@ -641,6 +643,16 @@ rule HostFulfilledMemorySearchQuery {
     when: MemorySearchQueryIssued(author, request_id, query, search_params)
 
     let q = IpcQuery{request_id: request_id}
+    -- search_params arrives as a raw payload structure from the agent's IPC file.
+    -- Shape it into the memory module's typed value so the helper's expected input
+    -- contract is explicit at the call site.
+    let params = memory.MemorySearchParams{
+        limit: search_params.limit,
+        min_score: search_params.min_score,
+        path_prefix: search_params.path_prefix,
+        source: search_params.source,
+        include_content: search_params.include_content
+    }
 
     requires: exists q
     requires: q.status = pending
@@ -648,13 +660,17 @@ rule HostFulfilledMemorySearchQuery {
     ensures: q.status = fulfilled
     ensures: ResponseFileWritten(
         request_id: request_id,
-        payload: memory.hybrid_search(author.group_folder, query, search_params)
+        payload: memory_hybrid_search(author.group_folder, query, params)
     )
 
     @guidance
+        -- memory_hybrid_search is a host-side helper (see memory.allium for the documented
+        -- contract). It is referenced as an unqualified black-box function because Allium
+        -- does not support module-qualified free-function references; the memory_ prefix
+        -- marks the boundary instead of an import alias.
         -- If memory search is not enabled (MEMORY_SEARCH_ENABLED = false) or the group
         -- has no memory manager, the response payload is { error: "Memory search not available" }.
-        -- search_params may include: limit?, min_score?, path_prefix?, source?, include_content?
+        -- search_params fields: limit?, min_score?, path_prefix?, source?, include_content?
         --
         -- Specialist containers: memory_search, memory_get, and memory_list are not registered
         -- in the specialist container MCP server (gated by isSpecialist at startup). Specialists
@@ -687,7 +703,7 @@ rule HostFulfilledMemoryGetQuery {
     ensures: q.status = fulfilled
     ensures: ResponseFileWritten(
         request_id: request_id,
-        payload: memory.get_file_content(author.group_folder, path, parse_frontmatter)
+        payload: memory_get_file_content(author.group_folder, path, parse_frontmatter)
     )
 }
 
@@ -712,6 +728,16 @@ rule HostFulfilledMemoryListQuery {
     when: MemoryListQueryIssued(author, request_id, list_params)
 
     let q = IpcQuery{request_id: request_id}
+    -- list_params arrives as a raw payload structure from the agent's IPC file.
+    -- Shape it into the memory module's typed value so the helper's expected input
+    -- contract is explicit at the call site.
+    let params = memory.MemoryListParams{
+        path_prefix: list_params.path_prefix,
+        source: list_params.source,
+        limit: list_params.limit,
+        order_by: list_params.order_by,
+        parse_frontmatter: list_params.parse_frontmatter
+    }
 
     requires: exists q
     requires: q.status = pending
@@ -719,7 +745,7 @@ rule HostFulfilledMemoryListQuery {
     ensures: q.status = fulfilled
     ensures: ResponseFileWritten(
         request_id: request_id,
-        payload: memory.list_files(author.group_folder, list_params)
+        payload: memory_list_files(author.group_folder, params)
     )
 }
 

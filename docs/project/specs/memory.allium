@@ -20,6 +20,11 @@ use "./specialists.allium" as specialists
 ------------------------------------------------------------
 
 -- A scored search result returned to the querying agent.
+-- Return type of the opaque memory_hybrid_search black-box function (see the
+-- Host-Side Helpers comment block below). Allium does not support module-qualified
+-- references to free functions, so this value type cannot be formally referenced
+-- from rules even though MemorySearched binds its results.
+-- allium-ignore allium.definition.unused
 value MemorySearchResult {
     chunk: MemoryChunk
     score: Decimal                      -- 0.0 – 1.0; hybrid of vector and keyword scores

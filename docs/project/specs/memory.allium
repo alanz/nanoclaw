@@ -13,7 +13,6 @@
 --   - sqlite-vec extension mechanics (implementation detail)
 
 use "./nanoclaw.allium" as nanoclaw
-use "./specialists.allium" as specialists
 
 ------------------------------------------------------------
 -- Value Types
@@ -176,41 +175,6 @@ rule FileDiscovered {
     )
 }
 
--- ---- Submission Indexing ----
-
--- When a memory submission is accepted and the final file is new to the index,
--- register and queue it for initial indexing.
--- Mirrors FileDiscovered but triggered by the authoritative specialist handoff
--- rather than the file watcher, ensuring the file is indexed at its permanent path.
-rule SubmittedMemoryFileDiscovered {
-    when: specialists.RawMemoryFileReady(group, path)
-
-    let content_hash = read_content_hash(path)
-
-    requires: not exists MemoryFile{group: group, path: path}
-
-    ensures: MemoryFile.created(
-        group: group,
-        path: path,
-        content_hash: content_hash,
-        status: pending
-    )
-}
-
--- When a memory submission replaces a previously indexed file, update
--- the hash and queue it for re-indexing.
-rule SubmittedMemoryFileUpdated {
-    when: specialists.RawMemoryFileReady(group, path)
-
-    let file = MemoryFile{group: group, path: path}
-    let content_hash = read_content_hash(path)
-
-    requires: exists file
-
-    ensures: file.content_hash = content_hash
-    ensures: file.status = pending
-}
-
 -- When a file is removed from the workspace, its chunks are deleted and the file is marked removed.
 rule FileRemoved {
     when: WorkspaceFileRemoved(group, path)
@@ -228,6 +192,11 @@ rule FileRemoved {
     @guidance
         -- FTS index rows and embedding rows for removed chunks are also deleted
         -- as part of the same operation to keep the search index consistent.
+        -- WorkspaceFileRemoved is emitted from two sources: the @parcel/watcher
+        -- filesystem event and the periodic sync sweep in src/memory/manager.ts,
+        -- which reconciles all tracked paths and emits the trigger for any file
+        -- that has disappeared without a watcher event. The rule applies equally
+        -- in both cases — the trigger source does not affect the postcondition.
 }
 
 -- ---- Indexing ----
@@ -306,6 +275,16 @@ rule MemoryListed {
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
+
+-- The staging directory (data/ipc/) must never be added to the watched workspace
+-- paths. Indexing of a memory submission begins only when the agent writes the
+-- file to its final_path inside the watched workspace (groups/<group>/memory/).
+-- This is structural: the watcher never sees the staging area, so no premature
+-- or duplicate index entries can arise from in-flight submissions.
+invariant StagingPathOutsideWatchedWorkspace {
+    for f in MemoryFiles:
+        not f.path.startsWith("data/ipc/")
+}
 
 -- Every chunk belongs to an indexed (or pending) file, never a removed one.
 invariant NoChunksForRemovedFiles {

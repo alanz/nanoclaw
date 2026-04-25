@@ -160,7 +160,9 @@ export const MAX_DISPATCH_DEPTH = parseInt(
 
 // Throwaway session summarisation config — mirrors session-archiving.allium config block
 export const MAX_THROWAWAY_RETRIES = 3;
-// ~80 000 tokens — matches Claude's auto-compact threshold
+// Conservative input ceiling for the throwaway summariser — intentionally lower
+// than the SDK's 165k auto-compact window since input is stripped user-visible
+// messaging, not raw context, and should be small.
 export const THROWAWAY_CONTEXT_LIMIT_TOKENS = 80_000;
 // Input exceeding 1/3 of context_limit_tokens triggers the oversized guard
 export const THROWAWAY_MAX_INPUT_FRACTION = 0.333;

@@ -948,10 +948,12 @@ rule SpecialistTaskSubResultAvailableAfterRestart {
 --             by the main group in response to new raw material.
 --
 -- Specialists write to layer 1 only. The main group generates layer 2 in response.
--- Embedding indexing is passive (file-watcher driven) but must not trigger until a
--- file reaches its final home: chunks are indexed by file path, so premature indexing
--- of a staging path would leave stale index entries if the file is later moved.
--- The staging → accepted → final_path transition is therefore the indexing gate.
+-- Embedding indexing is passive (file-watcher driven). The staging path lives in
+-- data/ipc/<group>/, which is outside the workspace tree watched by the memory
+-- manager (groups/<group>/). The watcher therefore never sees the staged file;
+-- indexing only begins once the agent writes the file to its final_path inside
+-- the watched workspace. This separation is a structural invariant, not a timing
+-- constraint: the staging directory must never be added to the watched paths.
 
 -- A raw information submission from a completed specialist task.
 -- The specialist writes content to a staging path; the main group reviews it,
@@ -1030,26 +1032,21 @@ rule SpecialistSubmitsRawMemory {
 }
 
 -- The main group agent has reviewed a staged submission, generated A-MEM analysis,
--- and filed the raw file at its permanent location.
--- Setting final_path signals the file watcher that this file is ready for embedding.
+-- and filed the raw file at its permanent location inside the watched workspace.
 rule MemorySubmissionAccepted {
     when: MemorySubmissionFiled(submission, final_path)
 
     requires: submission.status = staged
 
-    let main_group = nanoclaw.Groups where is_main .first
-
     ensures: submission.final_path = final_path
     ensures: submission.status = accepted
     ensures: submission.accepted_at = now
-    ensures: RawMemoryFileReady(group: main_group, path: final_path)
 
     @guidance
-        -- RawMemoryFileReady is consumed by the embedding layer (see memory.allium).
-        -- The file watcher may also fire independently on the final_path, but RawMemoryFileReady
-        -- is the authoritative signal that the file is in its permanent home and safe to index.
-        -- A-MEM analysis notes generated alongside this filing are also at stable paths and
-        -- will be picked up by the same embedding process.
+        -- The agent writes the file to final_path (inside groups/<group>/memory/) before
+        -- sending the MemorySubmissionFiled IPC event. The memory manager's file watcher
+        -- picks it up from there — no explicit handoff needed. A-MEM analysis notes written
+        -- alongside the filing are also at stable paths and are picked up the same way.
 }
 
 -- On startup, re-notify the main group for any submissions that are still staged.
@@ -1270,16 +1267,6 @@ invariant RunningTaskIsLeaf {
 deferred RecoveryDashboard         -- see: web-ui/recovery-dashboard.allium
                                    -- web UI surface for browsing specialist task history,
                                    -- retry events, and host restart incidents
-
--- allium-ignore allium.deferred.missingLocationHint
-deferred RawMemoryFileReady        -- see: memory.allium
-                                   -- consumed by the embedding layer; triggers chunk extraction
-                                   -- and vector indexing for the file at the given path.
-                                   -- Parameters: group (the owning group, needed to locate the
-                                   -- MemoryFile in the group-scoped index), path (the final
-                                   -- permanent location of the raw memory file).
-                                   -- Only fires after final_path is set (MemorySubmissionAccepted),
-                                   -- ensuring chunks are indexed against their permanent path
 
 -- allium-ignore allium.deferred.missingLocationHint
 deferred AddSpecialistSkill        -- see: skills/add-specialist

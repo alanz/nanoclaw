@@ -149,9 +149,6 @@ rule SyncCheckDue {
 -- If the pre-check API call fails (network error, bad credentials, timeout),
 -- skip this sync cycle and advance the schedule without spawning a container.
 -- There is no point running a full sync if the API is unreachable.
---
--- NOTE: current code (hasNewZoteroItems) is fail-open — it returns true on error,
--- proceeding to a full sync. This rule captures the correct intended behaviour.
 rule PreCheckFailed {
     when: ZoteroPreCheckRequested(state)
 

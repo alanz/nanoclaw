@@ -42,6 +42,7 @@ use "./ipc.allium" as ipc
 -- tracking (status transitions, result storage, closed_at) is not implemented and not
 -- planned before the specialist model supersedes sub-group delegation entirely.
 entity OrchestrationCycle {
+    delegating_group: nanoclaw.Group    -- the main group that opened the cycle
     sub_group: nanoclaw.Group           -- the group executing the delegated task
     task_id: String                     -- ID of the delegated ScheduledTask
     delegated_at: Timestamp
@@ -55,7 +56,7 @@ entity OrchestrationCycle {
 ------------------------------------------------------------
 
 config {
-    cycle_timeout: Duration = 30.minutes  -- open cycles older than this are abandoned (CYCLE_TIMEOUT env var)
+    cycle_timeout: Duration = 30.minutes  -- open cycles older than this are abandoned
 }
 
 ------------------------------------------------------------
@@ -77,6 +78,7 @@ rule CycleCreated {
     requires: parent_depth + 1 < nanoclaw.config.max_dispatch_depth
 
     ensures: OrchestrationCycle.created(
+        delegating_group: delegating_group,
         sub_group: sub_group,
         task_id: task_id,
         delegated_at: now
@@ -100,16 +102,27 @@ rule CycleReturned {
 }
 
 -- A running cycle that has not produced a result within cycle_timeout is abandoned.
--- The host injects a timeout notice into the main group's message queue.
+-- The host injects a synthetic timeout notice into the main group's message queue
+-- and then closes the cycle.
 rule CycleTimedOut {
     when: cycle: OrchestrationCycle.is_overdue
 
+    ensures: nanoclaw.Message.created(
+        chat: cycle.delegating_group.chat,
+        content: "[Orchestration cycle timed out] Sub-group did not deliver a result within the allowed time.",
+        sent_at: now,
+        is_from_me: false,
+        is_bot_response: false
+    )
     ensures: not exists cycle
 
     @guidance
         -- A cycle can time out if the sub-group container crashes, is killed, or
-        -- simply takes longer than cycle_timeout to run. The main group receives a
-        -- synthetic notice message rather than a deliver_result payload.
+        -- simply takes longer than cycle_timeout to run. The notice is stored as an
+        -- ordinary inbound message (is_from_me: false, is_bot_response: false) so
+        -- the main group's agent sees it in the next context assembly and can inform
+        -- the user. A bot-attributed message would be filtered out by the pending
+        -- message query and never reach the agent.
 }
 
 ------------------------------------------------------------

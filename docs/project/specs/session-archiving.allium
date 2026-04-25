@@ -182,11 +182,11 @@ config {
     -- throwaway is attempted at most four times in total (initial + 3 retries).
     max_throwaway_retries: Integer = 3
 
-    -- Effective context limit of the throwaway container, in tokens. Defaults
-    -- to the SDK's auto-compact threshold: a container that would trigger
-    -- self-compaction cannot meaningfully summarise a file that already
-    -- exceeds that threshold.
-    context_limit_tokens: Integer = sdk/config.auto_compact_window
+    -- Conservative input ceiling for the throwaway summariser, in tokens.
+    -- Intentionally lower than the SDK's auto_compact_window: throwaway input
+    -- is stripped user-visible messaging (not raw context), so transcripts
+    -- should be small. This is not derived from sdk/config.auto_compact_window.
+    context_limit_tokens: Integer = 80000
 
     -- Maximum fraction of context_limit_tokens that the raw JSONL is allowed
     -- to occupy before the throwaway is refused at creation time. A decimal

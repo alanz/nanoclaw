@@ -355,6 +355,45 @@ rule BackLinksWritten {
         -- LinksWithinActiveGraph invariant.
 }
 
+-- ---- Note Archival ----
+
+-- A MemoryNote transitions to archived when the agent decides it is no longer
+-- relevant (either directly from active, or after being superseded).
+rule MemoryNoteArchived {
+    when: note: MemoryNote.is_archive_requested
+
+    requires: note.status in { active, superseded }
+
+    ensures: note.status = archived
+    ensures:
+        for chunk in note.chunks:
+            not exists chunk
+
+    @guidance
+        -- This transition is agent-side: the agent writes updated frontmatter
+        -- (status: archived) to the note's markdown file, which the host memory
+        -- layer picks up via the file watcher and applies. No host rule directly
+        -- drives archival — the trigger here represents the file-write event that
+        -- follows the agent's decision. The chunk removal mirrors what FileRemoved
+        -- does in memory.allium and keeps the search index consistent.
+}
+
+-- A SynthesisNote transitions to archived when the agent decides it is no longer
+-- relevant (either directly from active, or after being superseded).
+rule SynthesisNoteArchived {
+    when: note: SynthesisNote.is_archive_requested
+
+    requires: note.status in { active, superseded }
+
+    ensures: note.status = archived
+
+    @guidance
+        -- Same agent-side mechanism as MemoryNoteArchived: the agent writes
+        -- updated frontmatter and the host picks it up via the file watcher.
+        -- SynthesisNotes do not have chunks (they are not chunked for embedding),
+        -- so no chunk removal is needed.
+}
+
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------

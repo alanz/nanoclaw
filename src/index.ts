@@ -212,6 +212,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     return;
   }
 
+  if (group.isMain) group = { ...group, requiresTrigger: false };
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
   if (group.isMain) queue.mainGroupJid = jid;

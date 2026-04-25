@@ -30,7 +30,7 @@ use "./container-claude-shared.allium" as shared
 
 config {
     model: String = "sonnet[1m]"           -- Claude Sonnet with 1M context window
-    auto_compact_window: Integer = 200000  -- token threshold triggering automatic context compaction
+    auto_compact_window: Integer = 165000  -- token threshold triggering automatic context compaction
 }
 
 ------------------------------------------------------------

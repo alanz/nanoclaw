@@ -141,6 +141,8 @@ entity Group {
 
     invariant MainGroupHasNoTriggerRequirement {
         is_main implies not requires_trigger
+        -- Enforced at registration: registerGroup() in src/index.ts clamps
+        -- requiresTrigger to false whenever isMain is true before writing to DB.
     }
 }
 
@@ -228,7 +230,7 @@ config {
     container_timeout: Duration = 30.minutes
     container_post_completion_drain: Duration = 30.seconds
     api_error_grace: Duration = 2.minutes
-    api_error_poll_interval: Integer = 5000     -- milliseconds
+    api_error_poll_interval: Integer = 5000     -- milliseconds; hardcoded in src/container-runner.ts, not env-overridable
 }
 
 ------------------------------------------------------------

@@ -39,7 +39,7 @@ enum QueryKind {
   | memory_get        -- memory_get: full content of a specific memory file
   | memory_list       -- memory_list: list indexed files by path prefix
   | skill_eval        -- skill_eval: run an eval case for a skill (main only)
-  | failed_summaries   -- list ThrowawaySession rows where status = failed for the caller's group
+  | list_failed_summaries -- list ThrowawaySession rows where status = failed for the caller's group
 }
 
 ------------------------------------------------------------
@@ -440,12 +440,13 @@ rule AgentResumedFeed {
 -- ---- Fire-and-Forget: Main-Group-Only Commands ----
 
 -- Only the main group agent may register a new group.
--- is_main cannot be set via IPC — if the group is already registered as main,
--- that flag is preserved; if not, the new registration has is_main = false.
-rule AgentRegisteredGroup {
+-- First registration via IPC always produces a non-main group: is_main cannot
+-- be elevated through this code path.
+rule AgentRegisteredNewGroup {
     when: AgentMcpCall(author, "register_group", jid, name, folder, trigger, requires_trigger?)
 
     requires: author.is_main
+    requires: not exists nanoclaw.Group{chat: nanoclaw.Chat{jid: jid}}
 
     ensures: nanoclaw.GroupRegistered(
         chat: nanoclaw.Chat{jid: jid},
@@ -460,7 +461,31 @@ rule AgentRegisteredGroup {
         -- (e.g. "whatsapp_family-chat"). The host validates the folder name is filesystem-safe.
         -- requires_trigger is taken from the IPC payload when provided and defaults to true
         -- when the caller omits it, matching the host's behaviour in src/ipc.ts.
-        -- If the group was already registered, its is_main flag is preserved (not overwritten).
+}
+
+-- Re-registration of an already-known group updates its mutable configuration
+-- (folder, trigger pattern, requires_trigger) without disturbing its is_main
+-- flag. This is how IPC config refreshes (e.g. updating additionalMounts) flow
+-- through the host without accidentally demoting the main group.
+rule AgentReregisteredGroup {
+    when: AgentMcpCall(author, "register_group", jid, name, folder, trigger, requires_trigger?)
+
+    let existing_group = nanoclaw.Group{chat: nanoclaw.Chat{jid: jid}}
+
+    requires: author.is_main
+    requires: exists existing_group
+
+    ensures:
+        existing_group.folder = folder
+        existing_group.trigger_pattern = trigger
+        existing_group.requires_trigger = requires_trigger ?? true
+        -- is_main is intentionally not assigned: the existing value is preserved.
+
+    @guidance
+        -- See src/ipc.ts:746-755: the host reads existingGroup?.isMain and passes
+        -- it back into deps.registerGroup, so a re-registration via IPC can never
+        -- change the main-group flag. Mutable configuration fields are overwritten
+        -- with the latest payload.
 }
 
 -- Only the main group agent may change another group's trusted status.
@@ -788,16 +813,29 @@ rule AgentQueriedSkillEval {
 -- group matches the caller's group, giving the agent enough context to present
 -- actionable information to the user before calling retry_session_summary.
 rule AgentQueriedFailedSummaries {
-    when: AgentMcpCall(author, "failed_summaries", request_id)
+    when: AgentMcpCall(author, "list_failed_summaries", request_id)
 
     ensures: IpcQuery.created(
         author: author,
-        kind: failed_summaries,
+        kind: list_failed_summaries,
         request_id: request_id,
         issued_at: now,
         status: pending
     )
     ensures: FailedSummariesQueryIssued(author: author, request_id: request_id)
+
+    @guidance
+        -- Wire-level naming notes (the spec's tool string and kind value mirror
+        -- the agent-facing MCP tool name to keep the spec aligned with what an
+        -- agent actually invokes):
+        --   MCP tool name (registered in container/agent-runner/src/ipc-mcp-stdio.ts):
+        --     list_failed_summaries
+        --   IPC payload "type" field written by that tool (see src/ipc.ts):
+        --     query_failed_summaries
+        -- The host's IPC watcher dispatches on the payload "type" field, so the
+        -- query_failed_summaries case in src/ipc.ts is what actually fires this
+        -- rule's behaviour. The trigger string above matches the MCP tool name
+        -- because that is the user-meaningful boundary the spec describes.
 }
 
 rule HostFulfilledFailedSummariesQuery {

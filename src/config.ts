@@ -47,8 +47,7 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
 );
 // 0.0.0.0 so containers (Apple Container bridge, Docker bridge) can reach the proxy
 // via the host gateway IP. 127.0.0.1 would only work for host-network containers.
-export const CREDENTIAL_PROXY_HOST =
-  process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST || '0.0.0.0';
+export const CREDENTIAL_PROXY_HOST = process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST || '0.0.0.0';
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);

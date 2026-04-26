@@ -104,17 +104,20 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
+# ---- Container CLAUDE.md (baked in; Apple Container doesn't support file-level bind mounts) ----
+COPY CLAUDE.md /app/CLAUDE.md
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # ---- Workspace + permissions -------------------------------------------------
-RUN mkdir -p /workspace/group /workspace/extra && \
+RUN mkdir -p /workspace && \
     chown -R node:node /workspace && \
     chmod 777 /home/node
 
 USER node
-WORKDIR /workspace/group
+WORKDIR /workspace
 
 # tini is PID 1, reaps zombies, forwards signals cleanly. entrypoint.sh does
 # `exec bun ...` so bun runs as tini's direct child.

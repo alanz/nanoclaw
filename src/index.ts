@@ -6,7 +6,8 @@
  */
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
+import { CREDENTIAL_PROXY_HOST, CREDENTIAL_PROXY_PORT, DATA_DIR } from './config.js';
+import { startCredentialProxy } from './credential-proxy.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
@@ -70,6 +71,11 @@ async function main(): Promise<void> {
   // 2. Container runtime
   ensureContainerRuntimeRunning();
   cleanupOrphans();
+
+  // 2b. Credential proxy — containers connect here instead of Anthropic directly;
+  // the proxy injects real credentials so containers never see them.
+  const proxyServer = await startCredentialProxy(CREDENTIAL_PROXY_PORT, CREDENTIAL_PROXY_HOST);
+  onShutdown(() => new Promise<void>((res) => proxyServer.close(() => res())));
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {

@@ -38,10 +38,7 @@ export function hostGatewayArgs(): string[] {
 
 /** Returns CLI args for a readonly bind mount. */
 export function readonlyMountArgs(hostPath: string, containerPath: string): string[] {
-  return [
-    '--mount',
-    `type=bind,source=${hostPath},target=${containerPath},readonly`,
-  ];
+  return ['--mount', `type=bind,source=${hostPath},target=${containerPath},readonly`];
 }
 
 /** Stop a container by name. Uses execSync to avoid shell injection. */
@@ -90,13 +87,9 @@ export function cleanupOrphans(): void {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
-    const containers: { status: string; configuration: { id: string } }[] =
-      JSON.parse(output || '[]');
+    const containers: { status: string; configuration: { id: string } }[] = JSON.parse(output || '[]');
     const orphans = containers
-      .filter(
-        (c) =>
-          c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'),
-      )
+      .filter((c) => c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'))
       .map((c) => c.configuration.id);
     for (const name of orphans) {
       try {

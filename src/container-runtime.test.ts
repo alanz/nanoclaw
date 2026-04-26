@@ -35,10 +35,7 @@ beforeEach(() => {
 describe('readonlyMountArgs', () => {
   it('returns --mount flag with type=bind and readonly', () => {
     const args = readonlyMountArgs('/host/path', '/container/path');
-    expect(args).toEqual([
-      '--mount',
-      'type=bind,source=/host/path,target=/container/path,readonly',
-    ]);
+    expect(args).toEqual(['--mount', 'type=bind,source=/host/path,target=/container/path,readonly']);
   });
 });
 
@@ -107,10 +104,7 @@ describe('cleanupOrphans', () => {
 
     cleanupOrphans();
 
-    expect(mockExecSync).toHaveBeenCalledWith(
-      `${CONTAINER_RUNTIME_BIN} ls --format json`,
-      expect.any(Object),
-    );
+    expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} ls --format json`, expect.any(Object));
   });
 
   it('stops orphaned nanoclaw containers', () => {

@@ -32,6 +32,11 @@ if [ "${INSTALL_CJK_FONTS:-false}" = "true" ]; then
     BUILD_ARGS+=(--build-arg INSTALL_CJK_FONTS=true)
 fi
 
+if [ "$CONTAINER_RUNTIME" = "container" ]; then
+    container builder status 2>/dev/null | grep -q "running" || container builder start
+    trap 'container builder stop' EXIT
+fi
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 

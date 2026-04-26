@@ -18,6 +18,7 @@ import { startDeltaChat } from '@deltachat/stdio-rpc-server';
 import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 
 import { ASSISTANT_NAME } from '../config.js';
+import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -229,7 +230,6 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
         if (chatmailQr) {
           await dc.rpc.batchSetConfig(account.id, {
             bot: '1',
-            e2ee_enabled: '1',
             displayname: ASSISTANT_NAME,
           });
           await dc.rpc.setConfigFromQr(account.id, chatmailQr);
@@ -239,12 +239,13 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
             addr,
             mail_pw: mailPw,
             bot: '1',
-            e2ee_enabled: '1',
             displayname: ASSISTANT_NAME,
           });
           await dc.rpc.configure(account.id);
         } else {
-          throw new Error('DeltaChat: no credentials — set DELTACHAT_CHATMAIL_QR or DELTACHAT_ADDR + DELTACHAT_MAIL_PW');
+          throw new Error(
+            'DeltaChat: no credentials — set DELTACHAT_CHATMAIL_QR or DELTACHAT_ADDR + DELTACHAT_MAIL_PW',
+          );
         }
         log.info('DeltaChat account configured');
       }
@@ -334,7 +335,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
                 attachments.push({ data: data.toString('base64'), name: filename, type: attachType });
                 if (text) contentParts.push(text);
               } else {
-                contentParts.push(mediaPlaceholder(viewType, (msg.fileName as string | null | undefined) ?? null, text));
+                contentParts.push(
+                  mediaPlaceholder(viewType, (msg.fileName as string | null | undefined) ?? null, text),
+                );
               }
             } catch {
               contentParts.push(mediaPlaceholder(viewType, (msg.fileName as string | null | undefined) ?? null, text));
@@ -363,7 +366,10 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
               firstTimestamp: new Date((msg.timestamp as number) * 1000).toISOString(),
             });
           }
-          debounceTimers.set(platformId, setTimeout(() => flushDebounce(platformId), DEBOUNCE_MS));
+          debounceTimers.set(
+            platformId,
+            setTimeout(() => flushDebounce(platformId), DEBOUNCE_MS),
+          );
         } catch (err) {
           log.error('DeltaChat: failed to process IncomingMsg', { err, chatId, msgId });
         }
@@ -600,25 +606,35 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
 registerChannelAdapter('deltachat', {
   factory: () => {
-    const chatmailQr = process.env.DELTACHAT_CHATMAIL_QR;
-    const addr = process.env.DELTACHAT_ADDR;
-    const mailPw = process.env.DELTACHAT_MAIL_PW;
+    const env = readEnvFile([
+      'DELTACHAT_CHATMAIL_QR',
+      'DELTACHAT_ADDR',
+      'DELTACHAT_MAIL_PW',
+      'DELTACHAT_DATA_DIR',
+    ]);
+
+    const chatmailQr = env.DELTACHAT_CHATMAIL_QR;
+    const addr = env.DELTACHAT_ADDR;
+    const mailPw = env.DELTACHAT_MAIL_PW;
 
     if (!chatmailQr && !(addr && mailPw)) {
       return null; // not configured — channel is skipped
     }
 
-    const rawDataDir = process.env.DELTACHAT_DATA_DIR ?? 'store/deltachat';
+    const rawDataDir = env.DELTACHAT_DATA_DIR ?? 'store/deltachat';
     const dataDir = path.resolve(rawDataDir.replace(/^~/, os.homedir()));
 
     return createAdapter({ chatmailQr, addr, mailPw, dataDir });
   },
-  containerConfig: {
-    env: {
-      DELTACHAT_CHATMAIL_QR: process.env.DELTACHAT_CHATMAIL_QR ?? '',
-      DELTACHAT_ADDR: process.env.DELTACHAT_ADDR ?? '',
-      DELTACHAT_MAIL_PW: process.env.DELTACHAT_MAIL_PW ?? '',
-      DELTACHAT_DATA_DIR: process.env.DELTACHAT_DATA_DIR ?? '',
-    },
-  },
+  containerConfig: (() => {
+    const e = readEnvFile(['DELTACHAT_CHATMAIL_QR', 'DELTACHAT_ADDR', 'DELTACHAT_MAIL_PW', 'DELTACHAT_DATA_DIR']);
+    return {
+      env: {
+        DELTACHAT_CHATMAIL_QR: e.DELTACHAT_CHATMAIL_QR ?? '',
+        DELTACHAT_ADDR: e.DELTACHAT_ADDR ?? '',
+        DELTACHAT_MAIL_PW: e.DELTACHAT_MAIL_PW ?? '',
+        DELTACHAT_DATA_DIR: e.DELTACHAT_DATA_DIR ?? '',
+      },
+    };
+  })(),
 });

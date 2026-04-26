@@ -33,6 +33,15 @@ vi.mock('os', () => ({
     tmpdir: vi.fn(() => '/tmp'),
   },
 }));
+vi.mock('../env.js', () => ({
+  readEnvFile: vi.fn((keys: string[]) => {
+    const result: Record<string, string> = {};
+    for (const key of keys) {
+      if (process.env[key] !== undefined) result[key] = process.env[key]!;
+    }
+    return result;
+  }),
+}));
 
 // --- DeltaChat RPC mock ---
 
@@ -331,9 +340,7 @@ describe('DeltaChat channel adapter', () => {
 
     it('skips AutocryptSetupMessage', async () => {
       const { config, dc } = await buildSetupAdapter();
-      dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ systemMessageType: 'AutocryptSetupMessage' }),
-      );
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ systemMessageType: 'AutocryptSetupMessage' }));
 
       emitIncomingMsg();
       await flush();
@@ -742,9 +749,7 @@ describe('DeltaChat channel adapter', () => {
       vi.mocked(fs.statSync).mockReturnValueOnce({ size: 100 } as ReturnType<typeof fs.statSync>);
       vi.mocked(fs.readFileSync).mockReturnValueOnce(Buffer.from('img') as ReturnType<typeof fs.readFileSync>);
 
-      dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/photo.jpg' }),
-      );
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/photo.jpg' }));
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
 
@@ -764,9 +769,7 @@ describe('DeltaChat channel adapter', () => {
       const { config, dc } = await buildSetupAdapter();
       vi.mocked(fs.statSync).mockReturnValueOnce({ size: 10 * 1024 * 1024 } as ReturnType<typeof fs.statSync>);
 
-      dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/big.jpg' }),
-      );
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/big.jpg' }));
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
 
@@ -781,11 +784,11 @@ describe('DeltaChat channel adapter', () => {
 
     it('falls back to placeholder when fs.statSync throws', async () => {
       const { config, dc } = await buildSetupAdapter();
-      vi.mocked(fs.statSync).mockImplementationOnce(() => { throw new Error('no such file'); });
+      vi.mocked(fs.statSync).mockImplementationOnce(() => {
+        throw new Error('no such file');
+      });
 
-      dc.rpc.getMessage.mockResolvedValueOnce(
-        makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/missing.jpg' }),
-      );
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/missing.jpg' }));
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
       dc.rpc.getContact.mockResolvedValueOnce(makeContact());
 
@@ -919,16 +922,16 @@ describe('DeltaChat channel adapter', () => {
       emitterRef.current!.emit('ConnectivityChanged');
       emitterRef.current!.emit('ConnectivityChanged');
 
-      const callsBefore = vi.mocked(log.info).mock.calls.filter(
-        (c) => typeof c[0] === 'string' && (c[0] as string).includes('connectivity'),
-      ).length;
+      const callsBefore = vi
+        .mocked(log.info)
+        .mock.calls.filter((c) => typeof c[0] === 'string' && (c[0] as string).includes('connectivity')).length;
       expect(callsBefore).toBe(0);
 
       await vi.runAllTimersAsync();
 
-      const connectivityCalls = vi.mocked(log.info).mock.calls.filter(
-        (c) => typeof c[0] === 'string' && (c[0] as string).includes('connectivity'),
-      );
+      const connectivityCalls = vi
+        .mocked(log.info)
+        .mock.calls.filter((c) => typeof c[0] === 'string' && (c[0] as string).includes('connectivity'));
       expect(connectivityCalls).toHaveLength(1);
       expect(connectivityCalls[0][0]).toBe('DeltaChat: connectivity changed (connected)');
     });
@@ -950,9 +953,9 @@ describe('DeltaChat channel adapter', () => {
         // Reset lastConnectivityLabel by emitting a different level first
         emitterRef.current!.emit('ConnectivityChanged');
         await vi.runAllTimersAsync();
-        const call = vi.mocked(log.info).mock.calls.find(
-          (c) => typeof c[0] === 'string' && (c[0] as string).includes('connectivity'),
-        );
+        const call = vi
+          .mocked(log.info)
+          .mock.calls.find((c) => typeof c[0] === 'string' && (c[0] as string).includes('connectivity'));
         expect(call?.[0]).toBe(`DeltaChat: connectivity changed (${label})`);
       }
     });
@@ -969,9 +972,7 @@ describe('DeltaChat channel adapter', () => {
       await buildSetupAdapter();
       emitterRef.current!.emit('ImapInboxIdle');
       await vi.runAllTimersAsync();
-      expect(vi.mocked(log.info)).toHaveBeenCalledWith(
-        'DeltaChat: IMAP inbox idle (ready for instant delivery)',
-      );
+      expect(vi.mocked(log.info)).toHaveBeenCalledWith('DeltaChat: IMAP inbox idle (ready for instant delivery)');
     });
 
     it('logs SmtpConnected', async () => {

@@ -26,6 +26,7 @@ import { spawn, spawnSync } from 'child_process';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { runDeltachatChannel } from './channels/deltachat.js';
 import { runDiscordChannel } from './channels/discord.js';
 import { runIMessageChannel } from './channels/imessage.js';
 import { runSignalChannel } from './channels/signal.js';
@@ -52,6 +53,7 @@ const CLI_AGENT_NAME = 'Terminal Agent';
 const RUN_START = Date.now();
 
 type ChannelChoice =
+  | 'deltachat'
   | 'telegram'
   | 'discord'
   | 'whatsapp'
@@ -311,7 +313,9 @@ async function main(): Promise<void> {
   let channelChoice: ChannelChoice = 'skip';
   if (!skip.has('channel')) {
     channelChoice = await askChannelChoice();
-    if (channelChoice === 'telegram') {
+    if (channelChoice === 'deltachat') {
+      await runDeltachatChannel(displayName!);
+    } else if (channelChoice === 'telegram') {
       await runTelegramChannel(displayName!);
     } else if (channelChoice === 'discord') {
       await runDiscordChannel(displayName!);
@@ -440,6 +444,10 @@ async function main(): Promise<void> {
 
 function channelDmLabel(choice: ChannelChoice): string | null {
   switch (choice) {
+    case 'deltachat':
+      // No welcome DM until the user taps the invite link — they see the URL
+      // in the setup note, so no follow-up banner needed here.
+      return null;
     case 'telegram':
       return 'Telegram';
     case 'discord':
@@ -838,6 +846,7 @@ async function askChannelChoice(): Promise<ChannelChoice> {
     await brightSelect<ChannelChoice>({
       message: 'Want to chat with your assistant from your phone?',
       options: [
+        { value: 'deltachat', label: 'Yes, connect DeltaChat', hint: 'zero-config, auto-provisions an account' },
         { value: 'telegram', label: 'Yes, connect Telegram', hint: 'recommended' },
         { value: 'discord', label: 'Yes, connect Discord' },
         { value: 'whatsapp', label: 'Yes, connect WhatsApp' },

@@ -264,6 +264,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       const selfAddr = await dc.rpc.getConfig(account.id, 'addr');
       const inviteQr = await dc.rpc.getChatSecurejoinQrCode(account.id, null);
       log.info('DeltaChat ready', { addr: selfAddr, inviteQr });
+      fs.writeFileSync(path.join(dataDir, 'invite-url'), inviteQr, 'utf8');
 
       const emitter = dc.getContextEvents(account.id);
 

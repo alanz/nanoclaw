@@ -67,8 +67,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const messages = getPendingMessages().filter((m) => m.kind !== 'system');
     pollCount++;
 
-    // Periodic heartbeat so we know the loop is alive
+    // Periodic heartbeat so the host sweep knows the loop is alive
     if (pollCount % 30 === 0) {
+      touchHeartbeat();
       log(`Poll heartbeat (${pollCount} iterations, ${messages.length} pending)`);
     }
 
@@ -260,8 +261,18 @@ async function processQuery(
   // Stream liveness is decided host-side via the heartbeat file + processing
   // claim age (see src/host-sweep.ts); if something is truly stuck, the host
   // will kill the container and messages get reset to pending.
+  let activeIdleTicks = 0;
   const pollHandle = setInterval(() => {
     if (done) return;
+
+    // Keep the heartbeat alive while the persistent query is open but idle
+    // (between turns). The for-await loop only fires touchHeartbeat() during
+    // SDK events; without this the host sweep would kill the container after
+    // 30 min of silence even though the agent is healthy.
+    activeIdleTicks++;
+    if (activeIdleTicks % 60 === 0) {
+      touchHeartbeat();
+    }
 
     // Skip system messages (MCP tool responses) and /clear (needs fresh query).
     // Thread routing is the router's concern — if a message landed in this

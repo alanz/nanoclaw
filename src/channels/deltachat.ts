@@ -258,6 +258,10 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
       await dc.rpc.startIo(account.id);
 
+      const selfAddr = await dc.rpc.getConfig(account.id, 'addr');
+      const inviteQr = await dc.rpc.getChatSecurejoinQrCode(account.id, null);
+      log.info('DeltaChat ready', { addr: selfAddr, inviteQr });
+
       const emitter = dc.getContextEvents(account.id);
 
       // --- Inbound messages ---
@@ -606,12 +610,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
 registerChannelAdapter('deltachat', {
   factory: () => {
-    const env = readEnvFile([
-      'DELTACHAT_CHATMAIL_QR',
-      'DELTACHAT_ADDR',
-      'DELTACHAT_MAIL_PW',
-      'DELTACHAT_DATA_DIR',
-    ]);
+    const env = readEnvFile(['DELTACHAT_CHATMAIL_QR', 'DELTACHAT_ADDR', 'DELTACHAT_MAIL_PW', 'DELTACHAT_DATA_DIR']);
 
     const chatmailQr = env.DELTACHAT_CHATMAIL_QR;
     const addr = env.DELTACHAT_ADDR;

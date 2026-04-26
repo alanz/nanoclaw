@@ -81,6 +81,8 @@ function makeDcMock() {
       sendReaction: vi.fn().mockResolvedValue(undefined),
       sendEditRequest: vi.fn().mockResolvedValue(null),
       getConnectivity: vi.fn().mockResolvedValue(4000),
+      getConfig: vi.fn().mockResolvedValue('bot@example.com'),
+      getChatSecurejoinQrCode: vi.fn().mockResolvedValue('https://i.delta.chat/#MOCKINVITE'),
     },
     getContextEvents: vi.fn(() => emitterRef.current!),
   };

@@ -41,6 +41,7 @@ type DebounceEntry = {
   sender: string;
   senderName: string;
   firstTimestamp: string;
+  isGroup: boolean;
 };
 
 function chatIdFromPlatformId(platformId: string): number | null {
@@ -153,6 +154,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       kind: 'chat',
       content,
       timestamp: entry.firstTimestamp,
+      isMention: !entry.isGroup, // DMs are always addressed to the bot
     });
   }
 
@@ -368,6 +370,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
               sender,
               senderName,
               firstTimestamp: new Date((msg.timestamp as number) * 1000).toISOString(),
+              isGroup,
             });
           }
           debounceTimers.set(

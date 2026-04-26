@@ -48,6 +48,7 @@ import { ensureAnswer, fail, runQuietChild, runQuietStep } from './lib/runner.js
 import { emit as phEmit } from './lib/diagnostics.js';
 import { brandBold, brandChip, dimWrap, fitToWidth, wrapForGutter } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
+import { readEnvFile } from '../src/env.js';
 
 const CLI_AGENT_NAME = 'Terminal Agent';
 const RUN_START = Date.now();
@@ -132,7 +133,7 @@ async function main(): Promise<void> {
     maybeReexecUnderSg();
   }
 
-  if (!skip.has('onecli')) {
+  if (!skip.has('onecli') && !useNativeProxy()) {
     p.log.message(
       dimWrap(
         'Your assistant never gets your API keys directly. The vault adds them to approved requests as they leave the sandbox.',
@@ -586,7 +587,9 @@ function sendChatMessage(message: string): Promise<void> {
 // ─── auth step (select → branch) ────────────────────────────────────────
 
 async function runAuthStep(): Promise<void> {
-  if (anthropicSecretExists()) {
+  const native = useNativeProxy();
+  const alreadyDone = native ? nativeCredentialExists() : anthropicSecretExists();
+  if (alreadyDone) {
     p.log.success('Your Claude account is already connected.');
     setupLog.step('auth', 'skipped', 0, { REASON: 'secret-already-present' });
     return;
@@ -618,22 +621,21 @@ async function runAuthStep(): Promise<void> {
   phEmit('auth_method_chosen', { method });
 
   if (method === 'subscription') {
-    await runSubscriptionAuth();
+    await runSubscriptionAuth(native);
   } else {
-    await runPasteAuth(method);
+    await runPasteAuth(method, native);
   }
 }
 
-async function runSubscriptionAuth(): Promise<void> {
+async function runSubscriptionAuth(native: boolean): Promise<void> {
   p.log.step("Opening the Claude sign-in flow…");
   console.log(
     k.dim('   (a browser will open for sign-in; this part is interactive)'),
   );
   console.log();
   const start = Date.now();
-  const code = await runInheritScript('bash', [
-    'setup/register-claude-token.sh',
-  ]);
+  const script = native ? 'setup/register-native-token.sh' : 'setup/register-claude-token.sh';
+  const code = await runInheritScript('bash', [script]);
   const durationMs = Date.now() - start;
   console.log();
   if (code !== 0) {
@@ -651,7 +653,7 @@ async function runSubscriptionAuth(): Promise<void> {
   p.log.success('Claude account connected.');
 }
 
-async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
+async function runPasteAuth(method: 'oauth' | 'api', native: boolean): Promise<void> {
   const label = method === 'oauth' ? 'OAuth token' : 'API key';
   const prefix = method === 'oauth' ? 'sk-ant-oat' : 'sk-ant-api';
 
@@ -669,30 +671,47 @@ async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
   );
   const token = (answer as string).trim();
 
-  const res = await runQuietChild(
-    'auth',
-    'onecli',
-    [
-      'secrets', 'create',
-      '--name', 'Anthropic',
-      '--type', 'anthropic',
-      '--value', token,
-      '--host-pattern', 'api.anthropic.com',
-    ],
-    {
-      running: `Saving your ${label} to your OneCLI vault…`,
-      done: 'Claude account connected.',
-    },
-    {
-      extraFields: { METHOD: method },
-    },
-  );
-  if (!res.ok) {
-    await fail(
+  if (native) {
+    // Native proxy: write the credential directly to .env
+    const envKey = method === 'oauth' ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY';
+    const res = await runQuietChild(
       'auth',
-      `Couldn't save your ${label} to the vault.`,
-      'Make sure OneCLI is running (`onecli version`), then retry.',
+      'pnpm',
+      ['exec', 'tsx', 'setup/index.ts', '--step', 'set-env', '--', '--key', envKey, '--value', token],
+      {
+        running: `Saving your ${label} to .env…`,
+        done: 'Claude account connected.',
+      },
+      { extraFields: { METHOD: method } },
     );
+    if (!res.ok) {
+      await fail('auth', `Couldn't save your ${label} to .env.`);
+    }
+  } else {
+    // OneCLI vault
+    const res = await runQuietChild(
+      'auth',
+      'onecli',
+      [
+        'secrets', 'create',
+        '--name', 'Anthropic',
+        '--type', 'anthropic',
+        '--value', token,
+        '--host-pattern', 'api.anthropic.com',
+      ],
+      {
+        running: `Saving your ${label} to your OneCLI vault…`,
+        done: 'Claude account connected.',
+      },
+      { extraFields: { METHOD: method } },
+    );
+    if (!res.ok) {
+      await fail(
+        'auth',
+        `Couldn't save your ${label} to the vault.`,
+        'Make sure OneCLI is running (`onecli version`), then retry.',
+      );
+    }
   }
 }
 
@@ -874,6 +893,20 @@ async function askChannelChoice(): Promise<ChannelChoice> {
 }
 
 // ─── interactive / env helpers ─────────────────────────────────────────
+
+/**
+ * True when ONECLI_URL is absent from .env — indicates the install is using
+ * the built-in credential proxy instead of the OneCLI vault.
+ */
+function useNativeProxy(): boolean {
+  return !readEnvFile(['ONECLI_URL']).ONECLI_URL;
+}
+
+/** True if a direct Anthropic credential is already present in .env. */
+function nativeCredentialExists(): boolean {
+  const env = readEnvFile(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']);
+  return !!(env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_OAUTH_TOKEN);
+}
 
 function anthropicSecretExists(): boolean {
   try {

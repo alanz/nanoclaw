@@ -10,25 +10,30 @@ IMAGE_NAME="nanoclaw-agent"
 TAG="${1:-latest}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-container}"
 
+NM_DIR="$SCRIPT_DIR/agent-runner/node_modules"
+NM_STASH="/tmp/nanoclaw-build-nm-stash-$$"
+
+cleanup() {
+  [ -d "$NM_STASH" ] && mv "$NM_STASH" "$NM_DIR" 2>/dev/null
+  [ "$CONTAINER_RUNTIME" = "container" ] && container builder stop
+}
+trap cleanup EXIT
+
+if [ "$CONTAINER_RUNTIME" = "container" ]; then
+    container builder status 2>/dev/null | grep -q "running" || container builder start
+fi
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
 # Apple Container (>=0.11.0) archives the entire build context before applying
 # .dockerignore rules, causing "unable to write data to the archive" on large
 # node_modules directories. Work around by temporarily moving it out.
-NM_DIR="$SCRIPT_DIR/agent-runner/node_modules"
-NM_STASH="/tmp/nanoclaw-build-nm-stash-$$"
 if [ -d "$NM_DIR" ]; then
   mv "$NM_DIR" "$NM_STASH"
-  trap 'mv "$NM_STASH" "$NM_DIR" 2>/dev/null; exit' EXIT INT TERM
 fi
 
 ${CONTAINER_RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .
-
-if [ -d "$NM_STASH" ]; then
-  mv "$NM_STASH" "$NM_DIR"
-  trap - EXIT INT TERM
-fi
 
 echo ""
 echo "Build complete!"

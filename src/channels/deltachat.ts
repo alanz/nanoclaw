@@ -9,7 +9,8 @@
  * Typing: sends 💭 on the last incoming message for the platformId.
  *
  * Credentials: set DELTACHAT_CHATMAIL_QR (chatmail QR) or DELTACHAT_ADDR +
- * DELTACHAT_MAIL_PW in .env. Omit all three to skip this channel.
+ * DELTACHAT_MAIL_PW in .env. DELTACHAT_CHATMAIL_QR defaults to
+ * dcaccount:https://nine.testrun.org/new (standard relay) if unset.
  */
 import fs from 'fs';
 import os from 'os';
@@ -615,11 +616,11 @@ registerChannelAdapter('deltachat', {
   factory: () => {
     const env = readEnvFile(['DELTACHAT_CHATMAIL_QR', 'DELTACHAT_ADDR', 'DELTACHAT_MAIL_PW', 'DELTACHAT_DATA_DIR']);
 
-    const chatmailQr = env.DELTACHAT_CHATMAIL_QR;
+    const chatmailQr = env.DELTACHAT_CHATMAIL_QR ?? 'dcaccount:https://nine.testrun.org/new';
     const addr = env.DELTACHAT_ADDR;
     const mailPw = env.DELTACHAT_MAIL_PW;
 
-    if (!chatmailQr && !(addr && mailPw)) {
+    if (!(addr && mailPw) && !chatmailQr) {
       return null; // not configured — channel is skipped
     }
 
@@ -632,7 +633,7 @@ registerChannelAdapter('deltachat', {
     const e = readEnvFile(['DELTACHAT_CHATMAIL_QR', 'DELTACHAT_ADDR', 'DELTACHAT_MAIL_PW', 'DELTACHAT_DATA_DIR']);
     return {
       env: {
-        DELTACHAT_CHATMAIL_QR: e.DELTACHAT_CHATMAIL_QR ?? '',
+        DELTACHAT_CHATMAIL_QR: e.DELTACHAT_CHATMAIL_QR ?? 'dcaccount:https://nine.testrun.org/new',
         DELTACHAT_ADDR: e.DELTACHAT_ADDR ?? '',
         DELTACHAT_MAIL_PW: e.DELTACHAT_MAIL_PW ?? '',
         DELTACHAT_DATA_DIR: e.DELTACHAT_DATA_DIR ?? '',

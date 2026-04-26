@@ -84,6 +84,42 @@ export async function run(_args: string[]): Promise<void> {
   }
 }
 
+function buildLaunchdPath(nodePath: string, homeDir: string): string {
+  // Build a PATH that works under launchd's minimal environment.
+  // launchd doesn't inherit the user's shell PATH, so we must explicitly
+  // include every directory that NanoClaw or its children need at runtime.
+  const parts: string[] = [];
+
+  // Node bin dir — derived from the actual node binary location so this
+  // works regardless of Node version or install method (nvm, brew keg, etc.)
+  const nodeBinDir = path.dirname(nodePath);
+  if (nodeBinDir && nodeBinDir !== '/usr/bin' && nodeBinDir !== '/usr/local/bin') {
+    parts.push(nodeBinDir);
+  }
+
+  // Homebrew on Apple Silicon (M1+). Also covers `container` CLI and any
+  // brew-installed tools (pnpm global wrappers, etc.).
+  if (fs.existsSync('/opt/homebrew/bin')) {
+    parts.push('/opt/homebrew/bin');
+  }
+  if (fs.existsSync('/opt/homebrew/sbin')) {
+    parts.push('/opt/homebrew/sbin');
+  }
+
+  // Homebrew on Intel Macs (and /usr/local tools generally).
+  parts.push('/usr/local/bin');
+
+  // Standard system paths.
+  parts.push('/usr/bin', '/bin', '/usr/sbin', '/sbin');
+
+  // User-local bin (tools installed with pip --user, cargo, etc.).
+  parts.push(`${homeDir}/.local/bin`);
+
+  // Deduplicate while preserving order.
+  const seen = new Set<string>();
+  return parts.filter((p) => { if (seen.has(p)) return false; seen.add(p); return true; }).join(':');
+}
+
 function setupLaunchd(
   projectRoot: string,
   nodePath: string,
@@ -99,6 +135,8 @@ function setupLaunchd(
     `${label}.plist`,
   );
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+
+  const launchdPath = buildLaunchdPath(nodePath, homeDir);
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -120,7 +158,7 @@ function setupLaunchd(
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <string>${launchdPath}</string>
         <key>HOME</key>
         <string>${homeDir}</string>
     </dict>
@@ -132,7 +170,7 @@ function setupLaunchd(
 </plist>`;
 
   fs.writeFileSync(plistPath, plist);
-  log.info('Wrote launchd plist', { plistPath });
+  log.info('Wrote launchd plist', { plistPath, launchdPath });
 
   // Unload first to force launchd to drop any cached plist and re-read from
   // disk. Bare `launchctl load` on an already-loaded plist errors with

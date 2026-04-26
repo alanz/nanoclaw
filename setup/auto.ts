@@ -127,7 +127,7 @@ async function main(): Promise<void> {
       await fail(
         'container',
         "Couldn't build the sandbox.",
-        'If Docker has a stale cache, try: `docker builder prune -f`, then retry.',
+        'Try: `docker builder prune -f` (Docker) or `container system prune` (Apple Container), then retry.',
       );
     }
     maybeReexecUnderSg();

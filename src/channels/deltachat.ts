@@ -293,6 +293,23 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           const sender = contact.address ?? String(msg.fromId);
           const senderName = contact.displayName ?? sender;
 
+          // One-shot first-contact record consumed by setup:auto to wire the owner.
+          // Only written for DMs, only if the file doesn't already exist.
+          if (!isGroup) {
+            const firstContactPath = path.join(dataDir, 'first-contact');
+            if (!fs.existsSync(firstContactPath)) {
+              try {
+                fs.writeFileSync(
+                  firstContactPath,
+                  JSON.stringify({ addr: sender, chatId: String(chatId), displayName: senderName }),
+                  'utf8',
+                );
+              } catch {
+                // non-fatal
+              }
+            }
+          }
+
           channelSetup!.onMetadata(platformId, chat.name, isGroup);
 
           const text = msg.text ?? '';

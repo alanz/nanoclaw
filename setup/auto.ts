@@ -445,9 +445,7 @@ async function main(): Promise<void> {
 function channelDmLabel(choice: ChannelChoice): string | null {
   switch (choice) {
     case 'deltachat':
-      // No welcome DM until the user taps the invite link — they see the URL
-      // in the setup note, so no follow-up banner needed here.
-      return null;
+      return 'DeltaChat';
     case 'telegram':
       return 'Telegram';
     case 'discord':

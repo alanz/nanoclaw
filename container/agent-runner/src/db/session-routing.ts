@@ -8,7 +8,7 @@
  * or preserves thread_id based on the adapter's thread support, and we
  * just read the fixed routing the host committed for this session.
  */
-import { getInboundDb } from './connection.js';
+import { getInboundDb, closeInboundDb } from './connection.js';
 
 export interface SessionRouting {
   channel_type: string | null;
@@ -25,6 +25,8 @@ export function getSessionRouting(): SessionRouting {
     if (row) return row;
   } catch {
     // Table may not exist on an older session DB — fall through to defaults
+  } finally {
+    closeInboundDb(db);
   }
   return { channel_type: null, platform_id: null, thread_id: null };
 }

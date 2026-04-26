@@ -24,17 +24,36 @@ const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
 const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
 const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
 
-let _inbound: Database | null = null;
 let _outbound: Database | null = null;
 let _heartbeatPath: string = DEFAULT_HEARTBEAT_PATH;
 
-/** Inbound DB — container opens read-only (host is the sole writer). */
+// Tests inject an in-memory DB here via initTestSessionDb().
+// In production this is always null and getInboundDb() opens fresh each time.
+let _testInbound: Database | null = null;
+
+/**
+ * Inbound DB — opens a fresh read-only connection every call in production.
+ *
+ * Do NOT cache the returned handle: VirtioFS freezes the guest page cache for
+ * long-lived connections. A new Database() forces the guest OS to re-read from
+ * the virtiofs share and see writes the host committed after the previous open.
+ *
+ * Call closeInboundDb(db) when done — it no-ops in tests (where the handle is
+ * the shared in-memory fixture) but closes in production.
+ */
 export function getInboundDb(): Database {
-  if (!_inbound) {
-    _inbound = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
-    _inbound.exec('PRAGMA busy_timeout = 5000');
-  }
-  return _inbound;
+  if (_testInbound) return _testInbound;
+  const db = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
+  db.exec('PRAGMA busy_timeout = 5000');
+  return db;
+}
+
+/**
+ * Close an inbound DB handle obtained from getInboundDb().
+ * No-ops when the handle is the test fixture managed by initTestSessionDb().
+ */
+export function closeInboundDb(db: Database): void {
+  if (db !== _testInbound) db.close();
 }
 
 /** Outbound DB — container owns this file (sole writer). */
@@ -144,9 +163,9 @@ export function clearStaleProcessingAcks(): void {
 
 /** For tests — creates in-memory DBs with the session schemas. */
 export function initTestSessionDb(): { inbound: Database; outbound: Database } {
-  _inbound = new Database(':memory:');
-  _inbound.exec('PRAGMA foreign_keys = ON');
-  _inbound.exec(`
+  _testInbound = new Database(':memory:');
+  _testInbound.exec('PRAGMA foreign_keys = ON');
+  _testInbound.exec(`
     CREATE TABLE messages_in (
       id             TEXT PRIMARY KEY,
       seq            INTEGER UNIQUE,
@@ -180,8 +199,8 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
   `);
 
   _outbound = new Database(':memory:');
-  _outbound.exec('PRAGMA foreign_keys = ON');
-  _outbound.exec(`
+  _outbound!.exec('PRAGMA foreign_keys = ON');
+  _outbound!.exec(`
     CREATE TABLE messages_out (
       id             TEXT PRIMARY KEY,
       seq            INTEGER UNIQUE,
@@ -214,12 +233,12 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
     );
   `);
 
-  return { inbound: _inbound, outbound: _outbound };
+  return { inbound: _testInbound!, outbound: _outbound! };
 }
 
 export function closeSessionDb(): void {
-  _inbound?.close();
-  _inbound = null;
+  _testInbound?.close();
+  _testInbound = null;
   _outbound?.close();
   _outbound = null;
 }

@@ -116,6 +116,13 @@ function setupLaunchd(
   logger.info({ plistPath }, 'Wrote launchd plist');
 
   try {
+    execSync(`launchctl enable gui/$(id -u)/com.nanoclaw`, { stdio: 'ignore' });
+    logger.info('launchctl enable succeeded');
+  } catch {
+    logger.warn('launchctl enable failed');
+  }
+
+  try {
     execSync(`launchctl load ${JSON.stringify(plistPath)}`, {
       stdio: 'ignore',
     });
@@ -180,11 +187,27 @@ function setupBackupLaunchd(projectRoot: string, homeDir: string): void {
   logger.info({ backupPlistPath }, 'Wrote backup launchd plist');
 
   try {
-    execSync(`launchctl unload ${JSON.stringify(backupPlistPath)} 2>/dev/null || true`, { stdio: 'ignore' });
-  } catch { /* ignore */ }
+    execSync(
+      `launchctl unload ${JSON.stringify(backupPlistPath)} 2>/dev/null || true`,
+      { stdio: 'ignore' },
+    );
+  } catch {
+    /* ignore */
+  }
 
   try {
-    execSync(`launchctl load ${JSON.stringify(backupPlistPath)}`, { stdio: 'ignore' });
+    execSync(`launchctl enable gui/$(id -u)/com.nanoclaw.backup`, {
+      stdio: 'ignore',
+    });
+    logger.info('launchctl enable for backup succeeded');
+  } catch {
+    logger.warn('launchctl enable for backup failed');
+  }
+
+  try {
+    execSync(`launchctl load ${JSON.stringify(backupPlistPath)}`, {
+      stdio: 'ignore',
+    });
     logger.info('Backup launchd agent loaded');
   } catch {
     logger.warn('launchctl load for backup failed');
@@ -409,7 +432,9 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'timers.target'}
 
   try {
     execSync(`${systemctlPrefix} daemon-reload`, { stdio: 'ignore' });
-    execSync(`${systemctlPrefix} enable --now nanoclaw-backup.timer`, { stdio: 'ignore' });
+    execSync(`${systemctlPrefix} enable --now nanoclaw-backup.timer`, {
+      stdio: 'ignore',
+    });
     logger.info('Backup systemd timer enabled');
   } catch {
     logger.warn('Failed to enable backup systemd timer');

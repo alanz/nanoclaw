@@ -8,3 +8,4 @@
 
 import './cli.js';
 import './deltachat.js';
+import './emacs.js';

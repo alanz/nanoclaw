@@ -634,13 +634,14 @@ registerChannelAdapter('deltachat', {
   factory: () => {
     const env = readEnvFile(['DELTACHAT_CHATMAIL_QR', 'DELTACHAT_ADDR', 'DELTACHAT_MAIL_PW', 'DELTACHAT_DATA_DIR']);
 
-    const chatmailQr = env.DELTACHAT_CHATMAIL_QR ?? 'dcaccount:https://nine.testrun.org/new';
     const addr = env.DELTACHAT_ADDR;
     const mailPw = env.DELTACHAT_MAIL_PW;
 
-    if (!(addr && mailPw) && !chatmailQr) {
+    if (!(addr && mailPw) && !env.DELTACHAT_CHATMAIL_QR) {
       return null; // not configured — channel is skipped
     }
+
+    const chatmailQr = env.DELTACHAT_CHATMAIL_QR ?? 'dcaccount:https://nine.testrun.org/new';
 
     const rawDataDir = env.DELTACHAT_DATA_DIR ?? 'store/deltachat';
     const dataDir = path.resolve(rawDataDir.replace(/^~/, os.homedir()));

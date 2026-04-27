@@ -14,6 +14,7 @@ export {
   getMessagingGroupByPlatform,
   getAllMessagingGroups,
   getMessagingGroupsByChannel,
+  getMessagingGroupsByAgentGroup,
   updateMessagingGroup,
   deleteMessagingGroup,
   createMessagingGroupAgent,
@@ -23,6 +24,14 @@ export {
   updateMessagingGroupAgent,
   deleteMessagingGroupAgent,
 } from './messaging-groups.js';
+export {
+  createDestination,
+  getDestinations,
+  getDestinationByName,
+  getDestinationByTarget,
+  hasDestination,
+  deleteDestination,
+} from '../modules/agent-to-agent/db/agent-destinations.js';
 export {
   createSession,
   getSession,

@@ -1,0 +1,616 @@
+-- allium: 3
+-- agent-to-agent.allium
+--
+-- Scope: Agent-initiated flows that originate inside an agent container and
+--        are applied by the host because the container cannot write to the
+--        host-owned inbound.db.
+-- Includes: AgentDestination (routing + ACL), sub-agent creation
+--           (create_agent), agent-to-agent message routing, channel
+--           delivery permission check, card delivery (send_card),
+--           message edit (edit_message), reaction (add_reaction),
+--           scheduling (schedule_task / cancel_task / pause_task /
+--           resume_task / update_task plus recurrence), interactive
+--           question flow (ask_user_question + button response).
+-- Excludes: Identity (identity.allium), channel routing (routing.allium),
+--           session lifecycle (sessions.allium), human approvals
+--           (approvals.allium), self-modification of container config
+--           (self-mod.allium).
+--
+-- All agent-initiated flows share the same shape: the container writes a
+-- system outbound message (or a chat-sdk card, in the question case) and
+-- the host applies the requested effect. Permission checks for
+-- agent-to-agent sends are enforced against AgentDestination, which is
+-- both the routing table (name -> target) and the ACL (row exists =>
+-- allowed).
+
+use "./identity.allium" as identity
+use "./routing.allium" as routing
+use "./sessions.allium" as sessions
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    default_question_timeout: Duration = 300.seconds
+    parent_destination_name: String = "parent"
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum DestinationTargetType { channel | agent }
+enum ScheduledTaskStatus { pending | paused | cancelled }
+enum InteractiveQuestionStatus { pending | answered | timed_out }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- AgentDestination is the per-agent map of locally-named outbound targets,
+-- and simultaneously the ACL: a row's existence is the source agent's
+-- permission to send to that target. The host always re-validates against
+-- this table on delivery; the per-session projection in inbound.db is a
+-- cached view.
+
+entity AgentDestination {
+    agent_group: identity/AgentGroup
+    local_name: String
+    target_type: DestinationTargetType
+    target_id: String
+    created_at: Timestamp
+}
+
+-- A request from an agent to spawn a long-lived sub-agent. The host
+-- creates a new AgentGroup, scaffolds its filesystem, and wires
+-- bidirectional AgentDestination rows so the two agents can address
+-- each other. Fire-and-forget; no human approval is required because the
+-- create_agent tool is only exposed to admin-tier agents.
+
+entity AgentCreationRequest {
+    requesting_session: sessions/Session
+    requested_name: String
+    instructions: String?
+    requested_at: Timestamp
+    status: pending | applied | rejected
+
+    transitions status {
+        pending -> applied
+        pending -> rejected
+        terminal: applied, rejected
+    }
+}
+
+-- ScheduledTask is a first-class scheduling concept. It is stored as a
+-- messages_in row of kind = 'task' on the host, but the domain is the
+-- task series (identified by series_id), not any single occurrence. A
+-- recurring task produces one completed messages_in row per firing plus
+-- one live follow-up row carrying the next process_after; both share the
+-- same series_id and are the same ScheduledTask from the agent's point
+-- of view.
+
+entity ScheduledTask {
+    session: sessions/Session
+    series_id: String
+    prompt: String
+    script: String?
+    process_after: Timestamp
+    recurrence: String?
+    status: ScheduledTaskStatus
+    created_at: Timestamp
+
+    is_due: process_after <= now
+    is_recurring: recurrence != null
+
+    transitions status {
+        pending -> paused
+        pending -> cancelled
+        paused -> pending
+        paused -> cancelled
+        terminal: cancelled
+    }
+}
+
+-- InteractiveQuestion is the host-side record of an outstanding
+-- ask_user_question. The card itself is a chat-sdk OutboundMessage
+-- delivered through the regular channel; this entity tracks whether
+-- the user has clicked an option yet and bounds the time the agent
+-- container will wait.
+
+entity InteractiveQuestion {
+    session: sessions/Session
+    question_id: String
+    title: String
+    question: String
+    options: List<String>
+    status: InteractiveQuestionStatus
+    selected_option: String? when status = answered
+    created_at: Timestamp
+    expires_at: Timestamp
+
+    is_actionable: status = pending and expires_at > now
+
+    transitions status {
+        pending -> answered
+        pending -> timed_out
+        terminal: answered, timed_out
+    }
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+------------------------------------------------------------
+-- Sub-agent creation (create_agent)
+------------------------------------------------------------
+
+-- An agent calls the create_agent MCP tool. The container writes a
+-- kind='system' outbound message; the host receives this trigger and
+-- creates an AgentCreationRequest as a record of the request.
+
+rule AgentCreationRequested {
+    when: AgentRequestsCreateAgent(session, name, instructions?)
+    requires: name != ""
+    ensures: AgentCreationRequest.created(
+        requesting_session: session,
+        requested_name: name,
+        instructions: instructions,
+        requested_at: now,
+        status: pending
+    )
+}
+
+-- A request is rejected when the requested name (after normalisation)
+-- already exists as a destination in the creator's namespace. The host
+-- notifies the creator via a chat-kind inbound message.
+
+rule AgentCreationNameCollision {
+    when: AgentRequestsCreateAgent(session, name, instructions?)
+    let local_name = normalize_name(name)
+    requires: name != ""
+    requires: exists AgentDestination{
+        agent_group: session.agent_group,
+        local_name: local_name
+    }
+    let req = AgentCreationRequest{
+        requesting_session: session,
+        requested_name: name
+    }
+    requires: exists req
+    requires: req.status = pending
+    ensures:
+        req.status = rejected
+        AgentNotified(
+            session: session,
+            text: "name collision in destination namespace"
+        )
+}
+
+-- Happy path: no collision, host creates the new AgentGroup, scaffolds
+-- its filesystem (folder may be deduplicated globally), creates two
+-- AgentDestination rows (creator -> child by chosen name; child ->
+-- creator as "parent", deduplicated if the child already happens to
+-- have a "parent" destination), refreshes the creator's session
+-- destination projection, and notifies the creator.
+
+rule AgentCreationApplied {
+    when: AgentRequestsCreateAgent(session, name, instructions?)
+    let local_name = normalize_name(name)
+    requires: name != ""
+    requires: not exists AgentDestination{
+        agent_group: session.agent_group,
+        local_name: local_name
+    }
+    let req = AgentCreationRequest{
+        requesting_session: session,
+        requested_name: name
+    }
+    requires: exists req
+    requires: req.status = pending
+    let folder = derive_unique_folder(local_name)
+    let parent_name = derive_unique_parent_name(session.agent_group)
+    ensures:
+        let new_group = identity/AgentGroup.created(
+            name: name,
+            folder: folder,
+            agent_provider: null,
+            created_at: now
+        )
+        AgentGroupFilesystemInitialised(
+            agent_group: new_group,
+            instructions: instructions
+        )
+        AgentDestination.created(
+            agent_group: session.agent_group,
+            local_name: local_name,
+            target_type: agent,
+            target_id: new_group.id,
+            created_at: now
+        )
+        AgentDestination.created(
+            agent_group: new_group,
+            local_name: parent_name,
+            target_type: agent,
+            target_id: session.agent_group.id,
+            created_at: now
+        )
+        DestinationProjectionRefreshed(session: session)
+        AgentNotified(
+            session: session,
+            text: "child agent ready"
+        )
+        req.status = applied
+}
+
+------------------------------------------------------------
+-- Agent-to-agent message routing
+------------------------------------------------------------
+
+-- When an agent's outbound message has channel_type = 'agent', the host
+-- routes it to another agent group. The target's agent_shared session
+-- is resolved (or lazily created) and a kind='chat' inbound message is
+-- written into the target's inbound.db.
+--
+-- Permission: the source agent must hold an AgentDestination row for
+-- the target, OR the source is sending to itself (used for system
+-- notes back into its own session, e.g. follow-up prompts).
+
+rule AgentToAgentMessageRouted {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type = "agent"
+    requires: outbound.platform_id != null
+    let source_group = outbound.session.agent_group
+    let target_group = identity/AgentGroup{id: outbound.platform_id}
+    requires: exists target_group
+    requires: target_group = source_group
+              or exists AgentDestination{
+                  agent_group: source_group,
+                  target_type: agent,
+                  target_id: target_group.id
+              }
+    let target_session = resolve_agent_shared_session(target_group)
+    ensures:
+        sessions/InboundMessage.created(
+            session: target_session,
+            seq: next_inbound_seq(target_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: outbound.content,
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: target_session)
+}
+
+-- An agent-to-agent message that lacks a corresponding AgentDestination
+-- (and is not a self-send) is rejected at delivery. This is the security
+-- boundary: stale or hallucinated destination IDs cannot reach a target.
+
+rule AgentToAgentMessageRejected {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type = "agent"
+    requires: outbound.platform_id != null
+    let source_group = outbound.session.agent_group
+    let target_group = identity/AgentGroup{id: outbound.platform_id}
+    requires: target_group != source_group
+    requires: not exists AgentDestination{
+        agent_group: source_group,
+        target_type: agent,
+        target_id: outbound.platform_id
+    }
+    ensures: AgentToAgentDeliveryRejected(
+        outbound: outbound,
+        reason: "no destination"
+    )
+}
+
+------------------------------------------------------------
+-- Channel delivery
+------------------------------------------------------------
+
+-- The channel-send analogue of AgentToAgentMessageRouted /
+-- AgentToAgentMessageRejected. The host enforces that an agent may only
+-- send to a channel that is either its session's origin messaging group,
+-- OR one for which the source agent group holds an AgentDestination row
+-- with target_type = channel.
+
+rule AgentChannelMessageDelivered {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type != null
+    requires: outbound.channel_type != "agent"
+    let mg = routing/MessagingGroup{
+        channel_type: outbound.channel_type,
+        platform_id: outbound.platform_id
+    }
+    requires: exists mg
+    requires: mg = outbound.session.messaging_group
+              or exists AgentDestination{
+                  agent_group: outbound.session.agent_group,
+                  target_type: channel,
+                  target_id: mg.id
+              }
+    ensures: ChannelMessageDelivered(outbound: outbound)
+}
+
+rule AgentChannelMessageRejected {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type != null
+    requires: outbound.channel_type != "agent"
+    let mg = routing/MessagingGroup{
+        channel_type: outbound.channel_type,
+        platform_id: outbound.platform_id
+    }
+    requires: exists mg
+    requires: mg != outbound.session.messaging_group
+    requires: not exists AgentDestination{
+        agent_group: outbound.session.agent_group,
+        target_type: channel,
+        target_id: mg.id
+    }
+    ensures: ChannelDeliveryRejected(outbound: outbound, reason: "no destination")
+}
+
+------------------------------------------------------------
+-- Channel actions
+------------------------------------------------------------
+
+-- send_card: deliver a structured display/interactive card to the channel.
+-- No host-side state beyond normal OutboundMessage delivery.
+rule AgentSentCard {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.kind = "chat-sdk"
+    ensures: CardDelivered(outbound: outbound)
+}
+
+-- edit_message: replace the text of a previously delivered message on the
+-- platform. The "edit" discriminator lives inside the opaque content blob,
+-- so this rule documents the existence of the operation rather than
+-- guarding on a navigable field.
+rule AgentEditedMessage {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.kind = "chat"
+    ensures: PlatformMessageEdited(outbound: outbound)
+}
+
+-- add_reaction: attach an emoji reaction to a previously delivered
+-- message. As with edit_message, the "reaction" discriminator lives in
+-- the opaque content blob.
+rule AgentAddedReaction {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.kind = "chat"
+    ensures: PlatformReactionAdded(outbound: outbound)
+}
+
+------------------------------------------------------------
+-- Scheduling
+------------------------------------------------------------
+
+-- schedule_task: agent declares a one-shot or recurring task. The host
+-- creates a ScheduledTask in the requesting session.
+
+rule ScheduledTaskCreated {
+    when: AgentRequestsScheduleTask(session, task_id, prompt, script?, process_after, recurrence?)
+    requires: not exists ScheduledTask{series_id: task_id}
+    ensures: ScheduledTask.created(
+        session: session,
+        series_id: task_id,
+        prompt: prompt,
+        script: script,
+        process_after: process_after,
+        recurrence: recurrence,
+        status: pending,
+        created_at: now
+    )
+}
+
+-- pause_task: stop a series from firing without forgetting it.
+
+rule ScheduledTaskPaused {
+    when: AgentRequestsPauseTask(session, task_id)
+    let task = ScheduledTask{series_id: task_id, session: session}
+    requires: exists task
+    requires: task.status = pending
+    ensures: task.status = paused
+}
+
+-- resume_task: paused -> pending.
+
+rule ScheduledTaskResumed {
+    when: AgentRequestsResumeTask(session, task_id)
+    let task = ScheduledTask{series_id: task_id, session: session}
+    requires: exists task
+    requires: task.status = paused
+    ensures: task.status = pending
+}
+
+-- cancel_task: terminal cancellation. Recurrence is also cleared so the
+-- recurrence sweep cannot revive the series.
+
+rule ScheduledTaskCancelled {
+    when: AgentRequestsCancelTask(session, task_id)
+    let task = ScheduledTask{series_id: task_id, session: session}
+    requires: exists task
+    requires: task.status in {pending, paused}
+    ensures:
+        task.status = cancelled
+        task.recurrence = null
+}
+
+-- update_task: change prompt, schedule, recurrence and/or script on the
+-- live row. Any field omitted is left unchanged.
+
+rule ScheduledTaskUpdated {
+    when: AgentRequestsUpdateTask(session, task_id, prompt?, process_after?, recurrence?, script?)
+    let task = ScheduledTask{series_id: task_id, session: session}
+    requires: exists task
+    requires: task.status in {pending, paused}
+    ensures:
+        if prompt != null: task.prompt = prompt
+        if process_after != null: task.process_after = process_after
+        if recurrence != null: task.recurrence = recurrence
+        if script != null: task.script = script
+}
+
+-- Recurrence sweep. When a recurring task is "fired" by the session
+-- processing side, that becomes a RecurrenceTickObserved trigger here:
+-- compute the next firing in the user's timezone, clone a new pending
+-- ScheduledTask carrying the same series_id, and clear the original's
+-- recurrence so it isn't re-cloned next sweep tick.
+--
+-- "Fired" is an external event from the session processing side; tasks
+-- don't terminate at "completed" in the scheduling domain — they either
+-- fire and roll forward, or they are cancelled.
+
+rule RecurrenceCloned {
+    when: RecurrenceTickObserved(task)
+    requires: task.recurrence != null
+    let next_run = next_cron_firing(task.recurrence, user_timezone())
+    ensures:
+        ScheduledTask.created(
+            session: task.session,
+            series_id: task.series_id,
+            prompt: task.prompt,
+            script: task.script,
+            process_after: next_run,
+            recurrence: task.recurrence,
+            status: pending,
+            created_at: now
+        )
+        task.recurrence = null
+}
+
+------------------------------------------------------------
+-- Interactive questions (ask_user_question)
+------------------------------------------------------------
+
+-- The agent calls ask_user_question. The container writes a chat-sdk
+-- card to outbound.db; the host's delivery records an
+-- InteractiveQuestion when the card is delivered. The agent then polls
+-- inbound.db for the question_response.
+
+rule InteractiveQuestionRecorded {
+    when: AgentAsksUserQuestion(session, question_id, title, question, options, timeout?)
+    requires: not exists InteractiveQuestion{question_id: question_id}
+    let resolved_timeout = if timeout != null: timeout else: config.default_question_timeout
+    ensures: InteractiveQuestion.created(
+        session: session,
+        question_id: question_id,
+        title: title,
+        question: question,
+        options: options,
+        status: pending,
+        created_at: now,
+        expires_at: now + resolved_timeout
+    )
+}
+
+-- The user clicks a button on the card. The host resolves the
+-- pending_questions row, writes a kind='system' question_response
+-- inbound message into the session, and wakes the container.
+
+rule InteractiveQuestionAnswered {
+    when: UserSelectsQuestionOption(question_id, selected_option, user)
+    let q = InteractiveQuestion{question_id: question_id}
+    requires: exists q
+    requires: q.is_actionable
+    requires: selected_option in q.options
+    ensures:
+        q.status = answered
+        q.selected_option = selected_option
+        sessions/InboundMessage.created(
+            session: q.session,
+            seq: next_inbound_seq(q.session),
+            kind: "system",
+            status: pending,
+            trigger: false,
+            content: encode_question_response(question_id, selected_option),
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: q.session)
+}
+
+-- The container's polling deadline elapses without an answer. The
+-- question becomes terminal so a stale row never resolves a click that
+-- arrives after the agent has given up.
+
+rule InteractiveQuestionTimedOut {
+    when: q: InteractiveQuestion.expires_at <= now
+    requires: q.status = pending
+    ensures: q.status = timed_out
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- A given local_name is unique within an agent group's destination
+-- namespace. The host enforces this at insert time; the spec captures
+-- it so the validator catches rules that would violate it.
+
+invariant LocalNameUniquePerAgentGroup {
+    for a in AgentDestinations:
+        for b in AgentDestinations:
+            a != b and a.agent_group = b.agent_group
+                implies a.local_name != b.local_name
+}
+
+-- A series is one ScheduledTask at a time in the live (pending|paused)
+-- states. Recurrence is allowed to leave a trail of cancelled rows
+-- (terminal), but only one row of the series can be live.
+
+invariant AtMostOneLiveTaskPerSeries {
+    for a in ScheduledTasks:
+        for b in ScheduledTasks:
+            a != b and a.series_id = b.series_id
+                implies not (
+                    a.status in {pending, paused} and b.status in {pending, paused}
+                )
+}
+
+-- question_id is the host-side handle for an outstanding question and
+-- must be unique across all InteractiveQuestion records.
+
+invariant UniqueQuestionId {
+    for a in InteractiveQuestions:
+        for b in InteractiveQuestions:
+            a != b implies a.question_id != b.question_id
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "create_agent: should the host validate the requested name against a reserved-word / blocklist before applying, or is normalisation + collision check sufficient?"
+open question "create_agent: when the creator's session terminates between request and apply, does the new agent group still get created and notified through some other channel, or is the request abandoned?"
+open question "Agent-to-agent: when the target agent group has no active container, does the message simply queue in inbound.db (current behaviour) or should there be a TTL after which it is dropped?"
+open question "Recurrence: how is the user's timezone established (per-session config vs. global host config), and what happens if the timezone changes after a recurring task is created?"
+open question "ask_user_question: when the agent's polling deadline expires before the user clicks, but the user clicks shortly after, should the late click be silently dropped (current behaviour) or reflected back as a no-op acknowledgement?"
+open question "ask_user_question: is there a per-session limit on concurrent outstanding questions, or can an agent fan out arbitrarily many cards?"
+
+-- Checker note: when run on the whole specs/ directory, allium check 3.2.3
+-- reports zero errors and zero warnings on this file. When run on this file
+-- alone (`allium check specs/agent-to-agent.allium`), the checker emits
+-- use.unresolvedPath warnings for ./identity.allium, ./routing.allium and
+-- ./sessions.allium — those are imports that resolve correctly in the
+-- multi-file check. Same pattern as self-mod.allium.
+--
+-- The remaining info-level diagnostics in this file are:
+--   * rule.unreachableTrigger for the agent-initiated stimuli
+--     (AgentRequestsCreateAgent, AgentRequestsScheduleTask,
+--     AgentRequestsPauseTask, AgentRequestsResumeTask,
+--     AgentRequestsCancelTask, AgentRequestsUpdateTask,
+--     AgentAsksUserQuestion, RecurrenceTickObserved,
+--     UserSelectsQuestionOption) — these are external entry points
+--     emitted by the agent container or channel adapter; surfaces
+--     for them belong in a future revision once the agent boundary
+--     is being modelled in spec form.
+--   * field.unused informational notes for declared metadata fields
+--     (created_at, requested_at, instructions, title, question and
+--     the is_due / is_recurring derivations) — kept for documentation
+--     value even though no rule navigates them today.

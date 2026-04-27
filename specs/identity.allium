@@ -1,0 +1,154 @@
+-- allium: 3
+-- identity.allium
+--
+-- Scope: User identity, privilege model, and agent group membership.
+-- Includes: User auto-registration on first contact, UserRole (owner/admin),
+--           AgentGroupMember, AgentGroup definition.
+-- Excludes: Channel routing, session management, approval flows.
+--
+-- Users are identified by channel type + platform handle. There is no cross-channel
+-- identity linking — the same human on two channels is two distinct User records.
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum Role { owner | admin }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity AgentGroup {
+    name: String
+    folder: String
+    agent_provider: String?
+    created_at: Timestamp
+}
+
+entity User {
+    channel_type: String
+    handle: String
+    display_name: String
+    created_at: Timestamp
+
+    roles: UserRole with user = this
+    memberships: AgentGroupMember with user = this
+
+    is_owner: roles.any(r => r.role = owner)
+    is_global_admin: roles.any(r => r.role = admin and r.agent_group = null)
+    can_access(group): is_owner
+                       or is_global_admin
+                       or roles.any(r => r.role = admin and r.agent_group = group)
+                       or memberships.any(m => m.agent_group = group)
+}
+
+entity UserRole {
+    user: User
+    role: Role
+    agent_group: AgentGroup?
+    granted_by: User
+    granted_at: Timestamp
+
+    invariant OwnerMustBeGlobal {
+        role = owner implies agent_group = null
+    }
+}
+
+entity AgentGroupMember {
+    user: User
+    agent_group: AgentGroup
+    added_by: User
+    added_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Users are auto-registered the first time they send a message on any channel.
+-- The SenderSeen trigger is emitted by the routing module for every received
+-- channel message, decoupling identity from the full ChannelMessage value.
+
+rule NewUserSeen {
+    when: SenderSeen(channel_type, handle, display_name)
+    requires: not exists User{channel_type: channel_type, handle: handle}
+    ensures: User.created(
+        channel_type: channel_type,
+        handle: handle,
+        display_name: display_name,
+        created_at: now
+    )
+}
+
+rule UserDisplayNameRefreshed {
+    when: SenderSeen(channel_type, handle, display_name)
+    let user = User{channel_type: channel_type, handle: handle}
+    requires: exists user
+    requires: user.display_name != display_name
+    ensures: user.display_name = display_name
+}
+
+-- Role management. Only owners and global admins may grant or revoke roles.
+
+rule RoleGranted {
+    when: GrantRole(actor, target_user, role, agent_group?)
+    requires: actor.is_owner or actor.is_global_admin
+    requires: role = owner implies agent_group = null
+    ensures: UserRole.created(
+        user: target_user,
+        role: role,
+        agent_group: agent_group,
+        granted_by: actor,
+        granted_at: now
+    )
+}
+
+rule RoleRevoked {
+    when: RevokeRole(actor, target_role)
+    requires: actor.is_owner or actor.is_global_admin
+    ensures: not exists target_role
+}
+
+-- Member management. Owners, global admins, and scoped admins of a group may
+-- add or remove members of that group.
+
+rule MemberAdded {
+    when: AddMember(actor, user, agent_group)
+    requires: actor.is_owner
+             or actor.is_global_admin
+             or exists UserRole{user: actor, role: admin, agent_group: agent_group}
+    requires: not exists AgentGroupMember{user: user, agent_group: agent_group}
+    ensures: AgentGroupMember.created(
+        user: user,
+        agent_group: agent_group,
+        added_by: actor,
+        added_at: now
+    )
+}
+
+rule MemberRemoved {
+    when: RemoveMember(actor, membership)
+    requires: actor.is_owner
+             or actor.is_global_admin
+             or exists UserRole{user: actor, role: admin, agent_group: membership.agent_group}
+    ensures: not exists membership
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor Owner {
+    identified_by: User where is_owner
+}
+
+actor Admin {
+    identified_by: User where is_global_admin
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "User.kind — does this field distinguish humans from bots, and what are its values?"

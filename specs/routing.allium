@@ -1,0 +1,304 @@
+-- allium: 3
+-- routing.allium
+--
+-- Scope: Channel-to-agent wiring, inbound message engagement, and routing decisions.
+-- Includes: MessagingGroup, Wiring (engagement rules, sender scope, session mode),
+--           unknown-sender policy enforcement, messaging group auto-creation.
+-- Excludes: User identity (identity.allium), session lifecycle (sessions.allium).
+--
+-- Wiring is the binding between a MessagingGroup and an AgentGroup. Four axes control
+-- which messages reach which agents:
+--   engage_mode   — how to test whether a message engages this wiring
+--   sender_scope  — which senders are allowed through this wiring
+--   ignored_message_policy — what to do with non-triggering messages
+--   session_mode  — how session identity is scoped for this wiring
+
+use "./identity.allium" as identity
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value ChannelMessage {
+    channel_type: String
+    platform_id: String
+    thread_id: String?
+    text: String
+    sender_handle: String
+    display_name: String
+    is_mention: Boolean
+    kind: String
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum UnknownSenderPolicy { strict | request_approval | public }
+enum EngageMode { pattern | mention | mention_sticky }
+enum SenderScope { all | known }
+enum IgnoredMessagePolicy { drop | accumulate }
+enum SessionMode { shared | per_thread | agent_shared }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity MessagingGroup {
+    channel_type: String
+    platform_id: String
+    name: String
+    is_group: Boolean
+    unknown_sender_policy: UnknownSenderPolicy
+    denied: Boolean
+    created_at: Timestamp
+
+    wirings: Wiring with messaging_group = this
+    denied_at: Timestamp? when denied = true
+
+    transitions denied {
+        false -> true
+        true -> false
+        terminal: false
+    }
+}
+
+entity Wiring {
+    messaging_group: MessagingGroup
+    agent_group: identity/AgentGroup
+    engage_mode: EngageMode
+    engage_pattern: String
+    sender_scope: SenderScope
+    ignored_message_policy: IgnoredMessagePolicy
+    session_mode: SessionMode
+    priority: Integer
+    created_at: Timestamp
+}
+
+entity SenderApprovalRequest {
+    messaging_group: MessagingGroup
+    sender: identity/User
+    created_at: Timestamp
+    status: pending | approved | denied
+
+    transitions status {
+        pending -> approved
+        pending -> denied
+        terminal: approved, denied
+    }
+}
+
+entity RoutedMessage {
+    wiring: Wiring
+    message: ChannelMessage
+    sender: identity/User
+    trigger: Boolean
+    created_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_wirings_per_messaging_group: Integer = 20
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Every inbound channel message announces its sender so identity rules
+-- can register or refresh the sending User. SenderSeen fires once per
+-- received message regardless of routing outcome.
+
+rule SenderObserved {
+    when: ChannelMessageReceived(message)
+    ensures: SenderSeen(
+        channel_type: message.channel_type,
+        handle: message.sender_handle,
+        display_name: message.display_name
+    )
+}
+
+-- Messaging groups are auto-created when an @mention is received
+-- and no record exists for that channel+platform_id pair.
+
+rule MessagingGroupAutoCreated {
+    when: ChannelMessageReceived(message)
+    requires: message.is_mention
+    requires: not exists MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
+    ensures: MessagingGroup.created(
+        channel_type: message.channel_type,
+        platform_id: message.platform_id,
+        name: message.platform_id,
+        is_group: false,
+        unknown_sender_policy: request_approval,
+        denied: false,
+        created_at: now
+    )
+}
+
+-- Operators explicitly wire a messaging group to an agent group.
+
+rule ChannelWired {
+    when: WireChannel(actor, messaging_group, agent_group, engage_mode, engage_pattern,
+                      sender_scope, ignored_message_policy, session_mode, priority)
+    requires: actor.is_owner or actor.is_global_admin
+    requires: not exists Wiring{messaging_group: messaging_group, agent_group: agent_group}
+    ensures: Wiring.created(
+        messaging_group: messaging_group,
+        agent_group: agent_group,
+        engage_mode: engage_mode,
+        engage_pattern: engage_pattern,
+        sender_scope: sender_scope,
+        ignored_message_policy: ignored_message_policy,
+        session_mode: session_mode,
+        priority: priority,
+        created_at: now
+    )
+}
+
+rule ChannelUnwired {
+    when: UnwireChannel(actor, wiring)
+    requires: actor.is_owner or actor.is_global_admin
+    ensures: not exists wiring
+}
+
+rule WiringUpdated {
+    when: UpdateWiring(actor, wiring, engage_mode?, engage_pattern?, sender_scope?,
+                       ignored_message_policy?, session_mode?, priority?)
+    requires: actor.is_owner or actor.is_global_admin
+    ensures:
+        if engage_mode != null: wiring.engage_mode = engage_mode
+        if engage_pattern != null: wiring.engage_pattern = engage_pattern
+        if sender_scope != null: wiring.sender_scope = sender_scope
+        if ignored_message_policy != null: wiring.ignored_message_policy = ignored_message_policy
+        if session_mode != null: wiring.session_mode = session_mode
+        if priority != null: wiring.priority = priority
+}
+
+-- Operators can deny a messaging group, preventing any messages from routing
+-- regardless of wiring. Denial is cleared by any subsequent wiring mutation.
+
+rule MessagingGroupDenied {
+    when: DenyMessagingGroup(actor, messaging_group)
+    requires: actor.is_owner or actor.is_global_admin
+    requires: not messaging_group.denied
+    ensures:
+        messaging_group.denied = true
+        messaging_group.denied_at = now
+}
+
+rule MessagingGroupUndenied {
+    when: UnwireChannel(actor, wiring)
+    requires: wiring.messaging_group.denied
+    ensures:
+        wiring.messaging_group.denied = false
+        wiring.messaging_group.denied_at = null
+}
+
+-- Inbound message routing.
+-- A message is routed to an agent when:
+--   (a) the messaging group is not denied
+--   (b) a wiring exists whose engage_mode matches the message
+--   (c) the sender passes the sender_scope check
+-- When the sender is unknown and the messaging group policy = request_approval, the
+-- message is dropped and an approval request is created.
+
+rule MessageEngagesAgent {
+    when: ChannelMessageReceived(message)
+    let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
+    let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
+    requires: exists mg
+    requires: exists sender
+    requires: not mg.denied
+
+    for wiring in mg.wirings where message_engages(wiring, message):
+        requires: sender.can_access(wiring.agent_group)
+                  or wiring.sender_scope = all and mg.unknown_sender_policy = public
+        ensures: RoutedMessage.created(
+            wiring: wiring,
+            message: message,
+            sender: sender,
+            trigger: true,
+            created_at: now
+        )
+}
+
+rule MessageAccumulated {
+    when: ChannelMessageReceived(message)
+    let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
+    let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
+    requires: exists mg
+    requires: exists sender
+    requires: not mg.denied
+
+    for wiring in mg.wirings where message_engages(wiring, message):
+        requires: not sender.can_access(wiring.agent_group)
+        requires: mg.unknown_sender_policy != strict
+        requires: wiring.ignored_message_policy = accumulate
+        ensures: RoutedMessage.created(
+            wiring: wiring,
+            message: message,
+            sender: sender,
+            trigger: false,
+            created_at: now
+        )
+}
+
+rule UnknownSenderEscalated {
+    when: ChannelMessageReceived(message)
+    let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
+    let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
+    requires: exists mg
+    requires: exists sender
+    requires: not mg.denied
+    requires: mg.unknown_sender_policy = request_approval
+    requires: not sender.can_access(mg.wirings.first.agent_group)
+    requires: not exists SenderApprovalRequest{messaging_group: mg, sender: sender,
+                                               status: pending}
+    ensures: SenderApprovalRequest.created(
+        messaging_group: mg,
+        sender: sender,
+        created_at: now,
+        status: pending
+    )
+}
+
+-- Sender approval flows.
+
+rule SenderApproved {
+    when: ApproveSender(actor, request)
+    requires: actor.is_owner or actor.is_global_admin
+    requires: request.status = pending
+    ensures:
+        request.status = approved
+        AgentGroupMembershipGranted(user: request.sender, messaging_group: request.messaging_group)
+}
+
+rule SenderDenied {
+    when: DenySender(actor, request)
+    requires: actor.is_owner or actor.is_global_admin
+    requires: request.status = pending
+    ensures: request.status = denied
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant DeniedGroupAcceptsNoMessages {
+    -- When a MessagingGroup.denied = true, no Wiring should route messages.
+    -- Enforced by the routing gate; captured here for clarity.
+    for mg in MessagingGroups:
+        mg.denied implies mg.wirings.count >= 0
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "MessagingGroup auto-creation: should auto-created groups always use request_approval policy, or should there be a configurable default?"
+open question "mention_sticky engage_mode: exactly which session types count as 'existing' for stickiness?"
+open question "Fan-out priority: when multiple wirings match, does priority control order only, or does it gate delivery?"

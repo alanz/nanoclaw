@@ -1,0 +1,335 @@
+-- allium: 3
+-- sessions.allium
+--
+-- Scope: Session lifecycle, inbound message queuing, outbound delivery, and
+--        container processing state.
+-- Includes: Session creation and resolution, InboundMessage, OutboundMessage,
+--           delivery, stuck-container detection and recovery.
+-- Excludes: User identity (identity.allium), wiring rules (routing.allium).
+--
+-- A session is the unit of conversation context shared between one agent group
+-- and one messaging group (or thread within that group). Session identity depends
+-- on the wiring's session_mode:
+--   shared       — one session per (agent_group, messaging_group)
+--   per_thread   — one session per (agent_group, messaging_group, thread_id)
+--   agent_shared — one session per agent_group, spanning all messaging groups
+--
+-- The host and the agent container communicate only via two per-session SQLite
+-- databases. The host writes inbound messages; the container writes outbound
+-- messages. There is no other IPC.
+
+use "./identity.allium" as identity
+use "./routing.allium" as routing
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum SessionStatus { active | closed }
+enum ProcessingState { idle | processing | stuck }
+enum MessageStatus { pending | processing | completed | failed }
+enum DeliveryStatus { delivered | failed }
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_message_tries: Integer = 5
+    processing_ceiling: Duration = 30.minutes
+    stuck_claim_timeout: Duration = 60.seconds
+    scheduled_check_interval: Duration = 60.seconds
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity Session {
+    agent_group: identity/AgentGroup
+    messaging_group: routing/MessagingGroup?
+    thread_id: String?
+    status: SessionStatus
+    processing_state: ProcessingState
+    last_active: Timestamp
+    created_at: Timestamp
+
+    inbound_messages: InboundMessage with session = this
+    outbound_messages: OutboundMessage with session = this
+    pending_messages: inbound_messages where status = pending
+    triggering_messages: inbound_messages where status = pending and trigger = true
+
+    has_work: triggering_messages.count > 0
+
+    invariant AgentSharedHasNoMessagingGroup {
+        messaging_group = null implies thread_id = null
+    }
+
+    transitions status {
+        active -> closed
+        terminal: closed
+    }
+
+    transitions processing_state {
+        idle -> processing
+        processing -> idle
+        processing -> stuck
+        stuck -> idle
+        terminal: idle
+    }
+}
+
+entity InboundMessage {
+    session: Session
+    seq: Integer
+    kind: String
+    status: MessageStatus
+    trigger: Boolean
+    content: String
+    process_after: Timestamp?
+    recurrence: String?
+    series_id: String?
+    tries: Integer
+    created_at: Timestamp
+
+    is_due: process_after = null or process_after <= now
+    is_retriable: tries < config.max_message_tries
+
+    transitions status {
+        pending -> processing
+        processing -> completed
+        processing -> failed
+        failed -> pending
+        terminal: completed
+    }
+}
+
+entity OutboundMessage {
+    session: Session
+    seq: Integer
+    in_reply_to: InboundMessage?
+    kind: String
+    content: String
+    channel_type: String?
+    platform_id: String?
+    thread_id: String?
+    deliver_after: Timestamp?
+    recurrence: String?
+    created_at: Timestamp
+
+    is_due: deliver_after = null or deliver_after <= now
+}
+
+entity DeliveredMessage {
+    outbound_message: OutboundMessage
+    platform_message_id: String?
+    status: DeliveryStatus
+    delivered_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Session resolution: lazily created on first engagement.
+
+rule SessionResolvedForSharedWiring {
+    when: routed: routing/RoutedMessage.created
+    requires: routed.wiring.session_mode = shared
+    requires: not exists Session{agent_group: routed.wiring.agent_group,
+                                 messaging_group: routed.wiring.messaging_group,
+                                 thread_id: null}
+    ensures: Session.created(
+        agent_group: routed.wiring.agent_group,
+        messaging_group: routed.wiring.messaging_group,
+        thread_id: null,
+        status: active,
+        processing_state: idle,
+        last_active: now,
+        created_at: now
+    )
+}
+
+rule SessionResolvedForPerThreadWiring {
+    when: routed: routing/RoutedMessage.created
+    requires: routed.wiring.session_mode = per_thread
+    requires: not exists Session{agent_group: routed.wiring.agent_group,
+                                 messaging_group: routed.wiring.messaging_group,
+                                 thread_id: routed.message.thread_id}
+    ensures: Session.created(
+        agent_group: routed.wiring.agent_group,
+        messaging_group: routed.wiring.messaging_group,
+        thread_id: routed.message.thread_id,
+        status: active,
+        processing_state: idle,
+        last_active: now,
+        created_at: now
+    )
+}
+
+rule SessionResolvedForAgentSharedWiring {
+    when: routed: routing/RoutedMessage.created
+    requires: routed.wiring.session_mode = agent_shared
+    requires: not exists Session{agent_group: routed.wiring.agent_group, messaging_group: null}
+    ensures: Session.created(
+        agent_group: routed.wiring.agent_group,
+        messaging_group: null,
+        thread_id: null,
+        status: active,
+        processing_state: idle,
+        last_active: now,
+        created_at: now
+    )
+}
+
+-- Inbound message queuing.
+
+rule InboundMessageQueued {
+    when: routed: routing/RoutedMessage.created
+    let session = resolve_session(routed.wiring, routed.message)
+    requires: exists session
+    requires: session.status = active
+    ensures: InboundMessage.created(
+        session: session,
+        seq: next_inbound_seq(session),
+        kind: routed.message.kind,
+        status: pending,
+        trigger: routed.trigger,
+        content: routed.message.text,
+        process_after: null,
+        tries: 0,
+        created_at: now
+    )
+}
+
+-- Scheduled messages (process_after set) are re-queued by the host at their due time.
+
+rule ScheduledMessageDue {
+    when: msg: InboundMessage.process_after <= now
+    requires: msg.status = pending
+    requires: msg.is_due
+    ensures: SessionWoken(session: msg.session)
+}
+
+-- Container processing lifecycle.
+-- The container is started when there are triggering messages to process.
+
+rule SessionProcessingStarted {
+    when: SessionWoken(session)
+    requires: session.status = active
+    requires: session.processing_state = idle
+    requires: session.has_work
+    ensures:
+        session.processing_state = processing
+        session.last_active = now
+}
+
+rule SessionProcessingCompleted {
+    when: ContainerReportedIdle(session)
+    requires: session.processing_state = processing
+    ensures: session.processing_state = idle
+}
+
+-- Stuck container detection. If a session has been in processing_state = processing
+-- for longer than the ceiling, it is marked stuck and messages are reset for retry.
+
+rule StuckContainerDetected {
+    when: session: Session.last_active + config.processing_ceiling <= now
+    requires: session.processing_state = processing
+    ensures:
+        session.processing_state = stuck
+        for msg in session.inbound_messages where status = processing:
+            if msg.is_retriable:
+                msg.status = pending
+                msg.tries = msg.tries + 1
+            else:
+                msg.status = failed
+}
+
+rule StuckSessionRecovered {
+    when: session: Session.processing_state becomes stuck
+    requires: session.has_work
+    ensures: session.processing_state = processing
+}
+
+rule StuckSessionIdled {
+    when: session: Session.processing_state becomes stuck
+    requires: not session.has_work
+    ensures: session.processing_state = idle
+}
+
+-- Inbound message claim and completion (mirrored from container).
+
+rule InboundMessageClaimed {
+    when: ContainerClaimedMessage(message)
+    requires: message.status = pending
+    ensures: message.status = processing
+}
+
+rule InboundMessageCompleted {
+    when: ContainerCompletedMessage(message)
+    requires: message.status = processing
+    ensures:
+        message.status = completed
+        message.session.last_active = now
+}
+
+-- Outbound message delivery.
+
+rule OutboundMessageDelivered {
+    when: OutboundMessageDue(outbound_message)
+    requires: outbound_message.is_due
+    requires: not exists DeliveredMessage{outbound_message: outbound_message}
+    ensures: DeliveredMessage.created(
+        outbound_message: outbound_message,
+        platform_message_id: null,
+        status: delivered,
+        delivered_at: now
+    )
+}
+
+rule OutboundDeliveryFailed {
+    when: DeliveryAttemptFailed(outbound_message, reason)
+    requires: not exists DeliveredMessage{outbound_message: outbound_message}
+    ensures: DeliveredMessage.created(
+        outbound_message: outbound_message,
+        platform_message_id: null,
+        status: failed,
+        delivered_at: now
+    )
+}
+
+-- Session closure.
+
+rule SessionClosed {
+    when: CloseSession(actor, session)
+    requires: actor.is_owner or actor.is_global_admin
+    requires: session.status = active
+    ensures: session.status = closed
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant SessionUniqueness {
+    for a in Sessions:
+        for b in Sessions:
+            a != b implies not (
+                a.agent_group = b.agent_group
+                and a.messaging_group = b.messaging_group
+                and a.thread_id = b.thread_id
+            )
+}
+
+invariant NoProcessingInClosedSession {
+    for s in Sessions:
+        s.status = closed implies s.processing_state = idle
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Recurrence: what triggers the creation of the next recurrence instance, and how are series managed?"
+open question "OutboundMessage routing: how does the container specify the channel for a reply that differs from the session's default routing?"

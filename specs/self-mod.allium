@@ -1,0 +1,222 @@
+-- allium: 3
+-- self-mod.allium
+--
+-- Scope: Agent self-modification flows — requesting package installation and
+--        MCP (Model Context Protocol) server addition.
+-- Includes: PackageInstallRequest, McpServerRequest, approval-gated application.
+-- Excludes: The approval primitive itself (approvals.allium), container runtime
+--           details (treated as black boxes here).
+--
+-- Agents may request two categories of container mutation:
+--   install_packages — APT system packages and/or npm packages
+--   add_mcp_server   — wire a new MCP server into the container config
+--
+-- Both require admin approval. On approval:
+--   install_packages — the container image is rebuilt and the session is restarted
+--   add_mcp_server   — the container config is updated; the next container spawn
+--                      picks up the new server automatically
+--
+-- Motivation: agents discover they need a tool mid-conversation and can request
+-- it without an operator having to manually edit config files.
+
+use "./identity.allium" as identity
+use "./approvals.allium" as approvals
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_packages_per_request: Integer = 20
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity PackageInstallRequest {
+    agent_group: identity/AgentGroup
+    apt_packages: List<String>
+    npm_packages: List<String>
+    reason: String
+    requested_at: Timestamp
+    status: pending_approval | approved | rejected | applied
+
+    total_packages: apt_packages.count + npm_packages.count
+
+    invariant PackageCountWithinLimit {
+        total_packages <= config.max_packages_per_request
+    }
+
+    transitions status {
+        pending_approval -> approved
+        pending_approval -> rejected
+        approved -> applied
+        terminal: applied, rejected
+    }
+}
+
+entity McpServerRequest {
+    agent_group: identity/AgentGroup
+    server_name: String
+    command: String
+    args: List<String>
+    env_keys: List<String>
+    reason: String
+    requested_at: Timestamp
+    status: pending_approval | approved | rejected | applied
+
+    transitions status {
+        pending_approval -> approved
+        pending_approval -> rejected
+        approved -> applied
+        terminal: applied, rejected
+    }
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Agents initiate a package install request from within the container.
+
+rule PackageInstallRequested {
+    when: AgentRequestsPackageInstall(session, apt_packages, npm_packages, reason)
+    requires: apt_packages.count + npm_packages.count > 0
+    requires: apt_packages.count + npm_packages.count <= config.max_packages_per_request
+    ensures: PackageInstallRequest.created(
+        agent_group: session.agent_group,
+        apt_packages: apt_packages,
+        npm_packages: npm_packages,
+        reason: reason,
+        requested_at: now,
+        status: pending_approval
+    )
+    ensures: approvals/ApprovalRequested(
+        agent_group: session.agent_group,
+        session_id: session.id,
+        action: install_packages,
+        payload: reason,
+        title: reason,
+        options: "Approve / Reject"
+    )
+}
+
+rule PackageInstallApproved {
+    when: approval: approvals/PendingApproval.status transitions_to approved
+    requires: approval.action = install_packages
+    let req = PackageInstallRequest{agent_group: approval.agent_group}
+    requires: exists req
+    requires: req.status = pending_approval
+    ensures:
+        req.status = approved
+        ContainerImageRebuilt(agent_group: req.agent_group)
+        ContainerRestarted(agent_group: req.agent_group)
+}
+
+rule PackageInstallRejected {
+    when: approval: approvals/PendingApproval.status transitions_to rejected
+    requires: approval.action = install_packages
+    let req = PackageInstallRequest{agent_group: approval.agent_group}
+    requires: exists req
+    requires: req.status = pending_approval
+    ensures: req.status = rejected
+}
+
+rule PackageInstallApplied {
+    when: ContainerImageRebuilt(agent_group)
+    let req = PackageInstallRequest{agent_group: agent_group}
+    requires: exists req
+    requires: req.status = approved
+    ensures: req.status = applied
+}
+
+-- Agents initiate an MCP server addition request.
+
+rule McpServerAddRequested {
+    when: AgentRequestsMcpServer(session, server_name, command, args, env_keys, reason)
+    ensures: McpServerRequest.created(
+        agent_group: session.agent_group,
+        server_name: server_name,
+        command: command,
+        args: args,
+        env_keys: env_keys,
+        reason: reason,
+        requested_at: now,
+        status: pending_approval
+    )
+    ensures: approvals/ApprovalRequested(
+        agent_group: session.agent_group,
+        session_id: session.id,
+        action: add_mcp_server,
+        payload: reason,
+        title: reason,
+        options: "Approve / Reject"
+    )
+}
+
+rule McpServerApproved {
+    when: approval: approvals/PendingApproval.status transitions_to approved
+    requires: approval.action = add_mcp_server
+    let req = McpServerRequest{agent_group: approval.agent_group}
+    requires: exists req
+    requires: req.status = pending_approval
+    ensures:
+        req.status = approved
+        ContainerConfigUpdated(agent_group: req.agent_group)
+        ContainerRestarted(agent_group: req.agent_group)
+}
+
+rule McpServerRejected {
+    when: approval: approvals/PendingApproval.status transitions_to rejected
+    requires: approval.action = add_mcp_server
+    let req = McpServerRequest{agent_group: approval.agent_group}
+    requires: exists req
+    requires: req.status = pending_approval
+    ensures: req.status = rejected
+}
+
+rule McpServerApplied {
+    when: ContainerConfigUpdated(agent_group)
+    let req = McpServerRequest{agent_group: agent_group}
+    requires: exists req
+    requires: req.status = approved
+    ensures: req.status = applied
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant AtMostOnePendingInstallPerGroup {
+    for a in PackageInstallRequests:
+        for b in PackageInstallRequests:
+            a != b and a.agent_group = b.agent_group
+                implies not (a.status = pending_approval and b.status = pending_approval)
+}
+
+invariant AtMostOnePendingMcpPerGroup {
+    for a in McpServerRequests:
+        for b in McpServerRequests:
+            a != b and a.agent_group = b.agent_group
+                implies not (a.status = pending_approval and b.status = pending_approval)
+}
+
+-- ContainerImageRebuilt, ContainerRestarted, and ContainerConfigUpdated are
+-- trigger emissions that the host processes outside this spec. Their execution
+-- is an implementation concern (image rebuild pipeline, container process restart).
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Package validation: what is the allowlist/blocklist for apt and npm packages, if any?"
+open question "Should MCP server env_keys be validated against the secret vault before the request is created?"
+open question "After an install failure (image rebuild error), should the PackageInstallRequest roll back to pending_approval or stay at approved?"
+
+-- Checker note: allium check 3.2.3 emits status.noExit / status.unreachableValue warnings
+-- for PackageInstallRequest and McpServerRequest. These are false positives caused by the
+-- checker not resolving cross-module type identity in let-bound join lookups
+-- (e.g. `PackageInstallRequest{agent_group: approval.agent_group}` where approval is
+-- approvals/PendingApproval). The rules are domain-correct; each transition is witnessed
+-- by an explicit requires + ensures pair.

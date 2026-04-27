@@ -1,0 +1,132 @@
+-- allium: 3
+-- approvals.allium
+--
+-- Scope: Human approval flows for privileged actions.
+-- Includes: PendingApproval creation, approver resolution, approval/rejection,
+--           expiry, and SenderApproval (unknown-sender escalation).
+-- Excludes: The specific actions that trigger approvals (see self-mod.allium,
+--           routing.allium). This spec models the generic approval primitive.
+--
+-- Approvals are used whenever an agent (or the system) needs a human decision
+-- before executing a privileged action. The approver is resolved from the
+-- privilege hierarchy: scoped admins of the relevant group first, then global
+-- admins, then owners. Approval decisions are delivered to the agent session
+-- that requested the action.
+--
+-- Two approval types exist:
+--   PendingApproval  — action-gated (e.g. package install, MCP server add)
+--   SenderApproval   — unknown-sender admission (modelled in routing.allium)
+
+use "./identity.allium" as identity
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum ApprovalStatus { pending | approved | rejected | expired }
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    approval_expiry: Duration = 24.hours
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity PendingApproval {
+    request_id: String
+    action: String
+    payload: String
+    agent_group: identity/AgentGroup
+    session_id: String?
+    title: String
+    options: String
+    created_at: Timestamp
+    expires_at: Timestamp
+    status: ApprovalStatus
+
+    is_actionable: status = pending and expires_at > now
+
+    transitions status {
+        pending -> approved
+        pending -> rejected
+        pending -> expired
+        terminal: approved, rejected, expired
+    }
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Approval requests are created by the system when a privileged action needs
+-- human sign-off. The action string routes the decision to a registered handler.
+
+rule ApprovalRequested {
+    when: ApprovalRequested(agent_group, session_id?, action, payload, title, options)
+    ensures: PendingApproval.created(
+        request_id: generate_request_id(),
+        action: action,
+        payload: payload,
+        agent_group: agent_group,
+        session_id: session_id,
+        title: title,
+        options: options,
+        created_at: now,
+        expires_at: now + config.approval_expiry,
+        status: pending
+    )
+}
+
+rule ApprovalGranted {
+    when: AdminGrantsApproval(actor, approval)
+    requires: actor.is_owner
+             or actor.is_global_admin
+             or exists identity/UserRole{user: actor, role: admin, agent_group: approval.agent_group}
+    requires: approval.is_actionable
+    ensures: approval.status = approved
+}
+
+rule ApprovalRejected {
+    when: AdminRejectsApproval(actor, approval)
+    requires: actor.is_owner
+             or actor.is_global_admin
+             or exists identity/UserRole{user: actor, role: admin, agent_group: approval.agent_group}
+    requires: approval.is_actionable
+    ensures: approval.status = rejected
+}
+
+rule ApprovalExpired {
+    when: approval: PendingApproval.expires_at <= now
+    requires: approval.status = pending
+    ensures: approval.status = expired
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant UniqueRequestId {
+    for a in PendingApprovals:
+        for b in PendingApprovals:
+            a != b implies a.request_id != b.request_id
+}
+
+invariant OnlyOneActivePendingPerAction {
+    -- At most one pending approval per (agent_group, action) pair at any time.
+    for a in PendingApprovals:
+        for b in PendingApprovals:
+            a != b and a.agent_group = b.agent_group and a.action = b.action
+                implies not (a.status = pending and b.status = pending)
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Approver notification: how does the system notify the approver? DM? Which channel?"
+open question "Re-request: can an agent re-request an approval after rejection, or is there a cooldown?"

@@ -343,6 +343,25 @@ rule SpecialistTaskStarted {
     requires: task.status in {queued, awaiting_restart}
     ensures:
         task.status = running
+
+    @guidance
+        -- A task remains in queued while its specialist's container is
+        -- unavailable at dispatch time (image not built, OneCLI agent not
+        -- yet provisioned, runtime unreachable). The host retries container
+        -- startup; the task only leaves queued when one of the following
+        -- occurs:
+        --   - the container begins processing the trigger inbound message
+        --     and this rule fires (queued -> running);
+        --   - the container starts but crashes before first processing,
+        --     causing SpecialistContainerCrashed to fire
+        --     (queued -> awaiting_restart);
+        --   - the overall task timeout fires via SpecialistTaskTimedOut
+        --     (queued -> failed with kind = timeout).
+        -- A container that simply cannot be started yet is treated as a
+        -- transient infrastructure delay, not an immediate execution
+        -- failure. There is no queued -> failed/execution_error transition
+        -- for unavailability at dispatch time; execution_error is reserved
+        -- for failures observed once the container is processing.
 }
 
 ------------------------------------------------------------
@@ -720,6 +739,30 @@ rule SpecialistDeliveredResult {
         -- invocation_for_session resolves the current Invocation for the
         -- specialist's session (the one that wrote ipc-out). It is the same
         -- invocation that emitted SpecialistContainerProcessing earlier.
+        --
+        -- Sub-task commit_to_memory degradation. When commit_to_memory = true
+        -- and the task is a sub-task (task.requester_task != null,
+        -- task.requester_group = null), resolve_delivery_paths silently
+        -- degrades: it treats commit_to_memory as false and rewrites ipc-out
+        -- paths to ipc-in paths instead of memory paths. The files are staged
+        -- to the parent's ipc-in via the normal in_transit path; no error is
+        -- returned to the specialist.
+        --
+        -- This is intentional. Specialists are designed to be composable and
+        -- should not need to know their position in the dispatch chain. A
+        -- specialist that prefers commit_to_memory = true will still have its
+        -- files delivered; they just land in the parent's ipc-in rather than
+        -- the main group's memory area. Rejecting commit_to_memory on sub-task
+        -- deliveries with a structured error would couple specialist behaviour
+        -- to chain position and break composability.
+        --
+        -- Only root-task deliveries (task.requester_group != null) can commit
+        -- files to memory. SpecialistResultRoutedToMain is the only place
+        -- where commit_to_memory = true takes effect; it copies files into the
+        -- requester group's memory area and records the workspace-relative
+        -- paths on the task's committed_files. SpecialistResultRoutedToParent
+        -- never commits to memory (the parent specialist is not a memory-area
+        -- owner).
 }
 
 -- The host has taken ownership of staged files. This rule witnesses the
@@ -803,6 +846,18 @@ rule SpecialistResultRoutedToMain {
         -- helper degrades gracefully (treats commit_to_memory as false when
         -- task.requester_group is null) so the specialist still gets file
         -- handover even if it requested commit on a sub-task delivery.
+        --
+        -- Memory commit collision policy: when two deliveries produce the
+        -- same group_memory_report_path (same requester_group, same
+        -- original_name basename), the later host copy silently overwrites
+        -- the earlier one on disk. Both deliveries' result messages
+        -- reference the same path, so the requester sees the most-recently-
+        -- committed content at that path. This is intentional; no collision
+        -- detection or disambiguation (timestamping, task-id prefixing) is
+        -- performed. A future revision may prefix the workspace-relative
+        -- path with a task id to avoid collisions, but that would require a
+        -- corresponding change to resolve_delivery_paths so the rewritten
+        -- result_text reflects the disambiguated path.
 }
 
 -- Sub-tasks route their result back into the parent specialist's per-task
@@ -859,6 +914,38 @@ rule SpecialistResultRoutedToParent {
 rule SpecialistFailureRoutedToRequester {
     when: task: SpecialistTask.status transitions_to failed
     ensures: SpecialistResultReady(task: task)
+
+    @guidance
+        -- This rule fires for every task that reaches failed, including
+        -- sub-tasks rejected immediately at dispatch time by
+        -- SubTaskRejectedCycle, SubTaskRejectedDepth, SubTaskRejectedCount
+        -- and SubTaskRejectedSameTypeLimit (each of which creates the
+        -- child task directly in status = failed). Two distinct routing
+        -- shapes follow from the SpecialistResultReady emission:
+        --
+        --   1. Normally-failed tasks (those that went through queued or
+        --      running before failing — timeout, execution_error, host_restart):
+        --      the parent task is in awaiting_sub_task, so
+        --      SpecialistResultRoutedToParent matches and routes the
+        --      failure into the parent's session as a triggering inbound
+        --      message. Root-task failures route via
+        --      SpecialistResultRoutedToMain in the same way.
+        --
+        --   2. Immediately-rejected sub-tasks (cycle / depth / count /
+        --      same-type rejections): the rejection rule creates the child
+        --      task already in status = failed and the parent task remains
+        --      in status = running (it never enters awaiting_sub_task).
+        --      SpecialistResultRoutedToParent's
+        --      requires: task.requester_task.status = awaiting_sub_task
+        --      is therefore false, and SpecialistResultRoutedToMain's
+        --      requires: task.requester_group != null is also false (sub-
+        --      tasks have requester_group = null). The
+        --      SpecialistResultReady event is deliberately unmatched in
+        --      this case. The AgentNotified event emitted directly by the
+        --      rejection rule is the canonical and sufficient notification
+        --      mechanism: it surfaces the rejection on the parent
+        --      specialist's session synchronously without dragging the
+        --      parent through an awaiting_sub_task -> running cycle.
 }
 
 -- Overall task timeout. A task that has been live (queued, running, or
@@ -950,6 +1037,38 @@ rule InvocationEnded {
     ensures:
         out.status = cleared
         in_.status = cleared
+
+    @guidance
+        -- ipc-out is cleared on every container exit, including the exit
+        -- caused by a dispatch_sub_task call (where the parent task
+        -- transitions running -> awaiting_sub_task and the parent's
+        -- container terminates while the child runs). There is no
+        -- "pause-and-preserve" path: the awaiting_sub_task boundary is a
+        -- hard ipc-out reset, identical to any other invocation end.
+        --
+        -- Files written to ipc-out before a dispatch_sub_task call are
+        -- discarded when the parent container exits for the sub-task
+        -- dispatch. They will not be present in the resumed invocation's
+        -- ipc-out (each invocation gets a fresh, empty ipc-out per the
+        -- per-invocation isolation model documented on Invocation).
+        --
+        -- A specialist that intends to include files in its final delivery
+        -- must call deliver_specialist_result (which consumes those files
+        -- from ipc-out via HostTookOwnership) before calling
+        -- dispatch_sub_task. Calling dispatch_sub_task with unconsumed
+        -- ipc-out files is a specialist authoring error; the files are
+        -- silently lost. The deliver tool is fire-and-forget and exits the
+        -- container, so the natural ordering "deliver, then any further
+        -- delegation" is forced by the lifecycle: a specialist that
+        -- delivers cannot subsequently dispatch a sub-task on the same
+        -- task, and a specialist that dispatches a sub-task must defer all
+        -- file production until after the sub-task result returns and the
+        -- parent resumes in a fresh invocation with a fresh ipc-out.
+        --
+        -- This is consistent with the per-invocation isolation model: each
+        -- invocation starts with a fresh, empty ipc-out and an ipc-in
+        -- populated only with files staged for that invocation by
+        -- transfers targeting it.
 }
 
 -- Transfers expire when the requester task reaches a terminal state.
@@ -1054,6 +1173,56 @@ rule SpecialistContainerCrashed {
         task.restart_attempt_count = task.restart_attempt_count + 1
 }
 
+-- When a task transitions to awaiting_restart and was holding a pending
+-- sub-task (i.e. it was in awaiting_sub_task before the crash), the child
+-- subtree is cancelled immediately. The parent will restart clean and
+-- re-dispatch the sub-task from scratch; any work the child had done is
+-- lost. This prevents the parent's restart from re-dispatching the same
+-- sub-task and creating duplicate children.
+
+rule ChildSubtreeCancelledOnParentCrash {
+    when: task: SpecialistTask.status transitions_to awaiting_restart
+    requires: task.pending_sub_task != null
+    ensures:
+        SubtreeCancelled(task: task.pending_sub_task)
+}
+
+-- Apply a cancellation to a single task in the subtree. The task is failed
+-- with kind = execution_error and a cancellation detail string. If the
+-- cancelled task itself had a pending sub-task, the cancellation propagates
+-- recursively down the chain.
+
+rule SubtreeCancellationApplied {
+    when: SubtreeCancelled(task)
+    requires: task.status not in {completed, failed}
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: execution_error,
+            detail: "cancelled: ancestor specialist container crashed"
+        }
+        task.closed_at = now
+        if task.pending_sub_task != null:
+            SubtreeCancelled(task: task.pending_sub_task)
+
+    @guidance
+        -- Recursive propagation: ChildSubtreeCancelledOnParentCrash fires only
+        -- on transitions into awaiting_restart, not into failed, so it does not
+        -- itself cascade through the chain. Instead this rule emits
+        -- SubtreeCancelled on the cancelled task's own pending_sub_task when
+        -- present, so cancellation walks the pending_sub_task chain until no
+        -- further pending_sub_task exists. Each task cancelled this way also
+        -- emits SpecialistResultReady via SpecialistFailureRoutedToRequester,
+        -- but the routing rules will not match: SpecialistResultRoutedToParent
+        -- requires the parent to be in awaiting_sub_task, but the parent in a
+        -- cancelled subtree is either in awaiting_restart (the original
+        -- crashed task) or already failed itself (further up the chain). This
+        -- silent drop is intentional and consistent with the immediately-
+        -- rejected sub-task case documented on SpecialistFailureRoutedToRequester.
+        -- The parent restarts clean and re-dispatches the sub-task from
+        -- scratch; any work done by the cancelled subtree is lost.
+}
+
 -- When retries are exhausted the task fails. SpecialistFailureRoutedToRequester
 -- picks up the failed transition and routes the outcome to the requester.
 
@@ -1070,6 +1239,20 @@ rule SpecialistRestartExhausted {
             detail: "specialist container failed and maximum restart retries were exhausted"
         }
         task.closed_at = now
+}
+
+-- Companion to ChildSubtreeCancelledOnParentCrash for the retries-exhausted
+-- path. SpecialistRestartExhausted transitions the task directly to failed
+-- (not awaiting_restart), so the awaiting_restart-keyed rule does not fire.
+-- This rule cancels the child subtree when the parent was in awaiting_sub_task
+-- before exhausting retries.
+
+rule ChildSubtreeCancelledOnRestartExhausted {
+    when: task: SpecialistTask.status transitions_to failed
+    requires: task.failure.kind = host_restart
+    requires: task.pending_sub_task != null
+    ensures:
+        SubtreeCancelled(task: task.pending_sub_task)
 }
 
 ------------------------------------------------------------
@@ -1183,36 +1366,3 @@ invariant TransferAndFilesInSync {
             (t.status = expired) implies (f.status = expired)
 }
 
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
--- Resolved: last-turn notice delivery. is_last_same_type_dispatch = true
--- causes format_task_prompt(child) to append the last_turn_sub_notice to
--- the triggering InboundMessage content, so the specialist sees it on first
--- pickup. format_specialist_outcome(task) appends last_turn_parent_notice
--- when routing the result back to the parent.
-
--- Resolved: memory provider tasks are invisible to the chain counters.
--- Memory provider lookups are transparent reads, not true delegations,
--- so MemoryProviderDispatched copies the parent's depth,
--- chain_delegation_count and ancestor_groups onto the child unchanged
--- (the memory provider group is not added to ancestors). A memory
--- provider call therefore neither consumes a delegation slot nor
--- shortens the remaining depth budget.
-
--- Resolved: running_task_for_group disambiguation. Each specialist task
--- now has its own isolated Session (thread_id = task.id). The
--- SpecialistContainerProcessing trigger is associated with a specific task,
--- not a group, so two tasks with the same specialist_group cannot be
--- confused. RunningTaskIsLeaf ensures at most one live running task
--- per chain, but different chains may each have a running task for the
--- same specialist_group simultaneously. running_task_for_group must
--- therefore be scoped to the current session (task) to disambiguate.
-
-open question "Specialist dispatch: when a specialist's container is unavailable at dispatch time (image not built, OneCLI agent not provisioned), is the task held in queued or transitioned immediately to failed with execution_error?"
-open question "Specialist failure routing: when a sub-task fails before its parent reaches awaiting_sub_task (e.g., immediate chain rejection), SpecialistResultRoutedToParent's requires: task.requester_task.status = awaiting_sub_task will not match. Is failure of an immediately-rejected sub-task only routed via AgentNotified, with no SpecialistResultReady emission, or is there a separate routing path for this case?"
-open question "Crash recovery and awaiting_sub_task: when SpecialistContainerCrashed fires for a task in awaiting_sub_task, the task moves to awaiting_restart while a child task may still be running. Should the child task be cancelled, or should the parent wait for the child to complete before the restart attempt?"
-open question "Memory commit collisions: when two specialists deliver files with the same basename and commit_to_memory = true, group_memory_report_path produces the same workspace-relative path for both. Should the second delivery overwrite the first, be rejected, or be disambiguated (e.g. timestamped or task-id-prefixed filename)? Currently the spec treats the resulting path as canonical; the host's copy step will overwrite by default. The deliver tool's path-rewriting in resolve_delivery_paths assumes the basename is preserved, so any disambiguation strategy must also flow back into the rewritten result_text."
-open question "Sub-task commit_to_memory semantics: a specialist sub-task can call deliver_specialist_result with commit_to_memory = true, but the requester is another specialist (no memory area of its own). Currently routed_message_text falls through to ipc-in placement and resolve_delivery_paths is documented as degrading to commit_to_memory = false in this case. Should the deliver tool reject commit_to_memory = true on sub-task deliveries with a structured error instead, so the specialist becomes aware its commit request was ignored?"
-open question "ipc-out staging across awaiting_sub_task: a parent specialist that has written files to ipc-out before dispatching a sub-task will lose those files when its container exits and ipc-out is cleared. Should specialists be required to call deliver_specialist_result before any awaiting_sub_task transition, or should files written to ipc-out be preserved across awaiting_sub_task -> running cycles for a single delivering task? Inherited from container-ipc-transfer.allium open question 3."

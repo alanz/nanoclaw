@@ -61,7 +61,7 @@ entity McpServerRequest {
     server_name: String
     command: String
     args: List<String>
-    env_keys: List<String>
+    env: Map<String, String>
     reason: String
     requested_at: Timestamp
     status: pending_approval | approved | rejected | applied
@@ -100,6 +100,25 @@ rule PackageInstallRequested {
         title: reason,
         options: "Approve / Reject"
     )
+
+    @guidance
+        -- Package names are validated for shape only, not against any
+        -- allowlist or blocklist. APT package names must match
+        --   ^[a-z0-9][a-z0-9._+-]*$
+        -- (start with a lowercase alphanumeric, then lowercase
+        -- alphanumerics, dots, underscores, plus signs or hyphens).
+        -- npm package names must match
+        --   ^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$
+        -- which permits scoped packages (`@scope/name`) and otherwise
+        -- the same lowercase alphanumeric + dot/underscore/hyphen set
+        -- (note: no `+` in npm names).
+        --
+        -- There is no curated allowlist or blocklist of package names.
+        -- Admin approval is the sole security gate: on apply, the
+        -- approved package names are passed verbatim to a shell exec
+        -- (apt-get install / npm install) with no further filtering.
+        -- Approvers must therefore treat the package list as the
+        -- security boundary and verify each entry before approving.
 }
 
 rule PackageInstallApproved {
@@ -112,6 +131,26 @@ rule PackageInstallApproved {
         req.status = approved
         ContainerImageRebuilt(agent_group: req.agent_group)
         ContainerRestarted(agent_group: req.agent_group)
+
+    @guidance
+        -- On approval, the host calls updateContainerConfig before
+        -- triggering the image rebuild. The config mutation (appending
+        -- the approved packages to the agent group's container.json)
+        -- happens first and is not rolled back if the subsequent
+        -- rebuild fails.
+        --
+        -- The state machine has no failure transition: there is no
+        -- edge from approved back to pending_approval and no
+        -- approved -> rejected (or approved -> failed) edge. On
+        -- rebuild failure, the PackageInstallRequest stays at
+        -- approved and never reaches applied (since
+        -- ContainerImageRebuilt is only emitted on rebuild success).
+        --
+        -- The host notifies the approver of the failure so they can
+        -- inspect the build logs. There is no replay mechanism on
+        -- the existing approved request: a retry requires the agent
+        -- to issue a fresh install_packages request, which produces
+        -- a new PackageInstallRequest and a new approval cycle.
 }
 
 rule PackageInstallRejected {
@@ -134,13 +173,13 @@ rule PackageInstallApplied {
 -- Agents initiate an MCP server addition request.
 
 rule McpServerAddRequested {
-    when: AgentRequestsMcpServer(session, server_name, command, args, env_keys, reason)
+    when: AgentRequestsMcpServer(session, server_name, command, args, env, reason)
     ensures: McpServerRequest.created(
         agent_group: session.agent_group,
         server_name: server_name,
         command: command,
         args: args,
-        env_keys: env_keys,
+        env: env,
         reason: reason,
         requested_at: now,
         status: pending_approval
@@ -153,6 +192,19 @@ rule McpServerAddRequested {
         title: reason,
         options: "Approve / Reject"
     )
+
+    @guidance
+        -- The `env` map carries full key-value pairs supplied verbatim
+        -- by the requesting agent. There is no secret-vault resolution:
+        -- values are not looked up from a credential store, and the
+        -- keys are not validated against a vault allowlist at request
+        -- time or at apply time. On approval, the host's
+        -- updateContainerConfig writes the env entries directly into
+        -- the agent group's container.json as-is.
+        --
+        -- Admin approval is the sole gate. Approvers must treat the
+        -- env map as the security boundary and inspect the values
+        -- (which may include API keys or tokens) before approving.
 }
 
 rule McpServerApproved {
@@ -205,14 +257,6 @@ invariant AtMostOnePendingMcpPerGroup {
 -- ContainerImageRebuilt, ContainerRestarted, and ContainerConfigUpdated are
 -- trigger emissions that the host processes outside this spec. Their execution
 -- is an implementation concern (image rebuild pipeline, container process restart).
-
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
-open question "Package validation: what is the allowlist/blocklist for apt and npm packages, if any?"
-open question "Should MCP server env_keys be validated against the secret vault before the request is created?"
-open question "After an install failure (image rebuild error), should the PackageInstallRequest roll back to pending_approval or stay at approved?"
 
 -- Checker note: allium check 3.2.3 emits status.noExit / status.unreachableValue warnings
 -- for PackageInstallRequest and McpServerRequest. These are false positives caused by the

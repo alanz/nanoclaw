@@ -1,0 +1,629 @@
+-- allium: 3
+-- specialists.allium
+--
+-- Scope: Specialist orchestration — AgentGroups designated as typed task workers
+--        dispatched by the main group. A specialist is an AgentGroup that has a
+--        Specialist row in identity.allium.
+-- Includes: SpecialistTask lifecycle, delegation from main group, sub-task dispatch,
+--           chain limit enforcement (depth/count/same-type/cycle), memory provider
+--           bypass, result routing back to requester, overall task timeout.
+-- Excludes: AgentGroup / Specialist registration (identity.allium), session lifecycle
+--           (sessions.allium), agent-to-agent messaging infra (agent-to-agent.allium),
+--           host-restart recovery (handled by sessions.allium stuck-container detection).
+
+use "./identity.allium" as identity
+use "./sessions.allium" as sessions
+use "./agent-to-agent.allium" as a2a
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum SpecialistTaskStatus {
+    queued | running | awaiting_sub_task | completed | failed
+}
+
+enum SpecialistFailureKind {
+    cycle_detected | depth_exceeded | count_exceeded
+    | same_type_limit_exceeded | timeout | execution_error
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value TaskFailure {
+    kind: SpecialistFailureKind
+    detail: String
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_specialist_depth: Integer = 5
+    max_chain_delegations: Integer = 20
+    max_same_type_dispatches: Integer = 3
+    max_task_duration: Duration = 4.hours
+    default_last_turn_sub_notice: String = "[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]"
+    default_last_turn_parent_notice: String = "[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]"
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- A SpecialistTask records one dispatch into a specialist agent group. Root
+-- tasks are dispatched by the main group (requester_group set, requester_task
+-- null). Sub-tasks are dispatched by another specialist (requester_task set,
+-- requester_group null). A task moves from queued (recorded by the host)
+-- through running (the specialist's container is processing the prompt) to
+-- either completed (the specialist returned a result) or failed (timeout,
+-- chain-policy rejection or execution error). awaiting_sub_task is the
+-- intermediate state held while the specialist's own dispatch_sub_task call
+-- is being processed by a child task; the parent resumes to running once the
+-- child's result is routed back.
+
+entity SpecialistTask {
+    specialist_group: identity/AgentGroup
+    prompt: String
+    requester_group: identity/AgentGroup?
+    requester_task: SpecialistTask?
+    depth: Integer
+    chain_delegation_count: Integer
+    ancestor_groups: Set<identity/AgentGroup>
+    is_last_same_type_dispatch: Boolean
+    status: SpecialistTaskStatus
+    dispatched_at: Timestamp
+    closed_at: Timestamp?
+
+    pending_sub_task: SpecialistTask when status = awaiting_sub_task
+    result: String when status = completed
+    failure: TaskFailure when status = failed
+
+    has_cycle: specialist_group in ancestor_groups
+    is_overdue: status in {queued, running, awaiting_sub_task}
+                and now - dispatched_at > config.max_task_duration
+
+    transitions status {
+        queued -> running
+        queued -> failed
+        running -> awaiting_sub_task
+        running -> completed
+        running -> failed
+        awaiting_sub_task -> running
+        awaiting_sub_task -> failed
+        terminal: completed, failed
+    }
+
+    invariant ExactlyOneRequester {
+        (requester_group != null) != (requester_task != null)
+    }
+
+    invariant DepthMatchesAncestorCount {
+        depth = ancestor_groups.count
+    }
+
+    invariant SpecialistGroupMustBeSpecialist {
+        exists specialist_group.specialist
+    }
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+------------------------------------------------------------
+-- Root dispatch (main group -> specialist)
+------------------------------------------------------------
+
+-- The main group's agent calls dispatch_specialist. The container writes a
+-- system outbound message; the host creates a SpecialistTask and writes the
+-- prompt as a triggering inbound message into the target specialist's
+-- agent_shared session.
+
+rule MainGroupDispatchesSpecialist {
+    when: AgentRequestsDispatchSpecialist(session, specialist_group_id, prompt)
+    requires: session.agent_group.is_main = true
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    let target_session = resolve_agent_shared_session(target_group)
+    ensures:
+        let task = SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: session.agent_group,
+            requester_task: null,
+            depth: 0,
+            chain_delegation_count: 1,
+            ancestor_groups: {},
+            is_last_same_type_dispatch: false,
+            status: queued,
+            dispatched_at: now,
+            closed_at: null
+        )
+        sessions/InboundMessage.created(
+            session: target_session,
+            seq: next_inbound_seq(target_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: prompt,
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: target_session)
+}
+
+------------------------------------------------------------
+-- Specialist container picks up the task
+------------------------------------------------------------
+
+-- When the host begins processing the trigger inbound message inside the
+-- specialist's container, the corresponding SpecialistTask transitions from
+-- queued to running. SpecialistContainerProcessing is emitted by the host
+-- when it observes its own session moving into the processing state for
+-- this task.
+
+rule SpecialistTaskStarted {
+    when: SpecialistContainerProcessing(task)
+    requires: task.status = queued
+    ensures:
+        task.status = running
+}
+
+------------------------------------------------------------
+-- Sub-task dispatch (specialist -> specialist)
+------------------------------------------------------------
+
+-- A running specialist may call dispatch_sub_task to delegate further work
+-- to another specialist. Memory providers may not delegate (they are
+-- read-only lookups). Five outcomes are possible: cycle, depth exceeded,
+-- chain count exceeded, same-type count exceeded, or accepted dispatch.
+-- The four rejection rules and the accepted-dispatch rule are mutually
+-- exclusive on their guards.
+
+rule SpecialistDispatchesSubTask {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count < config.max_chain_delegations
+    requires: same_type_dispatch_count(parent_task, target_group)
+              < config.max_same_type_dispatches
+    let is_last = same_type_dispatch_count(parent_task, target_group)
+                  = config.max_same_type_dispatches - 1
+    let target_session = resolve_agent_shared_session(target_group)
+    ensures:
+        let child = SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: is_last,
+            status: queued,
+            dispatched_at: now,
+            closed_at: null
+        )
+        parent_task.status = awaiting_sub_task
+        parent_task.pending_sub_task = child
+        sessions/InboundMessage.created(
+            session: target_session,
+            seq: next_inbound_seq(target_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: prompt,
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: target_session)
+}
+
+-- Cycle: the requested target appears in the parent's ancestor chain.
+-- Memory providers are not gated by this check, so the rule guards on
+-- non-memory-provider targets.
+
+rule SubTaskRejectedCycle {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: target_group in parent_task.ancestor_groups
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: cycle_detected,
+                detail: "target specialist appears in dispatch chain"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: cycle detected"
+        )
+}
+
+-- Depth exceeded: this dispatch would push the chain past max_specialist_depth.
+
+rule SubTaskRejectedDepth {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 >= config.max_specialist_depth
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: depth_exceeded,
+                detail: "specialist chain depth limit reached"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: depth limit reached"
+        )
+}
+
+-- Chain count exceeded: total delegations along this branch would exceed
+-- max_chain_delegations.
+
+rule SubTaskRejectedCount {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count >= config.max_chain_delegations
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: count_exceeded,
+                detail: "specialist chain delegation count limit reached"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: chain delegation limit reached"
+        )
+}
+
+-- Same-type limit exceeded: parent has already dispatched to this same
+-- specialist group max_same_type_dispatches times.
+
+rule SubTaskRejectedSameTypeLimit {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count < config.max_chain_delegations
+    requires: same_type_dispatch_count(parent_task, target_group)
+              >= config.max_same_type_dispatches
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: same_type_limit_exceeded,
+                detail: "specialist same-type dispatch limit reached"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: same-type dispatch limit reached"
+        )
+}
+
+-- Memory provider dispatch: bypasses cycle/depth/count/same-type checks
+-- and is invisible to the chain counters. Memory provider lookups are
+-- transparent reads, not true delegations: the child task copies the
+-- parent's depth, chain_delegation_count and ancestor_groups unchanged,
+-- so a memory provider call neither consumes a delegation slot nor
+-- shortens the remaining depth budget. Memory providers are read-only;
+-- they cannot themselves delegate (enforced by SpecialistDispatchesSubTask's
+-- requesting-side guard and the MemoryProviderDoesNotDelegate invariant).
+-- The parent still moves into awaiting_sub_task while the lookup runs.
+
+rule MemoryProviderDispatched {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = true
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    let target_session = resolve_agent_shared_session(target_group)
+    ensures:
+        let child = SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            depth: parent_task.depth,
+            chain_delegation_count: parent_task.chain_delegation_count,
+            ancestor_groups: parent_task.ancestor_groups,
+            is_last_same_type_dispatch: false,
+            status: queued,
+            dispatched_at: now,
+            closed_at: null
+        )
+        parent_task.status = awaiting_sub_task
+        parent_task.pending_sub_task = child
+        sessions/InboundMessage.created(
+            session: target_session,
+            seq: next_inbound_seq(target_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: prompt,
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: target_session)
+}
+
+------------------------------------------------------------
+-- Result delivery and routing
+------------------------------------------------------------
+
+-- The specialist calls deliver_specialist_result. The host transitions the
+-- running task to completed, captures the result text, and emits
+-- SpecialistResultReady so the result can be routed back to the requester.
+
+rule SpecialistDeliveredResult {
+    when: AgentRequestsDeliverSpecialistResult(session, result_text)
+    let task = running_task_for_group(session.agent_group)
+    requires: exists task
+    requires: task.status = running
+    ensures:
+        task.status = completed
+        task.result = result_text
+        task.closed_at = now
+        SpecialistResultReady(task: task)
+}
+
+-- Root tasks (dispatched by the main group) route their result back into
+-- the main group's agent_shared session as a triggering inbound message.
+
+rule SpecialistResultRoutedToMain {
+    when: SpecialistResultReady(task)
+    requires: task.requester_group != null
+    let main_session = resolve_agent_shared_session(task.requester_group)
+    ensures:
+        sessions/InboundMessage.created(
+            session: main_session,
+            seq: next_inbound_seq(main_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: format_specialist_outcome(task),
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: main_session)
+}
+
+-- Sub-tasks route their result back into the parent specialist's session.
+-- The parent task transitions from awaiting_sub_task back to running by
+-- having the result written as a triggering inbound message; the
+-- pending_sub_task pointer is cleared as the parent leaves the
+-- awaiting_sub_task state.
+
+rule SpecialistResultRoutedToParent {
+    when: SpecialistResultReady(task)
+    requires: task.requester_task != null
+    requires: task.requester_task.status = awaiting_sub_task
+    let parent_task = task.requester_task
+    let parent_session = resolve_agent_shared_session(parent_task.specialist_group)
+    ensures:
+        parent_task.status = running
+        parent_task.pending_sub_task = null
+        sessions/InboundMessage.created(
+            session: parent_session,
+            seq: next_inbound_seq(parent_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: format_specialist_outcome(task),
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: parent_session)
+}
+
+-- Failure routing: when a task transitions to failed (timeout, execution
+-- error, or chain rejection), notify the requester the same way a result
+-- would be. SpecialistResultRoutedToMain / SpecialistResultRoutedToParent
+-- both subscribe to SpecialistResultReady so the routing rule for failures
+-- emits the same trigger.
+
+rule SpecialistFailureRoutedToRequester {
+    when: task: SpecialistTask.status transitions_to failed
+    ensures: SpecialistResultReady(task: task)
+}
+
+-- Overall task timeout. A task that has been live (queued, running, or
+-- awaiting_sub_task) longer than max_task_duration is marked failed with
+-- a timeout failure and the result-ready event is emitted so the requester
+-- can be notified.
+
+rule SpecialistTaskTimedOut {
+    when: task: SpecialistTask.is_overdue
+    requires: task.status in {queued, running, awaiting_sub_task}
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: timeout,
+            detail: "task exceeded maximum duration"
+        }
+        task.closed_at = now
+        SpecialistResultReady(task: task)
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Root specialist tasks may only be dispatched by the main group. Sub-tasks
+-- (requester_task != null) carry no constraint on requester_group because
+-- it is null for them.
+
+invariant SpecialistDispatchMainGroupOnly {
+    for t in SpecialistTasks:
+        t.requester_task = null implies (
+            t.requester_group != null
+            and t.requester_group.is_main = true
+        )
+}
+
+-- A live task never has its own specialist group in its ancestor chain.
+-- Cycle attempts are rejected at dispatch time and recorded as terminal
+-- failed tasks; only terminal tasks may have has_cycle = true.
+
+invariant NoCycleInLiveTask {
+    for t in SpecialistTasks:
+        t.status in {queued, running, awaiting_sub_task} implies not t.has_cycle
+}
+
+-- A memory provider is a leaf: it is read-only and cannot itself delegate.
+-- This invariant catches any path where a memory provider would appear as
+-- the immediate parent of a sub-task.
+
+invariant MemoryProviderDoesNotDelegate {
+    for t in SpecialistTasks:
+        t.requester_task != null implies (
+            t.requester_task.specialist_group.specialist?.is_memory_provider != true
+        )
+}
+
+-- Depth is bounded by config; the dispatch rules enforce this and the
+-- invariant captures the resulting structural property.
+
+invariant TaskDepthBounded {
+    for t in SpecialistTasks:
+        t.depth < config.max_specialist_depth
+}
+
+-- closed_at is present iff the task is in a terminal state. Live tasks
+-- (queued, running, awaiting_sub_task) have closed_at = null.
+
+invariant ClosedAtPresentWhenTerminal {
+    for t in SpecialistTasks:
+        (t.status in {completed, failed}) = (t.closed_at != null)
+}
+
+-- A running task is a leaf: it has no child task that is itself running.
+-- While a child is running, the parent should be in awaiting_sub_task.
+
+invariant RunningTaskIsLeaf {
+    for parent in SpecialistTasks:
+        for child in SpecialistTasks:
+            (parent.status = running and child.requester_task = parent)
+                implies child.status != running
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Specialist dispatch: how is is_last_same_type_dispatch surfaced to the running specialist (e.g., as last_turn_sub_notice text injected into the trigger prompt), and is the parent likewise informed via last_turn_parent_notice when the result is routed back?"
+open question "Specialist dispatch: when a specialist's container is unavailable at dispatch time (image not built, OneCLI agent not provisioned), is the task held in queued or transitioned to failed with execution_error?"
+open question "Specialist failure routing: when a sub-task fails before its parent reaches awaiting_sub_task (e.g., immediate rejection), the parent_task pointer in SpecialistResultRoutedToParent's requires would not match. Is failure of an immediately-rejected sub-task only routed via AgentNotified, with no SpecialistResultReady emission, or is there a separate routing path?"
+-- Resolved: memory provider tasks are invisible to the chain counters.
+-- Memory provider lookups are transparent reads, not true delegations,
+-- so MemoryProviderDispatched copies the parent's depth,
+-- chain_delegation_count and ancestor_groups onto the child unchanged
+-- (the memory provider group is not added to ancestors). A memory
+-- provider call therefore neither consumes a delegation slot nor
+-- shortens the remaining depth budget.
+open question "running_task_for_group resolution: when an agent group has multiple historical SpecialistTasks, the running one is unique per the RunningTaskIsLeaf invariant for the same agent group only when sessions are agent_shared. Is there a case where two running tasks could share the same specialist_group (e.g., one started from main, one from a separate parent), and if so how is the parent disambiguated on dispatch_sub_task?"

@@ -23,6 +23,17 @@ entity AgentGroup {
     name: String
     folder: String
     agent_provider: String?
+    is_main: Boolean
+    created_at: Timestamp
+
+    specialist: Specialist with agent_group = this
+}
+
+entity Specialist {
+    agent_group: AgentGroup
+    is_memory_provider: Boolean
+    last_turn_sub_notice: String?
+    last_turn_parent_notice: String?
     created_at: Timestamp
 }
 
@@ -133,6 +144,65 @@ rule MemberRemoved {
              or actor.is_global_admin
              or exists UserRole{user: actor, role: admin, agent_group: membership.agent_group}
     ensures: not exists membership
+}
+
+-- Main group designation. The main group is a dispatch marker used by future
+-- routing logic; only one group may be flagged at a time, but zero is also
+-- valid (fresh installs have no main group). Re-designation transparently
+-- clears any prior main group.
+
+rule MainGroupDesignated {
+    when: DesignateMainGroup(actor, agent_group)
+    requires: actor.is_owner or actor.is_global_admin
+    ensures:
+        for g in AgentGroups where is_main = true and g != agent_group:
+            g.is_main = false
+        agent_group.is_main = true
+}
+
+-- Specialist registration. A specialist is an AgentGroup with a Specialist
+-- row carrying its specialist-specific config. Both rows are created in a
+-- single command so the group never exists in a half-registered state.
+
+rule SpecialistRegistered {
+    when: RegisterSpecialist(actor, name, folder, agent_provider?,
+                             is_memory_provider, last_turn_sub_notice?,
+                             last_turn_parent_notice?)
+    requires: actor.is_owner or actor.is_global_admin
+    ensures:
+        let group = AgentGroup.created(
+            name: name,
+            folder: folder,
+            agent_provider: agent_provider,
+            is_main: false,
+            created_at: now
+        )
+        Specialist.created(
+            agent_group: group,
+            is_memory_provider: is_memory_provider,
+            last_turn_sub_notice: last_turn_sub_notice,
+            last_turn_parent_notice: last_turn_parent_notice,
+            created_at: now
+        )
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant AtMostOneMainGroup {
+    (AgentGroups where is_main = true).count <= 1
+}
+
+invariant MainGroupIsNotSpecialist {
+    for g in AgentGroups:
+        g.is_main implies not exists g.specialist
+}
+
+invariant OneSpecialistPerGroup {
+    for a in Specialists:
+        for b in Specialists:
+            a != b implies a.agent_group != b.agent_group
 }
 
 ------------------------------------------------------------

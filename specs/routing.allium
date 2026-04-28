@@ -199,7 +199,7 @@ rule MessagingGroupUndenied {
 rule MessageEngagesAgent {
     when: ChannelMessageReceived(message)
     let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
-    let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
+    let sender = identity/User{kind: message.channel_type, handle: message.sender_handle}
     requires: exists mg
     requires: exists sender
     requires: mg.denied_at = null
@@ -219,7 +219,7 @@ rule MessageEngagesAgent {
 rule MessageAccumulated {
     when: ChannelMessageReceived(message)
     let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
-    let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
+    let sender = identity/User{kind: message.channel_type, handle: message.sender_handle}
     requires: exists mg
     requires: exists sender
     requires: mg.denied_at = null
@@ -240,7 +240,7 @@ rule MessageAccumulated {
 rule UnknownSenderEscalated {
     when: ChannelMessageReceived(message)
     let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
-    let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
+    let sender = identity/User{kind: message.channel_type, handle: message.sender_handle}
     requires: exists mg
     requires: exists sender
     requires: mg.denied_at = null

@@ -5,12 +5,10 @@
  * agent_destinations rows, projects the new destination into the parent's
  * running container, and notifies the parent.
  */
-import path from 'path';
-
-import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
+import { isValidGroupFolder } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -48,27 +46,25 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
 
   const localName = normalizeName(name);
 
+  // Reserved name check (covers path-safety and semantic conflicts like "parent")
+  if (!isValidGroupFolder(localName)) {
+    notifyAgent(session, `Cannot create agent "${name}": name is reserved or invalid.`);
+    log.error('create_agent rejected reserved or invalid name', { name, localName });
+    return;
+  }
+
   // Collision in the creator's destination namespace
   if (getDestinationByName(sourceGroup.id, localName)) {
     notifyAgent(session, `Cannot create agent "${name}": you already have a destination named "${localName}".`);
     return;
   }
 
-  // Derive a safe folder name, deduplicated globally across agent_groups.folder
+  // Derive a folder, adding a numeric suffix if the base name is already taken globally.
   let folder = localName;
   let suffix = 2;
   while (getAgentGroupByFolder(folder)) {
     folder = `${localName}-${suffix}`;
     suffix++;
-  }
-
-  const groupPath = path.join(GROUPS_DIR, folder);
-  const resolvedPath = path.resolve(groupPath);
-  const resolvedGroupsDir = path.resolve(GROUPS_DIR);
-  if (!resolvedPath.startsWith(resolvedGroupsDir + path.sep)) {
-    notifyAgent(session, `Cannot create agent "${name}": invalid folder path.`);
-    log.error('create_agent path traversal attempt', { folder, resolvedPath });
-    return;
   }
 
   const agentGroupId = `ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

@@ -34,6 +34,7 @@ use "./sessions.allium" as sessions
 config {
     default_question_timeout: Duration = 300.seconds
     parent_destination_name: String = "parent"
+    reserved_agent_names: Set<String> = { "global", "parent", "unnamed", "system", "host" }
 }
 
 ------------------------------------------------------------
@@ -162,14 +163,42 @@ rule AgentCreationRequested {
     )
 }
 
+-- A request is rejected when the normalised name is in the reserved
+-- blocklist. "parent" is reserved because it is the auto-assigned
+-- back-link from a child agent to its creator; "unnamed" is reserved
+-- because it is the normalize_name fallback for blank input (and the
+-- decision is to reject blanks outright rather than coerce); "global",
+-- "system" and "host" are reserved to prevent conflicts with
+-- system-level folder names and future infrastructure names.
+
+rule AgentCreationRejectedReserved {
+    when: AgentRequestsCreateAgent(session, name, instructions?)
+    let local_name = normalize_name(name)
+    requires: name != ""
+    requires: local_name in config.reserved_agent_names
+    let req = AgentCreationRequest{
+        requesting_session: session,
+        requested_name: name
+    }
+    requires: exists req
+    requires: req.status = pending
+    ensures:
+        req.status = rejected
+        AgentNotified(
+            session: session,
+            text: "name is reserved"
+        )
+}
+
 -- A request is rejected when the requested name (after normalisation)
 -- already exists as a destination in the creator's namespace. The host
 -- notifies the creator via a chat-kind inbound message.
 
-rule AgentCreationNameCollision {
+rule AgentCreationRejectedCollision {
     when: AgentRequestsCreateAgent(session, name, instructions?)
     let local_name = normalize_name(name)
     requires: name != ""
+    requires: local_name not in config.reserved_agent_names
     requires: exists AgentDestination{
         agent_group: session.agent_group,
         local_name: local_name
@@ -199,6 +228,7 @@ rule AgentCreationApplied {
     when: AgentRequestsCreateAgent(session, name, instructions?)
     let local_name = normalize_name(name)
     requires: name != ""
+    requires: local_name not in config.reserved_agent_names
     requires: not exists AgentDestination{
         agent_group: session.agent_group,
         local_name: local_name
@@ -586,7 +616,6 @@ invariant UniqueQuestionId {
 -- Open Questions
 ------------------------------------------------------------
 
-open question "create_agent: should the host validate the requested name against a reserved-word / blocklist before applying, or is normalisation + collision check sufficient?"
 open question "create_agent: when the creator's session terminates between request and apply, does the new agent group still get created and notified through some other channel, or is the request abandoned?"
 open question "Agent-to-agent: when the target agent group has no active container, does the message simply queue in inbound.db (current behaviour) or should there be a TTL after which it is dropped?"
 open question "Recurrence: how is the user's timezone established (per-session config vs. global host config), and what happens if the timezone changes after a recurring task is created?"

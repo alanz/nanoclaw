@@ -38,7 +38,7 @@ entity Specialist {
 }
 
 entity User {
-    channel_type: String
+    kind: String
     handle: String
     display_name: String
     created_at: Timestamp
@@ -83,9 +83,9 @@ entity AgentGroupMember {
 
 rule NewUserSeen {
     when: SenderSeen(channel_type, handle, display_name)
-    requires: not exists User{channel_type: channel_type, handle: handle}
+    requires: not exists User{kind: channel_type, handle: handle}
     ensures: User.created(
-        channel_type: channel_type,
+        kind: channel_type,
         handle: handle,
         display_name: display_name,
         created_at: now
@@ -94,7 +94,7 @@ rule NewUserSeen {
 
 rule UserDisplayNameRefreshed {
     when: SenderSeen(channel_type, handle, display_name)
-    let user = User{channel_type: channel_type, handle: handle}
+    let user = User{kind: channel_type, handle: handle}
     requires: exists user
     requires: user.display_name != display_name
     ensures: user.display_name = display_name
@@ -216,9 +216,3 @@ actor Owner {
 actor Admin {
     identified_by: User where is_global_admin
 }
-
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
-open question "User.kind — does this field distinguish humans from bots, and what are its values?"

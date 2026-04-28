@@ -3,7 +3,7 @@ import path from 'path';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 
 const GROUP_FOLDER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-const RESERVED_FOLDERS = new Set(['global']);
+const RESERVED_FOLDERS = new Set(['global', 'parent', 'unnamed', 'system', 'host']);
 
 export function isValidGroupFolder(folder: string): boolean {
   if (!folder) return false;

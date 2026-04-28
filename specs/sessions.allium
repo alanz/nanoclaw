@@ -200,6 +200,25 @@ rule InboundMessageQueued {
         tries: 0,
         created_at: now
     )
+
+    @guidance
+        -- This rule covers InboundMessages that originate from external routing —
+        -- a platform message arriving via a channel adapter and being routed to a
+        -- session. It is not the only path that creates an InboundMessage.
+        --
+        -- Recurring InboundMessages (rows with `recurrence` set and
+        -- `series_id = id`) do NOT pass through this rule. They originate from
+        -- the host's `schedule_task` delivery action: when the container emits a
+        -- ScheduledTaskCreated outcome (modelled in agent-to-agent.allium), the
+        -- host writes a row directly into the session's inbound store with the
+        -- cron string in `recurrence` and `series_id` set to the new row's own
+        -- id. This DB write bridges the agent-facing ScheduledTask entity in
+        -- agent-to-agent.allium to the InboundMessage entity here, but it is not
+        -- yet captured as a rule in either spec. Once the bridge is modelled, it
+        -- will be a second creation site for InboundMessage alongside this rule,
+        -- and the recurrence/series_id fields will be established there rather
+        -- than via RecurrenceCloned (which only propagates the series across
+        -- subsequent firings).
 }
 
 -- Scheduled messages (process_after set) are re-queued by the host at their due time.
@@ -209,6 +228,43 @@ rule ScheduledMessageDue {
     requires: msg.status = pending
     requires: msg.is_due
     ensures: SessionWoken(session: msg.session)
+}
+
+-- Recurrence cloning. A completed inbound message that still carries a recurrence
+-- string is the signal to schedule its next firing. The completed row's recurrence
+-- is cleared so it cannot re-fire; a new pending row is created carrying the same
+-- series identity and the next firing time. By induction, exactly one live (non-
+-- completed) row exists per series at any time: the previous live row only completes
+-- after the new live row has been created here. Series-scoped operations (cancel,
+-- pause/resume, update) target the live row by matching on series_id, so the handle
+-- remains stable across firings even though each firing has its own InboundMessage id.
+
+rule RecurrenceCloned {
+    when: msg: InboundMessage.status becomes completed
+    requires: msg.recurrence != null
+    ensures:
+        InboundMessage.created(
+            session: msg.session,
+            seq: next_inbound_seq(msg.session),
+            kind: msg.kind,
+            status: pending,
+            trigger: msg.trigger,
+            content: msg.content,
+            process_after: next_recurrence(msg.recurrence, now),
+            recurrence: msg.recurrence,
+            series_id: msg.series_id,
+            tries: 0,
+            created_at: now
+        )
+        msg.recurrence = null
+
+    @guidance
+        -- Realised by the host's 60-second sweep: it queries `messages_in` for
+        -- rows where `status = completed and recurrence != null` and applies the
+        -- ensures clauses above. Modelled as `becomes completed` because the
+        -- behaviour is observable from the message's lifecycle, not from the tick.
+        -- Clearing `recurrence` on the completed row is what guarantees the rule
+        -- fires once per firing rather than re-firing on every sweep.
 }
 
 -- Container processing lifecycle.
@@ -286,6 +342,33 @@ rule OutboundMessageDelivered {
         status: delivered,
         delivered_at: now
     )
+
+    @guidance
+        -- The OutboundMessage's channel_type, platform_id and thread_id fields
+        -- determine where this delivery goes. Three mechanisms populate them, in
+        -- precedence order:
+        --
+        -- 1. Explicit destination tag. The agent wraps output in
+        --    `<message to="name">...</message>` blocks naming a destination from
+        --    its destinations table. The destination entry carries its own
+        --    channel_type and platform_id; thread_id is inherited from the
+        --    inbound routing context. This is how an agent replies to a channel
+        --    other than the one that triggered the session.
+        --
+        -- 2. Default session routing. If the agent emits plain text with no
+        --    `<message>` blocks and the session has session_routing set
+        --    (always true for channel-originated sessions), the reply goes to
+        --    the (channel_type, platform_id, thread_id) stored in
+        --    session_routing — i.e. exactly the origin channel and thread.
+        --
+        -- 3. Single-destination shortcut. If session_routing is null (e.g. an
+        --    agent_shared session with no channel origin) and exactly one
+        --    destination is registered, plain-text output is sent there
+        --    automatically.
+        --
+        -- The OutboundMessage is created with channel_type, platform_id and
+        -- thread_id already populated by whichever mechanism fires; this rule
+        -- only witnesses the act of delivery, not the routing decision.
 }
 
 rule OutboundDeliveryFailed {
@@ -326,10 +409,3 @@ invariant NoProcessingInClosedSession {
     for s in Sessions:
         s.status = closed implies s.processing_state = idle
 }
-
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
-open question "Recurrence: what triggers the creation of the next recurrence instance, and how are series managed?"
-open question "OutboundMessage routing: how does the container specify the channel for a reply that differs from the session's default routing?"

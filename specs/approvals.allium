@@ -80,6 +80,25 @@ rule ApprovalRequested {
         expires_at: now + config.approval_expiry,
         status: pending
     )
+
+    @guidance
+        -- Approver notification is delivered as a direct message (DM) carrying
+        -- an interactive chat-sdk card with Approve and Reject buttons. The
+        -- approver is resolved from the privilege hierarchy in priority order:
+        -- scoped admins of the relevant agent_group, then global admins, then
+        -- owners. Within that order, the system prefers an approver reachable
+        -- on the same channel type as the request's origin (e.g. if the
+        -- triggering message arrived via Telegram, prefer a Telegram DM); if
+        -- no same-channel approver is reachable, the system falls back to any
+        -- reachable DM for the highest-priority approver.
+        --
+        -- Failure modes:
+        --   - No eligible approver in the privilege hierarchy: the requesting
+        --     agent session is informed with an error and the approval is not
+        --     created (or, if already created, is treated as undeliverable).
+        --   - At least one eligible approver exists but none has a reachable
+        --     DM on any channel: the requesting agent session is informed with
+        --     an error.
 }
 
 rule ApprovalGranted {
@@ -98,6 +117,19 @@ rule ApprovalRejected {
              or exists identity/UserRole{user: actor, role: admin, agent_group: approval.agent_group}
     requires: approval.is_actionable
     ensures: approval.status = rejected
+
+    @guidance
+        -- Rejection is terminal for this PendingApproval row, but the agent
+        -- may immediately re-request the same action: a fresh
+        -- ApprovalRequested fires, generate_request_id() produces a new id,
+        -- and a new PendingApproval row is created in pending status. The
+        -- OnlyOneActivePendingPerAction invariant only forbids two
+        -- concurrently pending approvals for the same (agent_group, action)
+        -- pair; it does not block re-requests after a prior approval has
+        -- reached a terminal status. No cooldown is enforced at the spec
+        -- level. Rate-limiting or cooldown policy, if needed, belongs to
+        -- the action handlers that emit ApprovalRequested, not to the
+        -- approval primitive itself.
 }
 
 rule ApprovalExpired {
@@ -123,10 +155,3 @@ invariant OnlyOneActivePendingPerAction {
             a != b and a.agent_group = b.agent_group and a.action = b.action
                 implies not (a.status = pending and b.status = pending)
 }
-
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
-open question "Approver notification: how does the system notify the approver? DM? Which channel?"
-open question "Re-request: can an agent re-request an approval after rejection, or is there a cooldown?"

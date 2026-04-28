@@ -129,6 +129,16 @@ rule MessagingGroupAutoCreated {
         unknown_sender_policy: request_approval,
         created_at: now
     )
+
+    @guidance
+        -- The unknown_sender_policy is deliberately hardcoded to request_approval
+        -- for auto-created groups. Auto-creation is triggered by an unsolicited
+        -- @mention from a previously-unseen party, where neither extreme is safe:
+        -- 'strict' would silently drop everything from a sender who has not yet
+        -- been registered, and 'public' would let anyone who mentions the bot
+        -- through. 'request_approval' surfaces the unknown sender to an admin and
+        -- holds the message until a decision is made. No configurable default is
+        -- offered: an admin can adjust the policy on the group after wiring.
 }
 
 -- Operators explicitly wire a messaging group to an agent group.
@@ -214,6 +224,49 @@ rule MessageEngagesAgent {
             trigger: true,
             created_at: now
         )
+
+    @guidance
+        -- engage_mode controls how message_engages(wiring, message) decides
+        -- whether this wiring is on the hook for the message:
+        --   pattern         — the message text matches engage_pattern.
+        --   mention         — the message carries an @mention of the agent.
+        --   mention_sticky  — engages on @mention OR when an existing session
+        --                     already covers this (agent_group, messaging_group,
+        --                     thread_id) triple, so a back-and-forth thread does
+        --                     not require re-mentioning on every turn.
+        --
+        -- 'Existing' for mention_sticky is defined narrowly: a session counts
+        -- if and only if there is a Session record with status = active for
+        -- the (wiring.agent_group, mg, message.thread_id) triple. status = active
+        -- is the sole criterion. Other session attributes (idle vs processing,
+        -- heartbeat freshness, container liveness) are deliberately ignored — a
+        -- session that has merely gone quiet is still 'existing' for stickiness
+        -- purposes; only an explicit close/cleanup that flips status off active
+        -- ends stickiness.
+        --
+        -- Stickiness applies only to group chats. When mg.is_group = false (a
+        -- DM), mention_sticky never engages from session presence alone — DMs
+        -- fall back to the mention/pattern criterion regardless of any active
+        -- session. The intent is that DMs always require an explicit address
+        -- so the user can hold parallel conversations with multiple agents in
+        -- the same DM channel without one of them silently grabbing every turn.
+        --
+        -- Fan-out and priority. The 'for wiring in mg.wirings' loop is an
+        -- independent fan-out: every wiring on this messaging group whose
+        -- engage_mode matches and whose sender check passes produces its own
+        -- RoutedMessage. There is no exclusive-first-match semantics, no
+        -- stop-after-first-engaging-wiring gate, no winner-takes-all. If three
+        -- wirings on the same messaging group all match the same inbound
+        -- message, all three agents are routed to in parallel.
+        --
+        -- wiring.priority controls evaluation order only. Wirings are visited
+        -- in descending priority (highest priority first) so any per-message
+        -- side effects an implementation performs once-per-message — for
+        -- example, an idempotent 'subscribe' call to the channel adapter when
+        -- the first mention_sticky wiring engages — happen against the
+        -- highest-priority wiring rather than an arbitrary one. Priority
+        -- never gates delivery: a lower-priority wiring still receives the
+        -- message even when a higher-priority one has already matched.
 }
 
 rule MessageAccumulated {
@@ -285,10 +338,3 @@ invariant DeniedGroupAcceptsNoMessages {
         r.wiring.messaging_group.denied_at = null
 }
 
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
-open question "MessagingGroup auto-creation: should auto-created groups always use request_approval policy, or should there be a configurable default?"
-open question "mention_sticky engage_mode: exactly which session types count as 'existing' for stickiness?"
-open question "Fan-out priority: when multiple wirings match, does priority control order only, or does it gate delivery?"

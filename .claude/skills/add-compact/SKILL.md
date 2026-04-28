@@ -52,7 +52,7 @@ npm run build
 ### Restart service
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1  # macOS
 # Linux: systemctl --user restart nanoclaw
 ```
 

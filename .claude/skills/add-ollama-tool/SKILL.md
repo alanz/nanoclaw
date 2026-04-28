@@ -123,7 +123,7 @@ OLLAMA_HOST=http://your-ollama-host:11434
 ### Restart the service
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1  # macOS
 # Linux: systemctl --user restart nanoclaw
 ```
 

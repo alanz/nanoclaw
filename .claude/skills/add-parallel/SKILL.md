@@ -233,7 +233,7 @@ Rebuild the main app and restart:
 
 ```bash
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1  # macOS
 # Linux: systemctl --user restart nanoclaw
 ```
 
@@ -287,4 +287,4 @@ To remove Parallel AI integration:
 2. Revert changes to container-runner.ts and agent-runner/src/index.ts
 3. Remove Web Research Tools section from groups/main/CLAUDE.md
 4. Rebuild: `./container/build.sh && npm run build`
-5. Restart: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw` (macOS) or `systemctl --user restart nanoclaw` (Linux)
+5. Restart: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1` (macOS) or `systemctl --user restart nanoclaw` (Linux)

@@ -98,20 +98,20 @@ The NanoClaw launchd service runs with a restricted PATH. `whisper-cli` and `ffm
 
 Check the current PATH:
 ```bash
-grep -A1 'PATH' ~/Library/LaunchAgents/com.nanoclaw.plist
+grep -A1 'PATH' ~/Library/LaunchAgents/com.nanoclaw.v1.plist
 ```
 
 If `/opt/homebrew/bin` is missing, add it to the `<string>` value inside the `PATH` key in the plist. Then reload:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.nanoclaw.v1.plist
+launchctl load ~/Library/LaunchAgents/com.nanoclaw.v1.plist
 ```
 
 ### Build and restart
 
 ```bash
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1
 ```
 
 ### Test

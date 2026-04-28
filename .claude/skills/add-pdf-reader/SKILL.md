@@ -62,7 +62,7 @@ npx vitest run src/channels/whatsapp.test.ts
 ### Restart service
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1  # macOS
 # Linux: systemctl --user restart nanoclaw
 ```
 

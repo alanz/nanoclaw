@@ -81,7 +81,7 @@ systemctl --user restart nanoclaw
 
 macOS:
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1
 ```
 
 ### Test receiving reactions

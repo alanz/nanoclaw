@@ -75,7 +75,7 @@ All tests must pass and build must be clean before proceeding.
 
 3. Restart the service:
    ```bash
-   launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+   launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1
    ```
 
 ## Phase 4: Verify

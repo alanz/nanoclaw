@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw</string>
+    <string>com.nanoclaw.v1</string>
     <key>ProgramArguments</key>
     <array>
         <string>{{NODE_PATH}}</string>

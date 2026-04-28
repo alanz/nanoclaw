@@ -87,7 +87,7 @@ All 73 tests should pass and the build should be clean before continuing.
 
 ```bash
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1   # macOS
 # Linux: systemctl --user restart nanoclaw
 ```
 

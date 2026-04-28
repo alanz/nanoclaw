@@ -19,7 +19,7 @@ function generatePlist(
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw</string>
+    <string>com.nanoclaw.v1</string>
     <key>ProgramArguments</key>
     <array>
         <string>${nodePath}</string>
@@ -79,7 +79,7 @@ describe('plist generation', () => {
       '/home/user/nanoclaw',
       '/home/user',
     );
-    expect(plist).toContain('<string>com.nanoclaw</string>');
+    expect(plist).toContain('<string>com.nanoclaw.v1</string>');
   });
 
   it('uses the correct node path', () => {

@@ -406,7 +406,7 @@ If testing live:
 
 1. Stop the service (do this directly):
    ```bash
-   launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist 2>/dev/null || true
+   launchctl unload ~/Library/LaunchAgents/com.nanoclaw.v1.plist 2>/dev/null || true
    ```
 
 2. Symlink data into the worktree:
@@ -465,7 +465,7 @@ Run `npm install && npm run build` in the main tree to confirm.
 
 Restart the service:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl load ~/Library/LaunchAgents/com.nanoclaw.v1.plist
 ```
 
 Show summary:

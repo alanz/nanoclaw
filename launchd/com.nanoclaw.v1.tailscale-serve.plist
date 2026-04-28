@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw.tailscale-serve</string>
+    <string>com.nanoclaw.v1.tailscale-serve</string>
     <key>ProgramArguments</key>
     <array>
         <string>{{TAILSCALE_PATH}}</string>

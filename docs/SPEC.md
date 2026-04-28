@@ -321,7 +321,7 @@ nanoclaw/
 │   # Note: Per-container logs are in groups/{folder}/logs/container-*.log
 │
 └── launchd/
-    └── com.nanoclaw.plist         # macOS service configuration
+    └── com.nanoclaw.v1.plist         # macOS service configuration
 ```
 
 ---
@@ -671,9 +671,9 @@ When NanoClaw starts, it:
    - Recovers any unprocessed messages from before shutdown
    - Starts the message polling loop
 
-### Service: com.nanoclaw
+### Service: com.nanoclaw.v1
 
-**launchd/com.nanoclaw.plist:**
+**launchd/com.nanoclaw.v1.plist:**
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -681,7 +681,7 @@ When NanoClaw starts, it:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw</string>
+    <string>com.nanoclaw.v1</string>
     <key>ProgramArguments</key>
     <array>
         <string>{{NODE_PATH}}</string>
@@ -714,13 +714,13 @@ When NanoClaw starts, it:
 
 ```bash
 # Install service
-cp launchd/com.nanoclaw.plist ~/Library/LaunchAgents/
+cp launchd/com.nanoclaw.v1.plist ~/Library/LaunchAgents/
 
 # Start service
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl load ~/Library/LaunchAgents/com.nanoclaw.v1.plist
 
 # Stop service
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.nanoclaw.v1.plist
 
 # Check status
 launchctl list | grep nanoclaw

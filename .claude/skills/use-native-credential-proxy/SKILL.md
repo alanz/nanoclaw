@@ -129,7 +129,7 @@ npm run build
 ```
 
 Then restart the service:
-- macOS: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw`
+- macOS: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1`
 - Linux: `systemctl --user restart nanoclaw`
 - WSL/manual: stop and re-run `bash start-nanoclaw.sh`
 

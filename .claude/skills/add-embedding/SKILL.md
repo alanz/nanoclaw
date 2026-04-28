@@ -97,7 +97,7 @@ Then restart NanoClaw so it picks up the new `.env`:
 
 ```bash
 # macOS (launchd)
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v1
 
 # Linux (systemd)
 systemctl --user restart nanoclaw

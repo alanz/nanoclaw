@@ -77,7 +77,7 @@ function setupLaunchd(
     homeDir,
     'Library',
     'LaunchAgents',
-    'com.nanoclaw.plist',
+    'com.nanoclaw.v1.plist',
   );
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
 
@@ -86,7 +86,7 @@ function setupLaunchd(
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw</string>
+    <string>com.nanoclaw.v1</string>
     <key>ProgramArguments</key>
     <array>
         <string>${nodePath}</string>
@@ -116,7 +116,7 @@ function setupLaunchd(
   logger.info({ plistPath }, 'Wrote launchd plist');
 
   try {
-    execSync(`launchctl enable gui/$(id -u)/com.nanoclaw`, { stdio: 'ignore' });
+    execSync(`launchctl enable gui/$(id -u)/com.nanoclaw.v1`, { stdio: 'ignore' });
     logger.info('launchctl enable succeeded');
   } catch {
     logger.warn('launchctl enable failed');
@@ -135,7 +135,7 @@ function setupLaunchd(
   let serviceLoaded = false;
   try {
     const output = execSync('launchctl list', { encoding: 'utf-8' });
-    serviceLoaded = output.includes('com.nanoclaw');
+    serviceLoaded = output.includes('com.nanoclaw.v1');
   } catch {
     // launchctl list failed
   }
@@ -158,7 +158,7 @@ function setupBackupLaunchd(projectRoot: string, homeDir: string): void {
     homeDir,
     'Library',
     'LaunchAgents',
-    'com.nanoclaw.backup.plist',
+    'com.nanoclaw.v1.backup.plist',
   );
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -166,7 +166,7 @@ function setupBackupLaunchd(projectRoot: string, homeDir: string): void {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw.backup</string>
+    <string>com.nanoclaw.v1.backup</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
@@ -196,7 +196,7 @@ function setupBackupLaunchd(projectRoot: string, homeDir: string): void {
   }
 
   try {
-    execSync(`launchctl enable gui/$(id -u)/com.nanoclaw.backup`, {
+    execSync(`launchctl enable gui/$(id -u)/com.nanoclaw.v1.backup`, {
       stdio: 'ignore',
     });
     logger.info('launchctl enable for backup succeeded');

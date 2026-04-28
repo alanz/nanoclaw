@@ -6,10 +6,10 @@
 --        Specialist row in identity.allium.
 -- Includes: SpecialistTask lifecycle, delegation from main group, sub-task dispatch,
 --           chain limit enforcement (depth/count/same-type/cycle), memory provider
---           bypass, result routing back to requester, overall task timeout.
+--           bypass, result routing back to requester, overall task timeout,
+--           per-task session provisioning, container crash/restart recovery.
 -- Excludes: AgentGroup / Specialist registration (identity.allium), session lifecycle
---           (sessions.allium), agent-to-agent messaging infra (agent-to-agent.allium),
---           host-restart recovery (handled by sessions.allium stuck-container detection).
+--           (sessions.allium), agent-to-agent messaging infra (agent-to-agent.allium).
 
 use "./identity.allium" as identity
 use "./sessions.allium" as sessions
@@ -20,12 +20,12 @@ use "./agent-to-agent.allium" as a2a
 ------------------------------------------------------------
 
 enum SpecialistTaskStatus {
-    queued | running | awaiting_sub_task | completed | failed
+    queued | running | awaiting_sub_task | awaiting_restart | completed | failed
 }
 
 enum SpecialistFailureKind {
     cycle_detected | depth_exceeded | count_exceeded
-    | same_type_limit_exceeded | timeout | execution_error
+    | same_type_limit_exceeded | timeout | execution_error | host_restart
 }
 
 ------------------------------------------------------------
@@ -46,6 +46,7 @@ config {
     max_chain_delegations: Integer = 20
     max_same_type_dispatches: Integer = 3
     max_task_duration: Duration = 4.hours
+    max_restart_retries: Integer = 2
     default_last_turn_sub_notice: String = "[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]"
     default_last_turn_parent_notice: String = "[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]"
 }
@@ -76,6 +77,7 @@ entity SpecialistTask {
     is_last_same_type_dispatch: Boolean
     status: SpecialistTaskStatus
     dispatched_at: Timestamp
+    restart_attempt_count: Integer
     closed_at: Timestamp?
 
     pending_sub_task: SpecialistTask when status = awaiting_sub_task
@@ -83,17 +85,22 @@ entity SpecialistTask {
     failure: TaskFailure when status = failed
 
     has_cycle: specialist_group in ancestor_groups
-    is_overdue: status in {queued, running, awaiting_sub_task}
+    is_overdue: status in {queued, running, awaiting_sub_task, awaiting_restart}
                 and now - dispatched_at > config.max_task_duration
 
     transitions status {
         queued -> running
+        queued -> awaiting_restart
         queued -> failed
         running -> awaiting_sub_task
+        running -> awaiting_restart
         running -> completed
         running -> failed
+        awaiting_sub_task -> awaiting_restart
         awaiting_sub_task -> running
         awaiting_sub_task -> failed
+        awaiting_restart -> running
+        awaiting_restart -> failed
         terminal: completed, failed
     }
 
@@ -118,10 +125,12 @@ entity SpecialistTask {
 -- Root dispatch (main group -> specialist)
 ------------------------------------------------------------
 
--- The main group's agent calls dispatch_specialist. The container writes a
--- system outbound message; the host creates a SpecialistTask and writes the
--- prompt as a triggering inbound message into the target specialist's
--- agent_shared session.
+-- The main group's agent calls dispatch_specialist. The host creates a
+-- SpecialistTask and provisions a fresh per-task Session keyed on the task
+-- id (messaging_group = null, thread_id = task.id). The task prompt is
+-- written as the triggering inbound message into that session. The
+-- specialist's AgentGroup folder is mounted read-only into its container;
+-- the per-task session DBs are the only mutable surfaces.
 
 rule MainGroupDispatchesSpecialist {
     when: AgentRequestsDispatchSpecialist(session, specialist_group_id, prompt)
@@ -129,7 +138,6 @@ rule MainGroupDispatchesSpecialist {
     let target_group = identity/AgentGroup{id: specialist_group_id}
     requires: exists target_group
     requires: exists target_group.specialist
-    let target_session = resolve_agent_shared_session(target_group)
     ensures:
         let task = SpecialistTask.created(
             specialist_group: target_group,
@@ -142,11 +150,21 @@ rule MainGroupDispatchesSpecialist {
             is_last_same_type_dispatch: false,
             status: queued,
             dispatched_at: now,
+            restart_attempt_count: 0,
             closed_at: null
         )
+        let task_session = sessions/Session.created(
+            agent_group: target_group,
+            messaging_group: null,
+            thread_id: task.id,
+            status: active,
+            processing_state: idle,
+            last_active: now,
+            created_at: now
+        )
         sessions/InboundMessage.created(
-            session: target_session,
-            seq: next_inbound_seq(target_session),
+            session: task_session,
+            seq: next_inbound_seq(task_session),
             kind: "chat",
             status: pending,
             trigger: true,
@@ -155,7 +173,7 @@ rule MainGroupDispatchesSpecialist {
             tries: 0,
             created_at: now
         )
-        sessions/SessionWoken(session: target_session)
+        sessions/SessionWoken(session: task_session)
 }
 
 ------------------------------------------------------------
@@ -164,13 +182,13 @@ rule MainGroupDispatchesSpecialist {
 
 -- When the host begins processing the trigger inbound message inside the
 -- specialist's container, the corresponding SpecialistTask transitions from
--- queued to running. SpecialistContainerProcessing is emitted by the host
--- when it observes its own session moving into the processing state for
--- this task.
+-- queued (first start) or awaiting_restart (after a crash recovery) to
+-- running. SpecialistContainerProcessing is emitted by the host when it
+-- observes the task's per-task Session moving into the processing state.
 
 rule SpecialistTaskStarted {
     when: SpecialistContainerProcessing(task)
-    requires: task.status = queued
+    requires: task.status in {queued, awaiting_restart}
     ensures:
         task.status = running
 }
@@ -185,6 +203,16 @@ rule SpecialistTaskStarted {
 -- chain count exceeded, same-type count exceeded, or accepted dispatch.
 -- The four rejection rules and the accepted-dispatch rule are mutually
 -- exclusive on their guards.
+--
+-- Per-task session: the child task receives its own Session (messaging_group
+-- = null, thread_id = child.id), isolating its inbound/outbound DBs from
+-- all other tasks and from the type template folder (mounted read-only).
+--
+-- Last-turn notice: format_task_prompt(child) returns the task's prompt
+-- text optionally suffixed with the specialist's last_turn_sub_notice
+-- (falling back to config.default_last_turn_sub_notice) when
+-- child.is_last_same_type_dispatch = true. The notice is baked into the
+-- triggering InboundMessage so the container sees it on first pickup.
 
 rule SpecialistDispatchesSubTask {
     when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
@@ -204,7 +232,6 @@ rule SpecialistDispatchesSubTask {
               < config.max_same_type_dispatches
     let is_last = same_type_dispatch_count(parent_task, target_group)
                   = config.max_same_type_dispatches - 1
-    let target_session = resolve_agent_shared_session(target_group)
     ensures:
         let child = SpecialistTask.created(
             specialist_group: target_group,
@@ -217,22 +244,32 @@ rule SpecialistDispatchesSubTask {
             is_last_same_type_dispatch: is_last,
             status: queued,
             dispatched_at: now,
+            restart_attempt_count: 0,
             closed_at: null
         )
         parent_task.status = awaiting_sub_task
         parent_task.pending_sub_task = child
+        let child_session = sessions/Session.created(
+            agent_group: target_group,
+            messaging_group: null,
+            thread_id: child.id,
+            status: active,
+            processing_state: idle,
+            last_active: now,
+            created_at: now
+        )
         sessions/InboundMessage.created(
-            session: target_session,
-            seq: next_inbound_seq(target_session),
+            session: child_session,
+            seq: next_inbound_seq(child_session),
             kind: "chat",
             status: pending,
             trigger: true,
-            content: prompt,
+            content: format_task_prompt(child),
             process_after: null,
             tries: 0,
             created_at: now
         )
-        sessions/SessionWoken(session: target_session)
+        sessions/SessionWoken(session: child_session)
 }
 
 -- Cycle: the requested target appears in the parent's ancestor chain.
@@ -419,7 +456,6 @@ rule MemoryProviderDispatched {
     let parent_task = running_task_for_group(session.agent_group)
     requires: exists parent_task
     requires: parent_task.status = running
-    let target_session = resolve_agent_shared_session(target_group)
     ensures:
         let child = SpecialistTask.created(
             specialist_group: target_group,
@@ -432,13 +468,23 @@ rule MemoryProviderDispatched {
             is_last_same_type_dispatch: false,
             status: queued,
             dispatched_at: now,
+            restart_attempt_count: 0,
             closed_at: null
         )
         parent_task.status = awaiting_sub_task
         parent_task.pending_sub_task = child
+        let child_session = sessions/Session.created(
+            agent_group: target_group,
+            messaging_group: null,
+            thread_id: child.id,
+            status: active,
+            processing_state: idle,
+            last_active: now,
+            created_at: now
+        )
         sessions/InboundMessage.created(
-            session: target_session,
-            seq: next_inbound_seq(target_session),
+            session: child_session,
+            seq: next_inbound_seq(child_session),
             kind: "chat",
             status: pending,
             trigger: true,
@@ -447,7 +493,7 @@ rule MemoryProviderDispatched {
             tries: 0,
             created_at: now
         )
-        sessions/SessionWoken(session: target_session)
+        sessions/SessionWoken(session: child_session)
 }
 
 ------------------------------------------------------------
@@ -492,18 +538,26 @@ rule SpecialistResultRoutedToMain {
         sessions/SessionWoken(session: main_session)
 }
 
--- Sub-tasks route their result back into the parent specialist's session.
--- The parent task transitions from awaiting_sub_task back to running by
--- having the result written as a triggering inbound message; the
--- pending_sub_task pointer is cleared as the parent leaves the
--- awaiting_sub_task state.
+-- Sub-tasks route their result back into the parent specialist's per-task
+-- session. specialist_task_session(parent_task) resolves the Session whose
+-- thread_id = parent_task.id — the same session provisioned when the parent
+-- task was created. The parent task transitions from awaiting_sub_task back
+-- to running; the pending_sub_task pointer is cleared.
+--
+-- Parent notice: format_specialist_outcome(task) appends the specialist's
+-- last_turn_parent_notice (falling back to config.default_last_turn_parent_notice)
+-- when task.is_last_same_type_dispatch = true, so the parent container
+-- knows no further responses will follow from this specialist.
+--
+-- Correlation: the child task's id is embedded in format_specialist_outcome
+-- so the parent container can match the result to its original dispatch call.
 
 rule SpecialistResultRoutedToParent {
     when: SpecialistResultReady(task)
     requires: task.requester_task != null
     requires: task.requester_task.status = awaiting_sub_task
     let parent_task = task.requester_task
-    let parent_session = resolve_agent_shared_session(parent_task.specialist_group)
+    let parent_session = specialist_task_session(parent_task)
     ensures:
         parent_task.status = running
         parent_task.pending_sub_task = null
@@ -539,7 +593,7 @@ rule SpecialistFailureRoutedToRequester {
 
 rule SpecialistTaskTimedOut {
     when: task: SpecialistTask.is_overdue
-    requires: task.status in {queued, running, awaiting_sub_task}
+    requires: task.status in {queued, running, awaiting_sub_task, awaiting_restart}
     ensures:
         task.status = failed
         task.failure = TaskFailure{
@@ -548,6 +602,49 @@ rule SpecialistTaskTimedOut {
         }
         task.closed_at = now
         SpecialistResultReady(task: task)
+}
+
+------------------------------------------------------------
+-- Crash and restart recovery
+------------------------------------------------------------
+
+-- When a specialist container exits unexpectedly, the session's stuck
+-- detection fires (sessions.allium: StuckContainerDetected). The specialist
+-- layer observes this via the session's processing_state transition to stuck
+-- and maps it to the task via thread_id = task.id. If retries remain, the
+-- task moves to awaiting_restart and the retry count is incremented. The
+-- sessions.allium StuckSessionRecovered rule then re-queues the inbound
+-- message and re-starts the container, which will emit
+-- SpecialistContainerProcessing and transition the task back to running via
+-- SpecialistTaskStarted.
+
+rule SpecialistContainerCrashed {
+    when: session: sessions/Session.processing_state transitions_to stuck
+    let task = SpecialistTask{id: session.thread_id}
+    requires: exists task
+    requires: task.status in {running, awaiting_sub_task}
+    requires: task.restart_attempt_count < config.max_restart_retries
+    ensures:
+        task.status = awaiting_restart
+        task.restart_attempt_count = task.restart_attempt_count + 1
+}
+
+-- When retries are exhausted the task fails. SpecialistFailureRoutedToRequester
+-- picks up the failed transition and routes the outcome to the requester.
+
+rule SpecialistRestartExhausted {
+    when: session: sessions/Session.processing_state transitions_to stuck
+    let task = SpecialistTask{id: session.thread_id}
+    requires: exists task
+    requires: task.status in {running, awaiting_sub_task}
+    requires: task.restart_attempt_count >= config.max_restart_retries
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: host_restart,
+            detail: "specialist container failed and maximum restart retries were exhausted"
+        }
+        task.closed_at = now
 }
 
 ------------------------------------------------------------
@@ -612,13 +709,24 @@ invariant RunningTaskIsLeaf {
                 implies child.status != running
 }
 
+-- Per-task session isolation: each specialist task's Session has
+-- messaging_group = null and thread_id = task.id, making it unique to
+-- that task. The specialist's AgentGroup folder (CLAUDE.md, skills) is
+-- mounted read-only and shared across all tasks of the same type; the
+-- only writable surfaces visible to the container are the per-task
+-- inbound.db and outbound.db. A running task therefore cannot alter the
+-- type template or another task's session state.
+
 ------------------------------------------------------------
 -- Open Questions
 ------------------------------------------------------------
 
-open question "Specialist dispatch: how is is_last_same_type_dispatch surfaced to the running specialist (e.g., as last_turn_sub_notice text injected into the trigger prompt), and is the parent likewise informed via last_turn_parent_notice when the result is routed back?"
-open question "Specialist dispatch: when a specialist's container is unavailable at dispatch time (image not built, OneCLI agent not provisioned), is the task held in queued or transitioned to failed with execution_error?"
-open question "Specialist failure routing: when a sub-task fails before its parent reaches awaiting_sub_task (e.g., immediate rejection), the parent_task pointer in SpecialistResultRoutedToParent's requires would not match. Is failure of an immediately-rejected sub-task only routed via AgentNotified, with no SpecialistResultReady emission, or is there a separate routing path?"
+-- Resolved: last-turn notice delivery. is_last_same_type_dispatch = true
+-- causes format_task_prompt(child) to append the last_turn_sub_notice to
+-- the triggering InboundMessage content, so the specialist sees it on first
+-- pickup. format_specialist_outcome(task) appends last_turn_parent_notice
+-- when routing the result back to the parent.
+
 -- Resolved: memory provider tasks are invisible to the chain counters.
 -- Memory provider lookups are transparent reads, not true delegations,
 -- so MemoryProviderDispatched copies the parent's depth,
@@ -626,4 +734,16 @@ open question "Specialist failure routing: when a sub-task fails before its pare
 -- (the memory provider group is not added to ancestors). A memory
 -- provider call therefore neither consumes a delegation slot nor
 -- shortens the remaining depth budget.
-open question "running_task_for_group resolution: when an agent group has multiple historical SpecialistTasks, the running one is unique per the RunningTaskIsLeaf invariant for the same agent group only when sessions are agent_shared. Is there a case where two running tasks could share the same specialist_group (e.g., one started from main, one from a separate parent), and if so how is the parent disambiguated on dispatch_sub_task?"
+
+-- Resolved: running_task_for_group disambiguation. Each specialist task
+-- now has its own isolated Session (thread_id = task.id). The
+-- SpecialistContainerProcessing trigger is associated with a specific task,
+-- not a group, so two tasks with the same specialist_group cannot be
+-- confused. RunningTaskIsLeaf ensures at most one live running task
+-- per chain, but different chains may each have a running task for the
+-- same specialist_group simultaneously. running_task_for_group must
+-- therefore be scoped to the current session (task) to disambiguate.
+
+open question "Specialist dispatch: when a specialist's container is unavailable at dispatch time (image not built, OneCLI agent not provisioned), is the task held in queued or transitioned immediately to failed with execution_error?"
+open question "Specialist failure routing: when a sub-task fails before its parent reaches awaiting_sub_task (e.g., immediate chain rejection), SpecialistResultRoutedToParent's requires: task.requester_task.status = awaiting_sub_task will not match. Is failure of an immediately-rejected sub-task only routed via AgentNotified, with no SpecialistResultReady emission, or is there a separate routing path for this case?"
+open question "Crash recovery and awaiting_sub_task: when SpecialistContainerCrashed fires for a task in awaiting_sub_task, the task moves to awaiting_restart while a child task may still be running. Should the child task be cancelled, or should the parent wait for the child to complete before the restart attempt?"

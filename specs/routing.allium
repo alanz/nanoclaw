@@ -50,17 +50,10 @@ entity MessagingGroup {
     name: String
     is_group: Boolean
     unknown_sender_policy: UnknownSenderPolicy
-    denied: Boolean
+    denied_at: Timestamp?
     created_at: Timestamp
 
     wirings: Wiring with messaging_group = this
-    denied_at: Timestamp? when denied = true
-
-    transitions denied {
-        false -> true
-        true -> false
-        terminal: false
-    }
 }
 
 entity Wiring {
@@ -134,7 +127,6 @@ rule MessagingGroupAutoCreated {
         name: message.platform_id,
         is_group: false,
         unknown_sender_policy: request_approval,
-        denied: false,
         created_at: now
     )
 }
@@ -184,17 +176,15 @@ rule WiringUpdated {
 rule MessagingGroupDenied {
     when: DenyMessagingGroup(actor, messaging_group)
     requires: actor.is_owner or actor.is_global_admin
-    requires: not messaging_group.denied
+    requires: messaging_group.denied_at = null
     ensures:
-        messaging_group.denied = true
         messaging_group.denied_at = now
 }
 
 rule MessagingGroupUndenied {
     when: UnwireChannel(actor, wiring)
-    requires: wiring.messaging_group.denied
+    requires: wiring.messaging_group.denied_at != null
     ensures:
-        wiring.messaging_group.denied = false
         wiring.messaging_group.denied_at = null
 }
 
@@ -212,7 +202,7 @@ rule MessageEngagesAgent {
     let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
     requires: exists mg
     requires: exists sender
-    requires: not mg.denied
+    requires: mg.denied_at = null
 
     for wiring in mg.wirings where message_engages(wiring, message):
         requires: sender.can_access(wiring.agent_group)
@@ -232,7 +222,7 @@ rule MessageAccumulated {
     let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
     requires: exists mg
     requires: exists sender
-    requires: not mg.denied
+    requires: mg.denied_at = null
 
     for wiring in mg.wirings where message_engages(wiring, message):
         requires: not sender.can_access(wiring.agent_group)
@@ -253,7 +243,7 @@ rule UnknownSenderEscalated {
     let sender = identity/User{channel_type: message.channel_type, handle: message.sender_handle}
     requires: exists mg
     requires: exists sender
-    requires: not mg.denied
+    requires: mg.denied_at = null
     requires: mg.unknown_sender_policy = request_approval
     requires: not sender.can_access(mg.wirings.first.agent_group)
     requires: not exists SenderApprovalRequest{messaging_group: mg, sender: sender,
@@ -289,10 +279,10 @@ rule SenderDenied {
 ------------------------------------------------------------
 
 invariant DeniedGroupAcceptsNoMessages {
-    -- When a MessagingGroup.denied = true, no Wiring should route messages.
+    -- When a MessagingGroup has denied_at set, no Wiring should route messages.
     -- Enforced by the routing gate; captured here for clarity.
-    for mg in MessagingGroups:
-        mg.denied implies mg.wirings.count >= 0
+    for r in RoutedMessages:
+        r.wiring.messaging_group.denied_at = null
 }
 
 ------------------------------------------------------------

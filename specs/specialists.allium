@@ -28,6 +28,22 @@ enum SpecialistFailureKind {
     | same_type_limit_exceeded | timeout | execution_error | host_restart
 }
 
+enum IpcMountStatus { active | cleared }
+
+enum TransferStatus {
+    pending     -- host has taken ownership; awaiting recipient invocation
+    | in_transit -- recipient invocation has started; files placed in its ipc-in
+    | committed  -- files were committed to the requester group's memory area
+    | expired    -- transfer no longer needed; staging copies may be reclaimed
+}
+
+enum TransferFileStatus {
+    staged   -- written to ipc-out by the container, not yet handed over
+    | owned  -- host has taken ownership; copied to host-managed storage
+    | placed -- in the recipient invocation's ipc-in mount
+    | expired -- recipient task is terminal; storage may be reclaimed
+}
+
 ------------------------------------------------------------
 -- Value Types
 ------------------------------------------------------------
@@ -35,6 +51,18 @@ enum SpecialistFailureKind {
 value TaskFailure {
     kind: SpecialistFailureKind
     detail: String
+}
+
+-- One run of a container, identified by a unique id assigned by the host at
+-- start time. A specialist task may span multiple invocations: an initial
+-- start, plus one re-invocation per sub-task result it consumes. A main-group
+-- container run is also a single invocation. Invocations are the unit of
+-- per-run isolation for ipc-out and ipc-in: each invocation gets a fresh,
+-- empty ipc-out and an ipc-in populated only with the files staged for it.
+value Invocation {
+    id: String
+    session: sessions/Session   -- the session whose container is running this invocation
+    task: SpecialistTask?       -- non-null when the invocation is for a specialist task
 }
 
 ------------------------------------------------------------
@@ -49,6 +77,16 @@ config {
     max_restart_retries: Integer = 2
     default_last_turn_sub_notice: String = "[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]"
     default_last_turn_parent_notice: String = "[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]"
+    -- Container-side mount points for the per-invocation file-handover area.
+    -- ipc_out is the staging area the specialist writes files to before delivery;
+    -- ipc_in is the area the host populates with files staged by other invocations
+    -- whose transfers target this one. Mounts are managed by the host: ipc_out is
+    -- read-write to the container, ipc_in is read-only.
+    ipc_out_container_path: String = "/workspace/ipc-out"
+    ipc_in_container_path: String = "/workspace/ipc-in"
+    -- Path inside a group's workspace where committed memory files are placed.
+    -- Resolved against requester_group.folder when commit_to_memory is true.
+    memory_reports_subpath: String = "memory/reports"
 }
 
 ------------------------------------------------------------
@@ -82,6 +120,10 @@ entity SpecialistTask {
 
     pending_sub_task: SpecialistTask when status = awaiting_sub_task
     result: String when status = completed
+    -- Workspace-relative paths of files committed to the requester group's
+    -- memory area when the specialist delivered with commit_to_memory = true.
+    -- Empty when the specialist delivered text only or staged files to ipc-in.
+    committed_files: List<String>? when status = completed
     failure: TaskFailure when status = failed
 
     has_cycle: specialist_group in ancestor_groups
@@ -114,6 +156,116 @@ entity SpecialistTask {
 
     invariant SpecialistGroupMustBeSpecialist {
         exists specialist_group.specialist
+    }
+}
+
+-- ---------------------------------------------------------------
+-- File handover: per-invocation ipc-out / ipc-in mounts and transfers
+-- ---------------------------------------------------------------
+--
+-- Specialists may return files alongside their textual result. The handover
+-- is mediated by two host-managed mounts:
+--
+--   ipc_out_container_path  (read-write)  the running container writes files here
+--   ipc_in_container_path   (read-only)   the host populates here before start
+--
+-- When a specialist calls deliver_specialist_result with file_paths, the host
+-- takes ownership of those files (copies them to host-managed storage and
+-- removes them from ipc-out) and records the handover as a ContainerTransfer
+-- with one TransferFile per path. The transfer's downstream behaviour
+-- depends on commit_to_memory (carried on the transfer):
+--
+--   commit_to_memory = true  files are copied into the requester group's
+--                            workspace under memory_reports_subpath; the
+--                            committed paths are recorded on the parent task
+--                            as committed_files. The result text is path-
+--                            rewritten so the requester reads the memory
+--                            paths, not the original ipc-out paths.
+--   commit_to_memory = false files are placed under ipc_in_container_path
+--                            in the requester invocation's ipc-in mount on
+--                            its next start. The result text is path-rewritten
+--                            to reference the in-container ipc-in paths.
+--
+-- Routing (root vs sub-task) chooses the requester invocation; the file-
+-- handover lifecycle is the same in both cases.
+
+-- The outbound staging area for one invocation. Created fresh by the host
+-- when the invocation starts; cleared when the invocation ends. Files
+-- written here are immediate-staging only; files not consumed by a delivery
+-- are discarded at invocation end.
+entity IpcOutMount {
+    invocation: Invocation
+    status: IpcMountStatus
+
+    transitions status {
+        active -> cleared
+        terminal: cleared
+    }
+}
+
+-- The inbound staging area for one invocation. Created and populated by the
+-- host immediately before the container process begins. Contains only files
+-- explicitly placed there for transfers targeting this invocation. Cleared
+-- by the host at invocation end.
+entity IpcInMount {
+    invocation: Invocation
+    status: IpcMountStatus
+
+    transitions status {
+        active -> cleared
+        terminal: cleared
+    }
+}
+
+-- A file-handover bundle from a specialist task back to its requester. Each
+-- transfer carries zero or more files plus the accompanying result text and
+-- the commit_to_memory flag that determines whether the files end up in the
+-- requester group's memory area or in the requester invocation's ipc-in.
+-- One ContainerTransfer per delivery; multiple deliveries within a single
+-- task are not modelled (the deliver tool is fire-and-forget and exits the
+-- container).
+entity ContainerTransfer {
+    task: SpecialistTask              -- the delivering task
+    sender_invocation: Invocation     -- the specific invocation that wrote ipc-out
+    result_text: String               -- the rewritten result text the requester sees
+    commit_to_memory: Boolean
+    file_count: Integer
+    sent_at: Timestamp
+    status: TransferStatus
+
+    files: TransferFile with transfer = this
+
+    transitions status {
+        pending -> in_transit       -- placed into the requester invocation's ipc-in
+        pending -> committed        -- files committed to memory; no ipc-in placement
+        pending -> expired          -- empty transfer or no surviving files at expiry
+        in_transit -> expired       -- requester task reached terminal state
+        committed -> expired        -- staging copies reclaimed; memory copies persist
+        terminal: expired
+    }
+}
+
+-- One file in a ContainerTransfer. The host records the file's original
+-- ipc-out name, the host-managed storage path it was copied to, and (when
+-- the transfer commits to memory) the workspace-relative final path under
+-- the requester group's memory_reports_subpath.
+entity TransferFile {
+    transfer: ContainerTransfer
+    original_name: String     -- file name as written into ipc-out
+    host_path: String         -- absolute path in host-managed storage after ownership transfer
+    status: TransferFileStatus
+
+    -- Workspace-relative path under the requester group's folder when the
+    -- transfer committed to memory; null otherwise. Set on the commit path
+    -- so memory placements can be recorded once and persist after the
+    -- transfer expires (the memory copy survives staging cleanup).
+    memory_path: String?
+
+    transitions status {
+        staged -> owned
+        owned -> placed
+        placed -> expired
+        terminal: expired
     }
 }
 
@@ -503,39 +655,154 @@ rule MemoryProviderDispatched {
 -- The specialist calls deliver_specialist_result. The host transitions the
 -- running task to completed, captures the result text, and emits
 -- SpecialistResultReady so the result can be routed back to the requester.
-
+--
+-- file_paths and commit_to_memory are optional. When file_paths is non-null
+-- and non-empty, the host validates that each path exists under the
+-- specialist's ipc-out mount, takes ownership of the files (copies them to
+-- host-managed storage and removes them from ipc-out), and records a
+-- ContainerTransfer plus one TransferFile per path. The file-handover
+-- lifecycle continues independently of the SpecialistResultReady routing
+-- below: routing rules consume the transfer when they place files into the
+-- requester's ipc-in or commit them to memory.
+--
+-- commit_to_memory = null is treated identically to commit_to_memory = false
+-- (default behaviour: stage to ipc-in). When commit_to_memory = true and
+-- file_paths is null or empty, the flag is ignored and the result is
+-- delivered as plain text.
 rule SpecialistDeliveredResult {
-    when: AgentRequestsDeliverSpecialistResult(session, result_text)
+    when: AgentRequestsDeliverSpecialistResult(session, result_text, file_paths?, commit_to_memory?)
     let task = running_task_for_group(session.agent_group)
+    let invocation = invocation_for_session(session)
+    let paths = file_paths
+    let commit = commit_to_memory ?? false
     requires: exists task
     requires: task.status = running
+    let resolved_text = resolve_delivery_paths(task, result_text, paths, commit)
+    let has_files = paths != null and paths.count > 0
     ensures:
         task.status = completed
-        task.result = result_text
+        task.result = resolved_text
         task.closed_at = now
+        if has_files:
+            let transfer = ContainerTransfer.created(
+                task: task,
+                sender_invocation: invocation,
+                result_text: resolved_text,
+                commit_to_memory: commit,
+                file_count: paths.count,
+                sent_at: now,
+                status: pending
+            )
+            HostTookOwnership(
+                invocation: invocation,
+                transfer: transfer,
+                file_paths: paths
+            )
         SpecialistResultReady(task: task)
+
+    @guidance
+        -- resolve_delivery_paths is a black box function. It returns the
+        -- result_text with any references to ipc-out paths rewritten to the
+        -- paths the requester will see:
+        --   commit_to_memory = true   ipc-out paths -> "{memory_reports_subpath}/<basename>"
+        --                             relative to the requester group's workspace
+        --   commit_to_memory = false  ipc-out paths -> "{ipc_in_container_path}/{transfer_id}/<basename>"
+        --                             as the requester's container will see them
+        -- When file_paths is null or empty, resolved_text = result_text unchanged.
+        --
+        -- HostTookOwnership is a per-file action emitted as a system event:
+        -- for each path p in file_paths, the host copies the file from ipc-out
+        -- to host-managed storage and creates a TransferFile(transfer, original_name:
+        -- basename(p), host_path: <storage>, status: owned). Files are removed
+        -- from ipc-out as part of the same action; the rule TransferFilesOwned
+        -- below witnesses the staged -> owned transition for each file.
+        --
+        -- invocation_for_session resolves the current Invocation for the
+        -- specialist's session (the one that wrote ipc-out). It is the same
+        -- invocation that emitted SpecialistContainerProcessing earlier.
+}
+
+-- The host has taken ownership of staged files. This rule witnesses the
+-- file-by-file transition emitted via HostTookOwnership. It does not
+-- describe the underlying copy and unlink operations — those are the host's
+-- responsibility — but it captures the resulting TransferFile records and
+-- their owned status.
+rule TransferFilesOwned {
+    when: HostTookOwnership(invocation, transfer, file_paths)
+    for path in file_paths:
+        ensures: TransferFile.created(
+            transfer: transfer,
+            original_name: basename(path),
+            host_path: host_storage_path(invocation, path),
+            status: owned,
+            memory_path: null
+        )
+
+    @guidance
+        -- basename and host_storage_path are black box functions that map an
+        -- ipc-out path to the file's basename and to a stable host-managed
+        -- storage path keyed on the originating invocation. The host removes
+        -- each file from ipc-out as part of the same action; that removal is
+        -- not modelled per-file here because ipc-out is cleared at invocation
+        -- end (see InvocationEnded), making the per-file removal an
+        -- implementation detail of the eager unlink, not a separate state.
 }
 
 -- Root tasks (dispatched by the main group) route their result back into
 -- the main group's agent_shared session as a triggering inbound message.
+--
+-- When a ContainerTransfer exists for the task, the file-handover side of
+-- routing is dispatched here too: commit_to_memory = true copies files into
+-- the requester group's memory area and records the workspace-relative
+-- paths on the parent task; commit_to_memory = false stages files for
+-- placement in the requester invocation's ipc-in mount on its next start.
+-- The result text used in the inbound message is the already-rewritten
+-- transfer.result_text when a transfer exists, otherwise the formatted
+-- task outcome.
 
 rule SpecialistResultRoutedToMain {
     when: SpecialistResultReady(task)
     requires: task.requester_group != null
     let main_session = resolve_agent_shared_session(task.requester_group)
+    let transfer = ContainerTransfer{task: task}
     ensures:
+        if exists transfer and transfer.commit_to_memory:
+            for f in transfer.files:
+                f.memory_path = group_memory_report_path(task.requester_group, f.original_name)
+            task.committed_files = group_memory_report_paths(task.requester_group, transfer)
+            transfer.status = committed
         sessions/InboundMessage.created(
             session: main_session,
             seq: next_inbound_seq(main_session),
             kind: "chat",
             status: pending,
             trigger: true,
-            content: format_specialist_outcome(task),
+            content: routed_message_text(task, transfer),
             process_after: null,
             tries: 0,
             created_at: now
         )
         sessions/SessionWoken(session: main_session)
+
+    @guidance
+        -- routed_message_text returns transfer.result_text when transfer is
+        -- not null (already path-rewritten by resolve_delivery_paths during
+        -- delivery), otherwise format_specialist_outcome(task).
+        --
+        -- group_memory_report_path constructs the workspace-relative path:
+        --   "{config.memory_reports_subpath}/{original_name}"
+        -- group_memory_report_paths returns the list of such paths for every
+        -- file in the transfer, in the order they were originally listed.
+        -- The host copies each TransferFile from host-managed storage into
+        -- {requester_group.folder}/{memory_path} as part of this action.
+        --
+        -- Sub-task transfers (commit_to_memory = true with no requester_group)
+        -- fall through to SpecialistResultRoutedToParent and stage to ipc-in:
+        -- only root-task deliveries can commit to memory. The deliver tool
+        -- documentation should make this clear; the resolve_delivery_paths
+        -- helper degrades gracefully (treats commit_to_memory as false when
+        -- task.requester_group is null) so the specialist still gets file
+        -- handover even if it requested commit on a sub-task delivery.
 }
 
 -- Sub-tasks route their result back into the parent specialist's per-task
@@ -558,6 +825,7 @@ rule SpecialistResultRoutedToParent {
     requires: task.requester_task.status = awaiting_sub_task
     let parent_task = task.requester_task
     let parent_session = specialist_task_session(parent_task)
+    let transfer = ContainerTransfer{task: task}
     ensures:
         parent_task.status = running
         parent_task.pending_sub_task = null
@@ -567,12 +835,19 @@ rule SpecialistResultRoutedToParent {
             kind: "chat",
             status: pending,
             trigger: true,
-            content: format_specialist_outcome(task),
+            content: routed_message_text(task, transfer),
             process_after: null,
             tries: 0,
             created_at: now
         )
         sessions/SessionWoken(session: parent_session)
+
+    @guidance
+        -- Sub-task deliveries do not commit to memory: the parent specialist
+        -- is not a memory-area owner. When transfer is non-null its files
+        -- transition owned -> placed when the parent's next invocation starts
+        -- (see TransferFilesPlaced); transfer.status moves pending -> in_transit
+        -- at the same boundary.
 }
 
 -- Failure routing: when a task transitions to failed (timeout, execution
@@ -602,6 +877,156 @@ rule SpecialistTaskTimedOut {
         }
         task.closed_at = now
         SpecialistResultReady(task: task)
+}
+
+------------------------------------------------------------
+-- Invocation lifecycle and file handover
+------------------------------------------------------------
+
+-- An invocation starts when the host launches a container for a session.
+-- ContainerInvocationStarted carries the host-assigned id and links to the
+-- session and (for specialist tasks) the task. The host creates fresh
+-- ipc-out and ipc-in mounts for the invocation. ipc-in is populated with
+-- any TransferFiles in status = owned whose transfer targets the
+-- recipient session of this invocation, before the container process
+-- begins reading its inbound message.
+
+rule InvocationStarted {
+    when: ContainerInvocationStarted(invocation)
+    ensures:
+        IpcOutMount.created(invocation: invocation, status: active)
+        IpcInMount.created(invocation: invocation, status: active)
+        IpcInPopulated(invocation: invocation)
+
+    @guidance
+        -- IpcInPopulated is a system event the host emits after copying all
+        -- TransferFiles whose transfer targets this invocation into ipc-in.
+        -- The host derives the ipc-in container path for each file as
+        --   "{config.ipc_in_container_path}/{transfer_id}/{f.original_name}"
+        -- using the transfer id as a per-transfer subdirectory to prevent
+        -- name collisions when multiple transfers arrive for the same
+        -- invocation (e.g. results from two specialist sub-tasks delivered
+        -- before the parent resumed).
+}
+
+-- When ipc-in is populated for an invocation, every TransferFile in status
+-- = owned whose transfer targets that invocation transitions to placed,
+-- and the covering ContainerTransfer transitions pending -> in_transit.
+-- transfer_targets_invocation is a black box function: for sub-task
+-- transfers it returns true when invocation is the requester_task's next
+-- invocation; for root-task transfers it returns true when invocation is
+-- the requester_group's main session's next invocation. commit-to-memory
+-- transfers are not placed in ipc-in (they were committed to memory at
+-- routing time and transitioned to status = committed).
+
+rule TransferFilesPlaced {
+    when: IpcInPopulated(invocation)
+    for f in TransferFiles where status = owned and transfer_targets_invocation(transfer, invocation):
+        ensures: f.status = placed
+
+    @guidance
+        -- transfer_targets_invocation returns false for any transfer whose
+        -- status has already moved past pending (committed, in_transit,
+        -- expired); it implicitly only matches pending transfers whose
+        -- recipient is this invocation.
+}
+
+rule TransferMovedToInTransit {
+    when: IpcInPopulated(invocation)
+    for t in ContainerTransfers where status = pending and transfer_targets_invocation(t, invocation):
+        ensures: t.status = in_transit
+}
+
+-- An invocation ends when the container process exits. The host clears
+-- both mounts. Files remaining in ipc-out that were not consumed by a
+-- delivery are discarded as part of the clear.
+
+rule InvocationEnded {
+    when: ContainerInvocationEnded(invocation)
+    let out = IpcOutMount{invocation: invocation}
+    let in_ = IpcInMount{invocation: invocation}
+    requires: exists out
+    requires: exists in_
+    ensures:
+        out.status = cleared
+        in_.status = cleared
+}
+
+-- Transfers expire when the requester task reaches a terminal state.
+-- Both the in-transit (sub-task to parent) and committed (sub-task or root
+-- to memory) shapes converge here: staging copies in host-managed storage
+-- can be reclaimed, while memory copies on disk persist. For root-task
+-- transfers (requester_group != null), the requester is the main group
+-- session, which has no terminal state in the same sense as a task; the
+-- expiry is gated on the delivering task itself reaching a terminal state,
+-- which it always does at delivery time. For sub-task transfers, expiry
+-- waits for the parent task's terminal transition so files remain
+-- available across any retries of the parent.
+
+-- When the requester task reaches a terminal state, the transfer files are
+-- no longer needed and may be reclaimed from host-managed storage. Memory
+-- copies persist on disk regardless because they live in the requester
+-- group's workspace, not the staging area.
+--
+-- For sub-task transfers, the requester is t.task.requester_task; expiry
+-- waits for that parent task's terminal transition so files remain
+-- available across any retries of the parent. For root-task transfers,
+-- there is no parent task; the rule TransferExpiredOnRootDeliveryConsumed
+-- below covers that case once the routed inbound message has been read.
+
+rule TransferExpiredOnRequesterTerminal {
+    when: parent: SpecialistTask.status transitions_to completed
+    for t in ContainerTransfers where status in { in_transit, committed } and is_transfer_for_requester(t, parent):
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+
+    @guidance
+        -- is_transfer_for_requester(t, parent) is true when parent =
+        -- t.task.requester_task. For root-task transfers (requester_group
+        -- set, requester_task null), the function returns false; expiry
+        -- of those is handled in TransferExpiredOnRootDeliveryConsumed.
+}
+
+rule TransferExpiredOnRequesterFailed {
+    when: parent: SpecialistTask.status transitions_to failed
+    for t in ContainerTransfers where status in { in_transit, committed } and is_transfer_for_requester(t, parent):
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+}
+
+-- Root-task transfers expire once the routed inbound message has been
+-- consumed by the main group session. The InboundMessage moves from
+-- pending through processing to completed; the completed transition is
+-- the latest moment at which the agent might still need the files.
+
+rule TransferExpiredOnRootDeliveryConsumed {
+    when: msg: sessions/InboundMessage.status transitions_to completed
+    for t in ContainerTransfers where status in { in_transit, committed } and is_root_transfer_for_message(t, msg):
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+
+    @guidance
+        -- is_root_transfer_for_message returns true when t.task.requester_group
+        -- is non-null and msg.session is the main session whose inbound
+        -- message carried the routed result text for t.
+}
+
+-- A pending transfer whose delivering task fails between ownership and
+-- routing (e.g. host crash mid-delivery) expires without ever being
+-- placed. In practice this is rare because SpecialistDeliveredResult
+-- moves the task to completed atomically with the transfer creation;
+-- this rule covers the recovery case where SpecialistResultReady was
+-- emitted but routing failed before the transfer reached a recipient.
+
+rule PendingTransferExpiredOnDeliveringTaskFailed {
+    when: task: SpecialistTask.status transitions_to failed
+    for t in ContainerTransfers where status = pending and t.task = task:
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
 }
 
 ------------------------------------------------------------
@@ -717,6 +1142,47 @@ invariant RunningTaskIsLeaf {
 -- inbound.db and outbound.db. A running task therefore cannot alter the
 -- type template or another task's session state.
 
+-- File handover invariants
+--
+-- Each transfer commits at most one of the two delivery paths: it either
+-- ends up committed to memory (status = committed, eventually expired) or
+-- it ends up placed in the requester's ipc-in (status = in_transit,
+-- eventually expired). A transfer that committed to memory has no files
+-- in status = placed; a transfer that did not has no files with a
+-- memory_path. This prevents the spec from describing a transfer that
+-- both wrote to memory and was placed into ipc-in.
+
+invariant CommitAndPlaceMutuallyExclusive {
+    for t in ContainerTransfers:
+        for f in t.files:
+            (f.memory_path != null) implies t.commit_to_memory = true
+}
+
+-- Each TransferFile that lives in a recipient's ipc-in resolves to a
+-- distinct in-container path. Path construction uses the transfer id as a
+-- per-transfer subdirectory, so distinct transfers placing files for the
+-- same invocation cannot collide; within a transfer, original_name must
+-- be unique.
+
+invariant IpcInPathsUniquePerTransfer {
+    for t in ContainerTransfers:
+        for a in t.files:
+            for b in t.files:
+                a != b implies a.original_name != b.original_name
+}
+
+-- A transfer's files share its delivery state: a transfer in committed
+-- status has no files in placed status; a transfer in expired status has
+-- no files in any non-expired status. This is the cross-entity coherence
+-- guarantee that lets observability code report transfer state without
+-- inspecting each file.
+
+invariant TransferAndFilesInSync {
+    for t in ContainerTransfers:
+        for f in t.files:
+            (t.status = expired) implies (f.status = expired)
+}
+
 ------------------------------------------------------------
 -- Open Questions
 ------------------------------------------------------------
@@ -747,3 +1213,6 @@ invariant RunningTaskIsLeaf {
 open question "Specialist dispatch: when a specialist's container is unavailable at dispatch time (image not built, OneCLI agent not provisioned), is the task held in queued or transitioned immediately to failed with execution_error?"
 open question "Specialist failure routing: when a sub-task fails before its parent reaches awaiting_sub_task (e.g., immediate chain rejection), SpecialistResultRoutedToParent's requires: task.requester_task.status = awaiting_sub_task will not match. Is failure of an immediately-rejected sub-task only routed via AgentNotified, with no SpecialistResultReady emission, or is there a separate routing path for this case?"
 open question "Crash recovery and awaiting_sub_task: when SpecialistContainerCrashed fires for a task in awaiting_sub_task, the task moves to awaiting_restart while a child task may still be running. Should the child task be cancelled, or should the parent wait for the child to complete before the restart attempt?"
+open question "Memory commit collisions: when two specialists deliver files with the same basename and commit_to_memory = true, group_memory_report_path produces the same workspace-relative path for both. Should the second delivery overwrite the first, be rejected, or be disambiguated (e.g. timestamped or task-id-prefixed filename)? Currently the spec treats the resulting path as canonical; the host's copy step will overwrite by default. The deliver tool's path-rewriting in resolve_delivery_paths assumes the basename is preserved, so any disambiguation strategy must also flow back into the rewritten result_text."
+open question "Sub-task commit_to_memory semantics: a specialist sub-task can call deliver_specialist_result with commit_to_memory = true, but the requester is another specialist (no memory area of its own). Currently routed_message_text falls through to ipc-in placement and resolve_delivery_paths is documented as degrading to commit_to_memory = false in this case. Should the deliver tool reject commit_to_memory = true on sub-task deliveries with a structured error instead, so the specialist becomes aware its commit request was ignored?"
+open question "ipc-out staging across awaiting_sub_task: a parent specialist that has written files to ipc-out before dispatching a sub-task will lose those files when its container exits and ipc-out is cleared. Should specialists be required to call deliver_specialist_result before any awaiting_sub_task transition, or should files written to ipc-out be preserved across awaiting_sub_task -> running cycles for a single delivering task? Inherited from container-ipc-transfer.allium open question 3."

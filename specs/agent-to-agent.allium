@@ -272,6 +272,21 @@ rule AgentCreationApplied {
             text: "child agent ready"
         )
         req.status = applied
+
+    @guidance
+        -- Request and apply happen in the same host delivery-poll tick:
+        -- the host reads the AgentRequestsCreateAgent stimulus from
+        -- outbound.db, creates the AgentCreationRequest record (per
+        -- AgentCreationRequested) and applies the result (this rule, or
+        -- one of the rejection rules) within a single tick. There is no
+        -- durable work queue between request and apply, so a creator
+        -- session terminating mid-tick cannot strand a pending request
+        -- in the system. The only abandonment path is the container
+        -- crashing before it writes the system outbound message — in
+        -- which case the host never observed the request to begin with.
+        -- The AgentCreationRequest entity exists for traceability of
+        -- past requests (including rejections), not to model deferred
+        -- application.
 }
 
 ------------------------------------------------------------
@@ -314,6 +329,17 @@ rule AgentToAgentMessageRouted {
             created_at: now
         )
         sessions/SessionWoken(session: target_session)
+
+    @guidance
+        -- Inbound messages queue indefinitely in the target's inbound.db.
+        -- A new container is woken immediately on routing (via the
+        -- SessionWoken emission above), and there is no TTL after which
+        -- an unconsumed message is dropped. This is deliberate: the
+        -- container crash-recovery and restart mechanism is the safety
+        -- valve for stuck targets, not message expiry. If a target
+        -- container is wedged, host-sweep restarts it and the queued
+        -- chat-kind inbound rows are processed in seq order on the next
+        -- poll cycle.
 }
 
 -- An agent-to-agent message that lacks a corresponding AgentDestination
@@ -511,6 +537,32 @@ rule RecurrenceCloned {
             created_at: now
         )
         task.recurrence = null
+
+    @guidance
+        -- Timezone resolution for recurring tasks:
+        --
+        -- user_timezone() is global host config, not per-session or
+        -- per-task. It is resolved once at host startup, in priority
+        -- order: process.env.TZ, then the TZ entry in .env, then the
+        -- system locale via Intl.DateTimeFormat, then UTC as a final
+        -- fallback. The resolved value is stored as a single
+        -- module-level constant shared across every session and agent
+        -- group.
+        --
+        -- The recurrence column on ScheduledTask stores the raw cron
+        -- string. The next firing is computed fresh on each sweep tick
+        -- by parsing that cron expression against the host timezone, so
+        -- the timezone is never frozen onto the task at creation time.
+        -- A timezone change requires a host restart to take effect, and
+        -- once the host comes back up all future firings of every
+        -- existing recurring task silently shift to the new zone. Tasks
+        -- created before the change are not migrated or annotated.
+        --
+        -- DST is handled correctly when the timezone is set to an IANA
+        -- identifier (e.g. "Europe/London", "America/New_York"). Fixed
+        -- offset values (e.g. "GMT+1", "UTC+05:30") do not adjust
+        -- across DST boundaries. This behaviour is carried over from
+        -- v1 unchanged.
 }
 
 ------------------------------------------------------------
@@ -536,6 +588,14 @@ rule InteractiveQuestionRecorded {
         created_at: now,
         expires_at: now + resolved_timeout
     )
+
+    @guidance
+        -- There is no per-session limit on the number of concurrently
+        -- outstanding InteractiveQuestion rows, and no count check before
+        -- recording a new one. An agent may fan out arbitrarily many
+        -- ask_user_question cards in a single turn. The practical bound
+        -- is the Claude API's per-turn tool-call ceiling and the
+        -- container's turn budget; the host imposes none of its own.
 }
 
 -- The user clicks a button on the card. The host resolves the
@@ -573,6 +633,30 @@ rule InteractiveQuestionTimedOut {
     when: q: InteractiveQuestion.expires_at <= now
     requires: q.status = pending
     ensures: q.status = timed_out
+
+    @guidance
+        -- "Timed out" is a container-side concept, not a host-side one.
+        -- The container's polling deadline (expires_at on this entity)
+        -- and the host-side pending_questions row are independent
+        -- lifetimes: when this rule fires, the container stops waiting
+        -- and the InteractiveQuestion becomes terminal, but on the host
+        -- the underlying pending_questions row persists. There is no
+        -- expires_at column on that row and the host sweep does not
+        -- purge it.
+        --
+        -- A late button click therefore still finds the row, writes a
+        -- kind='system' question_response inbound message into the
+        -- session, and wakes the container — exactly as
+        -- InteractiveQuestionAnswered describes. The click is delivered.
+        --
+        -- The agent has by then almost certainly continued past the
+        -- ask_user_question call. Whether it acts on the late response,
+        -- logs it as unexpected or ignores it depends entirely on its
+        -- prompt and current task state; the spec does not constrain
+        -- this. This is the intentionally accepted behaviour: no
+        -- expires_at column is added to the host row, no purging sweep
+        -- is introduced, and no acknowledgement-to-user path is added
+        -- for late clicks.
 }
 
 ------------------------------------------------------------
@@ -611,16 +695,6 @@ invariant UniqueQuestionId {
         for b in InteractiveQuestions:
             a != b implies a.question_id != b.question_id
 }
-
-------------------------------------------------------------
--- Open Questions
-------------------------------------------------------------
-
-open question "create_agent: when the creator's session terminates between request and apply, does the new agent group still get created and notified through some other channel, or is the request abandoned?"
-open question "Agent-to-agent: when the target agent group has no active container, does the message simply queue in inbound.db (current behaviour) or should there be a TTL after which it is dropped?"
-open question "Recurrence: how is the user's timezone established (per-session config vs. global host config), and what happens if the timezone changes after a recurring task is created?"
-open question "ask_user_question: when the agent's polling deadline expires before the user clicks, but the user clicks shortly after, should the late click be silently dropped (current behaviour) or reflected back as a no-op acknowledgement?"
-open question "ask_user_question: is there a per-session limit on concurrent outstanding questions, or can an agent fan out arbitrarily many cards?"
 
 -- Checker note: when run on the whole specs/ directory, allium check 3.2.3
 -- reports zero errors and zero warnings on this file. When run on this file

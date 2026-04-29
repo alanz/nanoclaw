@@ -230,14 +230,15 @@ describe('DeltaChat channel adapter', () => {
   });
 
   describe('factory', () => {
-    it('returns null when no credentials set', async () => {
+    it('returns an adapter with the default chatmail QR when no credentials set', async () => {
       delete process.env.DELTACHAT_ADDR;
       delete process.env.DELTACHAT_MAIL_PW;
       delete process.env.DELTACHAT_CHATMAIL_QR;
 
       if (!capturedRegistration) throw new Error('registerChannelAdapter was never called');
       const adapter = await capturedRegistration.factory();
-      expect(adapter).toBeNull();
+      expect(adapter).not.toBeNull();
+      expect(adapter?.name).toBe('deltachat');
     });
   });
 

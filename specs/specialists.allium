@@ -16,6 +16,28 @@ use "./sessions.allium" as sessions
 use "./agent-to-agent.allium" as a2a
 
 ------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- The boundary between an agent container's MCP tool layer and the host.
+-- The agent (a main-group or specialist container) calls these tools and
+-- the host receives the request as an external stimulus on the rules
+-- below. The surface enumerates only the agent-initiated entry points;
+-- host-emitted system events (e.g. SpecialistContainerProcessing,
+-- HostTookOwnership, IpcInPopulated, ContainerInvocationStarted /
+-- ContainerInvocationEnded) are internal to the host and do not cross
+-- this boundary.
+
+surface SpecialistMcpTools {
+    facing agent: sessions/Session
+
+    provides:
+        AgentRequestsDispatchSpecialist(agent, specialist_group_id, prompt)
+        AgentRequestsDispatchSubTask(agent, specialist_group_id, prompt)
+        AgentRequestsDeliverSpecialistResult(agent, result_text, file_paths?, commit_to_memory?)
+}
+
+------------------------------------------------------------
 -- Enumerations
 ------------------------------------------------------------
 
@@ -109,6 +131,12 @@ entity SpecialistTask {
     prompt: String
     requester_group: identity/AgentGroup?
     requester_task: SpecialistTask?
+    -- The session that originated this dispatch. For root tasks this
+    -- identifies the exact main-group session whose container called
+    -- dispatch_specialist, so the result can be routed back to that
+    -- session rather than relying on a one-session-per-group assumption.
+    -- Null for sub-tasks: routing follows requester_task instead.
+    requester_session: sessions/Session?
     depth: Integer
     chain_delegation_count: Integer
     ancestor_groups: Set<identity/AgentGroup>
@@ -296,6 +324,7 @@ rule MainGroupDispatchesSpecialist {
             prompt: prompt,
             requester_group: session.agent_group,
             requester_task: null,
+            requester_session: session,
             depth: 0,
             chain_delegation_count: 1,
             ancestor_groups: {},
@@ -409,6 +438,7 @@ rule SpecialistDispatchesSubTask {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
+            requester_session: null,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -465,6 +495,7 @@ rule SubTaskRejectedCycle {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
+            requester_session: null,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -504,6 +535,7 @@ rule SubTaskRejectedDepth {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
+            requester_session: null,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -545,6 +577,7 @@ rule SubTaskRejectedCount {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
+            requester_session: null,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -588,6 +621,7 @@ rule SubTaskRejectedSameTypeLimit {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
+            requester_session: null,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -633,6 +667,7 @@ rule MemoryProviderDispatched {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
+            requester_session: null,
             depth: parent_task.depth,
             chain_delegation_count: parent_task.chain_delegation_count,
             ancestor_groups: parent_task.ancestor_groups,
@@ -806,7 +841,7 @@ rule TransferFilesOwned {
 rule SpecialistResultRoutedToMain {
     when: SpecialistResultReady(task)
     requires: task.requester_group != null
-    let main_session = resolve_agent_shared_session(task.requester_group)
+    let main_session = task.requester_session ?? resolve_agent_shared_session(task.requester_group)
     let transfer = ContainerTransfer{task: task}
     ensures:
         if exists transfer and transfer.commit_to_memory:

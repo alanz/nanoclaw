@@ -56,16 +56,6 @@ export function getTask(id: string): SpecialistTask | undefined {
   return getDb().prepare('SELECT * FROM specialist_tasks WHERE id = ?').get(id) as SpecialistTask | undefined;
 }
 
-export function getTaskBySessionThread(agentGroupId: string, threadId: string): SpecialistTask | undefined {
-  return getDb()
-    .prepare(
-      `SELECT t.* FROM specialist_tasks t
-       JOIN sessions s ON s.id = t.requester_session_id
-       WHERE t.specialist_group_id = ? AND t.id = ?`,
-    )
-    .get(agentGroupId, threadId) as SpecialistTask | undefined;
-}
-
 /** Find the live (non-terminal) task for a specialist session identified by thread_id = task.id. */
 export function getRunningTaskForGroup(agentGroupId: string): SpecialistTask | undefined {
   return getDb()

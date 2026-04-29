@@ -134,7 +134,7 @@ async function spawnContainer(session: Session): Promise<void> {
   const { contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
   const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
-  const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+  const containerName = `nanoclaw-v2-${agentGroup.folder.replace(/[^a-zA-Z0-9_.-]/g, '-')}-${Date.now()}`;
   const args = buildContainerArgs(mounts, containerName, containerConfig, contribution);
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });

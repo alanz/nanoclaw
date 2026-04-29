@@ -176,7 +176,16 @@ function formatSingleChat(msg: MessageInRow): string {
       ? ` from="unknown:${escapeXml(msg.channel_type || '')}:${escapeXml(msg.platform_id || '')}"`
       : '';
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
+  // Specialist context: specialistTaskId = this message is a task assignment (I am the specialist).
+  // completedSpecialistTaskId = a previously dispatched task result is being delivered to me.
+  const taskIdAttr = content.specialistTaskId
+    ? ` specialistTaskId="${escapeXml(String(content.specialistTaskId))}"`
+    : '';
+  const completedTaskAttr = content.completedSpecialistTaskId
+    ? ` completedSpecialistTaskId="${escapeXml(String(content.completedSpecialistTaskId))}"`
+    : '';
+
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}${taskIdAttr}${completedTaskAttr}>${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
 }
 
 function formatTaskMessage(msg: MessageInRow): string {

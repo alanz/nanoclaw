@@ -177,10 +177,10 @@ Container typecheck is a separate tsconfig — if you edit `container/agent-runn
 
 Service management:
 ```bash
-# macOS (launchd)
-launchctl load   ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+# macOS (launchd) — always use the v2 label
+launchctl load   ~/Library/LaunchAgents/com.nanoclaw.v2.plist
+launchctl unload ~/Library/LaunchAgents/com.nanoclaw.v2.plist
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v2  # restart
 
 # Linux (systemd)
 systemctl --user start|stop|restart nanoclaw

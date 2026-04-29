@@ -38,7 +38,7 @@ async function sendToSession(agentGroupId: string, sessionId: string, text: stri
       text,
       sender: 'system',
       senderId: 'system',
-      specialistTaskId: taskId,
+      completedSpecialistTaskId: taskId,
     }),
     trigger: 1,
   });

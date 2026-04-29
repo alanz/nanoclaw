@@ -175,8 +175,16 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   try {
-    // Read all due messages from outbound.db (read-only)
-    const allDue = getDueOutboundMessages(outDb);
+    // Read all due messages from outbound.db (read-only).
+    // getDueOutboundMessages can throw "attempt to write a readonly database"
+    // if the container is mid-write (journal present) — this is transient.
+    // Catch it here so the poll loop retries next tick rather than logging noise.
+    let allDue: ReturnType<typeof getDueOutboundMessages>;
+    try {
+      allDue = getDueOutboundMessages(outDb);
+    } catch {
+      return;
+    }
     if (allDue.length === 0) return;
 
     // Filter out already-delivered messages using inbound.db's delivered table

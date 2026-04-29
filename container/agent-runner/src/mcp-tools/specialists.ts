@@ -5,7 +5,7 @@
  *   dispatch_sub_task        — specialist delegates work to another specialist
  *   deliver_specialist_result — specialist delivers its final answer
  *
- * All three are fire-and-forget: they write a system_action row to outbound.db
+ * All three are fire-and-forget: they write a system row to outbound.db
  * and return immediately. The host delivery loop picks them up and handles the
  * state transitions.
  *
@@ -18,6 +18,7 @@
  * requester.
  */
 import { writeMessageOut } from '../db/messages-out.js';
+import { requestShutdown } from '../shutdown.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -68,7 +69,7 @@ const dispatchSpecialist: McpToolDefinition = {
 
     writeMessageOut({
       id: generateId(),
-      kind: 'system_action',
+      kind: 'system',
       content: JSON.stringify({
         action: 'dispatch_specialist',
         specialist_group_id: specialistGroupId,
@@ -116,7 +117,7 @@ const dispatchSubTask: McpToolDefinition = {
 
     writeMessageOut({
       id: generateId(),
-      kind: 'system_action',
+      kind: 'system',
       content: JSON.stringify({
         action: 'dispatch_sub_task',
         specialist_group_id: specialistGroupId,
@@ -124,6 +125,7 @@ const dispatchSubTask: McpToolDefinition = {
       }),
     });
 
+    requestShutdown();
     return ok(
       `Sub-task dispatched to "${specialistGroupId}". End your turn now — the result will arrive in your next invocation.`,
     );
@@ -156,14 +158,15 @@ const deliverSpecialistResult: McpToolDefinition = {
 
     writeMessageOut({
       id: generateId(),
-      kind: 'system_action',
+      kind: 'system',
       content: JSON.stringify({
         action: 'deliver_specialist_result',
         result_text: resultText,
       }),
     });
 
-    return ok('Result delivered. Your task is complete.');
+    requestShutdown();
+    return ok('Result delivered. Your task is complete — do not take any further actions.');
   },
 };
 

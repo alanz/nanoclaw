@@ -1,4 +1,5 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
+import { isShutdownRequested } from './shutdown.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
@@ -205,6 +206,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // Exit cleanly if a specialist tool (deliver_specialist_result or
+    // dispatch_sub_task) requested shutdown during this turn.
+    if (isShutdownRequested()) {
+      log('Shutdown requested — exiting cleanly');
+      process.exit(0);
+    }
   }
 }
 
@@ -289,6 +297,19 @@ async function processQuery(
     if (newMessages.length > 0) {
       const newIds = newMessages.map((m) => m.id);
       markProcessing(newIds);
+
+      // If the current routing lacks channel info (e.g. container started via a
+      // system message), upgrade it from the first pushed message that carries
+      // real routing — so plain-text replies go back to the right channel.
+      if (!routing.channelType) {
+        const upgraded = extractRouting(newMessages);
+        if (upgraded.channelType) {
+          routing.channelType = upgraded.channelType;
+          routing.platformId = upgraded.platformId;
+          routing.threadId = upgraded.threadId;
+          routing.inReplyTo = upgraded.inReplyTo;
+        }
+      }
 
       const prompt = formatMessages(newMessages);
       log(`Pushing ${newMessages.length} follow-up message(s) into active query`);

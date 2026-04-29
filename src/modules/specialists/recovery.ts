@@ -164,20 +164,72 @@ async function sweepTask(
     return;
   }
 
-  // ── 4. awaiting_restart → re-spawn ────────────────────────────────────────
+  // ── 4. awaiting_restart → re-spawn (or exhaust) ──────────────────────────
   // A task in awaiting_restart with no container running needs to be re-spawned.
+  // Increment restart_attempt_count on each re-wake attempt so that a container
+  // that crashes immediately (before the sweep can observe it in running state)
+  // still makes progress toward the retry limit and doesn't loop forever.
   if (task.status === 'awaiting_restart' && !containerAlive) {
+    const newRetryCount = task.restart_attempt_count + 1;
+
+    if (newRetryCount > SPECIALISTS_CONFIG.maxRestartRetries) {
+      const ts = new Date().toISOString();
+      updateTaskStatus(task.id, 'failed', {
+        failure_kind: 'host_restart',
+        failure_detail: `container failed to start after ${task.restart_attempt_count} restart attempts`,
+        closed_at: ts,
+        restart_attempt_count: newRetryCount,
+        pending_sub_task_id: null,
+      });
+      if (task.pending_sub_task_id) await cancelSubtree(task.pending_sub_task_id);
+      const failed = {
+        ...task,
+        status: 'failed' as const,
+        failure_kind: 'host_restart',
+        failure_detail: `container failed to start after ${task.restart_attempt_count} restart attempts`,
+        closed_at: ts,
+        pending_sub_task_id: null,
+      };
+      await routeResult(failed);
+      log.warn('specialists: task failed — restart limit exceeded', {
+        taskId: task.id,
+        retries: task.restart_attempt_count,
+      });
+      return;
+    }
+
+    updateTaskStatus(task.id, 'awaiting_restart', { restart_attempt_count: newRetryCount });
+
     const { findSessionByAgentGroupAndThread } = await import('./session-helpers.js');
     const { wakeContainer } = await import('../../container-runner.js');
     const { getSession } = await import('../../db/sessions.js');
+    const { writeSessionMessage } = await import('../../session-manager.js');
     const session = findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
     if (session) {
       const fresh = getSession(session.id);
       if (fresh) {
+        // Write a fresh trigger so the restarted container has a message to process.
+        // The original trigger was already acked; the container needs a new one.
+        writeSessionMessage(fresh.agent_group_id, fresh.id, {
+          id: `restart-${task.id}-${newRetryCount}`,
+          kind: 'chat',
+          timestamp: new Date().toISOString(),
+          content: JSON.stringify({
+            text: task.prompt,
+            sender: 'system',
+            senderId: 'system',
+            specialistTaskId: task.id,
+          }),
+          trigger: 1,
+        });
         await wakeContainer(fresh).catch((err) =>
           log.error('specialists: failed to wake container for restart', { err, taskId: task.id }),
         );
-        log.info('specialists: re-waking container for awaiting_restart task', { taskId: task.id });
+        log.info('specialists: re-waking container for awaiting_restart task', {
+          taskId: task.id,
+          attempt: newRetryCount,
+          maxRetries: SPECIALISTS_CONFIG.maxRestartRetries,
+        });
       }
     }
   }

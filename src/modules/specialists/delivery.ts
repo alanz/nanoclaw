@@ -24,13 +24,15 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
 
   const task = getRunningTaskForGroup(session.agent_group_id);
   if (!task) {
-    log.warn('specialists: deliver_specialist_result — no running task for agent group', {
+    log.warn('specialists: deliver_specialist_result — no live task for agent group', {
       agentGroupId: session.agent_group_id,
     });
     return;
   }
-  if (task.status !== 'running') {
-    log.warn('specialists: deliver_specialist_result — task not in running state', {
+  // Accept queued/running/awaiting_restart: a fast container may deliver before
+  // the 60s recovery sweep has advanced the status to 'running'.
+  if (!['queued', 'running', 'awaiting_restart'].includes(task.status)) {
+    log.warn('specialists: deliver_specialist_result — task not in a deliverable state', {
       taskId: task.id,
       status: task.status,
     });

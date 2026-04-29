@@ -4,7 +4,7 @@
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { wakeContainer } from '../../container-runner.js';
-import { writeSessionMessage } from '../../session-manager.js';
+import { initSessionFolder, writeSessionMessage } from '../../session-manager.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import {
@@ -42,6 +42,7 @@ function formatTaskPrompt(task: SpecialistTask, specialist: ReturnType<typeof ge
 
 async function spawnTaskSession(task: SpecialistTask): Promise<void> {
   const session = createSpecialistSession(task.specialist_group_id, task.id);
+  initSessionFolder(session.agent_group_id, session.id);
   writeSessionMessage(session.agent_group_id, session.id, {
     id: `trigger-${task.id}`,
     kind: 'chat',

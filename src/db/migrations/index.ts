@@ -12,6 +12,7 @@ import { migration012 } from './012-channel-registration.js';
 import { migration013 } from './013-approval-render-metadata.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+import { moduleSpecialists } from './module-specialists.js';
 
 export interface Migration {
   version: number;
@@ -31,6 +32,7 @@ const migrations: Migration[] = [
   migration011,
   migration012,
   migration013,
+  moduleSpecialists,
 ];
 
 export function runMigrations(db: Database.Database): void {

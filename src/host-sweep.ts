@@ -125,6 +125,14 @@ async function sweep(): Promise<void> {
     for (const session of sessions) {
       await sweepSession(session);
     }
+    // MODULE-HOOK:specialists-recovery:start
+    try {
+      const { sweepSpecialistTasks } = await import('./modules/specialists/index.js');
+      await sweepSpecialistTasks();
+    } catch {
+      // Table not yet created or module not loaded — skip silently
+    }
+    // MODULE-HOOK:specialists-recovery:end
   } catch (err) {
     log.error('Host sweep error', { err });
   }

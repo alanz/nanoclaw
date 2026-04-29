@@ -636,12 +636,11 @@ registerChannelAdapter('deltachat', {
 
     const addr = env.DELTACHAT_ADDR;
     const mailPw = env.DELTACHAT_MAIL_PW;
+    const chatmailQr = env.DELTACHAT_CHATMAIL_QR ?? 'dcaccount:https://nine.testrun.org/new';
 
-    if (!(addr && mailPw) && !env.DELTACHAT_CHATMAIL_QR) {
+    if (!(addr && mailPw) && !chatmailQr) {
       return null; // not configured — channel is skipped
     }
-
-    const chatmailQr = env.DELTACHAT_CHATMAIL_QR ?? 'dcaccount:https://nine.testrun.org/new';
 
     const rawDataDir = env.DELTACHAT_DATA_DIR ?? 'store/deltachat';
     const dataDir = path.resolve(rawDataDir.replace(/^~/, os.homedir()));

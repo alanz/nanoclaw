@@ -146,6 +146,17 @@ const deliverSpecialistResult: McpToolDefinition = {
           type: 'string',
           description: 'Your final result text.',
         },
+        file_paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Paths of files to hand over to the requester, relative to /workspace/ipc-out/. Use paths like /workspace/ipc-out/report.pdf.',
+        },
+        commit_to_memory: {
+          type: 'boolean',
+          description:
+            'When true and this is a root task, copy files to the requester group memory area instead of staging to ipc-in. Silently degraded to false for sub-tasks.',
+        },
       },
     },
   },
@@ -156,12 +167,17 @@ const deliverSpecialistResult: McpToolDefinition = {
       return err('result_text is required');
     }
 
+    const filePaths = (args.file_paths ?? []) as string[];
+    const commitToMemory = Boolean(args.commit_to_memory);
+
     writeMessageOut({
       id: generateId(),
       kind: 'system',
       content: JSON.stringify({
         action: 'deliver_specialist_result',
         result_text: resultText,
+        file_paths: filePaths,
+        commit_to_memory: commitToMemory,
       }),
     });
 

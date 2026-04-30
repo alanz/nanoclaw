@@ -134,6 +134,22 @@ async function spawnContainer(session: Session): Promise<void> {
   const { contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
   const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
+
+  // Invocation lifecycle for specialist file-handover (no-op if tables absent)
+  let invocationId: string | undefined;
+  if (hasTable(getDb(), 'invocations')) {
+    try {
+      const { buildInvocationForSession } = await import('./modules/specialists/invocation.js');
+      const result = buildInvocationForSession(session);
+      if (result) {
+        mounts.push(...result.mounts);
+        invocationId = result.invocationId;
+      }
+    } catch (err) {
+      log.debug('container-runner: invocation setup skipped', { err });
+    }
+  }
+
   const containerName = `nanoclaw-v2-${agentGroup.folder.replace(/[^a-zA-Z0-9_.-]/g, '-')}-${Date.now()}`;
   const args = buildContainerArgs(mounts, containerName, containerConfig, contribution);
 
@@ -170,6 +186,11 @@ async function spawnContainer(session: Session): Promise<void> {
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.info('Container exited', { sessionId: session.id, code, containerName });
+    if (invocationId) {
+      import('./modules/specialists/invocation.js')
+        .then(({ endInvocationById }) => endInvocationById(invocationId!))
+        .catch(() => {});
+    }
   });
 
   container.on('error', (err) => {

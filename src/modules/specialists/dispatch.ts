@@ -110,6 +110,7 @@ export async function handleDispatchSpecialist(content: Record<string, unknown>,
     failure_kind: null,
     failure_detail: null,
     pending_sub_task_id: null,
+    committed_files: null,
   };
   createTask(task);
   await spawnTaskSession(task);
@@ -189,6 +190,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       failure_kind: null,
       failure_detail: null,
       pending_sub_task_id: null,
+      committed_files: null,
     };
     createTask(child);
     updateTaskStatus(parentTask.id, 'awaiting_sub_task', { pending_sub_task_id: taskId });
@@ -219,6 +221,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       failure_kind: 'cycle_detected',
       failure_detail: 'target specialist appears in dispatch chain',
       pending_sub_task_id: null,
+      committed_files: null,
     };
     createTask(rejected);
     notifyAgent(session, 'sub-task rejected: cycle detected');
@@ -248,6 +251,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       failure_kind: 'depth_exceeded',
       failure_detail: 'specialist chain depth limit reached',
       pending_sub_task_id: null,
+      committed_files: null,
     };
     createTask(rejected);
     notifyAgent(session, 'sub-task rejected: depth limit reached');
@@ -277,6 +281,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       failure_kind: 'count_exceeded',
       failure_detail: 'specialist chain delegation count limit reached',
       pending_sub_task_id: null,
+      committed_files: null,
     };
     createTask(rejected);
     notifyAgent(session, 'sub-task rejected: chain delegation limit reached');
@@ -307,6 +312,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       failure_kind: 'same_type_limit_exceeded',
       failure_detail: 'specialist same-type dispatch limit reached',
       pending_sub_task_id: null,
+      committed_files: null,
     };
     createTask(rejected);
     notifyAgent(session, 'sub-task rejected: same-type dispatch limit reached');
@@ -336,6 +342,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     failure_kind: null,
     failure_detail: null,
     pending_sub_task_id: null,
+    committed_files: null,
   };
 
   // Rewrite prompt with last-turn notice if this is the last allowed dispatch to this group

@@ -32,6 +32,19 @@ requester.
    This is the last tool call you make. The host routes your result to whoever
    requested you and the container exits.
 
+   **Delivering files:** If your work produced files, include them:
+   ```
+   deliver_specialist_result(
+     result_text="Summary of results. See attached file(s).",
+     file_paths=["/workspace/ipc-out/report.md", "/workspace/ipc-out/data.csv"]
+   )
+   ```
+   Files must be written to `/workspace/ipc-out/` before delivery. The host
+   takes ownership and routes them to the requester's next invocation via
+   `/workspace/ipc-in/<transfer_id>/<filename>`. For root tasks only, pass
+   `commit_to_memory=True` to copy files into the requester group's
+   `memory/reports/` area instead.
+
 3. **If you cannot complete the task**, still call `deliver_specialist_result`
    with an explanation of what you attempted and why it failed. Never exit
    without calling it.

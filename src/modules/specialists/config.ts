@@ -6,6 +6,9 @@ export interface SpecialistsConfig {
   maxRestartRetries: number;
   defaultLastTurnSubNotice: string;
   defaultLastTurnParentNotice: string;
+  ipcOutContainerPath: string;
+  ipcInContainerPath: string;
+  memoryReportsSubpath: string;
 }
 
 export const SPECIALISTS_CONFIG: SpecialistsConfig = {
@@ -18,4 +21,7 @@ export const SPECIALISTS_CONFIG: SpecialistsConfig = {
     '[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]',
   defaultLastTurnParentNotice:
     '[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]',
+  ipcOutContainerPath: '/workspace/ipc-out',
+  ipcInContainerPath: '/workspace/ipc-in',
+  memoryReportsSubpath: 'memory/reports',
 };

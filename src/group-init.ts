@@ -6,18 +6,24 @@ import { initContainerConfig } from './container-config.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
-const DEFAULT_SETTINGS_JSON =
-  JSON.stringify(
-    {
-      env: {
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+function buildSettingsJson(agentGroupId: string): string {
+  // Specialist groups must not auto-write memories to CLAUDE.local.md —
+  // that file holds task instructions, not conversational notes.
+  const disableAutoMemory = agentGroupId.startsWith('ag-specialist-') ? '1' : '0';
+  return (
+    JSON.stringify(
+      {
+        env: {
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+          CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+          CLAUDE_CODE_DISABLE_AUTO_MEMORY: disableAutoMemory,
+        },
       },
-    },
-    null,
-    2,
-  ) + '\n';
+      null,
+      2,
+    ) + '\n'
+  );
+}
 
 /**
  * Initialize the on-disk filesystem state for an agent group. Idempotent —
@@ -69,7 +75,7 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
 
   const settingsFile = path.join(claudeDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(settingsFile, DEFAULT_SETTINGS_JSON);
+    fs.writeFileSync(settingsFile, buildSettingsJson(group.id));
     initialized.push('settings.json');
   }
 

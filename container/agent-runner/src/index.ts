@@ -26,6 +26,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
+import { clearContinuation } from './db/session-state.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
@@ -44,6 +45,14 @@ async function main(): Promise<void> {
   const providerName = config.provider.toLowerCase() as ProviderName;
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
+
+  // Specialist containers must start every invocation fresh — no resumed
+  // conversation history. Clear any stale continuation so the provider
+  // always starts a new Claude Code session for each specialist task.
+  if (config.agentGroupId.startsWith('ag-specialist-')) {
+    clearContinuation(providerName);
+    log('Specialist container — continuation cleared for fresh session');
+  }
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module

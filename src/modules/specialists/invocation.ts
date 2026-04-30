@@ -214,18 +214,52 @@ export function endInvocationById(invocationId: string): void {
   db.prepare("UPDATE ipc_out_mounts SET status = 'cleared' WHERE invocation_id = ?").run(invocationId);
   db.prepare("UPDATE ipc_in_mounts SET status = 'cleared' WHERE invocation_id = ?").run(invocationId);
 
-  // Expire in_transit transfers whose recipient session is this invocation's session
-  // (files were in ipc-in which is now being deleted)
-  db.prepare(
-    `UPDATE transfer_files SET status = 'expired'
-     WHERE transfer_id IN (
-       SELECT id FROM container_transfers
-       WHERE status = 'in_transit' AND recipient_session_id = ?
-     )`,
-  ).run(inv.session_id);
-  db.prepare(
-    "UPDATE container_transfers SET status = 'expired' WHERE status = 'in_transit' AND recipient_session_id = ?",
-  ).run(inv.session_id);
+  // Handle in_transit transfers whose files were in this ipc-in (now being deleted).
+  //
+  // Whether to expire or reset depends on whether the recipient session's task is
+  // still alive:
+  //   - Main-agent sessions have no associated specialist task — the agent consumed
+  //     the files this turn, so expire.
+  //   - Specialist sessions whose task is terminal — expire (task is done).
+  //   - Specialist sessions whose task is NOT terminal (crash / awaiting_restart) —
+  //     reset to pending + files back to owned so the next invocation's
+  //     _populateIpcIn can re-place them from host staging. Expiring here would
+  //     lose the files across retries, violating the "files survive task restarts"
+  //     invariant.
+  const taskRow = db
+    .prepare(
+      `SELECT st.status
+       FROM sessions s
+       JOIN specialist_tasks st ON st.id = s.thread_id
+       WHERE s.id = ? AND s.messaging_group_id IS NULL`,
+    )
+    .get(inv.session_id) as { status: string } | undefined;
+
+  const taskAlive = taskRow != null && taskRow.status !== 'completed' && taskRow.status !== 'failed';
+
+  if (taskAlive) {
+    db.prepare(
+      `UPDATE transfer_files SET status = 'owned'
+       WHERE transfer_id IN (
+         SELECT id FROM container_transfers
+         WHERE status = 'in_transit' AND recipient_session_id = ?
+       )`,
+    ).run(inv.session_id);
+    db.prepare(
+      "UPDATE container_transfers SET status = 'pending' WHERE status = 'in_transit' AND recipient_session_id = ?",
+    ).run(inv.session_id);
+  } else {
+    db.prepare(
+      `UPDATE transfer_files SET status = 'expired'
+       WHERE transfer_id IN (
+         SELECT id FROM container_transfers
+         WHERE status = 'in_transit' AND recipient_session_id = ?
+       )`,
+    ).run(inv.session_id);
+    db.prepare(
+      "UPDATE container_transfers SET status = 'expired' WHERE status = 'in_transit' AND recipient_session_id = ?",
+    ).run(inv.session_id);
+  }
 
   // Clean up ipc directories
   try {

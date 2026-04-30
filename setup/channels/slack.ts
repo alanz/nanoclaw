@@ -28,7 +28,7 @@ import * as setupLog from '../logs.js';
 import { confirmThenOpen } from '../lib/browser.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
-import { accentGreen, note, wrapForGutter } from '../lib/theme.js';
+import { accentGreen, fmtDuration, note, wrapForGutter } from '../lib/theme.js';
 
 const SLACK_API = 'https://slack.com/api';
 const SLACK_APPS_URL = 'https://api.slack.com/apps';
@@ -241,10 +241,9 @@ async function validateSlackToken(token: string): Promise<WorkspaceInfo> {
       user_id?: string;
       error?: string;
     };
-    const elapsedS = Math.round((Date.now() - start) / 1000);
     if (data.ok && data.team && data.user) {
       s.stop(
-        `Connected to ${data.team} as @${data.user}. ${k.dim(`(${elapsedS}s)`)}`,
+        `Connected to ${data.team} as @${data.user}. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`,
       );
       const info: WorkspaceInfo = {
         teamName: data.team,
@@ -273,8 +272,7 @@ async function validateSlackToken(token: string): Promise<WorkspaceInfo> {
         : `Slack said "${reason}". Check the token scopes and workspace install, then retry.`,
     );
   } catch (err) {
-    const elapsedS = Math.round((Date.now() - start) / 1000);
-    s.stop(`Couldn't reach Slack. ${k.dim(`(${elapsedS}s)`)}`, 1);
+    s.stop(`Couldn't reach Slack. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`, 1);
     const message = err instanceof Error ? err.message : String(err);
     setupLog.step('slack-validate', 'failed', Date.now() - start, {
       ERROR: message,
@@ -334,9 +332,8 @@ async function openDmChannel(token: string, userId: string): Promise<string> {
       channel?: { id?: string };
       error?: string;
     };
-    const elapsedS = Math.round((Date.now() - start) / 1000);
     if (data.ok && data.channel?.id) {
-      s.stop(`DM channel ready. ${k.dim(`(${elapsedS}s)`)}`);
+      s.stop(`DM channel ready. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`);
       setupLog.step('slack-open-dm', 'success', Date.now() - start, {
         DM_CHANNEL_ID: data.channel.id,
       });
@@ -360,8 +357,7 @@ async function openDmChannel(token: string, userId: string): Promise<string> {
       `Slack said "${reason}". Check the member ID and app permissions, then retry.`,
     );
   } catch (err) {
-    const elapsedS = Math.round((Date.now() - start) / 1000);
-    s.stop(`Couldn't reach Slack. ${k.dim(`(${elapsedS}s)`)}`, 1);
+    s.stop(`Couldn't reach Slack. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`, 1);
     const message = err instanceof Error ? err.message : String(err);
     setupLog.step('slack-open-dm', 'failed', Date.now() - start, {
       ERROR: message,

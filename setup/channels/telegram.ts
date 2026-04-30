@@ -33,7 +33,7 @@ import {
   spawnStep,
   writeStepEntry,
 } from '../lib/runner.js';
-import { accentGreen, brandBold, note } from '../lib/theme.js';
+import { accentGreen, brandBold, fitToWidth, fmtDuration, note } from '../lib/theme.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
 
@@ -191,10 +191,9 @@ async function validateTelegramToken(token: string): Promise<string> {
       result?: { username?: string; id?: number };
       description?: string;
     };
-    const elapsedS = Math.round((Date.now() - start) / 1000);
     if (data.ok && data.result?.username) {
       const username = data.result.username;
-      s.stop(`Found your bot: @${username}. ${k.dim(`(${elapsedS}s)`)}`);
+      s.stop(`Found your bot: @${username}. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`);
       setupLog.step('telegram-validate', 'success', Date.now() - start, {
         BOT_USERNAME: username,
         BOT_ID: data.result.id ?? '',
@@ -212,8 +211,7 @@ async function validateTelegramToken(token: string): Promise<string> {
       'Copy the token again from @BotFather and try setup once more.',
     );
   } catch (err) {
-    const elapsedS = Math.round((Date.now() - start) / 1000);
-    s.stop(`Couldn't reach Telegram. ${k.dim(`(${elapsedS}s)`)}`, 1);
+    s.stop(`Couldn't reach Telegram. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`, 1);
     const message = err instanceof Error ? err.message : String(err);
     setupLog.step('telegram-validate', 'failed', Date.now() - start, {
       ERROR: message,
@@ -254,11 +252,11 @@ async function runPairTelegram(): Promise<
           stopSpinner("Old code expired. Here's a fresh one.");
         }
         note(formatCodeCard(block.fields.CODE ?? '????'), 'Secret code');
-        s.start('Waiting for you to send the code from Telegram…');
+        s.start(fitToWidth('Waiting for you to send the code from Telegram…', ''));
         spinnerActive = true;
       } else if (block.type === 'PAIR_TELEGRAM_ATTEMPT') {
         stopSpinner(`Got "${block.fields.CANDIDATE ?? '?'}", not a match.`);
-        s.start('Waiting for the correct code…');
+        s.start(fitToWidth('Waiting for the correct code…', ''));
         spinnerActive = true;
       } else if (block.type === 'PAIR_TELEGRAM') {
         if (block.fields.STATUS === 'success') {

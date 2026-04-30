@@ -131,12 +131,11 @@ entity SpecialistTask {
     prompt: String
     requester_group: identity/AgentGroup?
     requester_task: SpecialistTask?
-    -- The session that originated this dispatch. For root tasks this
-    -- identifies the exact main-group session whose container called
-    -- dispatch_specialist, so the result can be routed back to that
-    -- session rather than relying on a one-session-per-group assumption.
-    -- Null for sub-tasks: routing follows requester_task instead.
-    requester_session: sessions/Session?
+    -- The session that dispatched this task. For root tasks this is the
+    -- main-agent session that receives the result; for sub-tasks this is
+    -- the parent specialist's per-task session. Result routing for sub-
+    -- tasks follows requester_task, not this field.
+    requester_session: sessions/Session
     depth: Integer
     chain_delegation_count: Integer
     ancestor_groups: Set<identity/AgentGroup>
@@ -438,7 +437,7 @@ rule SpecialistDispatchesSubTask {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
-            requester_session: null,
+            requester_session: session,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -495,7 +494,7 @@ rule SubTaskRejectedCycle {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
-            requester_session: null,
+            requester_session: session,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -535,7 +534,7 @@ rule SubTaskRejectedDepth {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
-            requester_session: null,
+            requester_session: session,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -577,7 +576,7 @@ rule SubTaskRejectedCount {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
-            requester_session: null,
+            requester_session: session,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -621,7 +620,7 @@ rule SubTaskRejectedSameTypeLimit {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
-            requester_session: null,
+            requester_session: session,
             depth: parent_task.depth + 1,
             chain_delegation_count: parent_task.chain_delegation_count + 1,
             ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
@@ -667,7 +666,7 @@ rule MemoryProviderDispatched {
             prompt: prompt,
             requester_group: null,
             requester_task: parent_task,
-            requester_session: null,
+            requester_session: session,
             depth: parent_task.depth,
             chain_delegation_count: parent_task.chain_delegation_count,
             ancestor_groups: parent_task.ancestor_groups,
@@ -841,7 +840,7 @@ rule TransferFilesOwned {
 rule SpecialistResultRoutedToMain {
     when: SpecialistResultReady(task)
     requires: task.requester_group != null
-    let main_session = task.requester_session ?? resolve_agent_shared_session(task.requester_group)
+    let main_session = task.requester_session
     let transfer = ContainerTransfer{task: task}
     ensures:
         if exists transfer and transfer.commit_to_memory:
@@ -893,6 +892,23 @@ rule SpecialistResultRoutedToMain {
         -- path with a task id to avoid collisions, but that would require a
         -- corresponding change to resolve_delivery_paths so the rewritten
         -- result_text reflects the disambiguated path.
+        --
+        -- The committed transfer status is a transient intermediate state.
+        -- The host transitions the transfer pending -> committed -> expired
+        -- in a single synchronous operation along this routing path: the
+        -- memory_path is recorded on each TransferFile, the workspace files
+        -- are written to the requester group's memory area, and the staging
+        -- copies are reclaimed immediately because the requester has no
+        -- ipc-in to wait on (commit-to-memory bypasses ipc-in entirely).
+        -- The memory copies on disk are preserved; only the transfer record
+        -- is expired. As a result no separate expiry rule is needed for
+        -- root-task transfers in status = committed: by the time any other
+        -- rule (TransferExpiredOnRequesterTerminal, the recipient-invocation
+        -- expiry, or any observer) could see them they are already in
+        -- status = expired. The committed value persists in the enum so the
+        -- transition graph and the CommitAndPlaceMutuallyExclusive
+        -- invariant remain expressible, but no live transfer ever rests in
+        -- it.
 }
 
 -- Sub-tasks route their result back into the parent specialist's per-task
@@ -1031,6 +1047,51 @@ rule InvocationStarted {
         -- before the parent resumed).
 }
 
+-- Orphan invocation cleanup. When a new invocation begins for a session
+-- that already has an active invocation (no ContainerInvocationEnded was
+-- ever observed for the previous one — typically because the runtime did
+-- not deliver a container-close event), the previous invocation's mounts
+-- are cleared as if InvocationEnded had fired for it. Together with the
+-- AtMostOneActiveInvocationPerSession invariant this enforces that a
+-- session has at most one active invocation at any moment.
+
+rule OrphanInvocationEnded {
+    when: ContainerInvocationStarted(new_invocation)
+    let orphan = active_invocation_for_session(new_invocation.session)
+    requires: exists orphan
+    requires: orphan != new_invocation
+    let orphan_out = IpcOutMount{invocation: orphan}
+    let orphan_in = IpcInMount{invocation: orphan}
+    requires: exists orphan_out
+    requires: exists orphan_in
+    requires: orphan_out.status = active
+    requires: orphan_in.status = active
+    ensures:
+        orphan_out.status = cleared
+        orphan_in.status = cleared
+
+    @guidance
+        -- active_invocation_for_session(session) is a black box that returns
+        -- the Invocation for which an IpcOutMount with status = active still
+        -- exists for that session, or null if none does. The host populates
+        -- this from its in-memory invocation registry; the spec models it as
+        -- a query over current mount state.
+        --
+        -- The host enforces "at most one active invocation per session" by
+        -- ending any orphan synchronously before creating the new
+        -- invocation's mounts. This rule covers the recovery path where the
+        -- container runtime did not emit a close event for the previous
+        -- invocation (observed empirically with the Apple Container runtime).
+        -- Files staged in the orphan's ipc-out at this point are discarded;
+        -- a delivery that did not complete before the orphan went silent has
+        -- already been treated as a lost invocation upstream.
+        --
+        -- This rule does not emit ContainerInvocationEnded for the orphan;
+        -- if the runtime later emits a close event for the orphan it will
+        -- find the mounts already in status = cleared and InvocationEnded's
+        -- active-status guards will treat it as a no-op.
+}
+
 -- When ipc-in is populated for an invocation, every TransferFile in status
 -- = owned whose transfer targets that invocation transitions to placed,
 -- and the covering ContainerTransfer transitions pending -> in_transit.
@@ -1059,6 +1120,70 @@ rule TransferMovedToInTransit {
         ensures: t.status = in_transit
 }
 
+-- Mid-invocation placement. When a transfer is staged at result-routing
+-- time and the recipient session already has a live (running) invocation,
+-- the host copies the transfer's files into that invocation's ipc-in
+-- directly rather than waiting for the recipient's next ContainerInvocationStarted.
+-- This handles the race where the recipient container was already running
+-- when the specialist delivered its result: the spawn-time IpcInPopulated
+-- ran before the transfer existed, so without this rule the files would
+-- never reach the running container's ipc-in.
+--
+-- Sub-task transfers between specialist deliveries don't usually hit this
+-- path: the parent specialist's container exits when it dispatches a
+-- sub-task and is restarted by the host only after the child's result is
+-- routed, so the transfer is placed via the spawn-time IpcInPopulated of
+-- the new parent invocation. The mid-invocation race is the main-group
+-- case where the main session's container is long-running and accepting
+-- inbound messages while specialists deliver.
+
+rule TransferPlacedIntoLiveIpcIn {
+    when: SpecialistResultReady(task)
+    let transfer = ContainerTransfer{task: task}
+    requires: exists transfer
+    requires: transfer.status = pending
+    requires: transfer.commit_to_memory = false
+    let recipient_session = recipient_session_for_transfer(transfer)
+    requires: exists recipient_session
+    let live = active_invocation_for_session(recipient_session)
+    requires: exists live
+    ensures:
+        for f in transfer.files where status = owned:
+            f.status = placed
+        transfer.status = in_transit
+
+    @guidance
+        -- recipient_session_for_transfer(transfer) returns:
+        --   for sub-task transfers (transfer.task.requester_task != null):
+        --     the parent task's per-task session
+        --     (specialist_task_session(transfer.task.requester_task))
+        --   for root-task transfers (transfer.task.requester_group != null):
+        --     transfer.task.requester_session (the main-agent session that
+        --     dispatched the root task)
+        -- This mirrors the recipient resolution in
+        -- SpecialistResultRoutedToParent and SpecialistResultRoutedToMain.
+        --
+        -- active_invocation_for_session(session) returns the Invocation for
+        -- which an IpcOutMount with status = active exists for that session,
+        -- or null if none does. The same helper is used by
+        -- OrphanInvocationEnded and InvocationEndedOnTaskTerminal.
+        --
+        -- Mid-invocation placement is mutually exclusive with
+        -- TransferFilesPlaced / TransferMovedToInTransit: those fire on
+        -- IpcInPopulated at the recipient's next start, by which time this
+        -- rule has already advanced the transfer to in_transit and its
+        -- files to placed. transfer_targets_invocation, used by the
+        -- IpcInPopulated rules, returns false for any transfer not in
+        -- status = pending, so a transfer placed mid-invocation here will
+        -- not be re-placed when the recipient subsequently starts a new
+        -- invocation.
+        --
+        -- commit_to_memory = true transfers are excluded: they are
+        -- committed to the requester group's memory area in
+        -- SpecialistResultRoutedToMain (which fires off the same trigger)
+        -- and never enter ipc-in.
+}
+
 -- An invocation ends when the container process exits. The host clears
 -- both mounts. Files remaining in ipc-out that were not consumed by a
 -- delivery are discarded as part of the clear.
@@ -1069,11 +1194,20 @@ rule InvocationEnded {
     let in_ = IpcInMount{invocation: invocation}
     requires: exists out
     requires: exists in_
+    requires: out.status = active
+    requires: in_.status = active
     ensures:
         out.status = cleared
         in_.status = cleared
 
     @guidance
+        -- The active-status requires clauses make this rule idempotent: if
+        -- the mounts have already been cleared by OrphanInvocationEnded
+        -- (orphan recovery at the next ContainerInvocationStarted) or by
+        -- InvocationEndedOnTaskTerminal (host-driven synchronous end at
+        -- task terminal transition), a late or duplicate
+        -- ContainerInvocationEnded is silently dropped.
+        --
         -- ipc-out is cleared on every container exit, including the exit
         -- caused by a dispatch_sub_task call (where the parent task
         -- transitions running -> awaiting_sub_task and the parent's
@@ -1106,6 +1240,62 @@ rule InvocationEnded {
         -- transfers targeting it.
 }
 
+-- Synchronous invocation end at task terminal transition. When a
+-- specialist task reaches a terminal state (completed or failed), the
+-- host clears the active invocation's mounts immediately, without waiting
+-- for ContainerInvocationEnded. This is more reliable than relying on the
+-- container-close event, which some runtimes do not deliver promptly (or
+-- at all).
+--
+-- Two parallel rules cover the two terminal transitions. They share an
+-- emitted internal event SpecialistTaskReachedTerminal so the cleanup
+-- logic only appears once, in InvocationEndedOnTaskTerminal.
+
+rule SpecialistTaskCompletedTerminal {
+    when: task: SpecialistTask.status transitions_to completed
+    ensures: SpecialistTaskReachedTerminal(task: task)
+}
+
+rule SpecialistTaskFailedTerminal {
+    when: task: SpecialistTask.status transitions_to failed
+    ensures: SpecialistTaskReachedTerminal(task: task)
+}
+
+rule InvocationEndedOnTaskTerminal {
+    when: SpecialistTaskReachedTerminal(task)
+    let session = specialist_task_session(task)
+    requires: exists session
+    let live = active_invocation_for_session(session)
+    requires: exists live
+    let out = IpcOutMount{invocation: live}
+    let in_ = IpcInMount{invocation: live}
+    requires: exists out
+    requires: exists in_
+    requires: out.status = active
+    requires: in_.status = active
+    ensures:
+        out.status = cleared
+        in_.status = cleared
+
+    @guidance
+        -- This rule fires synchronously on the host when a specialist task
+        -- reaches a terminal state, before the container process actually
+        -- exits. ContainerInvocationEnded for the same invocation may fire
+        -- afterward, but InvocationEnded's active-status guards make that
+        -- subsequent firing a no-op (the mounts are already cleared).
+        --
+        -- specialist_task_session(task) is null for tasks created directly
+        -- in status = failed by the sub-task rejection rules
+        -- (SubTaskRejectedCycle/Depth/Count/SameTypeLimit). For those tasks
+        -- no session was provisioned and no invocation exists; the
+        -- exists session and exists live guards together skip the rule.
+        --
+        -- For tasks failed by ChildSubtreeCancelledOnParentCrash propagation
+        -- a session was provisioned but no invocation may currently be
+        -- running (the child container may not have started). The exists
+        -- live guard handles this case the same way.
+}
+
 -- Transfers expire when the requester task reaches a terminal state.
 -- Both the in-transit (sub-task to parent) and committed (sub-task or root
 -- to memory) shapes converge here: staging copies in host-managed storage
@@ -1125,8 +1315,8 @@ rule InvocationEnded {
 -- For sub-task transfers, the requester is t.task.requester_task; expiry
 -- waits for that parent task's terminal transition so files remain
 -- available across any retries of the parent. For root-task transfers,
--- there is no parent task; the rule TransferExpiredOnRootDeliveryConsumed
--- below covers that case once the routed inbound message has been read.
+-- there is no parent task; the rule TransferExpiredOnRecipientInvocationEnded
+-- below covers that case when the main-agent recipient invocation ends.
 
 rule TransferExpiredOnRequesterTerminal {
     when: parent: SpecialistTask.status transitions_to completed
@@ -1139,7 +1329,7 @@ rule TransferExpiredOnRequesterTerminal {
         -- is_transfer_for_requester(t, parent) is true when parent =
         -- t.task.requester_task. For root-task transfers (requester_group
         -- set, requester_task null), the function returns false; expiry
-        -- of those is handled in TransferExpiredOnRootDeliveryConsumed.
+        -- of those is handled in TransferExpiredOnRecipientInvocationEnded.
 }
 
 rule TransferExpiredOnRequesterFailed {
@@ -1150,22 +1340,49 @@ rule TransferExpiredOnRequesterFailed {
             ensures: f.status = expired
 }
 
--- Root-task transfers expire once the routed inbound message has been
--- consumed by the main group session. The InboundMessage moves from
--- pending through processing to completed; the completed transition is
--- the latest moment at which the agent might still need the files.
+-- Root-task transfers expire when the recipient (main-agent) session's
+-- invocation ends. The main-agent session has no associated SpecialistTask,
+-- so its invocation lifecycle is the sole reliable expiry boundary for
+-- in_transit transfers staged into its ipc-in. When ContainerInvocationEnded
+-- fires for such an invocation, every in_transit transfer whose recipient is
+-- that session is expired and its files reclaimed from host-managed storage.
 
-rule TransferExpiredOnRootDeliveryConsumed {
-    when: msg: sessions/InboundMessage.status transitions_to completed
-    for t in ContainerTransfers where status in { in_transit, committed } and is_root_transfer_for_message(t, msg):
+rule TransferExpiredOnRecipientInvocationEnded {
+    when: ContainerInvocationEnded(invocation)
+    requires: invocation.task = null
+    for t in ContainerTransfers where status = in_transit and recipient_session_for_transfer(t) = invocation.session:
         ensures: t.status = expired
         for f in t.files:
             ensures: f.status = expired
 
     @guidance
-        -- is_root_transfer_for_message returns true when t.task.requester_group
-        -- is non-null and msg.session is the main session whose inbound
-        -- message carried the routed result text for t.
+        -- Why invocation-end is a sound proxy for "message consumed" on the
+        -- main-agent path. The routed delivery is consumed by the agent in a
+        -- single turn: the container reads the result text and any files
+        -- placed in ipc-in, then the invocation ends. There is no retry
+        -- semantics for a given delivery — the InboundMessage carrying the
+        -- result is processed once, and the next invocation gets a fresh,
+        -- empty ipc-in (per the per-invocation isolation model). Once the
+        -- recipient invocation ends, the staged files cannot be re-read by
+        -- any future invocation, so the staging copies are safe to reclaim.
+        --
+        -- This rule only handles the non-specialist (main-agent) recipient
+        -- case. Specialist-recipient transfers (i.e. sub-task transfers
+        -- whose recipient is the parent specialist's per-task session) are
+        -- expired via TransferExpiredOnRequesterTerminal /
+        -- TransferExpiredOnRequesterFailed when the parent task itself
+        -- reaches a terminal state, preserving file availability across any
+        -- parent restart retries. The invocation.task = null guard is what
+        -- selects the main-agent case here: a main-agent session has no
+        -- associated SpecialistTask, while every specialist invocation does.
+        --
+        -- recipient_session_for_transfer(t) is the same black box used by
+        -- TransferPlacedIntoLiveIpcIn: for root-task transfers it returns
+        -- t.task.requester_session (the main-agent session that dispatched
+        -- the root task); for sub-task transfers it returns the parent
+        -- task's per-task session. Combined with invocation.task = null
+        -- this rule matches only root-task transfers whose recipient is
+        -- the ending main-agent invocation.
 }
 
 -- A pending transfer whose delivering task fails between ownership and
@@ -1399,5 +1616,22 @@ invariant TransferAndFilesInSync {
     for t in ContainerTransfers:
         for f in t.files:
             (t.status = expired) implies (f.status = expired)
+}
+
+-- At most one invocation per session is active at any moment. The host
+-- enforces this by ending any orphan invocation synchronously at
+-- ContainerInvocationStarted (OrphanInvocationEnded) and by ending the
+-- active invocation synchronously when the specialist task reaches a
+-- terminal state (InvocationEndedOnTaskTerminal). The IpcOutMount status
+-- is the canonical witness of an invocation's liveness: an invocation is
+-- "active" iff its IpcOutMount is in status = active.
+
+invariant AtMostOneActiveInvocationPerSession {
+    for a in IpcOutMounts:
+        for b in IpcOutMounts:
+            (a != b
+             and a.status = active
+             and b.status = active)
+                implies a.invocation.session != b.invocation.session
 }
 

@@ -16,7 +16,7 @@ import { GROUPS_DIR } from '../../config.js';
 import { getSpecialist, getTask, updateTaskStatus } from './db.js';
 import { SPECIALISTS_CONFIG } from './config.js';
 import { findSessionByAgentGroupAndThread } from './session-helpers.js';
-import { endActiveInvocationForSession, expireTransfersForTerminalTask } from './invocation.js';
+import { endActiveInvocationForSession, expireTransfersForTerminalTask, placeTransferIntoActiveIpcIn } from './invocation.js';
 import type { ContainerTransfer, SpecialistTask, TransferFile } from './types.js';
 
 function generateId(): string {
@@ -122,10 +122,13 @@ async function routeResultToMain(task: SpecialistTask, transfer: ContainerTransf
       }
       content = transfer.result_text;
     } else {
-      // Stage for ipc-in delivery when requester container starts
+      // Stage for ipc-in delivery when requester container starts.
+      // Also populate into the active ipc-in if the container is already running —
+      // _populateIpcIn at spawn time may have run before this transfer was created.
       getDb()
         .prepare('UPDATE container_transfers SET recipient_session_id = ? WHERE id = ?')
         .run(session.id, transfer.id);
+      placeTransferIntoActiveIpcIn(session.id, { ...transfer, recipient_session_id: session.id });
       content = transfer.result_text;
     }
   } else {
@@ -154,10 +157,12 @@ async function routeResultToParent(
   let content: string;
 
   if (transfer) {
-    // Stage for ipc-in delivery to parent session
+    // Stage for ipc-in delivery to parent session.
+    // Also populate into the active ipc-in if the parent container is already running.
     getDb()
       .prepare('UPDATE container_transfers SET recipient_session_id = ? WHERE id = ?')
       .run(parentSession.id, transfer.id);
+    placeTransferIntoActiveIpcIn(parentSession.id, { ...transfer, recipient_session_id: parentSession.id });
     content = transfer.result_text;
   } else {
     content = formatOutcome(task) + lastTurnParentNotice(task);

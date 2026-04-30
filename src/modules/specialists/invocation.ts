@@ -48,6 +48,16 @@ export function buildInvocationForSession(
     if (row) taskId = row.id;
   }
 
+  // End any orphaned active invocation for this session. This can happen when
+  // the container close event doesn't fire (e.g. Apple Container), leaving the
+  // previous invocation's ended_at NULL. Ending it now keeps getActiveInvocation
+  // unambiguous and prevents placeTransferIntoActiveIpcIn from routing files to
+  // a stale ipc-in directory on the next result delivery.
+  const orphan = getActiveInvocation(session.id);
+  if (orphan) {
+    endInvocationById(orphan.id);
+  }
+
   const invocationId = genId('inv');
   const ipcOutPath = invocationIpcOutPath(invocationId);
   const ipcInPath = invocationIpcInPath(invocationId);
@@ -133,6 +143,49 @@ export function getActiveInvocation(sessionId: string): Invocation | undefined {
 }
 
 /**
+ * Copy a staged transfer into the active invocation's ipc-in directory.
+ * Called by routing.ts immediately after setting recipient_session_id so that
+ * files are available even when the requester container is already running
+ * (i.e. the spawn-time _populateIpcIn ran before the transfer was created).
+ */
+export function placeTransferIntoActiveIpcIn(sessionId: string, transfer: ContainerTransfer): void {
+  const db = getDb();
+  const invocation = getActiveInvocation(sessionId);
+  if (!invocation) return;
+
+  if (transfer.commit_to_memory === 1) return;
+
+  const files = db
+    .prepare("SELECT * FROM transfer_files WHERE transfer_id = ? AND status = 'owned'")
+    .all(transfer.id) as TransferFile[];
+
+  if (files.length === 0) return;
+
+  const subdir = path.join(invocation.ipc_in_host_path, transfer.id);
+  fs.mkdirSync(subdir, { recursive: true });
+
+  for (const file of files) {
+    try {
+      fs.copyFileSync(file.host_path, path.join(subdir, file.original_name));
+      db.prepare("UPDATE transfer_files SET status = 'placed' WHERE id = ?").run(file.id);
+    } catch (err) {
+      log.warn('specialists: failed to copy transfer file to active ipc-in', {
+        transferId: transfer.id,
+        file: file.original_name,
+        err,
+      });
+    }
+  }
+
+  db.prepare("UPDATE container_transfers SET status = 'in_transit' WHERE id = ?").run(transfer.id);
+  log.debug('specialists: transfer placed into active ipc-in', {
+    transferId: transfer.id,
+    sessionId,
+    invocationId: invocation.id,
+  });
+}
+
+/**
  * End the active invocation for a session, if any.
  * Called by routing.ts when the specialist task reaches a terminal state so
  * cleanup happens synchronously on the host rather than relying on the
@@ -213,9 +266,13 @@ export function expireTransfersForTerminalTask(taskId: string): void {
     db.prepare("UPDATE container_transfers SET status = 'expired' WHERE id = ?").run(id);
   }
 
-  // Also expire pending transfers for the task itself (PendingTransferExpiredOnDeliveringTaskFailed)
+  // Also expire pending transfers for the task itself that haven't been staged for delivery yet.
+  // Transfers with recipient_session_id already set have been routed to an ipc-in dir and must
+  // not be expired here — the delivery sweep will advance them to in_transit/committed.
   const pendingTransfers = db
-    .prepare("SELECT id FROM container_transfers WHERE task_id = ? AND status = 'pending'")
+    .prepare(
+      "SELECT id FROM container_transfers WHERE task_id = ? AND status = 'pending' AND recipient_session_id IS NULL",
+    )
     .all(taskId) as { id: string }[];
 
   for (const { id } of pendingTransfers) {

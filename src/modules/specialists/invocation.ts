@@ -133,6 +133,19 @@ export function getActiveInvocation(sessionId: string): Invocation | undefined {
 }
 
 /**
+ * End the active invocation for a session, if any.
+ * Called by routing.ts when the specialist task reaches a terminal state so
+ * cleanup happens synchronously on the host rather than relying on the
+ * container close event (which may not fire reliably on all runtimes).
+ */
+export function endActiveInvocationForSession(sessionId: string): void {
+  const invocation = getActiveInvocation(sessionId);
+  if (invocation) {
+    endInvocationById(invocation.id);
+  }
+}
+
+/**
  * End an invocation: clear mount records, expire in-transit transfers whose
  * files were in this ipc-in, and clean up ipc directories.
  */

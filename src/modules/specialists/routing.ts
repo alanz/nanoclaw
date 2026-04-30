@@ -16,7 +16,7 @@ import { GROUPS_DIR } from '../../config.js';
 import { getSpecialist, getTask, updateTaskStatus } from './db.js';
 import { SPECIALISTS_CONFIG } from './config.js';
 import { findSessionByAgentGroupAndThread } from './session-helpers.js';
-import { expireTransfersForTerminalTask } from './invocation.js';
+import { endActiveInvocationForSession, expireTransfersForTerminalTask } from './invocation.js';
 import type { ContainerTransfer, SpecialistTask, TransferFile } from './types.js';
 
 function generateId(): string {
@@ -177,6 +177,14 @@ async function routeResultToParent(
  *   null keeps them working unchanged.
  */
 export async function routeResult(task: SpecialistTask, transfer: ContainerTransfer | null = null): Promise<void> {
+  // End the specialist's active invocation now that the task is terminal.
+  // This is more reliable than relying on the container close event, which
+  // may not fire promptly on all runtimes (e.g. Apple Container).
+  const specialistSession = findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
+  if (specialistSession) {
+    endActiveInvocationForSession(specialistSession.id);
+  }
+
   if (task.requester_group_id) {
     await routeResultToMain(task, transfer);
     expireTransfersForTerminalTask(task.id);

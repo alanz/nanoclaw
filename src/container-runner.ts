@@ -189,7 +189,7 @@ async function spawnContainer(session: Session): Promise<void> {
     if (invocationId) {
       import('./modules/specialists/invocation.js')
         .then(({ endInvocationById }) => endInvocationById(invocationId!))
-        .catch(() => {});
+        .catch((err) => log.warn('container-runner: invocation cleanup failed', { invocationId, err }));
     }
   });
 

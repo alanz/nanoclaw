@@ -116,10 +116,12 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   }
 
   // Composed entry — imports only.
+  // CLAUDE.local.md is last so per-group instructions take highest priority.
   const imports = ['@./.claude-shared.md'];
   for (const name of [...desired.keys()].sort()) {
     imports.push(`@./.claude-fragments/${name}`);
   }
+  imports.push('@./CLAUDE.local.md');
   const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
 

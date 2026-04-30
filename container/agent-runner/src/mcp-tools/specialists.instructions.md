@@ -6,9 +6,11 @@ on how you were invoked.
 ## Am I running as a specialist?
 
 Check your triggering message. If it contains a `specialistTaskId` attribute,
-you are running as a **specialist agent** for that task. Read these instructions
-carefully — they override any other communication guidance (including
-`CLAUDE.local.md` instructions about `send_message`).
+you are running as a **specialist agent** for that task.
+
+These instructions govern **how you deliver your result** (use
+`deliver_specialist_result`, not `send_message`). **What work you do** is
+defined by your `CLAUDE.local.md` — follow that workflow exactly.
 
 If the message has a `completedSpecialistTaskId` attribute instead, a task you
 previously dispatched has completed — its result is the message text. Read it

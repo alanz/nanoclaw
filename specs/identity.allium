@@ -20,6 +20,7 @@ enum Role { owner | admin }
 ------------------------------------------------------------
 
 entity AgentGroup {
+    id: String
     name: String
     folder: String
     agent_provider: String?

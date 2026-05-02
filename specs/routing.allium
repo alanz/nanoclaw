@@ -45,6 +45,7 @@ enum SessionMode { shared | per_thread | agent_shared }
 ------------------------------------------------------------
 
 entity MessagingGroup {
+    id: String
     channel_type: String
     platform_id: String
     name: String
@@ -298,7 +299,7 @@ rule UnknownSenderEscalated {
     requires: exists sender
     requires: mg.denied_at = null
     requires: mg.unknown_sender_policy = request_approval
-    requires: not sender.can_access(mg.wirings.first.agent_group)
+    requires: for w in mg.wirings: not sender.can_access(w.agent_group)
     requires: not exists SenderApprovalRequest{messaging_group: mg, sender: sender,
                                                status: pending}
     ensures: SenderApprovalRequest.created(

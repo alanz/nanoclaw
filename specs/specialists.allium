@@ -127,6 +127,7 @@ config {
 -- child's result is routed back.
 
 entity SpecialistTask {
+    id: String
     specialist_group: identity/AgentGroup
     prompt: String
     requester_group: identity/AgentGroup?

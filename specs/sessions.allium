@@ -46,6 +46,7 @@ config {
 ------------------------------------------------------------
 
 entity Session {
+    id: String
     agent_group: identity/AgentGroup
     messaging_group: routing/MessagingGroup?
     thread_id: String?

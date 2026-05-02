@@ -95,7 +95,7 @@ rule PackageInstallRequested {
     ensures: approvals/ApprovalRequested(
         agent_group: session.agent_group,
         session_id: session.id,
-        action: install_packages,
+        action: "install_packages",
         payload: reason,
         title: reason,
         options: "Approve / Reject"
@@ -123,7 +123,7 @@ rule PackageInstallRequested {
 
 rule PackageInstallApproved {
     when: approval: approvals/PendingApproval.status transitions_to approved
-    requires: approval.action = install_packages
+    requires: approval.action = "install_packages"
     let req = PackageInstallRequest{agent_group: approval.agent_group}
     requires: exists req
     requires: req.status = pending_approval
@@ -155,7 +155,7 @@ rule PackageInstallApproved {
 
 rule PackageInstallRejected {
     when: approval: approvals/PendingApproval.status transitions_to rejected
-    requires: approval.action = install_packages
+    requires: approval.action = "install_packages"
     let req = PackageInstallRequest{agent_group: approval.agent_group}
     requires: exists req
     requires: req.status = pending_approval
@@ -187,7 +187,7 @@ rule McpServerAddRequested {
     ensures: approvals/ApprovalRequested(
         agent_group: session.agent_group,
         session_id: session.id,
-        action: add_mcp_server,
+        action: "add_mcp_server",
         payload: reason,
         title: reason,
         options: "Approve / Reject"
@@ -209,7 +209,7 @@ rule McpServerAddRequested {
 
 rule McpServerApproved {
     when: approval: approvals/PendingApproval.status transitions_to approved
-    requires: approval.action = add_mcp_server
+    requires: approval.action = "add_mcp_server"
     let req = McpServerRequest{agent_group: approval.agent_group}
     requires: exists req
     requires: req.status = pending_approval
@@ -221,7 +221,7 @@ rule McpServerApproved {
 
 rule McpServerRejected {
     when: approval: approvals/PendingApproval.status transitions_to rejected
-    requires: approval.action = add_mcp_server
+    requires: approval.action = "add_mcp_server"
     let req = McpServerRequest{agent_group: approval.agent_group}
     requires: exists req
     requires: req.status = pending_approval

@@ -1,0 +1,384 @@
+-- allium: 3
+-- memory.allium
+--
+-- NanoClaw v2 memory indexing and semantic search.
+-- Each agent group has an embedded memory index built from markdown and org files in its workspace
+-- (groups/<group>/memory/). Agents can search memory using natural language queries; results use
+-- hybrid vector + keyword scoring.
+--
+-- Scope: memory indexing and retrieval
+-- Includes: file watching, chunking, embedding, hybrid search, FTS fallback
+-- Excludes:
+--   - Core routing (see routing.allium, sessions.allium)
+--   - Embedding provider internals (treated as black box)
+--   - sqlite-vec extension mechanics (implementation detail)
+--
+-- NOTE: This is a ported template from v1. The v2 implementation is not yet written.
+-- Key v2 differences from v1:
+--   - Groups are now AgentGroups (identity.allium); the workspace root is groups/<folder>/memory/
+--   - The v1 IPC query path (HostFulfilled* rules) is replaced by the MemoryMcpTools surface
+--     (see bottom of file); MCP tools are registered in container/agent-runner/src/mcp-tools/
+--   - Write path differs by agent type (see MemoryFilesWithinWorkspace invariant comment):
+--       non-specialist agents — group dir mounted RW; agents write to memory/ directly
+--       specialist agents     — group dir mounted RO; files land via commit_to_memory on result delivery
+
+use "./identity.allium" as identity
+use "./sessions.allium" as sessions
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- A scored search result returned to the querying agent.
+-- Return type of the opaque memory_hybrid_search black-box function (see the
+-- Host-Side Helpers comment block below). Allium does not support module-qualified
+-- references to free functions, so this value type cannot be formally referenced
+-- from rules even though MemorySearched binds its results.
+-- allium-ignore allium.definition.unused
+value MemorySearchResult {
+    chunk: MemoryChunk
+    score: Decimal                      -- 0.0 – 1.0; hybrid of vector and keyword scores
+    snippet: String                     -- short excerpt for display
+}
+
+-- Caller-supplied parameters for memory_hybrid_search.
+-- All fields are optional; the host fills in defaults from config when absent.
+value MemorySearchParams {
+    limit: Integer?                     -- cap on results returned (defaults to config.search_top_k)
+    min_score: Decimal?                 -- minimum hybrid score (defaults to config.min_search_score)
+    path_prefix: String?                -- restrict search to files under this path prefix
+    source: String?                     -- restrict search to files from a named source
+    include_content: Boolean?           -- whether to include full chunk content alongside snippets
+}
+
+-- Caller-supplied parameters for memory_list_files.
+-- All fields are optional; the host fills in defaults when absent.
+value MemoryListParams {
+    path_prefix: String?                -- restrict listing to files under this path prefix
+    source: String?                     -- restrict listing to files from a named source
+    limit: Integer?                     -- cap on files returned
+    order_by: String?                   -- mtime | path | size
+    parse_frontmatter: Boolean?         -- whether to parse and include YAML frontmatter (limit ≤ 50 when true)
+}
+
+------------------------------------------------------------
+-- Host-Side Helpers
+------------------------------------------------------------
+
+-- The following four black-box functions are implemented by the host process and
+-- exposed to agents as MCP tool calls (see container/agent-runner/src/mcp-tools/).
+-- They are referenced by bare (unqualified) names because Allium does not support
+-- module-qualified references to free functions; the memory_ prefix marks the module
+-- boundary instead.
+--
+--   memory_hybrid_search(group: identity/AgentGroup, query: String, params: MemorySearchParams)
+--     → list of MemorySearchResult
+--     Combines vector similarity (sqlite-vec cosine distance) and FTS5 keyword match,
+--     weighted by config.vector_score_weight and config.keyword_score_weight. Falls
+--     back to keyword-only search when the vector index is unavailable.
+--
+--   memory_get_file_content(group: identity/AgentGroup, path: String, parse_frontmatter: Boolean)
+--     → file content (optionally with parsed frontmatter metadata)
+--     Reads a single indexed memory file by path. Returns the raw content plus
+--     optional frontmatter fields when parse_frontmatter = true.
+--
+--   memory_list_files(group: identity/AgentGroup, params: MemoryListParams)
+--     → list of indexed files matching the filter
+--     Enumerates MemoryFile records for the group, applying path_prefix, source,
+--     order_by, and limit filters from the params.
+--
+--   chunk_file(path: String, chunk_tokens: Integer, overlap_tokens: Integer)
+--     → list of (start_line: Integer, end_line: Integer, content: String, hash: String)
+--     Reads the file at path and splits its content into overlapping chunks for embedding.
+--     Dispatches to a format-specific chunker based on file extension:
+--       .md  — line-by-line, trailing-line overlap (chunkMarkdown)
+--       .org — heading-boundary splits with parent-heading context carried into child
+--              sections instead of character overlap (chunkOrgMode)
+--     Token counting uses a 4-chars-per-token character approximation (no real tokenizer).
+--     chunk_tokens and overlap_tokens map to chunk_tokens*4 and overlap_tokens*4 characters.
+--     Returns [] for empty files. Blocks and drawers in .org files are never split across
+--     chunk boundaries even if they exceed the token target.
+--     hash is SHA-256 of the chunk text; used to deduplicate embeddings across groups.
+--
+-- The memory_* helpers are read-only with respect to the memory index. chunk_file is
+-- read-only with respect to the filesystem — it reads but does not mutate MemoryFile
+-- or MemoryChunk entities.
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A file in a group's workspace that is tracked and indexed for semantic search.
+-- Files are re-indexed whenever their content changes.
+entity MemoryFile {
+    group: identity/AgentGroup
+    path: String                        -- repo-relative path, e.g. groups/<folder>/memory/notes/foo.md
+    content_hash: String
+    indexed_at: Timestamp?              -- null until first successful index
+    -- The triggering rules fire on WorkspaceFileChanged and WorkspaceFileRemoved — file-system
+    -- watcher events emitted by the host process with no governing allium spec. They will always
+    -- be external triggers. The checker cascades unreachable-trigger → unreachable-rule →
+    -- unobserved status assignment. Lift if the checker suppresses that cascade for external triggers.
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: pending | indexed | removed
+
+    -- Relationships
+    chunks: MemoryChunk with file = this
+
+    transitions status {
+        pending -> indexed
+        indexed -> pending              -- file changed; needs re-index
+        indexed -> removed
+        pending -> removed
+        terminal: removed
+    }
+}
+
+-- A contiguous chunk of a memory file, stored with its embedding for vector search.
+-- Chunks overlap slightly to preserve context across boundaries.
+entity MemoryChunk {
+    file: MemoryFile
+    start_line: Integer
+    end_line: Integer
+    content: String
+    hash: String                        -- SHA-256 of the chunk text; deduplicates embeddings across groups and models
+    indexed_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    chunk_tokens: Integer = 400
+    chunk_overlap_tokens: Integer = 80
+    search_top_k: Integer = 6
+    min_search_score: Decimal = 0.35
+    vector_score_weight: Decimal = 0.7
+    keyword_score_weight: Decimal = 0.3
+    embedding_provider: String = "gemini"
+    embedding_rpm_limit: Integer = 50   -- requests per minute to embedding provider
+    embedding_tpm_limit: Integer = 15_000
+    embedding_rpd_budget: Integer = 900 -- requests per session day; exhausted → defer to next session
+    memory_search_enabled: Boolean = true
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- File Watching ----
+
+-- A known file has changed content and needs re-indexing.
+-- Covers both the indexed→pending and pending→pending (hash changed again before sync) cases.
+-- The hash guard skips no-op watcher events (e.g. touch without content change) so the
+-- embedding API is not called unnecessarily.
+rule FileUpdated {
+    when: WorkspaceFileChanged(group, path, content_hash)
+
+    let file = MemoryFile{group: group, path: path}
+
+    requires: exists file
+    requires: content_hash != file.content_hash
+    requires: file.status in { pending, indexed }
+
+    ensures: file.content_hash = content_hash
+    ensures: file.status = pending
+}
+
+-- A new file has appeared in the workspace and needs initial indexing.
+rule FileDiscovered {
+    when: WorkspaceFileChanged(group, path, content_hash)
+
+    requires: not exists MemoryFile{group: group, path: path}
+
+    ensures: MemoryFile.created(
+        group: group,
+        path: path,
+        content_hash: content_hash,
+        status: pending
+    )
+
+    @guidance
+        -- Also fires when a specialist delivers a result with commit_to_memory = true
+        -- (see specialists/AgentRequestsDeliverSpecialistResult). The host copies the
+        -- file into the group's memory/ directory before WorkspaceFileChanged is emitted,
+        -- so this rule fires under the same conditions as any other new file.
+}
+
+-- When a file is removed from the workspace, its chunks are deleted and the file is marked removed.
+rule FileRemoved {
+    when: WorkspaceFileRemoved(group, path)
+
+    let file = MemoryFile{group: group, path: path}
+
+    requires: exists file
+    requires: file.status in { pending, indexed }
+
+    ensures: file.status = removed
+    ensures:
+        for chunk in file.chunks:
+            not exists chunk
+
+    @guidance
+        -- FTS index rows and embedding rows for removed chunks are also deleted
+        -- as part of the same operation to keep the search index consistent.
+        -- WorkspaceFileRemoved is emitted from two sources: the filesystem watcher
+        -- and the periodic sync sweep, which reconciles all tracked paths and emits
+        -- the trigger for any file that has disappeared without a watcher event.
+        -- The rule applies equally in both cases — the trigger source does not affect
+        -- the postcondition.
+}
+
+-- ---- Indexing ----
+
+-- A pending file is chunked, embedded, and its chunks stored for search.
+-- Existing chunks for the file are replaced with the new set.
+rule FileSynced {
+    when: file: MemoryFile.status becomes pending
+
+    requires: file.status = pending
+
+    let new_chunks = chunk_file(file.path, config.chunk_tokens, config.chunk_overlap_tokens)
+
+    ensures: file.status = indexed
+    ensures: file.indexed_at = now
+    ensures:
+        for chunk in file.chunks:
+            not exists chunk
+    ensures:
+        for c in new_chunks:
+            MemoryChunk.created(
+                file: file,
+                start_line: c.start_line,
+                end_line: c.end_line,
+                content: c.content,
+                hash: c.hash,
+                indexed_at: now
+            )
+
+    @guidance
+        -- Embeddings are generated in batches via the Gemini API with three rate limits:
+        --   RPM  (requests per minute)   — causes in-session waiting; transparent to this rule
+        --   TPM  (tokens per minute)     — causes in-session waiting; transparent to this rule
+        --   RPD  (requests per day)      — aborts the sync; see below
+        -- The per-session RPD budget (config.embedding_rpd_budget) is a process-lifetime cap
+        -- tracked in memory. When it is exhausted — or when the Gemini API returns a 429
+        -- with quotaType "rpd" — the host aborts the current sync immediately. Any files
+        -- not yet processed remain pending. The host sets an internal dirty flag so that
+        -- the next sync() invocation (next process start or next watcher event) retries all
+        -- pending files. No status change is needed: pending already means "not yet indexed,
+        -- will be retried." RPM/TPM cool-down is handled transparently inside acquirePermit.
+        -- Embeddings are cached by chunk hash and reused across groups and models, so a
+        -- repeated sync after budget recovery only embeds chunks whose hash is not yet cached.
+}
+
+-- ---- Search ----
+
+-- An agent queries its group's memory with a natural language string.
+-- Results are ranked by hybrid vector + keyword score and filtered by min_search_score.
+rule MemorySearched {
+    when: AgentMemorySearch(session, group, query, top_k?)
+
+    requires: session.agent_group = group
+    requires: config.memory_search_enabled
+
+    let params = MemorySearchParams{
+        limit: top_k ?? config.search_top_k,
+        min_score: config.min_search_score,
+        path_prefix: null,
+        source: null,
+        include_content: null
+    }
+    let results = memory_hybrid_search(group, query, params)
+
+    ensures: MemorySearchCompleted(group: group, query: query, results: results)
+
+    @guidance
+        -- memory_hybrid_search combines vector similarity (sqlite-vec cosine distance)
+        -- and FTS5 keyword match, weighted by config.vector_score_weight and
+        -- config.keyword_score_weight. If the vector index is unavailable, falls back
+        -- to keyword-only search. Returns a list of MemorySearchResult values.
+        -- Not available in specialist containers: memory search, get, and list are not
+        -- registered in the specialist container MCP server (gated by isSpecialist at
+        -- startup). Specialists that need memory access must use the query_memory tool,
+        -- which routes through a memory-provider specialist type.
+}
+
+-- An agent retrieves the full content of a specific memory file by path.
+rule MemoryFileRead {
+    when: AgentMemoryGet(session, group, path, parse_frontmatter?)
+
+    requires: session.agent_group = group
+    requires: config.memory_search_enabled
+    requires: exists MemoryFile{group: group, path: path, status: indexed}
+
+    ensures: MemoryFileContentReturned(group: group, path: path)
+
+    @guidance
+        -- Implemented by memory_get_file_content(group_folder, path, parse_frontmatter).
+        -- parse_frontmatter defaults to true when absent.
+        -- Not available in specialist containers (see specialist restriction note on MemorySearched).
+}
+
+-- An agent lists files in its group's memory workspace.
+rule MemoryListed {
+    when: AgentMemoryList(session, group, list_params?)
+
+    requires: session.agent_group = group
+    requires: config.memory_search_enabled
+
+    let params = list_params ?? MemoryListParams{
+        path_prefix: null,
+        source: null,
+        limit: null,
+        order_by: null,
+        parse_frontmatter: null
+    }
+    let files = memory_list_files(group, params)
+
+    ensures: MemoryListCompleted(group: group, files: files)
+
+    @guidance
+        -- Not available in specialist containers (see MemorySearched guidance).
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- All indexed files must live within the group's memory/ subdirectory.
+-- Non-specialist agents write there directly (group dir is mounted RW).
+-- Specialist agents land files there via commit_to_memory on result delivery
+-- (group dir is mounted RO for specialists; the host performs the copy).
+invariant MemoryFilesWithinWorkspace {
+    for f in MemoryFiles:
+        startsWith(f.path, "groups/") and contains(f.path, "/memory/")
+}
+
+-- Every chunk belongs to an indexed (or pending) file, never a removed one.
+invariant NoChunksForRemovedFiles {
+    for c in MemoryChunks:
+        c.file.status != removed
+}
+
+-- A file that has never completed a sync has no chunks.
+-- A file being re-indexed (status: pending, indexed_at non-null) retains its
+-- stale chunks until FileSynced replaces them; this invariant permits that window.
+invariant ChunksPresentOnlyWhenIndexed {
+    for f in MemoryFiles:
+        f.indexed_at = null implies f.chunks.count = 0
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface MemoryMcpTools {
+    facing agent: sessions/Session
+
+    provides:
+        AgentMemorySearch(agent, group, query, top_k?)
+        AgentMemoryGet(agent, group, path, parse_frontmatter?)
+        AgentMemoryList(agent, group, list_params?)
+}

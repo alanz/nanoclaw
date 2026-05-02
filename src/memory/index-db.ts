@@ -56,7 +56,12 @@ export type IndexDb = {
 
 export async function openIndexDb(dbPath: string, model: string): Promise<IndexDb> {
   const db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
+  // DELETE mode, not WAL: the index is mounted read-only into containers, and
+  // WAL-mode databases require the reader to access the .db-wal + .db-shm files
+  // on a read-write filesystem. On a read-only mount the container cannot update
+  // the wal-index, so it only sees checkpointed data. DELETE mode writes atomically
+  // to the main file and is visible to read-only mounts immediately after each commit.
+  db.pragma('journal_mode = DELETE');
 
   const vecResult = await loadSqliteVecExtension({ db });
   const vecAvailable = vecResult.ok;

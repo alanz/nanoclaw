@@ -73,20 +73,25 @@ export const memorySearch: McpToolDefinition = {
   tool: {
     name: 'memory_search',
     description:
-      'Search the agent group memory index using a natural language query. Returns ranked results from indexed markdown and org files.',
+      'Search your personal knowledge base (memory files, research documents, notes). Use when the user references something you may have notes on, or when background context would improve your answer.\n\nReturns ranked results with path, line range, score, and snippet. Use memory_get_file_content to fetch the full content of a result.',
     inputSchema: {
       type: 'object' as const,
-      required: ['group', 'query'],
+      required: ['query'],
       properties: {
-        group: { type: 'string', description: 'The agent group folder name to search within.' },
-        query: { type: 'string', description: 'Natural language search query.' },
-        top_k: { type: 'number', description: 'Maximum number of results to return (default: 6).' },
+        query: { type: 'string', description: 'What to search for.' },
+        top_k: { type: 'number', description: 'Max results (default 6, max 20).' },
+        path_prefix: { type: 'string', description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/memory/notes/".' },
+        source: { type: 'string', description: 'Filter by source: "memory" or "org".' },
+        min_score: { type: 'number', description: 'Min relevance score 0–1 (default 0.1).' },
       },
     },
   },
   async handler(args) {
     const query = args.query as string;
     const topK = typeof args.top_k === 'number' ? Math.min(args.top_k, 20) : 6;
+    const pathPrefix = args.path_prefix as string | undefined;
+    const source = args.source as string | undefined;
+    const minScore = typeof args.min_score === 'number' ? args.min_score : 0.1;
 
     const db = openDb();
     if (!db) return { content: [{ type: 'text' as const, text: JSON.stringify([]) }] };
@@ -98,15 +103,19 @@ export const memorySearch: McpToolDefinition = {
         return { content: [{ type: 'text' as const, text: JSON.stringify([]) }] };
       }
 
+      const conditions = [`${FTS_TABLE} MATCH ?`];
+      const params: (string | number)[] = [ftsQuery];
+      if (source) { conditions.push('source = ?'); params.push(source); }
+
       const rows = db.query<
         { id: string; path: string; source: string; start_line: number; end_line: number; text: string; rank: number },
-        [string, number]
+        (string | number)[]
       >(
         `SELECT id, path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` +
         `  FROM ${FTS_TABLE}` +
-        ` WHERE ${FTS_TABLE} MATCH ?` +
+        ` WHERE ${conditions.join(' AND ')}` +
         ` ORDER BY rank ASC LIMIT ?`,
-      ).all(ftsQuery, topK * 4);
+      ).all(...params, topK * 4);
 
       const results = rows
         .map((r) => ({
@@ -117,7 +126,8 @@ export const memorySearch: McpToolDefinition = {
           snippet: truncate(r.text, SNIPPET_MAX),
           source: r.source,
         }))
-        .filter((r) => r.score >= 0.1)
+        .filter((r) => r.score >= minScore)
+        .filter((r) => !pathPrefix || r.path.startsWith(pathPrefix))
         .slice(0, topK);
 
       db.close();
@@ -133,14 +143,13 @@ export const memorySearch: McpToolDefinition = {
 export const memoryGetFileContent: McpToolDefinition = {
   tool: {
     name: 'memory_get_file_content',
-    description: 'Read the full content of a specific indexed memory file by path.',
+    description: 'Read the full content of a specific file from your knowledge base. Use the path from memory_search results.',
     inputSchema: {
       type: 'object' as const,
-      required: ['group', 'path'],
+      required: ['path'],
       properties: {
-        group: { type: 'string', description: 'The agent group folder name.' },
-        path: { type: 'string', description: 'Repo-relative path of the file to retrieve.' },
-        parse_frontmatter: { type: 'boolean', description: 'Whether to parse and return YAML frontmatter (default: true).' },
+        path: { type: 'string', description: 'Repo-relative path of the file (from memory_search result).' },
+        parse_frontmatter: { type: 'boolean', description: 'Parse YAML frontmatter (default: true).' },
       },
     },
   },
@@ -192,17 +201,16 @@ export const memoryGetFileContent: McpToolDefinition = {
 export const memoryListFiles: McpToolDefinition = {
   tool: {
     name: 'memory_list_files',
-    description: 'List indexed files in the agent group memory workspace.',
+    description: 'List all indexed files in your knowledge base.',
     inputSchema: {
       type: 'object' as const,
-      required: ['group'],
+      required: [],
       properties: {
-        group: { type: 'string', description: 'The agent group folder name.' },
         path_prefix: { type: 'string', description: 'Restrict listing to files under this path prefix.' },
         source: { type: 'string', description: 'Restrict listing to files from a named source.' },
         limit: { type: 'number', description: 'Maximum number of files to return.' },
         order_by: { type: 'string', description: 'Sort order: mtime | path | size.' },
-        parse_frontmatter: { type: 'boolean', description: 'Whether to parse and include YAML frontmatter (limit ≤ 50 when true).' },
+        parse_frontmatter: { type: 'boolean', description: 'Parse and include YAML frontmatter (limit ≤ 50 when true).' },
       },
     },
   },

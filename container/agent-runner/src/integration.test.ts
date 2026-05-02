@@ -93,17 +93,12 @@ describe('poll loop integration', () => {
   });
 });
 
-// Helper: run poll loop until aborted or timeout
+// Helper: run poll loop until aborted or timeout.
+// Passes the signal directly to runPollLoop so abort properly tears down
+// the active query and clears the polling interval before the DB is closed.
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
   return Promise.race([
-    runPollLoop({
-      provider,
-      providerName: 'mock',
-      cwd: '/tmp',
-    }),
-    new Promise<void>((_, reject) => {
-      signal.addEventListener('abort', () => reject(new Error('aborted')));
-    }),
+    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal }),
     new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
   ]);
 }

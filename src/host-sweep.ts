@@ -92,16 +92,14 @@ export function decideStuckAction(args: {
     }
   }
 
-  // If there is no heartbeat file the container just spawned and hasn't had
-  // a chance to run clearStaleProcessingAcks() yet. Killing it here would
-  // create an infinite kill-loop: stale ack → new container → immediate kill
-  // → stale ack still present → next container → immediate kill → ...
-  // Skip the claim-stuck check entirely until the container has written its
-  // first heartbeat, at which point it has already cleared the stale acks.
-  if (heartbeatMtimeMs === 0) {
-    return { action: 'ok' };
-  }
-
+  // No early-return here for heartbeatMtimeMs === 0. A fresh container that
+  // has claimed a message but never written a heartbeat is genuinely stuck;
+  // the claim-stuck check below handles it correctly because
+  // `0 > claimedAt` (a positive epoch ms) is always false, so the heartbeat
+  // freshness guard never skips the stuck check. If the container just spawned
+  // and a stale ack from a previous crash is present, resetStuckProcessingRows
+  // adds exponential backoff that prevents immediate re-kill of the next
+  // container spawn, so there is no infinite kill-loop.
   const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
   for (const claim of claims) {
     const claimedAt = Date.parse(claim.status_changed);

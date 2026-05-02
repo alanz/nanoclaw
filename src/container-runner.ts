@@ -278,14 +278,22 @@ function buildMounts(
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
-  // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
-  mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
+  // Agent group folder at /workspace/agent.
+  // Non-specialist groups mount RW so the agent can update CLAUDE.local.md (auto-memory).
+  // Specialist groups share this type-template folder across concurrent tasks — mount RO
+  // so no running task can mutate the template or affect sibling tasks. Per-task state
+  // for specialists lives exclusively in the session DBs under /workspace.
+  const isSpecialist = agentGroup.id.startsWith('ag-specialist-');
+  mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: isSpecialist });
 
   // container.json and CLAUDE.md are inside groupDir (mounted as /workspace/agent above).
   // Apple Container only supports directory mounts, not file-level bind mounts,
-  // so the nested RO overlays used with Docker cannot be used here. The files
-  // remain writable by the agent, but container.json is rewritten at spawn time
-  // and CLAUDE.md is regenerated on every spawn, so agent-side writes are harmless.
+  // so the nested RO overlays used with Docker cannot be used here. For non-specialist
+  // groups, the files remain writable. container.json is rewritten at spawn time and
+  // CLAUDE.md is regenerated on every spawn — so agent-side writes to those two files
+  // are silently lost on the next spawn. CLAUDE.local.md is the correct target for
+  // any persistent per-group instructions; it survives across spawns and is included
+  // into the composed CLAUDE.md. For specialist groups the entire mount is RO.
 
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
   if (fs.existsSync(fragmentsDir)) {

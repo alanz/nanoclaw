@@ -51,16 +51,14 @@ export function createMemoryFile(params: {
 }
 
 export function getMemoryFile(id: string): MemoryFile | null {
-  return (
-    (getDb().prepare('SELECT * FROM memory_files WHERE id = ?').get(id) as MemoryFile | undefined) ?? null
-  );
+  return (getDb().prepare('SELECT * FROM memory_files WHERE id = ?').get(id) as MemoryFile | undefined) ?? null;
 }
 
 export function findMemoryFile(params: { group_id: string; path: string }): MemoryFile | null {
   return (
-    (getDb()
-      .prepare('SELECT * FROM memory_files WHERE group_id = ? AND path = ?')
-      .get(params.group_id, params.path) as MemoryFile | undefined) ?? null
+    (getDb().prepare('SELECT * FROM memory_files WHERE group_id = ? AND path = ?').get(params.group_id, params.path) as
+      | MemoryFile
+      | undefined) ?? null
   );
 }
 
@@ -117,9 +115,7 @@ export function createMemoryChunk(params: {
 }
 
 export function getMemoryFileChunks(file_id: string): MemoryChunk[] {
-  return getDb()
-    .prepare('SELECT * FROM memory_chunks WHERE file_id = ?')
-    .all(file_id) as MemoryChunk[];
+  return getDb().prepare('SELECT * FROM memory_chunks WHERE file_id = ?').all(file_id) as MemoryChunk[];
 }
 
 export function getAllMemoryChunks(): MemoryChunk[] {

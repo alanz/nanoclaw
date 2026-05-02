@@ -6,8 +6,10 @@
  */
 import path from 'path';
 
-import { CREDENTIAL_PROXY_HOST, CREDENTIAL_PROXY_PORT, DATA_DIR } from './config.js';
+import { CREDENTIAL_PROXY_HOST, CREDENTIAL_PROXY_PORT, DATA_DIR, GROUPS_DIR } from './config.js';
 import { readEnvFile } from './env.js';
+import { getAllAgentGroups } from './db/agent-groups.js';
+import { initMemoryManagers, closeAllMemoryManagers } from './memory/manager.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
@@ -72,6 +74,24 @@ async function main(): Promise<void> {
 
   // 1b. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
+
+  // 1c. Memory search — init per-group index managers if API key is configured.
+  const memEnv = readEnvFile(['MEMORY_SEARCH_GEMINI_API_KEY', 'MEMORY_SEARCH_MODEL']);
+  const geminiApiKey = process.env.MEMORY_SEARCH_GEMINI_API_KEY ?? memEnv.MEMORY_SEARCH_GEMINI_API_KEY ?? '';
+  if (geminiApiKey) {
+    const allGroups = getAllAgentGroups();
+    await initMemoryManagers({
+      dataDir: DATA_DIR,
+      groupsDir: GROUPS_DIR,
+      apiKey: geminiApiKey,
+      model: process.env.MEMORY_SEARCH_MODEL ?? memEnv.MEMORY_SEARCH_MODEL,
+      groups: allGroups.map((g) => ({ id: g.id, folder: g.folder })),
+    });
+    onShutdown(() => closeAllMemoryManagers());
+    log.info('Memory managers initialized', { groups: allGroups.length });
+  } else {
+    log.info('Memory search disabled: MEMORY_SEARCH_GEMINI_API_KEY not set');
+  }
 
   // 2. Container runtime
   ensureContainerRuntimeRunning();

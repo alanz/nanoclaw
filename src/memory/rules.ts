@@ -22,11 +22,7 @@ function assertMemoryPath(path: string): void {
   }
 }
 
-export function handleWorkspaceFileChanged(params: {
-  group_id: string;
-  path: string;
-  content_hash: string;
-}): void {
+export function handleWorkspaceFileChanged(params: { group_id: string; path: string; content_hash: string }): void {
   assertMemoryPath(params.path);
 
   const existing = findMemoryFile({ group_id: params.group_id, path: params.path });
@@ -50,10 +46,7 @@ export function handleWorkspaceFileChanged(params: {
   updateMemoryFile(existing.id, { status: 'pending', content_hash: params.content_hash });
 }
 
-export function handleWorkspaceFileRemoved(params: {
-  group_id: string;
-  path: string;
-}): void {
+export function handleWorkspaceFileRemoved(params: { group_id: string; path: string }): void {
   const file = findMemoryFile({ group_id: params.group_id, path: params.path });
   if (!file) return; // file not tracked — no-op
   if (file.status === 'removed') return; // already terminal — no-op

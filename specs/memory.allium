@@ -21,6 +21,13 @@
 --   - Write path differs by agent type (see MemoryFilesWithinWorkspace invariant comment):
 --       non-specialist agents — group dir mounted RW; agents write to memory/ directly
 --       specialist agents     — group dir mounted RO; files land via commit_to_memory on result delivery
+--
+-- Specialist exclusion: memory indexing, watching and search are disabled for specialist
+-- agent groups (groups with an associated identity/Specialist row — see identity.allium).
+-- Specialist containers do not mount the group's memory/ directory, do not run a watcher,
+-- and do not register the memory MCP tools. The rules and surface in this module gate on
+-- "not a specialist" via `group.specialist = null`. Specialists that need memory access
+-- delegate to a memory-provider specialist via the agent-to-agent query_memory tool.
 
 use "./identity.allium" as identity
 use "./sessions.allium" as sessions
@@ -178,6 +185,7 @@ rule FileUpdated {
 
     let file = MemoryFile{group: group, path: path}
 
+    requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: exists file
     requires: content_hash != file.content_hash
     requires: file.status in { pending, indexed }
@@ -190,6 +198,7 @@ rule FileUpdated {
 rule FileDiscovered {
     when: WorkspaceFileChanged(group, path, content_hash)
 
+    requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: not exists MemoryFile{group: group, path: path}
 
     ensures: MemoryFile.created(
@@ -212,6 +221,7 @@ rule FileRemoved {
 
     let file = MemoryFile{group: group, path: path}
 
+    requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: exists file
     requires: file.status in { pending, indexed }
 
@@ -237,6 +247,7 @@ rule FileRemoved {
 rule FileSynced {
     when: file: MemoryFile.status becomes pending
 
+    requires: file.group.specialist = null  -- memory indexing is disabled for specialist groups
     requires: file.status = pending
 
     let new_chunks = chunk_file(file.path, config.chunk_tokens, config.chunk_overlap_tokens)
@@ -281,6 +292,7 @@ rule MemorySearched {
     when: AgentMemorySearch(session, group, query, top_k?)
 
     requires: session.agent_group = group
+    requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
     requires: config.memory_search_enabled
 
     let params = MemorySearchParams{
@@ -310,6 +322,7 @@ rule MemoryFileRead {
     when: AgentMemoryGet(session, group, path, parse_frontmatter?)
 
     requires: session.agent_group = group
+    requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
     requires: config.memory_search_enabled
     requires: exists MemoryFile{group: group, path: path, status: indexed}
 
@@ -326,6 +339,7 @@ rule MemoryListed {
     when: AgentMemoryList(session, group, list_params?)
 
     requires: session.agent_group = group
+    requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
     requires: config.memory_search_enabled
 
     let params = list_params ?? MemoryListParams{
@@ -370,6 +384,14 @@ invariant ChunksPresentOnlyWhenIndexed {
         f.indexed_at = null implies f.chunks.count = 0
 }
 
+-- Memory indexing does not apply to specialist agent groups. Specialist containers
+-- do not mount the memory directory, do not run a watcher, and do not register the
+-- memory MCP tools, so no MemoryFile should ever be created for a specialist group.
+invariant NoMemoryFilesForSpecialistGroups {
+    for f in MemoryFiles:
+        f.group.specialist = null
+}
+
 ------------------------------------------------------------
 -- Surfaces
 ------------------------------------------------------------
@@ -381,4 +403,11 @@ surface MemoryMcpTools {
         AgentMemorySearch(agent, group, query, top_k?)
         AgentMemoryGet(agent, group, path, parse_frontmatter?)
         AgentMemoryList(agent, group, list_params?)
+
+    @guidance
+        -- Specialist sessions are excluded: this surface is not registered in specialist
+        -- containers (gated by isSpecialist at startup in container/agent-runner/src/mcp-tools/).
+        -- Equivalently, when agent.agent_group.specialist != null the surface is absent.
+        -- Specialists that need memory access route through a memory-provider specialist
+        -- via the agent-to-agent query_memory tool.
 }

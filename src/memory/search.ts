@@ -1,13 +1,12 @@
 import { findMemoryFile, getAllMemoryFiles, type MemoryFile } from './db.js';
 import { MEMORY_CONFIG, type MemoryConfig } from './config.js';
+import { getMemoryManager } from './manager.js';
 
 type Session = { id: string; agent_group_id: string };
 
 function assertSessionMatchesGroup(session: Session, group_id: string): void {
   if (session.agent_group_id !== group_id) {
-    throw new Error(
-      `Session agent_group_id "${session.agent_group_id}" does not match group "${group_id}"`,
-    );
+    throw new Error(`Session agent_group_id "${session.agent_group_id}" does not match group "${group_id}"`);
   }
 }
 
@@ -17,19 +16,22 @@ function assertSearchEnabled(config: MemoryConfig): void {
   }
 }
 
-// memory_hybrid_search is a black-box host function (vector + FTS5 hybrid).
-// Returns an empty list until the full embedding pipeline is wired.
-export function handleMemorySearch(
+export async function handleMemorySearch(
   params: { session: Session; group_id: string; query: string; top_k?: number },
   config: MemoryConfig = MEMORY_CONFIG,
-): unknown[] {
+): Promise<unknown[]> {
   assertSearchEnabled(config);
   assertSessionMatchesGroup(params.session, params.group_id);
-  return [];
+
+  const manager = getMemoryManager(params.group_id);
+  if (!manager) return [];
+
+  return manager.search(params.query, {
+    maxResults: params.top_k ?? config.search_top_k,
+    minScore: config.min_search_score,
+  });
 }
 
-// memory_get_file_content is a black-box host function.
-// Returns the MemoryFile record (path + metadata) for the indexed file.
 export function handleMemoryGet(
   params: { session: Session; group_id: string; path: string; parse_frontmatter?: boolean },
   config: MemoryConfig = MEMORY_CONFIG,
@@ -45,8 +47,6 @@ export function handleMemoryGet(
   return file;
 }
 
-// memory_list_files is a black-box host function.
-// Returns all indexed files for the group.
 export function handleMemoryList(
   params: { session: Session; group_id: string; list_params?: unknown },
   config: MemoryConfig = MEMORY_CONFIG,
@@ -54,7 +54,5 @@ export function handleMemoryList(
   assertSearchEnabled(config);
   assertSessionMatchesGroup(params.session, params.group_id);
 
-  return getAllMemoryFiles().filter(
-    (f) => f.group_id === params.group_id && f.status !== 'removed',
-  );
+  return getAllMemoryFiles().filter((f) => f.group_id === params.group_id && f.status !== 'removed');
 }

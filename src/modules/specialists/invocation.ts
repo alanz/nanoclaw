@@ -33,9 +33,7 @@ function genId(prefix: string): string {
  * Returns mounts to append and the invocation ID, or null if the invocations
  * table isn't present (file-handover migration not yet applied).
  */
-export function buildInvocationForSession(
-  session: Session,
-): { mounts: VolumeMount[]; invocationId: string } | null {
+export function buildInvocationForSession(session: Session): { mounts: VolumeMount[]; invocationId: string } | null {
   const db = getDb();
   if (!hasTable(db, 'invocations')) return null;
 
@@ -136,9 +134,7 @@ export function getActiveInvocation(sessionId: string): Invocation | undefined {
   const db = getDb();
   if (!hasTable(db, 'invocations')) return undefined;
   return db
-    .prepare(
-      'SELECT * FROM invocations WHERE session_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1',
-    )
+    .prepare('SELECT * FROM invocations WHERE session_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1')
     .get(sessionId) as Invocation | undefined;
 }
 

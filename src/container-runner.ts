@@ -323,6 +323,16 @@ function buildMounts(
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
+  // Per-group memory index — read-only so agents can run FTS5 / vector search
+  // directly via bun:sqlite without host round-trip. Non-specialist only: specialists
+  // use query_memory tool routed through a memory-provider group.
+  if (!isSpecialist) {
+    const memoryIndexDir = path.join(DATA_DIR, 'v2-memory', agentGroup.id);
+    if (fs.existsSync(memoryIndexDir)) {
+      mounts.push({ hostPath: memoryIndexDir, containerPath: '/workspace/memory', readonly: true });
+    }
+  }
+
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);

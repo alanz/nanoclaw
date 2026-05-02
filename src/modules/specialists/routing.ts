@@ -16,7 +16,11 @@ import { GROUPS_DIR } from '../../config.js';
 import { getSpecialist, getTask, updateTaskStatus } from './db.js';
 import { SPECIALISTS_CONFIG } from './config.js';
 import { findSessionByAgentGroupAndThread } from './session-helpers.js';
-import { endActiveInvocationForSession, expireTransfersForTerminalTask, placeTransferIntoActiveIpcIn } from './invocation.js';
+import {
+  endActiveInvocationForSession,
+  expireTransfersForTerminalTask,
+  placeTransferIntoActiveIpcIn,
+} from './invocation.js';
 import type { ContainerTransfer, SpecialistTask, TransferFile } from './types.js';
 
 function generateId(): string {
@@ -108,12 +112,8 @@ async function routeResultToMain(task: SpecialistTask, transfer: ContainerTransf
         }
 
         // Mark transfer committed then immediately expired (memory copies persist)
-        getDb()
-          .prepare("UPDATE container_transfers SET status = 'committed' WHERE id = ?")
-          .run(transfer.id);
-        getDb()
-          .prepare("UPDATE container_transfers SET status = 'expired' WHERE id = ?")
-          .run(transfer.id);
+        getDb().prepare("UPDATE container_transfers SET status = 'committed' WHERE id = ?").run(transfer.id);
+        getDb().prepare("UPDATE container_transfers SET status = 'expired' WHERE id = ?").run(transfer.id);
       } else {
         log.warn('specialists: requester group not found for memory commit', {
           taskId: task.id,

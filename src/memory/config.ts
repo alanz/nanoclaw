@@ -12,4 +12,17 @@ export const MEMORY_CONFIG = {
   memory_search_enabled: true,
 } as const;
 
-export type MemoryConfig = typeof MEMORY_CONFIG;
+// Widened type so tests can pass { memory_search_enabled: false } without a literal mismatch.
+export type MemoryConfig = {
+  chunk_tokens: number;
+  chunk_overlap_tokens: number;
+  search_top_k: number;
+  min_search_score: number;
+  vector_score_weight: number;
+  keyword_score_weight: number;
+  embedding_provider: string;
+  embedding_rpm_limit: number;
+  embedding_tpm_limit: number;
+  embedding_rpd_budget: number;
+  memory_search_enabled: boolean;
+};

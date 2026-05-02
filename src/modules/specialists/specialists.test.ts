@@ -58,7 +58,9 @@ function makeSession(id: string, agentGroupId: string) {
   };
 }
 
-function makeTask(overrides: Partial<SpecialistTask> & { id: string; specialist_group_id: string; requester_session_id: string }): SpecialistTask {
+function makeTask(
+  overrides: Partial<SpecialistTask> & { id: string; specialist_group_id: string; requester_session_id: string },
+): SpecialistTask {
   return {
     prompt: 'do work',
     requester_group_id: 'main-group',
@@ -95,7 +97,14 @@ afterEach(() => {
 
 describe('SpecialistTaskStatus enum', () => {
   it('has members: queued, running, awaiting_sub_task, awaiting_restart, completed, failed', () => {
-    const statuses: SpecialistTaskStatus[] = ['queued', 'running', 'awaiting_sub_task', 'awaiting_restart', 'completed', 'failed'];
+    const statuses: SpecialistTaskStatus[] = [
+      'queued',
+      'running',
+      'awaiting_sub_task',
+      'awaiting_restart',
+      'completed',
+      'failed',
+    ];
     expect(statuses).toHaveLength(6);
     expect(statuses).toContain('queued');
     expect(statuses).toContain('running');
@@ -244,8 +253,24 @@ describe('Invocation value type', () => {
 
   it('two Invocation objects with the same fields are structurally equal', () => {
     const ts = now();
-    const a: Invocation = { id: 'inv-x', session_id: 'sess-x', task_id: null, ipc_out_host_path: '/o', ipc_in_host_path: '/i', started_at: ts, ended_at: null };
-    const b: Invocation = { id: 'inv-x', session_id: 'sess-x', task_id: null, ipc_out_host_path: '/o', ipc_in_host_path: '/i', started_at: ts, ended_at: null };
+    const a: Invocation = {
+      id: 'inv-x',
+      session_id: 'sess-x',
+      task_id: null,
+      ipc_out_host_path: '/o',
+      ipc_in_host_path: '/i',
+      started_at: ts,
+      ended_at: null,
+    };
+    const b: Invocation = {
+      id: 'inv-x',
+      session_id: 'sess-x',
+      task_id: null,
+      ipc_out_host_path: '/o',
+      ipc_in_host_path: '/i',
+      started_at: ts,
+      ended_at: null,
+    };
     expect(a).toEqual(b);
   });
 });
@@ -337,7 +362,13 @@ describe('SpecialistTask entity', () => {
   describe('optional fields — obligation ids: entity-optional.SpecialistTask.*', () => {
     it('requester_group is nullable (root task has requester_group set, sub-task has null)', () => {
       setupMainGroup();
-      const rootTask = makeTask({ id: 'task-root', specialist_group_id: 'spec-group', requester_session_id: 'sess-main', requester_group_id: 'main-group', requester_task_id: null });
+      const rootTask = makeTask({
+        id: 'task-root',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-main',
+        requester_group_id: 'main-group',
+        requester_task_id: null,
+      });
       createTask(rootTask);
       const r = getDb().prepare('SELECT * FROM specialist_tasks WHERE id = ?').get('task-root') as SpecialistTask;
       expect(r.requester_group_id).toBe('main-group');
@@ -362,7 +393,14 @@ describe('SpecialistTask entity', () => {
 
     it('committed_files is nullable even when status = completed (text-only delivery)', () => {
       setupMainGroup();
-      const task = makeTask({ id: 'task-4', specialist_group_id: 'spec-group', requester_session_id: 'sess-main', status: 'completed', result: 'done', closed_at: now() });
+      const task = makeTask({
+        id: 'task-4',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-main',
+        status: 'completed',
+        result: 'done',
+        closed_at: now(),
+      });
       createTask(task);
       const r = getDb().prepare('SELECT * FROM specialist_tasks WHERE id = ?').get('task-4') as SpecialistTask;
       expect(r.committed_files).toBeNull();
@@ -373,12 +411,26 @@ describe('SpecialistTask entity', () => {
     it('pending_sub_task is present when status = awaiting_sub_task', () => {
       setupMainGroup();
       // Create parent first without child reference, then create child, then update parent
-      const parentTask = makeTask({ id: 'task-parent', specialist_group_id: 'spec-group', requester_session_id: 'sess-main', status: 'queued', pending_sub_task_id: null });
+      const parentTask = makeTask({
+        id: 'task-parent',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-main',
+        status: 'queued',
+        pending_sub_task_id: null,
+      });
       createTask(parentTask);
-      const childTask = makeTask({ id: 'task-child', specialist_group_id: 'spec-group', requester_session_id: 'sess-main', requester_group_id: null, requester_task_id: 'task-parent' });
+      const childTask = makeTask({
+        id: 'task-child',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-main',
+        requester_group_id: null,
+        requester_task_id: 'task-parent',
+      });
       createTask(childTask);
       // Now update parent to awaiting_sub_task with child reference
-      getDb().prepare("UPDATE specialist_tasks SET status = 'awaiting_sub_task', pending_sub_task_id = ? WHERE id = ?").run('task-child', 'task-parent');
+      getDb()
+        .prepare("UPDATE specialist_tasks SET status = 'awaiting_sub_task', pending_sub_task_id = ? WHERE id = ?")
+        .run('task-child', 'task-parent');
       const r = getDb().prepare('SELECT * FROM specialist_tasks WHERE id = ?').get('task-parent') as SpecialistTask;
       expect(r.status).toBe('awaiting_sub_task');
       expect(r.pending_sub_task_id).toBe('task-child');
@@ -386,7 +438,14 @@ describe('SpecialistTask entity', () => {
 
     it('result is present when status = completed', () => {
       setupMainGroup();
-      const task = makeTask({ id: 'task-completed', specialist_group_id: 'spec-group', requester_session_id: 'sess-main', status: 'completed', result: 'final answer', closed_at: now() });
+      const task = makeTask({
+        id: 'task-completed',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-main',
+        status: 'completed',
+        result: 'final answer',
+        closed_at: now(),
+      });
       createTask(task);
       const r = getDb().prepare('SELECT * FROM specialist_tasks WHERE id = ?').get('task-completed') as SpecialistTask;
       expect(r.status).toBe('completed');
@@ -395,7 +454,15 @@ describe('SpecialistTask entity', () => {
 
     it('failure_kind is present when status = failed', () => {
       setupMainGroup();
-      const task = makeTask({ id: 'task-failed', specialist_group_id: 'spec-group', requester_session_id: 'sess-main', status: 'failed', failure_kind: 'timeout', failure_detail: 'exceeded limit', closed_at: now() });
+      const task = makeTask({
+        id: 'task-failed',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-main',
+        status: 'failed',
+        failure_kind: 'timeout',
+        failure_detail: 'exceeded limit',
+        closed_at: now(),
+      });
       createTask(task);
       const r = getDb().prepare('SELECT * FROM specialist_tasks WHERE id = ?').get('task-failed') as SpecialistTask;
       expect(r.status).toBe('failed');
@@ -407,7 +474,13 @@ describe('SpecialistTask entity', () => {
   describe('invariants — obligation ids: invariant.SpecialistTask.*', () => {
     it('DepthMatchesAncestorCount: root task has depth=0 and ancestor_groups=[]', () => {
       setupMainGroup();
-      const task = makeTask({ id: 'task-root-depth', specialist_group_id: 'spec-group', requester_session_id: 'sess-main', depth: 0, ancestor_group_ids: '[]' });
+      const task = makeTask({
+        id: 'task-root-depth',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-main',
+        depth: 0,
+        ancestor_group_ids: '[]',
+      });
       createTask(task);
       const r = getDb().prepare('SELECT * FROM specialist_tasks WHERE id = ?').get('task-root-depth') as SpecialistTask;
       const ancestors = JSON.parse(r.ancestor_group_ids) as string[];
@@ -427,15 +500,23 @@ describe('global invariants', () => {
     createAgentGroup(makeAgentGroup('main-group', 'main'));
     getDb().prepare('UPDATE agent_groups SET is_main = 1 WHERE id = ?').run('main-group');
     createAgentGroup(makeAgentGroup('spec-group', 'spec'));
-    createSpecialist({ agent_group_id: 'spec-group', is_memory_provider: 0, last_turn_sub_notice: null, last_turn_parent_notice: null, created_at: now() });
+    createSpecialist({
+      agent_group_id: 'spec-group',
+      is_memory_provider: 0,
+      last_turn_sub_notice: null,
+      last_turn_parent_notice: null,
+      created_at: now(),
+    });
     createSession(makeSession('sess-1', 'main-group'));
     createSession(makeSession('sess-spec-1', 'spec-group'));
     createTask(makeTask({ id: 'task-xfer', specialist_group_id: 'spec-group', requester_session_id: 'sess-1' }));
 
     // Create an invocation row
     const db = getDb();
-    db.prepare(`INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).run('inv-1', 'sess-spec-1', 'task-xfer', '/tmp/out', '/tmp/in', now());
+    db.prepare(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('inv-1', 'sess-spec-1', 'task-xfer', '/tmp/out', '/tmp/in', now());
 
     // Create a ContainerTransfer with file_count=2
     const transfer: ContainerTransfer = {
@@ -449,17 +530,32 @@ describe('global invariants', () => {
       status: 'pending',
       recipient_session_id: null,
     };
-    db.prepare(`INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
-      VALUES (@id, @task_id, @sender_invocation_id, @result_text, @commit_to_memory, @file_count, @sent_at, @status, @recipient_session_id)`).run(transfer);
+    db.prepare(
+      `INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
+      VALUES (@id, @task_id, @sender_invocation_id, @result_text, @commit_to_memory, @file_count, @sent_at, @status, @recipient_session_id)`,
+    ).run(transfer);
 
     // Insert 2 transfer files
     for (let i = 0; i < 2; i++) {
-      const tf: TransferFile = { id: `tf-${i}`, transfer_id: 'xfer-1', original_name: `file${i}.txt`, host_path: `/tmp/f${i}`, status: 'owned', memory_path: null };
-      db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (@id, @transfer_id, @original_name, @host_path, @status, @memory_path)`).run(tf);
+      const tf: TransferFile = {
+        id: `tf-${i}`,
+        transfer_id: 'xfer-1',
+        original_name: `file${i}.txt`,
+        host_path: `/tmp/f${i}`,
+        status: 'owned',
+        memory_path: null,
+      };
+      db.prepare(
+        `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (@id, @transfer_id, @original_name, @host_path, @status, @memory_path)`,
+      ).run(tf);
     }
 
-    const count = (db.prepare('SELECT COUNT(*) as n FROM transfer_files WHERE transfer_id = ?').get('xfer-1') as { n: number }).n;
-    const stored = (db.prepare('SELECT file_count FROM container_transfers WHERE id = ?').get('xfer-1') as { file_count: number }).file_count;
+    const count = (
+      db.prepare('SELECT COUNT(*) as n FROM transfer_files WHERE transfer_id = ?').get('xfer-1') as { n: number }
+    ).n;
+    const stored = (
+      db.prepare('SELECT file_count FROM container_transfers WHERE id = ?').get('xfer-1') as { file_count: number }
+    ).file_count;
     expect(count).toBe(stored);
   });
 
@@ -480,20 +576,40 @@ describe('global invariants', () => {
 describe('IpcOutMount state machine', () => {
   function setup() {
     createAgentGroup(makeAgentGroup('spec-group', 'spec'));
-    createSpecialist({ agent_group_id: 'spec-group', is_memory_provider: 0, last_turn_sub_notice: null, last_turn_parent_notice: null, created_at: now() });
+    createSpecialist({
+      agent_group_id: 'spec-group',
+      is_memory_provider: 0,
+      last_turn_sub_notice: null,
+      last_turn_parent_notice: null,
+      created_at: now(),
+    });
     createSession(makeSession('sess-ipc', 'spec-group'));
-    createTask(makeTask({ id: 'task-ipc', specialist_group_id: 'spec-group', requester_session_id: 'sess-ipc', requester_group_id: null, requester_task_id: 'task-ipc' }));
+    createTask(
+      makeTask({
+        id: 'task-ipc',
+        specialist_group_id: 'spec-group',
+        requester_session_id: 'sess-ipc',
+        requester_group_id: null,
+        requester_task_id: 'task-ipc',
+      }),
+    );
     // Use self-reference for FK test workaround — create task without FK check
     const db = getDb();
     // Actually just insert invocation directly
-    db.prepare(`INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).run('inv-ipc', 'sess-ipc', null, '/tmp/out', '/tmp/in', now());
+    db.prepare(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('inv-ipc', 'sess-ipc', null, '/tmp/out', '/tmp/in', now());
   }
 
   it('IpcOutMount is created in active state when an invocation starts', () => {
     setup();
     const db = getDb();
-    db.prepare('INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run('om-1', 'inv-ipc', 'active');
+    db.prepare('INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run(
+      'om-1',
+      'inv-ipc',
+      'active',
+    );
     const r = db.prepare('SELECT * FROM ipc_out_mounts WHERE id = ?').get('om-1') as { status: string };
     expect(r.status).toBe('active');
   });
@@ -501,7 +617,11 @@ describe('IpcOutMount state machine', () => {
   it('active -> cleared is the only valid transition', () => {
     setup();
     const db = getDb();
-    db.prepare('INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run('om-2', 'inv-ipc', 'active');
+    db.prepare('INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run(
+      'om-2',
+      'inv-ipc',
+      'active',
+    );
     db.prepare("UPDATE ipc_out_mounts SET status = 'cleared' WHERE id = ?").run('om-2');
     const r = db.prepare('SELECT * FROM ipc_out_mounts WHERE id = ?').get('om-2') as { status: string };
     expect(r.status).toBe('cleared');
@@ -516,7 +636,11 @@ describe('IpcOutMount state machine', () => {
   it('IpcOutMount transitions to cleared when the invocation ends', () => {
     setup();
     const db = getDb();
-    db.prepare('INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run('om-3', 'inv-ipc', 'active');
+    db.prepare('INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run(
+      'om-3',
+      'inv-ipc',
+      'active',
+    );
     // Simulate end invocation
     db.prepare("UPDATE ipc_out_mounts SET status = 'cleared' WHERE invocation_id = ?").run('inv-ipc');
     const r = db.prepare('SELECT * FROM ipc_out_mounts WHERE id = ?').get('om-3') as { status: string };
@@ -533,14 +657,20 @@ describe('IpcInMount state machine', () => {
     createAgentGroup(makeAgentGroup('spec-group2', 'spec2'));
     createSession(makeSession('sess-ipc2', 'spec-group2'));
     const db = getDb();
-    db.prepare(`INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).run('inv-ipc2', 'sess-ipc2', null, '/tmp/out2', '/tmp/in2', now());
+    db.prepare(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('inv-ipc2', 'sess-ipc2', null, '/tmp/out2', '/tmp/in2', now());
   }
 
   it('IpcInMount is created in active state immediately before the container process starts', () => {
     setup();
     const db = getDb();
-    db.prepare('INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run('im-1', 'inv-ipc2', 'active');
+    db.prepare('INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run(
+      'im-1',
+      'inv-ipc2',
+      'active',
+    );
     const r = db.prepare('SELECT * FROM ipc_in_mounts WHERE id = ?').get('im-1') as { status: string };
     expect(r.status).toBe('active');
   });
@@ -548,7 +678,11 @@ describe('IpcInMount state machine', () => {
   it('active -> cleared is the only valid transition', () => {
     setup();
     const db = getDb();
-    db.prepare('INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run('im-2', 'inv-ipc2', 'active');
+    db.prepare('INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run(
+      'im-2',
+      'inv-ipc2',
+      'active',
+    );
     db.prepare("UPDATE ipc_in_mounts SET status = 'cleared' WHERE id = ?").run('im-2');
     const r = db.prepare('SELECT * FROM ipc_in_mounts WHERE id = ?').get('im-2') as { status: string };
     expect(r.status).toBe('cleared');
@@ -562,7 +696,11 @@ describe('IpcInMount state machine', () => {
   it('IpcInMount transitions to cleared when the invocation ends', () => {
     setup();
     const db = getDb();
-    db.prepare('INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run('im-3', 'inv-ipc2', 'active');
+    db.prepare('INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)').run(
+      'im-3',
+      'inv-ipc2',
+      'active',
+    );
     db.prepare("UPDATE ipc_in_mounts SET status = 'cleared' WHERE invocation_id = ?").run('inv-ipc2');
     const r = db.prepare('SELECT * FROM ipc_in_mounts WHERE id = ?').get('im-3') as { status: string };
     expect(r.status).toBe('cleared');
@@ -578,20 +716,37 @@ describe('ContainerTransfer state machine', () => {
     createAgentGroup(makeAgentGroup('spec-g', 'spec-g'));
     createSession(makeSession('sess-t', 'spec-g'));
     const db = getDb();
-    db.prepare(`INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).run('inv-t', 'sess-t', null, '/tmp/o', '/tmp/i', now());
-    createSpecialist({ agent_group_id: 'spec-g', is_memory_provider: 0, last_turn_sub_notice: null, last_turn_parent_notice: null, created_at: now() });
+    db.prepare(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('inv-t', 'sess-t', null, '/tmp/o', '/tmp/i', now());
+    createSpecialist({
+      agent_group_id: 'spec-g',
+      is_memory_provider: 0,
+      last_turn_sub_notice: null,
+      last_turn_parent_notice: null,
+      created_at: now(),
+    });
     createSession(makeSession('sess-req', 'spec-g'));
-    createTask(makeTask({ id: 'task-t', specialist_group_id: 'spec-g', requester_session_id: 'sess-req', requester_group_id: null, requester_task_id: null }));
+    createTask(
+      makeTask({
+        id: 'task-t',
+        specialist_group_id: 'spec-g',
+        requester_session_id: 'sess-req',
+        requester_group_id: null,
+        requester_task_id: null,
+      }),
+    );
     // Fix: set requester_group_id to avoid FK issue in task creation
   }
 
   function insertTransfer(id: string, status: TransferStatus = 'pending') {
     const db = getDb();
-    db.prepare(`INSERT INTO container_transfers
+    db.prepare(
+      `INSERT INTO container_transfers
       (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`)
-      .run(id, 'task-t', 'inv-t', 'result', 0, 0, now(), status);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    ).run(id, 'task-t', 'inv-t', 'result', 0, 0, now(), status);
   }
 
   it('pending -> in_transit (files placed into requester ipc-in, commit_to_memory=false)', () => {
@@ -640,10 +795,14 @@ describe('ContainerTransfer state machine', () => {
       setupTransfer();
       insertTransfer('xfer-rel');
       const db = getDb();
-      db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path)
-        VALUES (?, ?, ?, ?, ?, NULL)`).run('tf-rel-1', 'xfer-rel', 'a.txt', '/tmp/a', 'owned');
-      db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path)
-        VALUES (?, ?, ?, ?, ?, NULL)`).run('tf-rel-2', 'xfer-rel', 'b.txt', '/tmp/b', 'owned');
+      db.prepare(
+        `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path)
+        VALUES (?, ?, ?, ?, ?, NULL)`,
+      ).run('tf-rel-1', 'xfer-rel', 'a.txt', '/tmp/a', 'owned');
+      db.prepare(
+        `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path)
+        VALUES (?, ?, ?, ?, ?, NULL)`,
+      ).run('tf-rel-2', 'xfer-rel', 'b.txt', '/tmp/b', 'owned');
       const files = db.prepare('SELECT * FROM transfer_files WHERE transfer_id = ?').all('xfer-rel');
       expect(files).toHaveLength(2);
     });
@@ -652,11 +811,17 @@ describe('ContainerTransfer state machine', () => {
       setupTransfer();
       insertTransfer('xfer-fc');
       const db = getDb();
-      db.prepare("UPDATE container_transfers SET file_count = 1 WHERE id = ?").run('xfer-fc');
-      db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path)
-        VALUES (?, ?, ?, ?, ?, NULL)`).run('tf-fc-1', 'xfer-fc', 'c.txt', '/tmp/c', 'owned');
-      const fc = (db.prepare('SELECT file_count FROM container_transfers WHERE id = ?').get('xfer-fc') as { file_count: number }).file_count;
-      const actual = (db.prepare('SELECT COUNT(*) as n FROM transfer_files WHERE transfer_id = ?').get('xfer-fc') as { n: number }).n;
+      db.prepare('UPDATE container_transfers SET file_count = 1 WHERE id = ?').run('xfer-fc');
+      db.prepare(
+        `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path)
+        VALUES (?, ?, ?, ?, ?, NULL)`,
+      ).run('tf-fc-1', 'xfer-fc', 'c.txt', '/tmp/c', 'owned');
+      const fc = (
+        db.prepare('SELECT file_count FROM container_transfers WHERE id = ?').get('xfer-fc') as { file_count: number }
+      ).file_count;
+      const actual = (
+        db.prepare('SELECT COUNT(*) as n FROM transfer_files WHERE transfer_id = ?').get('xfer-fc') as { n: number }
+      ).n;
       expect(fc).toBe(actual);
     });
   });
@@ -671,19 +836,39 @@ describe('TransferFile state machine', () => {
     createAgentGroup(makeAgentGroup('spec-gf', 'spec-gf'));
     createSession(makeSession('sess-tf', 'spec-gf'));
     const db = getDb();
-    db.prepare(`INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).run('inv-tf', 'sess-tf', null, '/tmp/of', '/tmp/if', now());
-    createSpecialist({ agent_group_id: 'spec-gf', is_memory_provider: 0, last_turn_sub_notice: null, last_turn_parent_notice: null, created_at: now() });
+    db.prepare(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('inv-tf', 'sess-tf', null, '/tmp/of', '/tmp/if', now());
+    createSpecialist({
+      agent_group_id: 'spec-gf',
+      is_memory_provider: 0,
+      last_turn_sub_notice: null,
+      last_turn_parent_notice: null,
+      created_at: now(),
+    });
     createSession(makeSession('sess-req-tf', 'spec-gf'));
-    createTask(makeTask({ id: 'task-tf', specialist_group_id: 'spec-gf', requester_session_id: 'sess-req-tf', requester_group_id: null, requester_task_id: null }));
-    db.prepare(`INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run('xfer-files', 'task-tf', 'inv-tf', 'r', 0, 1, now(), 'pending');
+    createTask(
+      makeTask({
+        id: 'task-tf',
+        specialist_group_id: 'spec-gf',
+        requester_session_id: 'sess-req-tf',
+        requester_group_id: null,
+        requester_task_id: null,
+      }),
+    );
+    db.prepare(
+      `INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    ).run('xfer-files', 'task-tf', 'inv-tf', 'r', 0, 1, now(), 'pending');
   }
 
   it('owned -> placed (file placed in recipient ipc-in)', () => {
     setupForFiles();
     const db = getDb();
-    db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, NULL)`).run('tf-op', 'xfer-files', 'x.txt', '/tmp/x', 'owned');
+    db.prepare(
+      `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, NULL)`,
+    ).run('tf-op', 'xfer-files', 'x.txt', '/tmp/x', 'owned');
     db.prepare("UPDATE transfer_files SET status = 'placed' WHERE id = ?").run('tf-op');
     const r = db.prepare('SELECT status FROM transfer_files WHERE id = ?').get('tf-op') as { status: string };
     expect(r.status).toBe('placed');
@@ -692,7 +877,9 @@ describe('TransferFile state machine', () => {
   it('placed -> expired (recipient task is terminal)', () => {
     setupForFiles();
     const db = getDb();
-    db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, NULL)`).run('tf-pe', 'xfer-files', 'y.txt', '/tmp/y', 'placed');
+    db.prepare(
+      `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, NULL)`,
+    ).run('tf-pe', 'xfer-files', 'y.txt', '/tmp/y', 'placed');
     db.prepare("UPDATE transfer_files SET status = 'expired' WHERE id = ?").run('tf-pe');
     const r = db.prepare('SELECT status FROM transfer_files WHERE id = ?').get('tf-pe') as { status: string };
     expect(r.status).toBe('expired');
@@ -707,23 +894,33 @@ describe('TransferFile state machine', () => {
     it('memory_path is null when commit_to_memory=false', () => {
       setupForFiles();
       const db = getDb();
-      db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, NULL)`).run('tf-mp1', 'xfer-files', 'z.txt', '/tmp/z', 'owned');
-      const r = db.prepare('SELECT memory_path FROM transfer_files WHERE id = ?').get('tf-mp1') as { memory_path: string | null };
+      db.prepare(
+        `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, NULL)`,
+      ).run('tf-mp1', 'xfer-files', 'z.txt', '/tmp/z', 'owned');
+      const r = db.prepare('SELECT memory_path FROM transfer_files WHERE id = ?').get('tf-mp1') as {
+        memory_path: string | null;
+      };
       expect(r.memory_path).toBeNull();
     });
 
     it('memory_path is set to the workspace-relative final path when commit_to_memory=true', () => {
       setupForFiles();
       const db = getDb();
-      db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, ?)`).run('tf-mp2', 'xfer-files', 'r.pdf', '/tmp/r', 'placed', 'memory/reports/r.pdf');
-      const r = db.prepare('SELECT memory_path FROM transfer_files WHERE id = ?').get('tf-mp2') as { memory_path: string | null };
+      db.prepare(
+        `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run('tf-mp2', 'xfer-files', 'r.pdf', '/tmp/r', 'placed', 'memory/reports/r.pdf');
+      const r = db.prepare('SELECT memory_path FROM transfer_files WHERE id = ?').get('tf-mp2') as {
+        memory_path: string | null;
+      };
       expect(r.memory_path).toBe('memory/reports/r.pdf');
     });
 
     it('memory_path persists after the transfer expires (memory copy survives cleanup)', () => {
       setupForFiles();
       const db = getDb();
-      db.prepare(`INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, ?)`).run('tf-mp3', 'xfer-files', 's.pdf', '/tmp/s', 'placed', 'memory/reports/s.pdf');
+      db.prepare(
+        `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run('tf-mp3', 'xfer-files', 's.pdf', '/tmp/s', 'placed', 'memory/reports/s.pdf');
       db.prepare("UPDATE transfer_files SET status = 'expired' WHERE id = ?").run('tf-mp3');
       const r = db.prepare('SELECT * FROM transfer_files WHERE id = ?').get('tf-mp3') as TransferFile;
       expect(r.status).toBe('expired');

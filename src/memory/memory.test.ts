@@ -66,17 +66,39 @@ afterEach(() => {
 // ── Config defaults  [config-default.*] ───────────────────────────────────────
 
 describe('config defaults', () => {
-  it('chunk_tokens = 400', () => { expect(MEMORY_CONFIG.chunk_tokens).toBe(400); });
-  it('chunk_overlap_tokens = 80', () => { expect(MEMORY_CONFIG.chunk_overlap_tokens).toBe(80); });
-  it('search_top_k = 6', () => { expect(MEMORY_CONFIG.search_top_k).toBe(6); });
-  it('min_search_score = 0.35', () => { expect(MEMORY_CONFIG.min_search_score).toBe(0.35); });
-  it('vector_score_weight = 0.7', () => { expect(MEMORY_CONFIG.vector_score_weight).toBe(0.7); });
-  it('keyword_score_weight = 0.3', () => { expect(MEMORY_CONFIG.keyword_score_weight).toBe(0.3); });
-  it('embedding_provider = "gemini"', () => { expect(MEMORY_CONFIG.embedding_provider).toBe('gemini'); });
-  it('embedding_rpm_limit = 50', () => { expect(MEMORY_CONFIG.embedding_rpm_limit).toBe(50); });
-  it('embedding_tpm_limit = 15000', () => { expect(MEMORY_CONFIG.embedding_tpm_limit).toBe(15_000); });
-  it('embedding_rpd_budget = 900', () => { expect(MEMORY_CONFIG.embedding_rpd_budget).toBe(900); });
-  it('memory_search_enabled = true', () => { expect(MEMORY_CONFIG.memory_search_enabled).toBe(true); });
+  it('chunk_tokens = 400', () => {
+    expect(MEMORY_CONFIG.chunk_tokens).toBe(400);
+  });
+  it('chunk_overlap_tokens = 80', () => {
+    expect(MEMORY_CONFIG.chunk_overlap_tokens).toBe(80);
+  });
+  it('search_top_k = 6', () => {
+    expect(MEMORY_CONFIG.search_top_k).toBe(6);
+  });
+  it('min_search_score = 0.35', () => {
+    expect(MEMORY_CONFIG.min_search_score).toBe(0.35);
+  });
+  it('vector_score_weight = 0.7', () => {
+    expect(MEMORY_CONFIG.vector_score_weight).toBe(0.7);
+  });
+  it('keyword_score_weight = 0.3', () => {
+    expect(MEMORY_CONFIG.keyword_score_weight).toBe(0.3);
+  });
+  it('embedding_provider = "gemini"', () => {
+    expect(MEMORY_CONFIG.embedding_provider).toBe('gemini');
+  });
+  it('embedding_rpm_limit = 50', () => {
+    expect(MEMORY_CONFIG.embedding_rpm_limit).toBe(50);
+  });
+  it('embedding_tpm_limit = 15000', () => {
+    expect(MEMORY_CONFIG.embedding_tpm_limit).toBe(15_000);
+  });
+  it('embedding_rpd_budget = 900', () => {
+    expect(MEMORY_CONFIG.embedding_rpd_budget).toBe(900);
+  });
+  it('memory_search_enabled = true', () => {
+    expect(MEMORY_CONFIG.memory_search_enabled).toBe(true);
+  });
 });
 
 // ── MemoryFile entity  [entity-fields.MemoryFile, entity-optional.MemoryFile.indexed_at, entity-relationship.MemoryFile.chunks] ──
@@ -101,21 +123,46 @@ describe('MemoryFile entity', () => {
 
   it('accepts null indexed_at before first sync', () => {
     // [entity-optional.MemoryFile.indexed_at]
-    const file = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'pending', indexed_at: null });
+    const file = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'pending',
+      indexed_at: null,
+    });
     expect(file.indexed_at).toBeNull();
   });
 
   it('accepts non-null indexed_at after first sync', () => {
     // [entity-optional.MemoryFile.indexed_at]
     const stamp = ts();
-    const file = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'indexed', indexed_at: stamp });
+    const file = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: stamp,
+    });
     expect(file.indexed_at).toBe(stamp);
   });
 
   it('chunks relationship navigates to associated MemoryChunks', () => {
     // [entity-relationship.MemoryFile.chunks]
-    const file = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'indexed', indexed_at: ts() });
-    createMemoryChunk({ file_id: file.id, start_line: 1, end_line: 10, content: 'hello', hash: 'h1', indexed_at: ts() });
+    const file = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
+    createMemoryChunk({
+      file_id: file.id,
+      start_line: 1,
+      end_line: 10,
+      content: 'hello',
+      hash: 'h1',
+      indexed_at: ts(),
+    });
     const chunks = getMemoryFileChunks(file.id);
     expect(chunks).toHaveLength(1);
     expect(chunks[0].file_id).toBe(file.id);
@@ -126,9 +173,22 @@ describe('MemoryFile entity', () => {
 
 describe('MemoryChunk entity', () => {
   it('has all declared fields with correct types', () => {
-    const file = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'indexed', indexed_at: ts() });
+    const file = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
     const stamp = ts();
-    const chunk = createMemoryChunk({ file_id: file.id, start_line: 5, end_line: 25, content: 'chunk text', hash: 'cafebabe', indexed_at: stamp });
+    const chunk = createMemoryChunk({
+      file_id: file.id,
+      start_line: 5,
+      end_line: 25,
+      content: 'chunk text',
+      hash: 'cafebabe',
+      indexed_at: stamp,
+    });
     expect(typeof chunk.id).toBe('string');
     expect(chunk.file_id).toBe(file.id);
     expect(chunk.start_line).toBe(5);
@@ -237,7 +297,13 @@ describe('FileUpdated rule', () => {
   });
 
   it('skips update when content hash is unchanged (no-op)  [rule-failure.FileUpdated.2]', () => {
-    createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'same', status: 'indexed', indexed_at: ts() });
+    createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'same',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
     handleWorkspaceFileChanged({ group_id: GROUP_ID, path: memPath(), content_hash: 'same' });
     expect(findMemoryFile({ group_id: GROUP_ID, path: memPath() })!.status).toBe('indexed');
   });
@@ -294,7 +360,13 @@ describe('FileDiscovered rule', () => {
 
 describe('FileRemoved rule', () => {
   it('marks the file removed and deletes all its chunks  [rule-success.FileRemoved]', () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'indexed', indexed_at: ts() });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
     createMemoryChunk({ file_id: f.id, start_line: 1, end_line: 5, content: 'a', hash: 'h1', indexed_at: ts() });
     createMemoryChunk({ file_id: f.id, start_line: 6, end_line: 10, content: 'b', hash: 'h2', indexed_at: ts() });
 
@@ -309,7 +381,13 @@ describe('FileRemoved rule', () => {
   });
 
   it('is a no-op when the file is already in the terminal "removed" state  [rule-failure.FileRemoved.2]', () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'removed', indexed_at: null });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'removed',
+      indexed_at: null,
+    });
     expect(() => handleWorkspaceFileRemoved({ group_id: GROUP_ID, path: memPath() })).not.toThrow();
     expect(getMemoryFile(f.id)!.status).toBe('removed');
   });
@@ -327,7 +405,13 @@ describe('FileSynced rule', () => {
   });
 
   it('transitions pending->indexed, replaces chunks, sets indexed_at  [rule-success.FileSynced]', async () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'pending', indexed_at: null });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'pending',
+      indexed_at: null,
+    });
     // Stale chunk from a previous index — should be replaced
     createMemoryChunk({ file_id: f.id, start_line: 1, end_line: 5, content: 'stale', hash: 'old', indexed_at: ts() });
 
@@ -347,7 +431,13 @@ describe('FileSynced rule', () => {
   });
 
   it('rejects when file status is not pending  [rule-failure.FileSynced.1]', async () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'indexed', indexed_at: ts() });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
     await expect(syncPendingFile(f, { chunkFn: mockChunkFn, embedFn: mockEmbedFn })).rejects.toThrow();
   });
 });
@@ -355,18 +445,22 @@ describe('FileSynced rule', () => {
 // ── MemorySearched rule  [rule-success.MemorySearched, rule-failure.MemorySearched.*] ──
 
 describe('MemorySearched rule', () => {
-  it('returns an array of results for a valid session+group pair  [rule-success.MemorySearched]', () => {
-    const results = handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'meeting notes' });
+  it('returns an array of results for a valid session+group pair  [rule-success.MemorySearched]', async () => {
+    const results = await handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'meeting notes' });
     expect(Array.isArray(results)).toBe(true);
   });
 
-  it('rejects when session.agent_group_id does not match group  [rule-failure.MemorySearched.1]', () => {
-    expect(() => handleMemorySearch({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, query: 'anything' })).toThrow();
+  it('rejects when session.agent_group_id does not match group  [rule-failure.MemorySearched.1]', async () => {
+    await expect(
+      handleMemorySearch({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, query: 'anything' }),
+    ).rejects.toThrow();
   });
 
-  it('rejects when memory_search_enabled is false  [rule-failure.MemorySearched.2]', () => {
+  it('rejects when memory_search_enabled is false  [rule-failure.MemorySearched.2]', async () => {
     const cfg = { ...MEMORY_CONFIG, memory_search_enabled: false };
-    expect(() => handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'anything' }, cfg)).toThrow();
+    await expect(
+      handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'anything' }, cfg),
+    ).rejects.toThrow();
   });
 });
 
@@ -374,7 +468,13 @@ describe('MemorySearched rule', () => {
 
 describe('MemoryFileRead rule', () => {
   beforeEach(() => {
-    createMemoryFile({ group_id: GROUP_ID, path: memPath('doc.md'), content_hash: 'h', status: 'indexed', indexed_at: ts() });
+    createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath('doc.md'),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
   });
 
   it('returns content for an indexed file  [rule-success.MemoryFileRead]', () => {
@@ -383,7 +483,9 @@ describe('MemoryFileRead rule', () => {
   });
 
   it('rejects when session.agent_group_id does not match group  [rule-failure.MemoryFileRead.1]', () => {
-    expect(() => handleMemoryGet({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, path: memPath('doc.md') })).toThrow();
+    expect(() =>
+      handleMemoryGet({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, path: memPath('doc.md') }),
+    ).toThrow();
   });
 
   it('rejects when memory_search_enabled is false  [rule-failure.MemoryFileRead.2]', () => {
@@ -392,7 +494,13 @@ describe('MemoryFileRead rule', () => {
   });
 
   it('rejects when the file exists but is not in indexed status  [rule-failure.MemoryFileRead.3]', () => {
-    createMemoryFile({ group_id: GROUP_ID, path: memPath('pending.md'), content_hash: 'h', status: 'pending', indexed_at: null });
+    createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath('pending.md'),
+      content_hash: 'h',
+      status: 'pending',
+      indexed_at: null,
+    });
     expect(() => handleMemoryGet({ session: SESSION, group_id: GROUP_ID, path: memPath('pending.md') })).toThrow();
   });
 });
@@ -438,7 +546,13 @@ describe('invariant: MemoryFilesWithinWorkspace', () => {
 
 describe('invariant: NoChunksForRemovedFiles', () => {
   it('FileRemoved deletes chunks so no chunk references a removed file  [invariant.NoChunksForRemovedFiles]', () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'indexed', indexed_at: ts() });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
     createMemoryChunk({ file_id: f.id, start_line: 1, end_line: 5, content: 'x', hash: 'h1', indexed_at: ts() });
 
     handleWorkspaceFileRemoved({ group_id: GROUP_ID, path: memPath() });
@@ -454,12 +568,24 @@ describe('invariant: NoChunksForRemovedFiles', () => {
 
 describe('invariant: ChunksPresentOnlyWhenIndexed', () => {
   it('a newly created pending file (indexed_at = null) has no chunks  [invariant.ChunksPresentOnlyWhenIndexed]', () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'pending', indexed_at: null });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'pending',
+      indexed_at: null,
+    });
     expect(getMemoryFileChunks(f.id)).toHaveLength(0);
   });
 
   it('after FileSynced, indexed_at is set and chunks are present  [invariant.ChunksPresentOnlyWhenIndexed]', async () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'pending', indexed_at: null });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'pending',
+      indexed_at: null,
+    });
     mockChunkFn.mockReturnValue([{ start_line: 1, end_line: 10, content: 'text', hash: 'h1' }]);
     mockEmbedFn.mockResolvedValue(undefined);
 
@@ -482,13 +608,23 @@ describe('invariant: ChunksPresentOnlyWhenIndexed', () => {
 // This describe block provides the host-side surface contract summary:
 
 describe('MemoryMcpTools surface (host-side actor restriction)', () => {
-  it('AgentMemorySearch is not available to a session from a different group  [surface-actor.MemoryMcpTools]', () => {
-    expect(() => handleMemorySearch({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, query: 'q' })).toThrow();
+  it('AgentMemorySearch is not available to a session from a different group  [surface-actor.MemoryMcpTools]', async () => {
+    await expect(
+      handleMemorySearch({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, query: 'q' }),
+    ).rejects.toThrow();
   });
 
   it('AgentMemoryGet is not available to a session from a different group', () => {
-    createMemoryFile({ group_id: GROUP_ID, path: memPath('doc.md'), content_hash: 'h', status: 'indexed', indexed_at: ts() });
-    expect(() => handleMemoryGet({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, path: memPath('doc.md') })).toThrow();
+    createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath('doc.md'),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
+    expect(() =>
+      handleMemoryGet({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, path: memPath('doc.md') }),
+    ).toThrow();
   });
 
   it('AgentMemoryList is not available to a session from a different group', () => {
@@ -496,7 +632,13 @@ describe('MemoryMcpTools surface (host-side actor restriction)', () => {
   });
 
   it('all three operations succeed for a matching session  [surface-provides.MemoryMcpTools]', () => {
-    createMemoryFile({ group_id: GROUP_ID, path: memPath('doc.md'), content_hash: 'h', status: 'indexed', indexed_at: ts() });
+    createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath('doc.md'),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
     expect(() => handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'q' })).not.toThrow();
     expect(() => handleMemoryGet({ session: SESSION, group_id: GROUP_ID, path: memPath('doc.md') })).not.toThrow();
     expect(() => handleMemoryList({ session: SESSION, group_id: GROUP_ID })).not.toThrow();
@@ -517,14 +659,26 @@ describe('MemoryMcpTools surface (host-side actor restriction)', () => {
 
 describe('deadlock scenarios (external trigger resolves both stuck states)', () => {
   it('a pending file reaches "removed" only via handleWorkspaceFileRemoved', () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'pending', indexed_at: null });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'pending',
+      indexed_at: null,
+    });
     expect(getMemoryFile(f.id)!.status).toBe('pending');
     handleWorkspaceFileRemoved({ group_id: GROUP_ID, path: memPath() });
     expect(getMemoryFile(f.id)!.status).toBe('removed');
   });
 
   it('an indexed file reaches "removed" only via handleWorkspaceFileRemoved', () => {
-    const f = createMemoryFile({ group_id: GROUP_ID, path: memPath(), content_hash: 'h', status: 'indexed', indexed_at: ts() });
+    const f = createMemoryFile({
+      group_id: GROUP_ID,
+      path: memPath(),
+      content_hash: 'h',
+      status: 'indexed',
+      indexed_at: ts(),
+    });
     handleWorkspaceFileRemoved({ group_id: GROUP_ID, path: memPath() });
     expect(getMemoryFile(f.id)!.status).toBe('removed');
   });

@@ -18,7 +18,7 @@ import { log } from '../log.js';
 import { MEMORY_CONFIG } from './config.js';
 import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
 import { chunkFile, type MemoryChunk } from './chunking.js';
-import { createGeminiEmbeddingProvider, type EmbeddingProvider } from './embeddings.js';
+import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
 import { TokenBucketRateLimiter } from './rate-limiter.js';
 import {
@@ -153,6 +153,7 @@ export class MemoryIndexManager {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         this.dirty = true;
+        void this.sync();
       }, WATCH_DEBOUNCE_MS);
     };
 
@@ -171,6 +172,7 @@ export class MemoryIndexManager {
     this.periodicTimer = setInterval(
       () => {
         this.dirty = true;
+        void this.sync();
       },
       24 * 60 * 60 * 1000,
     );
@@ -456,7 +458,7 @@ export async function ensureMemoryManager(params: {
     params.memoryDir,
     params.dbPath,
     params.apiKey,
-    params.model ?? MEMORY_CONFIG.embedding_provider,
+    params.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL,
   );
   await manager.init();
   managers.set(params.groupId, manager);

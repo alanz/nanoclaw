@@ -15,6 +15,7 @@ import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js
 import { moduleSpecialists } from './module-specialists.js';
 import { moduleSpecialistsFileHandover } from './module-specialists-file-handover.js';
 import { moduleMemory } from './module-memory.js';
+import { moduleZotero } from './module-zotero.js';
 
 export interface Migration {
   version: number;
@@ -37,6 +38,7 @@ const migrations: Migration[] = [
   moduleSpecialists,
   moduleSpecialistsFileHandover,
   moduleMemory,
+  moduleZotero,
 ];
 
 export function runMigrations(db: Database.Database): void {

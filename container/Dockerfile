@@ -49,6 +49,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         curl \
         git \
+        poppler-utils \
         tini \
         unzip \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
@@ -103,6 +104,10 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+# ---- Zotero and other host-installed tools ----
+# Baked in so they're available to all agent groups without per-group setup.
+COPY tools/ /app/tools/
 
 # ---- Container CLAUDE.md (baked in; Apple Container doesn't support file-level bind mounts) ----
 COPY CLAUDE.md /app/CLAUDE.md

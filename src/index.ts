@@ -190,6 +190,10 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
+  // 6b. Zotero sync monitor (no-op if ZOTERO_GROUP_FOLDER is not set)
+  const { startZoteroMonitor } = await import('./modules/zotero/index.js');
+  startZoteroMonitor();
+
   // 7. Dashboard (optional)
   const dashboardEnv = readEnvFile(['DASHBOARD_SECRET', 'DASHBOARD_PORT']);
   const dashboardSecret = process.env.DASHBOARD_SECRET || dashboardEnv.DASHBOARD_SECRET;

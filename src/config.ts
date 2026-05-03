@@ -14,6 +14,8 @@ const envConfig = readEnvFile([
   'ONECLI_URL',
   'ONECLI_API_KEY',
   'TZ',
+  'ZOTERO_GROUP_FOLDER',
+  'ZOTERO_POLL_INTERVAL',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -70,6 +72,14 @@ export function getTriggerPattern(trigger?: string): RegExp {
 }
 
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
+
+// Zotero library sync
+export const ZOTERO_GROUP_FOLDER =
+  process.env.ZOTERO_GROUP_FOLDER || envConfig.ZOTERO_GROUP_FOLDER || '';
+export const ZOTERO_POLL_INTERVAL = parseInt(
+  process.env.ZOTERO_POLL_INTERVAL || envConfig.ZOTERO_POLL_INTERVAL || '3600000',
+  10,
+);
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

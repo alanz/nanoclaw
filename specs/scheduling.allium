@@ -10,9 +10,9 @@
 -- Excludes:
 --   - Per-session agent-initiated tasks — fully specced in agent-to-agent.allium
 --     (ScheduledTask entity, schedule_task / cancel_task / pause_task /
---     resume_task / update_task rules, RecurrenceCloned).
+--     resume_task / update_task rules, ScheduledTaskRecurrenceCloned).
 --   - Inbound message recurrence — sessions.allium (InboundMessage.recurrence,
---     process_after, RecurrenceCloned).
+--     process_after, InboundRecurrenceCloned).
 --   - Zotero sync details — zotero.allium.
 --
 -- Relationship to agent-to-agent.allium:
@@ -59,9 +59,9 @@ enum ScheduleType { cron | interval | once }
 --   Advances from `from`, not from `now`, so the schedule stays regular even
 --   when a check runs late. Missed intervals are skipped forward to the next
 --   future slot rather than fired back-to-back. Cron mode resolves timezone
---   using the same priority order as agent-to-agent.allium RecurrenceCloned:
---   TZ env var → .env TZ → system locale → UTC. Once mode returns null after
---   the first firing (consumed; does not repeat).
+--   using the same priority order as agent-to-agent.allium
+--   ScheduledTaskRecurrenceCloned: TZ env var → .env TZ → system locale → UTC.
+--   Once mode returns null after the first firing (consumed; does not repeat).
 --
 -- Recovery on restart — when the host starts up and a periodic job has a
 --   next_check in the past, it is advanced to the next future slot rather than

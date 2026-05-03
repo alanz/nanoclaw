@@ -17,6 +17,18 @@
 -- The host and the agent container communicate only via two per-session SQLite
 -- databases. The host writes inbound messages; the container writes outbound
 -- messages. There is no other IPC.
+--
+-- This spec governs both human-channel sessions (created from
+-- routing/RoutedMessage via the SessionResolvedFor*Wiring rules) and
+-- per-task specialist sessions (per_thread sessions on the null-channel
+-- singleton MessagingGroup, see null-channel.allium and
+-- specialists.allium). It does NOT govern agent-to-agent agent_shared
+-- sessions: those are created by agent-to-agent.allium directly in
+-- response to an OutboundMessage with channel_type = "agent", bypassing
+-- the routing wiring model entirely. The Session entity here is shared
+-- across all three paths, but the creation path matters because
+-- agent_shared sessions have no MessagingGroupAgentWiring row to anchor
+-- session_mode, no channel adapter origin and no thread.
 
 use "./identity.allium" as identity
 use "./routing.allium" as routing
@@ -233,8 +245,8 @@ rule InboundMessageQueued {
         -- yet captured as a rule in either spec. Once the bridge is modelled, it
         -- will be a second creation site for InboundMessage alongside this rule,
         -- and the recurrence/series_id fields will be established there rather
-        -- than via RecurrenceCloned (which only propagates the series across
-        -- subsequent firings).
+        -- than via InboundRecurrenceCloned (which only propagates the series
+        -- across subsequent firings).
 }
 
 -- When a triggering inbound message is queued, wake the session so the container
@@ -265,7 +277,7 @@ rule ScheduledMessageDue {
 -- pause/resume, update) target the live row by matching on series_id, so the handle
 -- remains stable across firings even though each firing has its own InboundMessage id.
 
-rule RecurrenceCloned {
+rule InboundRecurrenceCloned {
     when: msg: InboundMessage.status becomes completed
     requires: msg.recurrence != null
     ensures:

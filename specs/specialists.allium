@@ -14,6 +14,8 @@
 use "./identity.allium" as identity
 use "./sessions.allium" as sessions
 use "./agent-to-agent.allium" as a2a
+use "./routing.allium" as routing
+use "./null-channel.allium" as null_channel
 
 ------------------------------------------------------------
 -- Surfaces
@@ -96,6 +98,7 @@ config {
     max_chain_delegations: Integer = 20
     max_same_type_dispatches: Integer = 3
     max_task_duration: Duration = 4.hours
+    max_sub_task_await: Duration = 30.minutes
     max_restart_retries: Integer = 2
     default_last_turn_sub_notice: String = "[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]"
     default_last_turn_parent_notice: String = "[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]"
@@ -157,6 +160,9 @@ entity SpecialistTask {
     has_cycle: specialist_group in ancestor_groups
     is_overdue: status in {queued, running, awaiting_sub_task, awaiting_restart}
                 and now - dispatched_at > config.max_task_duration
+    sub_task_await_overdue: status = awaiting_sub_task
+                            and pending_sub_task != null
+                            and (pending_sub_task.dispatched_at + config.max_sub_task_await) <= now
 
     transitions status {
         queued -> running
@@ -318,6 +324,11 @@ rule MainGroupDispatchesSpecialist {
     let target_group = identity/AgentGroup{id: specialist_group_id}
     requires: exists target_group
     requires: exists target_group.specialist
+    let null_mg = routing/MessagingGroup{
+        channel_type: null_channel/config.channel_type,
+        platform_id: null_channel/config.singleton_platform_id
+    }
+    requires: exists null_mg
     ensures:
         let task = SpecialistTask.created(
             specialist_group: target_group,
@@ -336,7 +347,7 @@ rule MainGroupDispatchesSpecialist {
         )
         let task_session = sessions/Session.created(
             agent_group: target_group,
-            messaging_group: null,
+            messaging_group: null_mg,
             thread_id: task.id,
             status: active,
             processing_state: idle,
@@ -432,6 +443,11 @@ rule SpecialistDispatchesSubTask {
               < config.max_same_type_dispatches
     let is_last = same_type_dispatch_count(parent_task, target_group)
                   = config.max_same_type_dispatches - 1
+    let null_mg = routing/MessagingGroup{
+        channel_type: null_channel/config.channel_type,
+        platform_id: null_channel/config.singleton_platform_id
+    }
+    requires: exists null_mg
     ensures:
         let child = SpecialistTask.created(
             specialist_group: target_group,
@@ -452,7 +468,7 @@ rule SpecialistDispatchesSubTask {
         parent_task.pending_sub_task = child
         let child_session = sessions/Session.created(
             agent_group: target_group,
-            messaging_group: null,
+            messaging_group: null_mg,
             thread_id: child.id,
             status: active,
             processing_state: idle,
@@ -661,6 +677,11 @@ rule MemoryProviderDispatched {
     let parent_task = running_task_for_group(session.agent_group)
     requires: exists parent_task
     requires: parent_task.status = running
+    let null_mg = routing/MessagingGroup{
+        channel_type: null_channel/config.channel_type,
+        platform_id: null_channel/config.singleton_platform_id
+    }
+    requires: exists null_mg
     ensures:
         let child = SpecialistTask.created(
             specialist_group: target_group,
@@ -681,7 +702,7 @@ rule MemoryProviderDispatched {
         parent_task.pending_sub_task = child
         let child_session = sessions/Session.created(
             agent_group: target_group,
-            messaging_group: null,
+            messaging_group: null_mg,
             thread_id: child.id,
             status: active,
             processing_state: idle,
@@ -843,6 +864,7 @@ rule SpecialistResultRoutedToMain {
     requires: task.requester_group != null
     let main_session = task.requester_session
     let transfer = ContainerTransfer{task: task}
+    requires: main_session.status = active
     ensures:
         if exists transfer and transfer.commit_to_memory:
             for f in transfer.files:
@@ -933,6 +955,7 @@ rule SpecialistResultRoutedToParent {
     let parent_task = task.requester_task
     let parent_session = specialist_task_session(parent_task)
     let transfer = ContainerTransfer{task: task}
+    requires: parent_session.status = active
     ensures:
         parent_task.status = running
         parent_task.pending_sub_task = null
@@ -1405,21 +1428,46 @@ rule PendingTransferExpiredOnDeliveringTaskFailed {
 -- Crash and restart recovery
 ------------------------------------------------------------
 
--- When a specialist container exits unexpectedly, the session's stuck
--- detection fires (sessions.allium: StuckContainerDetected). The specialist
--- layer observes this via the session's processing_state transition to stuck
--- and maps it to the task via thread_id = task.id. If retries remain, the
--- task moves to awaiting_restart and the retry count is incremented. The
--- sessions.allium StuckSessionRecovered rule then re-queues the inbound
--- message and re-starts the container, which will emit
--- SpecialistContainerProcessing and transition the task back to running via
--- SpecialistTaskStarted.
+-- A specialist task can fail to make progress in three distinct ways, each
+-- with its own detection path and recovery rules:
+--
+-- 1. Crash while running. The specialist's container exits unexpectedly while
+--    the task is in status = running. sessions.allium's StuckContainerDetected
+--    fires (processing_state: processing -> stuck) and this layer observes
+--    the transition via SpecialistContainerCrashed (retries remain) or
+--    SpecialistRestartExhausted (retries exhausted).
+--
+--    Recovery: SpecialistContainerCrashed moves the task to awaiting_restart
+--    and increments restart_attempt_count. sessions.allium then either
+--    re-queues and restarts the container (StuckSessionRecovered, for main-
+--    group sessions or when no other sessions are waiting) or transitions the
+--    session stuck -> idle and places it at the back of the FIFO concurrency
+--    queue (StuckSessionQueued, for non-main specialist sessions when other
+--    sessions are already waiting). In the queued case the slot is given to
+--    the head waiter via ContainerSlotFreed; the stuck session re-enters
+--    processing when it reaches the head of the queue. Either way, the next
+--    invocation emits SpecialistContainerProcessing and SpecialistTaskStarted
+--    transitions the task back to running.
+--
+-- 2. Child sub-task not completing. The task is in status = awaiting_sub_task,
+--    its container has already exited cleanly (the dispatch_sub_task call
+--    terminates the parent invocation), and the child task is not making
+--    progress. There is no stuck-session signal here because the parent's
+--    session is idle, not processing. Detection is via the
+--    sub_task_await_overdue derived field, which fires SubTaskAwaitTimedOut
+--    (retries remain) or SubTaskAwaitExhausted (retries exhausted).
+--
+-- 3. Overall task timeout. The task has been live (queued, running,
+--    awaiting_sub_task, or awaiting_restart) longer than max_task_duration.
+--    SpecialistTaskTimedOut fires once is_overdue becomes true and transitions
+--    the task directly to failed with kind = timeout. This is the global
+--    deadline; it overrides path (1) and (2) once exceeded.
 
 rule SpecialistContainerCrashed {
     when: session: sessions/Session.processing_state transitions_to stuck
     let task = SpecialistTask{id: session.thread_id}
     requires: exists task
-    requires: task.status in {running, awaiting_sub_task}
+    requires: task.status = running
     requires: task.restart_attempt_count < config.max_restart_retries
     ensures:
         task.status = awaiting_restart
@@ -1483,7 +1531,7 @@ rule SpecialistRestartExhausted {
     when: session: sessions/Session.processing_state transitions_to stuck
     let task = SpecialistTask{id: session.thread_id}
     requires: exists task
-    requires: task.status in {running, awaiting_sub_task}
+    requires: task.status = running
     requires: task.restart_attempt_count >= config.max_restart_retries
     ensures:
         task.status = failed
@@ -1503,6 +1551,62 @@ rule SpecialistRestartExhausted {
 rule ChildSubtreeCancelledOnRestartExhausted {
     when: task: SpecialistTask.status transitions_to failed
     requires: task.failure.kind = host_restart
+    requires: task.pending_sub_task != null
+    ensures:
+        SubtreeCancelled(task: task.pending_sub_task)
+}
+
+-- Sub-task await timeout (retries remain). When a parent task has been in
+-- awaiting_sub_task longer than max_sub_task_await without the child reaching
+-- a terminal state, the parent is restarted. This handles the case where a
+-- crash on the child path produced no observable signal on the parent's
+-- session (the parent's container is already idle while it waits), so neither
+-- SpecialistContainerCrashed nor SpecialistRestartExhausted can fire for the
+-- parent on a stuck transition.
+--
+-- ChildSubtreeCancelledOnParentCrash already cancels the pending sub-task
+-- subtree on transitions into awaiting_restart, so no explicit cancellation
+-- is needed here: the awaiting_restart transition itself drives subtree
+-- cleanup via that rule.
+
+rule SubTaskAwaitTimedOut {
+    when: task: SpecialistTask.sub_task_await_overdue
+    requires: task.restart_attempt_count < config.max_restart_retries
+    ensures:
+        task.status = awaiting_restart
+        task.restart_attempt_count = task.restart_attempt_count + 1
+}
+
+-- Sub-task await timeout (retries exhausted). The parent has already used its
+-- restart budget; a further await timeout fails the task with kind = timeout.
+-- Companion rule ChildSubtreeCancelledOnSubTaskAwaitExhausted cancels the
+-- pending sub-task subtree on the failed transition.
+
+rule SubTaskAwaitExhausted {
+    when: task: SpecialistTask.sub_task_await_overdue
+    requires: task.restart_attempt_count >= config.max_restart_retries
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: timeout,
+            detail: "sub-task did not complete within the await window after exhausting restart retries"
+        }
+        task.closed_at = now
+}
+
+-- Companion to ChildSubtreeCancelledOnRestartExhausted for timeout failures.
+-- This rule fires whenever a task transitions to failed with kind = timeout
+-- while still holding a pending sub-task. Two paths produce this state:
+--   - SubTaskAwaitExhausted: the parent's await window expired and restart
+--     retries were exhausted.
+--   - SpecialistTaskTimedOut: the overall task duration was exceeded while
+--     the parent was in awaiting_sub_task.
+-- Both leave a child task running with no parent able to consume its result;
+-- this rule cancels the pending sub-task subtree on the failed transition.
+
+rule ChildSubtreeCancelledOnSubTaskAwaitExhausted {
+    when: task: SpecialistTask.status transitions_to failed
+    requires: task.failure.kind = timeout
     requires: task.pending_sub_task != null
     ensures:
         SubtreeCancelled(task: task.pending_sub_task)
@@ -1571,10 +1675,11 @@ invariant RunningTaskIsLeaf {
 }
 
 -- Per-task session isolation: each specialist task's Session has
--- messaging_group = null and thread_id = task.id, making it unique to
--- that task. The specialist's AgentGroup folder (CLAUDE.md, skills) is
--- mounted read-only and shared across all tasks of the same type; the
--- only writable surfaces visible to the container are the per-task
+-- messaging_group = the null-channel singleton MessagingGroup and
+-- thread_id = task.id, making it unique to that task. (See null-channel.allium
+-- for the singleton's role.) The specialist's AgentGroup folder (CLAUDE.md,
+-- skills) is mounted read-only and shared across all tasks of the same type;
+-- the only writable surfaces visible to the container are the per-task
 -- inbound.db and outbound.db. A running task therefore cannot alter the
 -- type template or another task's session state.
 

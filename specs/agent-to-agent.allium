@@ -22,6 +22,31 @@
 -- agent-to-agent sends are enforced against AgentDestination, which is
 -- both the routing table (name -> target) and the ACL (row exists =>
 -- allowed).
+--
+-- Container spawning mechanisms.
+--
+-- NanoClaw has two distinct ways of spawning agent containers, and this
+-- spec covers one of them:
+--
+--   1. Specialist / per-task containers. Ephemeral, one container per task.
+--      A running agent dispatches a unit of work to a specialist agent
+--      group; the host creates a per_thread Session on the null-channel
+--      singleton MessagingGroup with thread_id = task.id and the full
+--      sessions.allium machinery (FIFO concurrency cap, stuck detection,
+--      heartbeat, retry) governs its lifetime. Lives in
+--      specialists.allium + null-channel.allium + sessions.allium.
+--
+--   2. Long-lived named agents. Persistent, one container per AgentGroup.
+--      An agent calls create_agent to create a new AgentGroup with its own
+--      identity, filesystem and CLAUDE.md; messages travel between agent
+--      groups via channel_type = "agent" OutboundMessages and land in the
+--      target's agent_shared Session (messaging_group: null,
+--      thread_id: null) — a persistent inbox with no task lifecycle. This
+--      is what this spec covers.
+--
+-- The two mechanisms are complementary: specialists are dispatched
+-- per-task and torn down; named agents are addressed by name and live as
+-- long as their AgentGroup does.
 
 use "./identity.allium" as identity
 use "./routing.allium" as routing
@@ -315,7 +340,14 @@ rule AgentToAgentMessageRouted {
                   target_type: agent,
                   target_id: target_group.id
               }
-    let target_session = resolve_agent_shared_session(target_group)
+    requires: exists sessions/Session{
+        agent_group: target_group,
+        messaging_group: null
+    }
+    let target_session = sessions/Session{
+        agent_group: target_group,
+        messaging_group: null
+    }
     ensures:
         sessions/InboundMessage.created(
             session: target_session,
@@ -340,6 +372,74 @@ rule AgentToAgentMessageRouted {
         -- container is wedged, host-sweep restarts it and the queued
         -- chat-kind inbound rows are processed in seq order on the next
         -- poll cycle.
+}
+
+-- First-contact case: the target agent group has never received a message
+-- before, so no agent_shared session exists for it yet. Create one as part
+-- of routing, then queue the inbound message and wake the container.
+--
+-- This is the agent-to-agent analogue of
+-- sessions/SessionResolvedForAgentSharedWiring: that rule creates an
+-- agent_shared session in response to a channel routing event
+-- (routing/RoutedMessage.created), but agent-to-agent messages do not pass
+-- through routing/RoutedMessage at all. Without this rule, the very first
+-- message between two agent groups has no session to land in.
+
+rule AgentToAgentMessageRoutedFirstContact {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type = "agent"
+    requires: outbound.platform_id != null
+    let source_group = outbound.session.agent_group
+    let target_group = identity/AgentGroup{id: outbound.platform_id}
+    requires: exists target_group
+    requires: target_group = source_group
+              or exists AgentDestination{
+                  agent_group: source_group,
+                  target_type: agent,
+                  target_id: target_group.id
+              }
+    requires: not exists sessions/Session{
+        agent_group: target_group,
+        messaging_group: null
+    }
+    ensures:
+        let target_session = sessions/Session.created(
+            agent_group: target_group,
+            messaging_group: null,
+            thread_id: null,
+            status: active,
+            processing_state: idle,
+            last_active: now,
+            created_at: now
+        )
+        sessions/InboundMessage.created(
+            session: target_session,
+            seq: next_inbound_seq(target_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: outbound.content,
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: target_session)
+
+    @guidance
+        -- This is the agent-to-agent analogue of
+        -- sessions/SessionResolvedForAgentSharedWiring, but triggered by
+        -- an OutboundMessage from another agent rather than by a channel
+        -- routing event. The two paths are mutually exclusive: this rule
+        -- fires only when no Session exists for (target_group,
+        -- messaging_group: null), and AgentToAgentMessageRouted fires
+        -- only when one does.
+        --
+        -- Unlike specialist sessions (which are per_thread sessions on the
+        -- null-channel singleton MessagingGroup), agent-to-agent sessions
+        -- are true agent_shared sessions: messaging_group is null and
+        -- thread_id is null. The session represents the target agent's
+        -- persistent inbox for cross-agent traffic, not a per-task scratch
+        -- space.
 }
 
 -- An agent-to-agent message that lacks a corresponding AgentDestination
@@ -521,7 +621,7 @@ rule ScheduledTaskUpdated {
 -- don't terminate at "completed" in the scheduling domain — they either
 -- fire and roll forward, or they are cancelled.
 
-rule RecurrenceCloned {
+rule ScheduledTaskRecurrenceCloned {
     when: RecurrenceTickObserved(task)
     requires: task.recurrence != null
     let next_run = next_cron_firing(task.recurrence, user_timezone())

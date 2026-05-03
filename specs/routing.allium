@@ -71,7 +71,9 @@ entity Wiring {
 
 entity SenderApprovalRequest {
     messaging_group: MessagingGroup
+    agent_group: identity/AgentGroup
     sender: identity/User
+    original_message: ChannelMessage
     created_at: Timestamp
     status: pending | approved | denied
 
@@ -295,6 +297,7 @@ rule UnknownSenderEscalated {
     when: ChannelMessageReceived(message)
     let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
     let sender = identity/User{kind: message.channel_type, handle: message.sender_handle}
+    let inaccessible_wiring = (mg.wirings where not sender.can_access(agent_group)).first
     requires: exists mg
     requires: exists sender
     requires: mg.denied_at = null
@@ -304,10 +307,22 @@ rule UnknownSenderEscalated {
                                                status: pending}
     ensures: SenderApprovalRequest.created(
         messaging_group: mg,
+        agent_group: inaccessible_wiring.agent_group,
         sender: sender,
+        original_message: message,
         created_at: now,
         status: pending
     )
+
+    @guidance
+        -- The approval request carries one specific agent_group: the membership
+        -- granted on approval is scoped to that group, not to the messaging group
+        -- as a whole. The rule's universal precondition guarantees the sender
+        -- cannot access ANY wiring on this messaging group, so any inaccessible
+        -- wiring is a valid choice; the implementation picks the first one
+        -- encountered (currently non-deterministic across wirings, since wirings
+        -- is unordered). If multiple agent groups should be grantable from a
+        -- single approval, this rule needs a different shape.
 }
 
 -- Sender approval flows.
@@ -318,7 +333,7 @@ rule SenderApproved {
     requires: request.status = pending
     ensures:
         request.status = approved
-        AgentGroupMembershipGranted(user: request.sender, messaging_group: request.messaging_group)
+        AgentGroupMembershipGranted(user: request.sender, agent_group: request.agent_group, messaging_group: request.messaging_group)
 }
 
 rule SenderDenied {
@@ -326,6 +341,31 @@ rule SenderDenied {
     requires: actor.is_owner or actor.is_global_admin
     requires: request.status = pending
     ensures: request.status = denied
+}
+
+rule BlockedMessageReplayed {
+    when: AgentGroupMembershipGranted(user, agent_group, messaging_group)
+    let request = SenderApprovalRequest{messaging_group: messaging_group, agent_group: agent_group,
+                                        sender: user, status: approved}
+    let wiring = Wiring{messaging_group: messaging_group, agent_group: agent_group}
+    requires: exists request
+    requires: exists wiring
+    ensures: RoutedMessage.created(
+        wiring: wiring,
+        message: request.original_message,
+        sender: user,
+        trigger: true,
+        created_at: now
+    )
+
+    @guidance
+        -- Models the host-side replay of the originally blocked inbound event
+        -- after the sender is admitted. In the implementation this is the
+        -- routeInbound(event) call that follows addMember and the deletion of
+        -- the pending sender approval. The blocked ChannelMessage is captured
+        -- on the SenderApprovalRequest as original_message at the moment of
+        -- escalation, so that approval can re-enact the same routing decision
+        -- that would have fired had the sender been a member at the time.
 }
 
 ------------------------------------------------------------

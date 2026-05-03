@@ -271,6 +271,7 @@ rule AgentCreationApplied {
             name: name,
             folder: folder,
             agent_provider: null,
+            is_main: false,
             created_at: now
         )
         AgentGroupFilesystemInitialised(

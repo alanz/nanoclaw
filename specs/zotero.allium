@@ -83,7 +83,7 @@ entity SyncState {
     total_items: Integer
     last_sync: Timestamp?
     next_check: Timestamp?              -- null only before the very first check is scheduled
-    schedule: scheduling.Schedule       -- schedule.type must be cron or interval; once is not valid
+    schedule: scheduling/Schedule       -- schedule.type must be cron or interval; once is not valid
 
     -- Derived
     is_due: next_check != null and next_check <= now

@@ -1,0 +1,407 @@
+-- allium: 3
+-- zotero.allium
+--
+-- Zotero library synchronisation for a configured group.
+-- Periodically mirrors the user's Zotero library as markdown files in the group workspace,
+-- notifies the chat when items are added or removed, and supports abstract enrichment
+-- from external bibliographic sources or attached PDFs.
+--
+-- Scope: Zotero library sync, item file management, abstract enrichment, PDF extraction
+-- Includes: SyncState, ItemFile, DigestEntry, abstract enrichment, PDF abstract extraction
+-- Excludes:
+--   - Embedding and memory indexing of item files (see memory.allium)
+--   - Message delivery mechanics and channel routing (see routing.allium, sessions.allium)
+--   - Container execution details (container-level concern)
+--   - Zotero API wire format, HTTP pagination, authentication headers (implementation)
+--   - Abstract enrichment rate limiting and retry strategy (implementation)
+
+use "./identity.allium" as identity
+use "./scheduling.allium" as scheduling
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+-- The source from which an abstract was obtained during enrichment or extraction.
+enum AbstractSource {
+    s2_doi | s2_arxiv | s2_url_doi | s2_title |
+    cr_doi | cr_url_doi | cr_title |
+    pdf_extraction
+}
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- The user's Zotero library hosted at api.zotero.org.
+-- A monotonically increasing version number increments on any change to the library.
+-- allium-ignore allium.externalEntity.missingSourceHint
+-- allium-ignore allium.entity.unused
+external entity ZoteroLibrary {
+    -- allium-ignore allium.field.unused
+    version: Integer
+}
+
+-- A single reference item in the Zotero library.
+-- allium-ignore allium.externalEntity.missingSourceHint
+external entity ZoteroItem {
+    key: String                         -- 8-character opaque identifier, e.g. "224KRICZ"
+    title: String
+    -- allium-ignore allium.field.unused
+    authors: List<String>
+    -- allium-ignore allium.field.unused
+    year: Integer?
+    -- allium-ignore allium.field.unused
+    doi: String?
+    -- allium-ignore allium.field.unused
+    url: String?
+    -- allium-ignore allium.field.unused
+    item_type: String                   -- "journalArticle", "conferencePaper", "book", etc.
+    -- allium-ignore allium.field.unused
+    tags: Set<String>
+    abstract: String?
+    pdf_attachment: PdfAttachment?
+}
+
+-- A PDF file attached to a Zotero item and stored in the Zotero file server.
+-- allium-ignore allium.externalEntity.missingSourceHint
+external entity PdfAttachment {
+    -- allium-ignore allium.field.unused
+    item: ZoteroItem
+    size: Integer                       -- bytes
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- Persistent sync state for a group's Zotero integration.
+-- Tracks library version, item count, schedule, and when the next sync check is due.
+entity SyncState {
+    group: identity/AgentGroup
+    last_version: Integer               -- library version at the time of the last successful sync
+    total_items: Integer
+    last_sync: Timestamp?
+    next_check: Timestamp?              -- null only before the very first check is scheduled
+    schedule: scheduling.Schedule       -- schedule.type must be cron or interval; once is not valid
+
+    -- Derived
+    is_due: next_check != null and next_check <= now
+}
+
+-- A markdown file in the group workspace representing a Zotero library item.
+-- Created or updated on sync; deleted when the item is removed from the library.
+-- Keyed by the item's Zotero key, which is unique within a library.
+entity ItemFile {
+    group: identity/AgentGroup
+    item_key: String                    -- Zotero item key; unique per group
+    title: String
+    abstract: String?
+    abstract_source: AbstractSource?    -- set when abstract was obtained via enrichment or extraction
+    -- allium-ignore allium.field.unused
+    last_synced_at: Timestamp
+}
+
+-- A timestamped entry appended to the group's zotero-digest.md activity log.
+entity DigestEntry {
+    group: identity/AgentGroup
+    -- allium-ignore allium.field.unused
+    recorded_at: Timestamp
+    -- allium-ignore allium.field.unused
+    summary: String
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    default_sync_interval: Duration = 1.hour
+    pre_check_timeout: Duration = 10.seconds
+    max_pdf_size: Integer = 15_000_000       -- bytes; PDFs larger than this are skipped
+    min_abstract_length: Integer = 80        -- chars; shorter extracted text is rejected
+    max_abstract_length: Integer = 3000      -- chars; longer extracted text is rejected
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Sync Scheduling ----
+
+-- On first run (no next_check yet), schedule the first check immediately.
+rule SyncStateInitialised {
+    when: state: SyncState.next_check = null
+
+    ensures: state.next_check = now
+}
+
+-- When a sync check falls due, attempt a lightweight version pre-check by querying
+-- the Zotero API before committing to a full container-based sync.
+rule SyncCheckDue {
+    when: state: SyncState.is_due
+
+    ensures: ZoteroPreCheckRequested(state: state)
+}
+
+-- ---- Pre-Check ----
+
+-- If the pre-check API call fails (network error, bad credentials, timeout),
+-- skip this sync cycle and advance the schedule without spawning a container.
+-- There is no point running a full sync if the API is unreachable.
+rule PreCheckFailed {
+    when: ZoteroPreCheckRequested(state)
+
+    let server_version = fetch_library_version(state.group)
+
+    requires: server_version = null              -- API unreachable or credentials missing
+
+    ensures: state.next_check = compute_next_check(state.schedule, state.next_check)
+}
+
+-- If the pre-check confirms the library version is unchanged, skip the full sync
+-- and advance the next check time without spawning a container.
+rule LibraryUnchanged {
+    when: ZoteroPreCheckRequested(state)
+
+    let server_version = fetch_library_version(state.group)
+
+    requires: server_version = state.last_version
+
+    ensures: state.next_check = compute_next_check(state.schedule, state.next_check)
+}
+
+-- If the pre-check detects a newer library version, proceed to full sync.
+rule LibraryChanged {
+    when: ZoteroPreCheckRequested(state)
+
+    let server_version = fetch_library_version(state.group)
+
+    requires: server_version > state.last_version
+
+    ensures: ZoteroSyncRequested(state: state)
+}
+
+-- ---- Full Sync ----
+
+-- Fetch all new and modified items since last_version, upsert their item files, remove
+-- files for deleted items, update sync state, and emit a completion event.
+-- The sync runs inside a container agent with access to the Zotero API credentials.
+rule LibrarySynced {
+    when: ZoteroSyncRequested(state)
+
+    let new_items    = fetch_new_items(state.group, since: state.last_version)
+    let deleted_keys = fetch_deleted_keys(state.group, since: state.last_version)
+    let new_version  = fetch_library_version(state.group)
+    let total        = fetch_total_item_count(state.group)
+
+    -- Create or update a markdown file for each new/modified item.
+    -- In practice this is an upsert keyed on (group, item_key).
+    ensures:
+        for item in new_items:
+            ItemFile.created(
+                group: state.group,
+                item_key: item.key,
+                title: item.title,
+                abstract: item.abstract,
+                abstract_source: null,
+                last_synced_at: now
+            )
+
+    -- Remove files for items that were deleted in the Zotero library.
+    ensures:
+        for key in deleted_keys:
+            not exists ItemFile{ group: state.group, item_key: key }
+
+    ensures: state.last_version = new_version
+    ensures: state.total_items = total
+    ensures: state.last_sync = now
+    ensures: state.next_check = compute_next_check(state.schedule, state.next_check)
+
+    ensures: LibrarySyncCompleted(
+        state: state,
+        added: new_items,
+        deleted_keys: deleted_keys
+    )
+
+    @guidance
+        -- compute_next_check advances from the current state.next_check (not from now),
+        -- so the schedule stays regular even when sync is delayed. Missed intervals are
+        -- skipped forward until the next future slot. Cron mode finds the next cron tick
+        -- after now, respecting the configured timezone.
+        -- The sync runs as a container agent prompt; zotero-sync.mjs writes a JSON
+        -- summary and zotero-state.json which the host merges back into SyncState.
+}
+
+-- ---- Notification ----
+
+-- When a sync produces any changes, notify the group's chat with a summary
+-- and append a timestamped entry to the group's digest log.
+rule ChangesNotified {
+    when: LibrarySyncCompleted(state, added, deleted_keys)
+
+    requires: added.count > 0 or deleted_keys.count > 0
+
+    ensures: SyncNotificationSent(
+        group: state.group,
+        content: sync_summary(added, deleted_keys)
+    )
+    ensures: DigestEntry.created(
+        group: state.group,
+        recorded_at: now,
+        summary: sync_summary(added, deleted_keys)
+    )
+
+    @guidance
+        -- In v2 there is no Message entity on AgentGroup directly. AgentGroup has
+        -- no .chat field; the chat relationship runs through MessagingGroup → Wiring
+        -- (routing.allium). Host-side background notifications like this one are
+        -- delivered via a direct channel adapter call, bypassing the session DB path
+        -- (inbound.db / outbound.db) entirely. SyncNotificationSent abstracts the
+        -- delivery act: the implementation resolves the messaging group(s) wired to
+        -- state.group via routing.allium Wiring rows and posts through their channel
+        -- adapters directly. The v1 nanoclaw.Message.created() call has no allium
+        -- entity equivalent in v2; the observable effect is the same (a message
+        -- appears in the chat), but the mechanism is host-direct rather than
+        -- session-mediated.
+}
+
+-- ---- Enrichment Triggers ----
+
+-- After a sync that added new items, automatically trigger abstract enrichment
+-- for every new item file that has no abstract.
+rule EnrichmentTriggeredAfterSync {
+    when: LibrarySyncCompleted(state, added, deleted_keys)
+
+    requires: added.count > 0
+
+    let pending = ItemFiles where item_key in added.keys and abstract = null
+
+    ensures:
+        for item_file in pending:
+            EnrichAbstractRequested(item_file: item_file)
+    ensures:
+        for item_file in pending:
+            ExtractPdfAbstractRequested(item_file: item_file)
+}
+
+-- The user can also request enrichment of all items without abstracts at any time
+-- by asking the agent. Covers both newly added items and older ones never enriched.
+-- allium-ignore allium.rule.unreachableTrigger
+rule EnrichmentTriggeredOnRequest {
+    when: UserRequestedEnrichment(group)
+
+    let pending = ItemFiles where group = group and abstract = null
+
+    ensures:
+        for item_file in pending:
+            EnrichAbstractRequested(item_file: item_file)
+    ensures:
+        for item_file in pending:
+            ExtractPdfAbstractRequested(item_file: item_file)
+}
+
+-- ---- Abstract Enrichment ----
+
+-- Enrich an item file that has no abstract by querying external bibliographic sources.
+-- Sources are tried in priority order until one yields an abstract within the
+-- configured length bounds, or all sources are exhausted.
+rule AbstractEnriched {
+    when: EnrichAbstractRequested(item_file)
+
+    requires: item_file.abstract = null
+
+    let found = find_abstract_from_external_sources(item_file)
+
+    requires: found != null
+    requires: found.text.length >= config.min_abstract_length
+    requires: found.text.length <= config.max_abstract_length
+
+    ensures: item_file.abstract = found.text
+    ensures: item_file.abstract_source = found.source
+
+    @guidance
+        -- Lookup order (7 sequential attempts):
+        --   1. Semantic Scholar via DOI
+        --   2. Semantic Scholar via arXiv ID extracted from item URL
+        --   3. Semantic Scholar via DOI embedded in item URL
+        --   4. Semantic Scholar via normalised title (>= 80% word-overlap similarity)
+        --   5. CrossRef via DOI
+        --   6. CrossRef via DOI embedded in item URL
+        --   7. CrossRef via normalised title (>= 80% word-overlap similarity)
+        -- If no source yields a usable abstract, item_file is left unchanged.
+        -- Rate limiting and retry strategy are implementation details of zotero-enrich.mjs.
+}
+
+-- ---- PDF Abstract Extraction ----
+
+-- Extract an abstract from an item's attached PDF when no abstract is available
+-- and the PDF is within the configured size limit.
+rule PdfAbstractExtracted {
+    when: ExtractPdfAbstractRequested(item_file)
+
+    let item = find_zotero_item(item_file.item_key)
+
+    requires: item_file.abstract = null
+    requires: item.pdf_attachment != null
+    requires: item.pdf_attachment.size <= config.max_pdf_size
+
+    let extracted = extract_abstract_from_pdf(item.pdf_attachment)
+
+    requires: extracted != null
+    requires: extracted.length >= config.min_abstract_length
+    requires: extracted.length <= config.max_abstract_length
+
+    ensures: item_file.abstract = extracted
+    ensures: item_file.abstract_source = pdf_extraction
+
+    @guidance
+        -- The PDF is downloaded from the Zotero file server via the items/{key}/children
+        -- endpoint. Only items with linkMode = imported_file and contentType = application/pdf
+        -- have a downloadable attachment.
+        -- Extraction uses pdftotext on the first 4 pages. The abstract section is
+        -- delimited by "Abstract" as a start marker and section headers such as
+        -- "Introduction" or "Keywords" as end markers.
+        -- Dehyphenation joins line-broken words before length validation.
+        -- If extraction fails or yields nothing, item_file is left unchanged.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- There is at most one SyncState in the system. Zotero sync targets a single configured group.
+invariant SyncStateIsSingleton {
+    SyncStates.count <= 1
+}
+
+-- Item file keys are unique within a group (one file per Zotero item per group).
+invariant UniqueItemFilesPerGroup {
+    for a in ItemFiles:
+        for b in ItemFiles:
+            (a != b and a.group = b.group) implies a.item_key != b.item_key
+}
+
+-- An item file that carries an abstract_source always has a non-null abstract.
+invariant AbstractSourceImpliesAbstract {
+    for f in ItemFiles:
+        f.abstract_source != null implies f.abstract != null
+}
+
+-- An active SyncState always has a next_check scheduled.
+-- (next_check = null is transient and immediately resolved by SyncStateInitialised.)
+invariant ActiveSyncStateHasNextCheck {
+    for s in SyncStates:
+        s.last_sync != null implies s.next_check != null
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+-- resolved: one Zotero group only; SyncState is a singleton (see SyncStateIsSingleton invariant)
+-- resolved: enrichment runs automatically after sync for new items without abstracts (EnrichmentTriggeredAfterSync),
+--           and can also be requested ad hoc by the user (EnrichmentTriggeredOnRequest)
+-- resolved: pre-check failure skips the sync and advances the schedule (fail-closed, no container spawn);
+--           current code (hasNewZoteroItems) diverges — it is fail-open and should be fixed
+-- resolved: deleted item files are removed permanently; recovery via Borg backups if needed

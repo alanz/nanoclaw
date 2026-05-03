@@ -1,0 +1,69 @@
+-- allium: 3
+-- scheduling.allium
+--
+-- Shared scheduling types and host-side periodic scheduling support.
+--
+-- Scope: Schedule value type and ScheduleType enum (shared across any spec that
+--        needs a structured schedule); host-side periodic scheduling for background
+--        jobs that run independently of any agent session (Zotero sync, RSS feeds).
+-- Includes: Schedule (value), ScheduleType (enum), compute_next_check concept.
+-- Excludes:
+--   - Per-session agent-initiated tasks — fully specced in agent-to-agent.allium
+--     (ScheduledTask entity, schedule_task / cancel_task / pause_task /
+--     resume_task / update_task rules, RecurrenceCloned).
+--   - Inbound message recurrence — sessions.allium (InboundMessage.recurrence,
+--     process_after, RecurrenceCloned).
+--   - Zotero sync details — zotero.allium.
+--
+-- Relationship to agent-to-agent.allium:
+--   agent-to-agent.allium covers agent-initiated scheduling via the schedule_task
+--   MCP tool. It uses raw cron strings and Timestamps directly on ScheduledTask
+--   rather than the Schedule value type here. This spec covers the host-side
+--   background scheduling layer that fires without an agent session driving it.
+--
+-- Status: skeleton. Schedule and ScheduleType are defined and ready for use by
+--   zotero.allium. The host-periodic scheduling entity and rules are stubs —
+--   implement them here when the first concrete consumer (Zotero or RSS) is wired up.
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- A structured schedule specification for host-side periodic features.
+-- Carries the schedule type alongside its value so callers can branch on
+-- cron vs interval vs once without parsing the value string.
+--
+-- Agent-initiated tasks in agent-to-agent.allium use raw strings directly
+-- on ScheduledTask.recurrence / process_after and do not use this type.
+-- allium-ignore allium.definition.unused
+value Schedule {
+    type: ScheduleType
+    value: String           -- cron expr ("0 9 * * 1-5"), interval ms ("3600000"),
+                            -- or ISO timestamp ("2026-01-01T09:00:00Z") for once
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum ScheduleType { cron | interval | once }
+
+------------------------------------------------------------
+-- Stubs: Host-side Periodic Scheduling
+------------------------------------------------------------
+--
+-- The items below are planned for this spec and are referenced by zotero.allium.
+-- Implement here once a concrete host-periodic consumer is wired up.
+--
+-- compute_next_check(schedule, from) — helper used by zotero.allium rules.
+--   Advances from `from`, not from `now`, so the schedule stays regular even
+--   when a check runs late. Missed intervals are skipped forward to the next
+--   future slot rather than fired back-to-back. Cron mode resolves timezone
+--   using the same priority order as agent-to-agent.allium RecurrenceCloned:
+--   TZ env var → .env TZ → system locale → UTC. Once mode returns null after
+--   the first firing (consumed; does not repeat).
+--
+-- Recovery on restart — when the host starts up and a periodic job has a
+--   next_check in the past, it is advanced to the next future slot rather than
+--   fired immediately. This prevents a burst of back-to-back runs after a long
+--   outage.

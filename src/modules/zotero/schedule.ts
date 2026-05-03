@@ -21,8 +21,7 @@ export function computeNextZoteroCheck(
 
   // interval — advance from the last scheduled check, skipping missed windows
   const ms = parseInt(state.schedule_value, 10);
-  let next =
-    new Date(state.next_check ?? new Date(now - ms).toISOString()).getTime() + ms;
+  let next = new Date(state.next_check ?? new Date(now - ms).toISOString()).getTime() + ms;
   while (next <= now) {
     next += ms;
   }

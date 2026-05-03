@@ -62,13 +62,7 @@ export async function notifySyncChanges(
   const messagingGroups = getMessagingGroupsByAgentGroup(agentGroupId);
   for (const mg of messagingGroups) {
     try {
-      await adapter.deliver(
-        mg.channel_type,
-        mg.platform_id,
-        null,
-        'text',
-        JSON.stringify({ text: summary }),
-      );
+      await adapter.deliver(mg.channel_type, mg.platform_id, null, 'text', JSON.stringify({ text: summary }));
       log.info('Zotero notification sent', { channelType: mg.channel_type, platformId: mg.platform_id });
     } catch (err) {
       log.warn('Zotero: failed to deliver notification', { channelType: mg.channel_type, err });

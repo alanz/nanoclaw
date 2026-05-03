@@ -1,12 +1,7 @@
 import { ZOTERO_GROUP_FOLDER, ZOTERO_POLL_INTERVAL } from '../../config.js';
 import { getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { log } from '../../log.js';
-import {
-  getZoteroSyncState,
-  updateAfterSync,
-  updateNextCheck,
-  upsertZoteroSyncState,
-} from './db.js';
+import { getZoteroSyncState, updateAfterSync, updateNextCheck, upsertZoteroSyncState } from './db.js';
 import { notifySyncChanges } from './notify.js';
 import { fetchLibraryVersion } from './pre-check.js';
 import { computeNextZoteroCheck } from './schedule.js';

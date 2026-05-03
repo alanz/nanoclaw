@@ -40,12 +40,7 @@ export function updateNextCheck(nextCheck: string): void {
     .run(nextCheck);
 }
 
-export function updateAfterSync(
-  lastVersion: number,
-  totalItems: number,
-  lastSync: string,
-  nextCheck: string,
-): void {
+export function updateAfterSync(lastVersion: number, totalItems: number, lastSync: string, nextCheck: string): void {
   getDb()
     .prepare(
       `UPDATE zotero_sync_state

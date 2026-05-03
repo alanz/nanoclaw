@@ -74,8 +74,7 @@ export function getTriggerPattern(trigger?: string): RegExp {
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
 
 // Zotero library sync
-export const ZOTERO_GROUP_FOLDER =
-  process.env.ZOTERO_GROUP_FOLDER || envConfig.ZOTERO_GROUP_FOLDER || '';
+export const ZOTERO_GROUP_FOLDER = process.env.ZOTERO_GROUP_FOLDER || envConfig.ZOTERO_GROUP_FOLDER || '';
 export const ZOTERO_POLL_INTERVAL = parseInt(
   process.env.ZOTERO_POLL_INTERVAL || envConfig.ZOTERO_POLL_INTERVAL || '3600000',
   10,

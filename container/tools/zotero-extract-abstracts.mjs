@@ -26,13 +26,16 @@ import https from 'https';
 import http from 'http';
 import { execFileSync } from 'child_process';
 import { parseArgs } from 'util';
+import { parseFrontMatter, insertAbstract, addFrontMatterField } from './zotero-frontmatter.mjs';
+
+const DEFAULT_MAX_PDF_MB = 15;
 
 const { values: args } = parseArgs({
   options: {
     dir:      { type: 'string' },
     'dry-run':{ type: 'boolean', default: false },
     limit:    { type: 'string' },
-    'max-mb': { type: 'string', default: '15' },
+    'max-mb': { type: 'string', default: String(DEFAULT_MAX_PDF_MB) },
   },
   strict: false,
 });
@@ -40,7 +43,7 @@ const { values: args } = parseArgs({
 const DIR     = args.dir || '/workspace/agent/zotero-md';
 const DRY_RUN = args['dry-run'] || false;
 const LIMIT   = args.limit ? parseInt(args.limit, 10) : null;
-const MAX_MB  = parseFloat(args['max-mb'] || '15');
+const MAX_MB  = parseFloat(args['max-mb']);
 
 const API_KEY  = process.env.ZOTERO_API_KEY || '';
 const USER_ID  = process.env.ZOTERO_USER_ID || '';
@@ -173,30 +176,8 @@ function extractAbstractFromPdf(pdfPath) {
   }
 }
 
-// ── Front matter helpers ──────────────────────────────────────────────────────
-
-function parseFrontMatter(text) {
-  if (!text.startsWith('---')) return null;
-  const nl = text.indexOf('\n');
-  if (nl < 0) return null;
-  const end = text.indexOf('\n---', nl + 1);
-  if (end < 0) return null;
-  const fmText = text.slice(nl + 1, end);
-  const bodyStart = end + 4 + (text[end + 4] === '\n' ? 1 : 0);
-  const meta = {};
-  for (const line of fmText.split('\n')) {
-    const colon = line.indexOf(': ');
-    if (colon > 0) meta[line.slice(0, colon).trim()] = line.slice(colon + 2).trim();
-  }
-  return { meta, body: text.slice(bodyStart) };
-}
-
 function hasAbstract(body) {
   return body.split('\n').filter((l) => l.trim()).length > 2;
-}
-
-function insertAbstract(text, abstract) {
-  return text.trimEnd() + '\n\n' + abstract.trim() + '\n';
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -264,7 +245,8 @@ for (const fp of batch) {
 
     if (abstract) {
       if (!DRY_RUN) {
-        fs.writeFileSync(fp, insertAbstract(text, abstract), 'utf-8');
+        const withSource = addFrontMatterField(text, 'abstract_source', 'pdf_extraction');
+        fs.writeFileSync(fp, insertAbstract(withSource, abstract), 'utf-8');
       }
       process.stderr.write(`  ✓\n`);
       found++;

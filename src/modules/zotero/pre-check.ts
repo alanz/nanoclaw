@@ -1,6 +1,8 @@
 import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
 
+const PRE_CHECK_TIMEOUT_MS = 10_000;
+
 /**
  * Lightweight pre-check: fetch the current library version from Zotero API.
  * Returns null on missing credentials, non-OK HTTP response, or network error.
@@ -16,9 +18,7 @@ export async function fetchLibraryVersion(lastVersion: number): Promise<number |
     return null;
   }
 
-  const url =
-    `https://api.zotero.org/users/${userId}/items` +
-    `?since=${lastVersion}&format=versions&limit=1`;
+  const url = `https://api.zotero.org/users/${userId}/items` + `?since=${lastVersion}&format=versions&limit=1`;
 
   try {
     const res = await fetch(url, {
@@ -26,7 +26,7 @@ export async function fetchLibraryVersion(lastVersion: number): Promise<number |
         'Zotero-API-Key': apiKey,
         'Zotero-API-Version': '3',
       },
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(PRE_CHECK_TIMEOUT_MS),
     });
 
     if (!res.ok) {

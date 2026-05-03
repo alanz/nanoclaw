@@ -37,6 +37,8 @@ function getCredentials() {
   return { apiKey, userId };
 }
 
+const SYNC_REQUEST_TIMEOUT_MS = 30_000;
+
 // ── Zotero API helpers ────────────────────────────────────────────────────────
 
 async function fetchZotero(url, apiKey) {
@@ -45,7 +47,7 @@ async function fetchZotero(url, apiKey) {
       'Zotero-API-Key': apiKey,
       'Zotero-API-Version': '3',
     },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(SYNC_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`Zotero API error: HTTP ${response.status} for ${url}`);

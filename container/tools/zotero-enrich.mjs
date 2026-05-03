@@ -22,6 +22,7 @@ import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import { parseArgs } from 'util';
+import { parseFrontMatter, insertAbstract, addFrontMatterField, validateAbstract } from './zotero-frontmatter.mjs';
 
 const { values: args } = parseArgs({
   options: {
@@ -86,24 +87,6 @@ async function fetchWithRetry(url, headers = {}) {
   return null;
 }
 
-// ── Front matter parser ───────────────────────────────────────────────────────
-
-function parseFrontMatter(text) {
-  if (!text.startsWith('---')) return null;
-  const nl = text.indexOf('\n');
-  if (nl < 0) return null;
-  const end = text.indexOf('\n---', nl + 1);
-  if (end < 0) return null;
-  const fmText = text.slice(nl + 1, end);
-  const bodyStart = end + 4 + (text[end + 4] === '\n' ? 1 : 0);
-  const meta = {};
-  for (const line of fmText.split('\n')) {
-    const colon = line.indexOf(': ');
-    if (colon > 0) meta[line.slice(0, colon).trim()] = line.slice(colon + 2).trim();
-  }
-  return { meta, body: text.slice(bodyStart) };
-}
-
 function hasAbstract(body) {
   const lines = body.split('\n').filter((l) => l.trim());
   return lines.length > 2;
@@ -144,7 +127,7 @@ async function s2ById(identifier) {
   await sleep(S2_PAUSE_MS);
   const url = `https://api.semanticscholar.org/graph/v1/paper/${encodeId(identifier)}?fields=${S2_FIELDS}`;
   const data = await fetchWithRetry(url);
-  return data?.abstract || null;
+  return validateAbstract(data?.abstract);
 }
 
 async function s2ByTitle(title) {
@@ -153,8 +136,9 @@ async function s2ByTitle(title) {
   const data = await fetchWithRetry(url);
   if (!data?.data) return null;
   for (const paper of data.data) {
-    if (titleSim(title, paper.title) >= TITLE_MATCH && paper.abstract) {
-      return paper.abstract;
+    if (titleSim(title, paper.title) >= TITLE_MATCH) {
+      const ab = validateAbstract(paper.abstract);
+      if (ab) return ab;
     }
   }
   return null;
@@ -172,8 +156,7 @@ function jatsStrip(text) {
 
 function crAbstract(msg) {
   if (!msg?.abstract) return null;
-  const clean = jatsStrip(msg.abstract);
-  return clean.length >= 80 ? clean : null;
+  return validateAbstract(jatsStrip(msg.abstract));
 }
 
 async function crByDoi(doi) {
@@ -260,10 +243,6 @@ async function findAbstract(meta, title) {
   return [null, null];
 }
 
-function insertAbstract(text, abstract) {
-  return text.trimEnd() + '\n\n' + abstract.trim() + '\n';
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 const files = fs
@@ -297,7 +276,8 @@ for (const fp of batch) {
     const [abstract, source] = await findAbstract(meta, title);
     if (abstract) {
       if (!DRY_RUN) {
-        fs.writeFileSync(fp, insertAbstract(text, abstract), 'utf-8');
+        const withSource = addFrontMatterField(text, 'abstract_source', source);
+        fs.writeFileSync(fp, insertAbstract(withSource, abstract), 'utf-8');
       }
       process.stderr.write(`  ✓ [${(source || '').padEnd(12)}] ${title.slice(0, 60)}\n`);
       enriched++;

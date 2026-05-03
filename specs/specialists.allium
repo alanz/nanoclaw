@@ -62,8 +62,7 @@ enum TransferStatus {
 }
 
 enum TransferFileStatus {
-    staged   -- written to ipc-out by the container, not yet handed over
-    | owned  -- host has taken ownership; copied to host-managed storage
+    owned    -- host has taken ownership; copied to host-managed storage
     | placed -- in the recipient invocation's ipc-in mount
     | expired -- recipient task is terminal; storage may be reclaimed
 }
@@ -273,6 +272,7 @@ entity ContainerTransfer {
         pending -> in_transit       -- placed into the requester invocation's ipc-in
         pending -> committed        -- files committed to memory; no ipc-in placement
         pending -> expired          -- empty transfer or no surviving files at expiry
+        in_transit -> pending       -- recipient invocation ended before its task reached terminal; re-stage on next invocation
         in_transit -> expired       -- requester task reached terminal state
         committed -> expired        -- staging copies reclaimed; memory copies persist
         terminal: expired
@@ -296,8 +296,8 @@ entity TransferFile {
     memory_path: String?
 
     transitions status {
-        staged -> owned
         owned -> placed
+        placed -> owned             -- recipient invocation ended before its task reached terminal; re-place on next invocation
         placed -> expired
         terminal: expired
     }
@@ -1409,6 +1409,68 @@ rule TransferExpiredOnRecipientInvocationEnded {
         -- the ending main-agent invocation.
 }
 
+-- Reset on recipient specialist crash. When a specialist invocation ends
+-- while its associated task is still alive (not in a terminal state), any
+-- in-transit transfer staged into this invocation's ipc-in is rolled back
+-- to pending, and each placed file is rolled back to owned. This preserves
+-- the file handover across the parent specialist's restart: the next
+-- invocation's ipc-in population path (see TransferFilesPlaced /
+-- TransferMovedToInTransit) will re-place the files from host-managed
+-- storage when the recipient resumes.
+--
+-- The guard invocation.task != null distinguishes the specialist-recipient
+-- case from the main-agent recipient case (handled by
+-- TransferExpiredOnRecipientInvocationEnded above, where invocation.task
+-- = null). The non-terminal-status guard is what makes this the reset
+-- branch rather than the expire branch: a specialist recipient whose task
+-- has already reached completed or failed is handled by the existing
+-- expire-on-requester-terminal rules and needs no further action here.
+
+rule TransferResetOnRecipientCrash {
+    when: ContainerInvocationEnded(invocation)
+    requires: invocation.task != null
+    requires: invocation.task.status not in {completed, failed}
+    for t in ContainerTransfers where status = in_transit and recipient_session_for_transfer(t) = invocation.session:
+        ensures: t.status = pending
+        for f in t.files where status = placed:
+            ensures: f.status = owned
+
+    @guidance
+        -- Condition: this rule only fires when the recipient invocation
+        -- ends while its specialist task is non-terminal. Concretely that
+        -- means the parent specialist has gone to awaiting_restart (or
+        -- still queued / running / awaiting_sub_task at the moment its
+        -- container exits, e.g. orphan-style runtime hiccups). In those
+        -- cases the parent will be restarted by the host and a new
+        -- invocation will start.
+        --
+        -- Purpose: files must survive container crashes and restarts.
+        -- The "files survive specialist task restarts" invariant is what
+        -- makes a sub-task transfer durable across the parent's retry
+        -- budget: a child's delivery is not lost just because the parent
+        -- crashed before consuming it. By moving the transfer back to
+        -- pending and the files back to owned, the next invocation's
+        -- IpcInPopulated step can re-place them via TransferFilesPlaced
+        -- and TransferMovedToInTransit, identical to the spawn-time path.
+        --
+        -- Counterpart (expire path). The expire branch fires when the
+        -- recipient is past the point where it can still consume the
+        -- files. Two distinct rules cover that:
+        --   - TransferExpiredOnRecipientInvocationEnded: same trigger
+        --     (ContainerInvocationEnded) but invocation.task = null,
+        --     i.e. a main-agent recipient with no specialist task. The
+        --     agent reads the transfer in a single turn; once the
+        --     invocation ends, the staged copies can be reclaimed.
+        --   - TransferExpiredOnRequesterTerminal / TransferExpiredOnRequesterFailed:
+        --     fired by the parent task itself transitioning to
+        --     completed or failed, which always precedes (or coincides
+        --     with) the parent's invocation ending. By the time
+        --     ContainerInvocationEnded fires for a terminal-task
+        --     recipient, transfers are already in status = expired and
+        --     this rule's status = in_transit guard is false; the rule
+        --     is a no-op in that case.
+}
+
 -- A pending transfer whose delivering task fails between ownership and
 -- routing (e.g. host crash mid-delivery) expires without ever being
 -- placed. In practice this is rare because SpecialistDeliveredResult
@@ -1432,10 +1494,13 @@ rule PendingTransferExpiredOnDeliveringTaskFailed {
 -- with its own detection path and recovery rules:
 --
 -- 1. Crash while running. The specialist's container exits unexpectedly while
---    the task is in status = running. sessions.allium's StuckContainerDetected
---    fires (processing_state: processing -> stuck) and this layer observes
---    the transition via SpecialistContainerCrashed (retries remain) or
---    SpecialistRestartExhausted (retries exhausted).
+--    the task is in status = running. One of sessions.allium's stuck-detection
+--    rules fires — StuckContainerDetectedByHeartbeat (heartbeat stale beyond
+--    ceiling) or StuckContainerDetectedByClaim (a claimed message has gone
+--    silent past tolerance) — moving the session processing_state from
+--    processing to stuck. This layer observes the transition via
+--    SpecialistContainerCrashed (retries remain) or SpecialistRestartExhausted
+--    (retries exhausted).
 --
 --    Recovery: SpecialistContainerCrashed moves the task to awaiting_restart
 --    and increments restart_attempt_count. sessions.allium then either

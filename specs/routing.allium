@@ -3,7 +3,8 @@
 --
 -- Scope: Channel-to-agent wiring, inbound message engagement, and routing decisions.
 -- Includes: MessagingGroup, Wiring (engagement rules, sender scope, session mode),
---           unknown-sender policy enforcement, messaging group auto-creation.
+--           unknown-sender policy enforcement, messaging group auto-creation,
+--           unknown-channel registration approvals.
 -- Excludes: User identity (identity.allium), session lifecycle (sessions.allium).
 --
 -- Wiring is the binding between a MessagingGroup and an AgentGroup. Four axes control
@@ -24,7 +25,10 @@ value ChannelMessage {
     platform_id: String
     thread_id: String?
     text: String
-    sender_handle: String
+    -- sender_id is the namespaced composite "<channel_type>:<platform_handle>"
+    -- (e.g. "discord:alan"). The channel adapter is responsible for forming
+    -- it from the raw platform metadata before the message reaches routing.
+    sender_id: String
     display_name: String
     is_mention: Boolean
     kind: String
@@ -84,6 +88,62 @@ entity SenderApprovalRequest {
     }
 }
 
+-- Per-messaging-group request to wire an unknown channel to an agent group.
+-- Created when a bot-addressed message lands on a messaging group that has
+-- no wiring at all (distinct from SenderApprovalRequest, which assumes a
+-- wiring exists but the sender is not yet a member). Resolved by an
+-- approver picking 'approve' (creates the wiring + admits the original
+-- sender + replays the message) or 'ignore' (denies the messaging group
+-- so future mentions stop escalating).
+
+entity ChannelRegistrationRequest {
+    messaging_group: MessagingGroup
+    agent_group: identity/AgentGroup
+    original_message: ChannelMessage
+    approver: identity/User
+    created_at: Timestamp
+    title: String
+    options_json: String
+    status: pending | approved | ignored
+
+    transitions status {
+        pending -> approved
+        pending -> ignored
+        terminal: approved, ignored
+    }
+
+    @guidance
+        -- Storage shape: pending_channel_approvals (PRIMARY KEY
+        -- messaging_group_id) — see migrations 012 and 013. The PK gives
+        -- the "at most one in-flight per messaging group" dedup that
+        -- ChannelRegistrationRequested relies on.
+        --
+        -- The row is deleted on any terminal transition (approved or
+        -- ignored), mirroring approvals/PendingApproval. The terminal
+        -- status is observable only for the instant the witnessing rule
+        -- fires; there is no persistent terminal-state row to query
+        -- after the fact. The witnessing rules (ChannelRegistrationApproved
+        -- and ChannelRegistrationIgnored) carry all downstream effects in
+        -- their own ensures clauses rather than relying on subscribers,
+        -- so the disappearing terminal state is not load-bearing for any
+        -- chain.
+        --
+        -- title and options_json carry the rendered card metadata so
+        -- the same wording is shown on the initial card and on any
+        -- post-click re-render — see migration 013 for the equivalent
+        -- columns added to pending_sender_approvals and pending_approvals.
+        -- These are presentation artefacts of the chat-sdk integration,
+        -- not domain state; they are kept on the entity rather than
+        -- recomputed in the response handler so the message text cannot
+        -- drift between request and re-render.
+        --
+        -- approver names a single designated user (the one DM'd by the
+        -- request flow). Click-time authorisation accepts either that
+        -- approver or any user with admin privilege over agent_group;
+        -- this is enforced at the surface boundary, not modelled as a
+        -- precondition on the witnessing rules below.
+}
+
 entity RoutedMessage {
     wiring: Wiring
     message: ChannelMessage
@@ -111,8 +171,8 @@ config {
 rule SenderObserved {
     when: ChannelMessageReceived(message)
     ensures: SenderSeen(
+        id: message.sender_id,
         channel_type: message.channel_type,
-        handle: message.sender_handle,
         display_name: message.display_name
     )
 }
@@ -212,7 +272,7 @@ rule MessagingGroupUndenied {
 rule MessageEngagesAgent {
     when: ChannelMessageReceived(message)
     let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
-    let sender = identity/User{kind: message.channel_type, handle: message.sender_handle}
+    let sender = identity/User{id: message.sender_id}
     requires: exists mg
     requires: exists sender
     requires: mg.denied_at = null
@@ -275,7 +335,7 @@ rule MessageEngagesAgent {
 rule MessageAccumulated {
     when: ChannelMessageReceived(message)
     let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
-    let sender = identity/User{kind: message.channel_type, handle: message.sender_handle}
+    let sender = identity/User{id: message.sender_id}
     requires: exists mg
     requires: exists sender
     requires: mg.denied_at = null
@@ -296,7 +356,7 @@ rule MessageAccumulated {
 rule UnknownSenderEscalated {
     when: ChannelMessageReceived(message)
     let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
-    let sender = identity/User{kind: message.channel_type, handle: message.sender_handle}
+    let sender = identity/User{id: message.sender_id}
     let inaccessible_wiring = (mg.wirings where not sender.can_access(agent_group)).first
     requires: exists mg
     requires: exists sender
@@ -368,6 +428,187 @@ rule BlockedMessageReplayed {
         -- that would have fired had the sender been a member at the time.
 }
 
+-- Unknown-channel registration flows.
+-- A bot-addressed message on a messaging group with no wirings escalates to
+-- an approver, who chooses 'approve' (wire it and replay) or 'ignore' (deny
+-- the messaging group so future addresses stop escalating).
+
+rule ChannelRegistrationRequested {
+    when: ChannelMessageReceived(message)
+    let mg = MessagingGroup{channel_type: message.channel_type, platform_id: message.platform_id}
+    let target = (identity/AgentGroups).first
+    let chosen_approver = pick_approver(target)
+    requires: exists mg
+    requires: message.is_mention
+    requires: mg.denied_at = null
+    requires: mg.wirings.count = 0
+    requires: identity/AgentGroups.count > 0
+    requires: exists chosen_approver
+    requires: not exists ChannelRegistrationRequest{messaging_group: mg, status: pending}
+    ensures: ChannelRegistrationRequest.created(
+        messaging_group: mg,
+        agent_group: target,
+        original_message: message,
+        approver: chosen_approver,
+        created_at: now,
+        title: render_channel_card_title(mg),
+        options_json: render_channel_card_options(),
+        status: pending
+    )
+
+    @guidance
+        -- 'Bot-addressed' is captured by message.is_mention. The channel SDK
+        -- pre-conflates two stimuli into this single flag: an explicit
+        -- @mention in a group chat, and any inbound message on a 1:1 DM
+        -- channel (where addressing the bot is implicit). The spec does not
+        -- carry a separate is_dm field; the conflation lives in the
+        -- adapter layer that produces ChannelMessage and is documented
+        -- alongside the field declaration.
+        --
+        -- target agent group selection is MVP: the first AgentGroup by
+        -- creation order. There is no UI for the approver to pick a target
+        -- yet; multi-agent installs always escalate to the same agent. A
+        -- richer card with a target picker is a follow-up (see implementation
+        -- notes in src/modules/permissions/channel-approval.ts). When this
+        -- changes, the rule's `target` binding will become an approver
+        -- choice rather than a deterministic pick.
+        --
+        -- pick_approver is a black-box selection: prefer scoped admins of
+        -- target, then global admins, then owners; within each tier prefer
+        -- a user reachable on the same channel as the originating message.
+        -- The implementation also rejects approvers without a reachable DM,
+        -- silently dropping the registration if none can be reached. That
+        -- failure mode is not modelled as a precondition here because the
+        -- spec layer does not represent DM reachability; treat the existence
+        -- of chosen_approver as the spec-level proxy for "an approver
+        -- reachable for this request". See actioning-findings if a
+        -- reachability gap is reported.
+        --
+        -- render_channel_card_title and render_channel_card_options
+        -- produce the persisted card metadata. These are presentation
+        -- artefacts whose exact wording is not domain logic; they are
+        -- captured as black-box renderers so the spec can express that
+        -- the same wording is reused for any post-click re-render
+        -- without prescribing the wording itself.
+        --
+        -- Dedup: at most one in-flight (pending) ChannelRegistrationRequest
+        -- per messaging group. Subsequent bot-addressed messages on the
+        -- same unwired messaging group are silently dropped while a card
+        -- is outstanding, preventing approver spam. The DB enforces this
+        -- via PRIMARY KEY on messaging_group_id; the invariant
+        -- OnePendingChannelRegistrationPerMessagingGroup states the
+        -- domain-level property the PK secures.
+}
+
+rule ChannelRegistrationApproved {
+    when: ApproveChannelRegistration(actor, request)
+    let original = request.original_message
+    let sender = identity/User{id: original.sender_id}
+    requires: actor = request.approver
+             or actor.is_owner
+             or actor.is_global_admin
+             or exists identity/UserRole{user: actor, role: admin, agent_group: request.agent_group}
+    requires: request.status = pending
+    requires: exists sender
+    ensures:
+        request.status = approved
+        Wiring.created(
+            messaging_group: request.messaging_group,
+            agent_group: request.agent_group,
+            engage_mode: pick_default_engage_mode(original),
+            engage_pattern: pick_default_engage_pattern(original),
+            sender_scope: known,
+            ignored_message_policy: accumulate,
+            session_mode: shared,
+            priority: 0,
+            created_at: now
+        )
+        identity/AgentGroupMember.created(
+            user: sender,
+            agent_group: request.agent_group,
+            added_by: actor,
+            added_at: now
+        )
+        ChannelMessageReceived(message: original)
+
+    @guidance
+        -- The new Wiring uses MVP defaults that match the implementation
+        -- in handleChannelApprovalResponse:
+        --   - engage_mode/engage_pattern: pick_default_engage_mode(original)
+        --     returns mention_sticky for group/threaded chats and pattern
+        --     for DMs; pick_default_engage_pattern returns "." for DMs and
+        --     null otherwise. The implementation uses the original event's
+        --     threadId to make this choice (a non-null thread implies a
+        --     group platform), since at this point the messaging_group's
+        --     is_group flag may not yet be authoritative.
+        --   - sender_scope = known: only members of the agent group reach
+        --     it. The original sender is auto-admitted below so the replay
+        --     does not bounce into a sender-approval cascade.
+        --   - ignored_message_policy = accumulate: non-triggering messages
+        --     are still recorded against the session for context.
+        --   - session_mode = shared: one session per (agent_group,
+        --     messaging_group). Per-thread or agent-shared modes require
+        --     an explicit operator decision and are not picked by default.
+        --   - priority = 0: no precedence relative to any future wirings
+        --     on the same messaging group.
+        --
+        -- The original sender is added as a member of the target agent
+        -- group, not the messaging_group. Membership is per-agent-group;
+        -- adding to messaging_group here would not exist as a concept.
+        --
+        -- The ChannelMessageReceived emission is the spec analogue of the
+        -- implementation's routeInbound(original_event) call after wiring
+        -- is created. It re-enters the routing pipeline as if the message
+        -- had just arrived, this time finding a wiring and a known sender
+        -- and producing a RoutedMessage. The request row is deleted before
+        -- the replay so the ChannelRegistrationRequested gate on the
+        -- replay sees no in-flight request (and the wiring count check
+        -- short-circuits anyway).
+        --
+        -- Click-time authorisation accepts either the designated approver
+        -- (the user the card was DM'd to) or any user with admin privilege
+        -- over the target agent group. This mirrors the implementation's
+        -- isAuthorized check and lets a global admin act on a card
+        -- DM'd to a different admin without forcing a re-issue.
+        --
+        -- Row deletion: ChannelRegistrationRequest is deleted on this
+        -- transition. The approved status is observable only for the
+        -- instant this rule's effects are computed; no other rule
+        -- subscribes to that transition. See the entity-level @guidance.
+}
+
+rule ChannelRegistrationIgnored {
+    when: IgnoreChannelRegistration(actor, request)
+    requires: actor = request.approver
+             or actor.is_owner
+             or actor.is_global_admin
+             or exists identity/UserRole{user: actor, role: admin, agent_group: request.agent_group}
+    requires: request.status = pending
+    requires: request.messaging_group.denied_at = null
+    ensures:
+        request.status = ignored
+        request.messaging_group.denied_at = now
+
+    @guidance
+        -- Ignoring a channel-registration request denies the messaging
+        -- group as a whole: no future bot-addressed message on this
+        -- messaging group will escalate again until an admin explicitly
+        -- wires it (which clears denied_at via WiringUpdated or
+        -- ChannelUnwired's MessagingGroupUndenied chain). This is
+        -- coarser than rejecting a single SenderApprovalRequest, where
+        -- only that specific request is dismissed and future messages
+        -- from the same sender can still escalate.
+        --
+        -- Row deletion follows the same pattern as ChannelRegistrationApproved:
+        -- the request row is deleted on this transition. The ignored
+        -- status is observable only for the instant this rule fires.
+        -- See the entity-level @guidance.
+        --
+        -- Click-time authorisation accepts the designated approver or
+        -- any user with admin privilege over the target agent group,
+        -- matching the implementation's isAuthorized check.
+}
+
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
@@ -377,5 +618,19 @@ invariant DeniedGroupAcceptsNoMessages {
     -- Enforced by the routing gate; captured here for clarity.
     for r in RoutedMessages:
         r.wiring.messaging_group.denied_at = null
+}
+
+invariant OnePendingChannelRegistrationPerMessagingGroup {
+    -- At most one ChannelRegistrationRequest may be pending against any
+    -- given MessagingGroup at a time. Enforced in storage by PRIMARY KEY
+    -- on pending_channel_approvals.messaging_group_id; in the spec this
+    -- is the domain property that the dedup precondition on
+    -- ChannelRegistrationRequested secures. Terminal-status rows are
+    -- deleted, so the assertion is equivalent to "at most one
+    -- ChannelRegistrationRequest per messaging group, full stop".
+    for a in ChannelRegistrationRequests:
+        for b in ChannelRegistrationRequests:
+            a != b and a.status = pending and b.status = pending
+                implies a.messaging_group != b.messaging_group
 }
 

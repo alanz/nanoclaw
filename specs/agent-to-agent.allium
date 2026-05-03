@@ -547,21 +547,59 @@ rule AgentAddedReaction {
 ------------------------------------------------------------
 
 -- schedule_task: agent declares a one-shot or recurring task. The host
--- creates a ScheduledTask in the requesting session.
+-- creates a ScheduledTask in the requesting session AND queues a
+-- task-kind InboundMessage in the same session's inbound store. The two
+-- creations are co-located here because the underlying host action is a
+-- single SQL insert into messages_in: ScheduledTask is the agent-facing
+-- view of that row, and InboundMessage is the session-facing view of the
+-- same row. Both views must come into being together for the row to be
+-- consistent.
 
 rule ScheduledTaskCreated {
     when: AgentRequestsScheduleTask(session, task_id, prompt, script?, process_after, recurrence?)
     requires: not exists ScheduledTask{series_id: task_id}
-    ensures: ScheduledTask.created(
-        session: session,
-        series_id: task_id,
-        prompt: prompt,
-        script: script,
-        process_after: process_after,
-        recurrence: recurrence,
-        status: pending,
-        created_at: now
-    )
+    ensures:
+        ScheduledTask.created(
+            session: session,
+            series_id: task_id,
+            prompt: prompt,
+            script: script,
+            process_after: process_after,
+            recurrence: recurrence,
+            status: pending,
+            created_at: now
+        )
+        sessions/InboundMessage.created(
+            session: session,
+            seq: next_inbound_seq(session),
+            kind: "task",
+            status: pending,
+            trigger: true,
+            content: encode_task_content(prompt, script),
+            process_after: process_after,
+            recurrence: recurrence,
+            series_id: task_id,
+            tries: 0,
+            created_at: now
+        )
+
+    @guidance
+        -- The InboundMessage created here is the live row of the task
+        -- series. It carries series_id = task_id, matching the
+        -- ScheduledTask's series_id, so the two views address the same
+        -- domain object. The ScheduledMessageDue rule in sessions.allium
+        -- picks the row up when its process_after arrives and emits
+        -- SessionWoken; from the session's perspective this is an
+        -- ordinary scheduled inbound message and no extra plumbing is
+        -- needed. trigger = true because a task firing must wake the
+        -- container.
+        --
+        -- Recurrence cloning is handled twice in parallel narratives:
+        -- ScheduledTaskRecurrenceCloned in this spec models the agent's
+        -- view (clone the next ScheduledTask), and InboundRecurrenceCloned
+        -- in sessions.allium models the session's view (clone the next
+        -- InboundMessage). Both are realised by the same host sweep tick
+        -- that walks completed messages_in rows with recurrence != null.
 }
 
 -- pause_task: stop a series from firing without forgetting it.
@@ -724,6 +762,21 @@ rule InteractiveQuestionAnswered {
             created_at: now
         )
         sessions/SessionWoken(session: q.session)
+
+    @guidance
+        -- The host's pending_questions row is deleted from storage as soon
+        -- as this rule fires: the response handler writes the question_response
+        -- inbound message and then immediately calls deletePendingQuestion
+        -- in the same handler invocation. The row does not persist in
+        -- `status = answered`; that terminal status is observable only for
+        -- the instant the transition fires.
+        --
+        -- This matches the delete-on-resolve pattern used by PendingApproval
+        -- in approvals.allium: the transition into the terminal status is
+        -- the witness, and there is no persistent terminal-state row to
+        -- query after the fact. selected_option, captured here for the
+        -- duration of the transition, is encoded into the question_response
+        -- payload before the row disappears.
 }
 
 -- The container's polling deadline elapses without an answer. The
@@ -748,16 +801,28 @@ rule InteractiveQuestionTimedOut {
         -- A late button click therefore still finds the row, writes a
         -- kind='system' question_response inbound message into the
         -- session, and wakes the container — exactly as
-        -- InteractiveQuestionAnswered describes. The click is delivered.
+        -- InteractiveQuestionAnswered describes. The click is delivered,
+        -- but the woken container may or may not still be waiting on the
+        -- ask_user_question call: the agent has by then almost certainly
+        -- moved on. Whether it acts on the late response, logs it as
+        -- unexpected or ignores it depends entirely on its prompt and
+        -- current task state; the spec does not constrain this. This is
+        -- the intentionally accepted behaviour: no expires_at column is
+        -- added to the host row, no purging sweep is introduced, and no
+        -- acknowledgement-to-user path is added for late clicks.
         --
-        -- The agent has by then almost certainly continued past the
-        -- ask_user_question call. Whether it acts on the late response,
-        -- logs it as unexpected or ignores it depends entirely on its
-        -- prompt and current task state; the spec does not constrain
-        -- this. This is the intentionally accepted behaviour: no
-        -- expires_at column is added to the host row, no purging sweep
-        -- is introduced, and no acknowledgement-to-user path is added
-        -- for late clicks.
+        -- Accumulation: because the timed_out path never deletes the row
+        -- (in contrast to InteractiveQuestionAnswered, which deletes on
+        -- answer), and because no host sweep or TTL prunes
+        -- pending_questions, rows for timed-out questions accumulate
+        -- indefinitely. Every ask_user_question whose timeout elapses
+        -- without a click leaves a permanent row behind. This is a known
+        -- accumulation gap. A future cleanup sweep could prune
+        -- pending_questions rows older than some TTL (e.g. anything whose
+        -- corresponding InteractiveQuestion is in `status = timed_out`
+        -- and whose expires_at is sufficiently far in the past); the
+        -- design of that TTL is left open until the accumulation pressure
+        -- is observed in practice.
 }
 
 ------------------------------------------------------------

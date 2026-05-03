@@ -6,8 +6,10 @@
 --           AgentGroupMember, AgentGroup definition.
 -- Excludes: Channel routing, session management, approval flows.
 --
--- Users are identified by channel type + platform handle. There is no cross-channel
--- identity linking — the same human on two channels is two distinct User records.
+-- Users are identified by a composite id of the form "<kind>:<handle>", where
+-- kind is the channel type (e.g. "discord", "slack") and handle is the platform
+-- handle. There is no cross-channel identity linking — the same human on two
+-- channels is two distinct User records.
 
 ------------------------------------------------------------
 -- Enumerations
@@ -39,8 +41,10 @@ entity Specialist {
 }
 
 entity User {
+    -- id is the composite "<kind>:<handle>" string (e.g. "discord:alan").
+    -- The platform handle is not stored as a separate field; it is embedded in id.
+    id: String
     kind: String
-    handle: String
     display_name: String
     created_at: Timestamp
 
@@ -83,19 +87,19 @@ entity AgentGroupMember {
 -- channel message, decoupling identity from the full ChannelMessage value.
 
 rule NewUserSeen {
-    when: SenderSeen(channel_type, handle, display_name)
-    requires: not exists User{kind: channel_type, handle: handle}
+    when: SenderSeen(id, channel_type, display_name)
+    requires: not exists User{id: id}
     ensures: User.created(
+        id: id,
         kind: channel_type,
-        handle: handle,
         display_name: display_name,
         created_at: now
     )
 }
 
 rule UserDisplayNameRefreshed {
-    when: SenderSeen(channel_type, handle, display_name)
-    let user = User{kind: channel_type, handle: handle}
+    when: SenderSeen(id, channel_type, display_name)
+    let user = User{id: id}
     requires: exists user
     requires: user.display_name != display_name
     ensures: user.display_name = display_name

@@ -3,7 +3,7 @@
 --
 -- Scope: Agent self-modification flows — requesting package installation and
 --        MCP (Model Context Protocol) server addition.
--- Includes: PackageInstallRequest, McpServerRequest, approval-gated application.
+-- Includes: approval-gated container mutations driven by approvals/PendingApproval.
 -- Excludes: The approval primitive itself (approvals.allium), container runtime
 --           details (treated as black boxes here).
 --
@@ -18,6 +18,15 @@
 --
 -- Motivation: agents discover they need a tool mid-conversation and can request
 -- it without an operator having to manually edit config files.
+--
+-- Persistence model: there is no self-mod request entity. A request and its
+-- payload (package list / MCP server config) live entirely on the
+-- approvals/PendingApproval row that the request rule emits. On admin approve,
+-- the apply rule reads the payload off that row and mutates the container
+-- config in place. On admin reject, the row is removed by approvals.allium and
+-- no further self-mod action runs. There is no "applied" state to record:
+-- successful application is observable through the container image rebuild
+-- and restart events emitted by the apply rules.
 
 use "./identity.allium" as identity
 use "./approvals.allium" as approvals
@@ -31,67 +40,20 @@ config {
 }
 
 ------------------------------------------------------------
--- Entities and Variants
-------------------------------------------------------------
-
-entity PackageInstallRequest {
-    agent_group: identity/AgentGroup
-    apt_packages: List<String>
-    npm_packages: List<String>
-    reason: String
-    requested_at: Timestamp
-    status: pending_approval | approved | rejected | applied
-
-    total_packages: apt_packages.count + npm_packages.count
-
-    invariant PackageCountWithinLimit {
-        total_packages <= config.max_packages_per_request
-    }
-
-    transitions status {
-        pending_approval -> approved
-        pending_approval -> rejected
-        approved -> applied
-        terminal: applied, rejected
-    }
-}
-
-entity McpServerRequest {
-    agent_group: identity/AgentGroup
-    server_name: String
-    command: String
-    args: List<String>
-    env: Map<String, String>
-    reason: String
-    requested_at: Timestamp
-    status: pending_approval | approved | rejected | applied
-
-    transitions status {
-        pending_approval -> approved
-        pending_approval -> rejected
-        approved -> applied
-        terminal: applied, rejected
-    }
-}
-
-------------------------------------------------------------
 -- Rules
 ------------------------------------------------------------
 
--- Agents initiate a package install request from within the container.
+-- install_packages flow ---------------------------------------------------
+
+-- Agents initiate a package install request from within the container. The
+-- request data (apt list, npm list, reason) travels on the PendingApproval
+-- row created in response to the ApprovalRequested emission below; this spec
+-- does not maintain a separate request entity.
 
 rule PackageInstallRequested {
     when: AgentRequestsPackageInstall(session, apt_packages, npm_packages, reason)
     requires: apt_packages.count + npm_packages.count > 0
     requires: apt_packages.count + npm_packages.count <= config.max_packages_per_request
-    ensures: PackageInstallRequest.created(
-        agent_group: session.agent_group,
-        apt_packages: apt_packages,
-        npm_packages: npm_packages,
-        reason: reason,
-        requested_at: now,
-        status: pending_approval
-    )
     ensures: approvals/ApprovalRequested(
         agent_group: session.agent_group,
         session_id: session.id,
@@ -124,66 +86,40 @@ rule PackageInstallRequested {
 rule PackageInstallApproved {
     when: approval: approvals/PendingApproval.status transitions_to approved
     requires: approval.action = "install_packages"
-    let req = PackageInstallRequest{agent_group: approval.agent_group}
-    requires: exists req
-    requires: req.status = pending_approval
     ensures:
-        req.status = approved
-        ContainerImageRebuilt(agent_group: req.agent_group)
-        ContainerRestarted(agent_group: req.agent_group)
+        ContainerImageRebuilt(agent_group: approval.agent_group)
+        ContainerRestarted(agent_group: approval.agent_group)
 
     @guidance
-        -- On approval, the host calls updateContainerConfig before
-        -- triggering the image rebuild. The config mutation (appending
-        -- the approved packages to the agent group's container.json)
+        -- The host reads the package list off the approval's payload,
+        -- calls updateContainerConfig to append the entries to the
+        -- agent group's container.json, then triggers the image
+        -- rebuild and kills the running container. The config mutation
         -- happens first and is not rolled back if the subsequent
         -- rebuild fails.
         --
-        -- The state machine has no failure transition: there is no
-        -- edge from approved back to pending_approval and no
-        -- approved -> rejected (or approved -> failed) edge. On
-        -- rebuild failure, the PackageInstallRequest stays at
-        -- approved and never reaches applied (since
-        -- ContainerImageRebuilt is only emitted on rebuild success).
-        --
-        -- The host notifies the approver of the failure so they can
-        -- inspect the build logs. There is no replay mechanism on
-        -- the existing approved request: a retry requires the agent
-        -- to issue a fresh install_packages request, which produces
-        -- a new PackageInstallRequest and a new approval cycle.
+        -- There is no "applied" state to record: successful application
+        -- is observable through ContainerImageRebuilt and
+        -- ContainerRestarted, which downstream readers (logs, metrics,
+        -- the agent itself via a follow-up system message) can react
+        -- to. On rebuild failure, neither emission fires; the host
+        -- notifies the approver via chat instead. There is no replay
+        -- mechanism: a retry requires the agent to issue a fresh
+        -- install_packages request, which produces a new approval cycle.
 }
 
-rule PackageInstallRejected {
-    when: approval: approvals/PendingApproval.status transitions_to rejected
-    requires: approval.action = "install_packages"
-    let req = PackageInstallRequest{agent_group: approval.agent_group}
-    requires: exists req
-    requires: req.status = pending_approval
-    ensures: req.status = rejected
-}
+-- Rejection on approvals/PendingApproval.status transitions_to rejected is
+-- handled entirely inside approvals.allium (row deletion + agent
+-- notification). No self-mod rule is needed: there is nothing to undo.
 
-rule PackageInstallApplied {
-    when: ContainerImageRebuilt(agent_group)
-    let req = PackageInstallRequest{agent_group: agent_group}
-    requires: exists req
-    requires: req.status = approved
-    ensures: req.status = applied
-}
+-- add_mcp_server flow -----------------------------------------------------
 
--- Agents initiate an MCP server addition request.
+-- Agents initiate an MCP server addition request. As with install_packages,
+-- the request payload (server name, command, args, env) travels on the
+-- PendingApproval row, not on a separate self-mod entity.
 
 rule McpServerAddRequested {
     when: AgentRequestsMcpServer(session, server_name, command, args, env, reason)
-    ensures: McpServerRequest.created(
-        agent_group: session.agent_group,
-        server_name: server_name,
-        command: command,
-        args: args,
-        env: env,
-        reason: reason,
-        requested_at: now,
-        status: pending_approval
-    )
     ensures: approvals/ApprovalRequested(
         agent_group: session.agent_group,
         session_id: session.id,
@@ -210,57 +146,28 @@ rule McpServerAddRequested {
 rule McpServerApproved {
     when: approval: approvals/PendingApproval.status transitions_to approved
     requires: approval.action = "add_mcp_server"
-    let req = McpServerRequest{agent_group: approval.agent_group}
-    requires: exists req
-    requires: req.status = pending_approval
     ensures:
-        req.status = approved
-        ContainerConfigUpdated(agent_group: req.agent_group)
-        ContainerRestarted(agent_group: req.agent_group)
+        ContainerConfigUpdated(agent_group: approval.agent_group)
+        ContainerRestarted(agent_group: approval.agent_group)
+
+    @guidance
+        -- The host reads the server config (name, command, args, env)
+        -- off the approval's payload, writes it into the agent group's
+        -- container.json, and kills the running container. No image
+        -- rebuild is required: bun runs TypeScript directly, so a pure
+        -- MCP wiring change picks up on the next container start.
+        --
+        -- As with PackageInstallApproved, there is no "applied" state
+        -- to record. ContainerConfigUpdated and ContainerRestarted are
+        -- the observable signals.
 }
 
-rule McpServerRejected {
-    when: approval: approvals/PendingApproval.status transitions_to rejected
-    requires: approval.action = "add_mcp_server"
-    let req = McpServerRequest{agent_group: approval.agent_group}
-    requires: exists req
-    requires: req.status = pending_approval
-    ensures: req.status = rejected
-}
-
-rule McpServerApplied {
-    when: ContainerConfigUpdated(agent_group)
-    let req = McpServerRequest{agent_group: agent_group}
-    requires: exists req
-    requires: req.status = approved
-    ensures: req.status = applied
-}
-
-------------------------------------------------------------
--- Invariants
-------------------------------------------------------------
-
-invariant AtMostOnePendingInstallPerGroup {
-    for a in PackageInstallRequests:
-        for b in PackageInstallRequests:
-            a != b and a.agent_group = b.agent_group
-                implies not (a.status = pending_approval and b.status = pending_approval)
-}
-
-invariant AtMostOnePendingMcpPerGroup {
-    for a in McpServerRequests:
-        for b in McpServerRequests:
-            a != b and a.agent_group = b.agent_group
-                implies not (a.status = pending_approval and b.status = pending_approval)
-}
+-- Rejection: see the note above PackageInstallApproved. Same reasoning
+-- applies to add_mcp_server.
 
 -- ContainerImageRebuilt, ContainerRestarted, and ContainerConfigUpdated are
 -- trigger emissions that the host processes outside this spec. Their execution
--- is an implementation concern (image rebuild pipeline, container process restart).
-
--- Checker note: allium check 3.2.3 emits status.noExit / status.unreachableValue warnings
--- for PackageInstallRequest and McpServerRequest. These are false positives caused by the
--- checker not resolving cross-module type identity in let-bound join lookups
--- (e.g. `PackageInstallRequest{agent_group: approval.agent_group}` where approval is
--- approvals/PendingApproval). The rules are domain-correct; each transition is witnessed
--- by an explicit requires + ensures pair.
+-- is an implementation concern (image rebuild pipeline, container process
+-- restart). The "at most one pending request per (agent_group, action) pair"
+-- property is enforced generically by approvals/OnlyOneActivePendingPerAction
+-- and does not need restating here.

@@ -100,6 +100,27 @@ entity ItemFile {
     abstract_source: AbstractSource?    -- set when abstract was obtained via enrichment or extraction
     -- allium-ignore allium.field.unused
     last_synced_at: Timestamp
+
+    @guidance
+        -- Storage: each ItemFile instance is a markdown file at
+        -- groups/<folder>/zotero-md/<item_key>.md in the host filesystem,
+        -- mounted into the agent container at /workspace/agent/zotero-md.
+        -- There is no DB row for an ItemFile; the file IS the entity.
+        --
+        -- Field mapping (see container/tools/zotero-sync.mjs buildMarkdown):
+        --   - item_key       -> filename stem AND zoteroKey: in YAML frontmatter
+        --   - title          -> title: in YAML frontmatter AND H1 heading in body
+        --   - abstract       -> body text after the heading and author/year line
+        --                       (added/updated in place by zotero-enrich.mjs and
+        --                        zotero-extract-abstracts.mjs as a body section)
+        --   - abstract_source, last_synced_at -> not persisted in the file;
+        --                       host-derived from sync/enrichment events
+        --
+        -- Uniqueness: the UniqueItemFilesPerGroup invariant is enforced by the
+        -- filesystem itself — one file per item_key per group directory, by
+        -- filename collision. No DB UNIQUE constraint exists. Equally, there is
+        -- no ItemFiles table to query: enumeration requires reading the
+        -- zotero-md directory; lookup by item_key is a path stat.
 }
 
 -- A timestamped entry appended to the group's zotero-digest.md activity log.
@@ -109,6 +130,29 @@ entity DigestEntry {
     recorded_at: Timestamp
     -- allium-ignore allium.field.unused
     summary: String
+
+    @guidance
+        -- Storage: each DigestEntry instance is an appended text block in a
+        -- single shared file at groups/<folder>/zotero-digest.md. The file is
+        -- write-once-per-event and append-only (see notifySyncChanges in
+        -- src/modules/zotero/notify.ts), with each entry written as:
+        --
+        --     \n\n## <ISO timestamp>\n\n<summary>
+        --
+        -- Field mapping:
+        --   - recorded_at -> the "## <ISO timestamp>" heading line
+        --   - summary     -> the prose paragraph(s) following that heading
+        --
+        -- Implications vs a DB-backed entity:
+        --   - DigestEntry instances are NOT individually addressable. There is
+        --     no key, no row id, and no path that resolves to a single entry.
+        --   - DigestEntry instances cannot be deleted, updated or queried
+        --     individually; the only mutation is "append a new entry".
+        --   - There is no DigestEntries collection to iterate. Reading the
+        --     history requires opening the flat file and parsing the headings.
+        --   - Rules and invariants therefore should not assume per-entry
+        --     lookup, deletion, or status; the entity exists to record
+        --     observable activity, not to be navigated.
 }
 
 ------------------------------------------------------------

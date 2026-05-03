@@ -2,20 +2,39 @@
 -- approvals.allium
 --
 -- Scope: Human approval flows for privileged actions.
--- Includes: PendingApproval creation, approver resolution, approval/rejection,
---           expiry, and SenderApproval (unknown-sender escalation).
+-- Includes: PendingApproval (regular module-initiated approvals), OneCLIApproval
+--           (credentialed-action approvals from the OneCLI gateway), approver
+--           resolution, approval/rejection, OneCLI expiry, and SenderApproval
+--           (unknown-sender escalation, modelled in routing.allium).
 -- Excludes: The specific actions that trigger approvals (see self-mod.allium,
---           routing.allium). This spec models the generic approval primitive.
+--           routing.allium). This spec models the generic approval primitives.
 --
 -- Approvals are used whenever an agent (or the system) needs a human decision
 -- before executing a privileged action. The approver is resolved from the
 -- privilege hierarchy: scoped admins of the relevant group first, then global
 -- admins, then owners. Approval decisions are delivered to the agent session
--- that requested the action.
+-- that requested the action (regular approvals) or back through the gateway
+-- (OneCLI approvals).
 --
--- Two approval types exist:
---   PendingApproval  — action-gated (e.g. package install, MCP server add)
---   SenderApproval   — unknown-sender admission (modelled in routing.allium)
+-- Two approval entity kinds exist, with fundamentally different lifecycles:
+--
+--   PendingApproval   — Regular module-initiated approvals (e.g. package
+--                       install, MCP server add). No expiry; the row persists
+--                       in `pending` indefinitely until a human responds.
+--                       Resolved by Approve or Reject only.
+--   OneCLIApproval    — Credentialed-action approvals from the OneCLI gateway.
+--                       Always carries an `expires_at` derived from the
+--                       gateway's TTL; expires via an in-process timer (not a
+--                       DB sweep) if no human responds in time.
+--
+-- Both entities delete their row on any terminal transition (approved,
+-- rejected, or — for OneCLIApproval — expired). The terminal status is
+-- observable only for an instant before deletion; modelling it as a transition
+-- captures the witnessing rules cleanly without requiring persistent terminal
+-- rows.
+--
+-- A third kind, SenderApproval, models unknown-sender admission and lives in
+-- routing.allium.
 
 use "./identity.allium" as identity
 
@@ -23,19 +42,16 @@ use "./identity.allium" as identity
 -- Enumerations
 ------------------------------------------------------------
 
-enum ApprovalStatus { pending | approved | rejected | expired }
-
-------------------------------------------------------------
--- Config
-------------------------------------------------------------
-
-config {
-    approval_expiry: Duration = 24.hours
-}
+enum PendingApprovalStatus { pending | approved | rejected }
+enum OneCLIApprovalStatus { pending | approved | rejected | expired }
 
 ------------------------------------------------------------
 -- Entities and Variants
 ------------------------------------------------------------
+
+-- Regular module-initiated approvals. Created by ApprovalRequested. Resolved
+-- by Approve or Reject. No expiry; the row persists in `pending` until a
+-- human responds.
 
 entity PendingApproval {
     request_id: String
@@ -46,8 +62,44 @@ entity PendingApproval {
     title: String
     options: String
     created_at: Timestamp
+    status: PendingApprovalStatus
+
+    is_actionable: status = pending
+
+    transitions status {
+        pending -> approved
+        pending -> rejected
+        terminal: approved, rejected
+    }
+
+    @guidance
+        -- The row is deleted from storage on any terminal transition
+        -- (approved or rejected). The terminal status is observable
+        -- only for the instant a witnessing rule fires; downstream
+        -- rules in other modules (e.g. self-mod's PackageInstallApproved)
+        -- subscribe to `status transitions_to approved` and read the
+        -- approval's fields before the row disappears. This matches the
+        -- code's delete-on-resolve pattern: there is no persistent
+        -- terminal-state row to query after the fact.
+}
+
+-- OneCLI credentialed-action approvals. Created when the OneCLI gateway holds
+-- an outbound HTTP request and asks the host to obtain admin sign-off. Always
+-- carries the gateway's TTL as `expires_at`. Expires via an in-process timer.
+
+entity OneCLIApproval {
+    request_id: String
+    action: String
+    payload: String
+    agent_group: identity/AgentGroup?
+    title: String
+    options: String
+    channel_type: String
+    platform_id: String
+    platform_message_id: String?
+    created_at: Timestamp
     expires_at: Timestamp
-    status: ApprovalStatus
+    status: OneCLIApprovalStatus
 
     is_actionable: status = pending and expires_at > now
 
@@ -57,11 +109,27 @@ entity PendingApproval {
         pending -> expired
         terminal: approved, rejected, expired
     }
+
+    @guidance
+        -- Like PendingApproval, the row is deleted on any terminal
+        -- transition. Unlike PendingApproval, expiry is real: every
+        -- OneCLIApproval has an `expires_at` derived from the gateway's
+        -- TTL, and a fallback path resolves the request as denied if no
+        -- human responds. The card is edited to "Expired (<reason>)"
+        -- before the row is deleted.
+        --
+        -- session_id is intentionally absent: OneCLI approvals are
+        -- not tied to a specific agent session. The originating agent
+        -- group (when known) is carried for approver-scoping; the card's
+        -- channel/platform identifiers are carried so the host can edit
+        -- the card on expiry.
 }
 
 ------------------------------------------------------------
 -- Rules
 ------------------------------------------------------------
+
+-- Regular approvals: creation, grant, reject. -----------------------------
 
 -- Approval requests are created by the system when a privileged action needs
 -- human sign-off. The action string routes the decision to a registered handler.
@@ -77,7 +145,6 @@ rule ApprovalRequested {
         title: title,
         options: options,
         created_at: now,
-        expires_at: now + config.approval_expiry,
         status: pending
     )
 
@@ -108,6 +175,15 @@ rule ApprovalGranted {
              or exists identity/UserRole{user: actor, role: admin, agent_group: approval.agent_group}
     requires: approval.is_actionable
     ensures: approval.status = approved
+
+    @guidance
+        -- The row is deleted immediately after this rule fires. In code,
+        -- the response handler calls deletePendingApproval at the end of
+        -- handleRegisteredApproval; the approved status is observable
+        -- only for the instant subscribers (e.g. self-mod's
+        -- PackageInstallApproved) react to
+        -- `PendingApproval.status transitions_to approved`. There is no
+        -- persistent approved-state row to query after the fact.
 }
 
 rule ApprovalRejected {
@@ -119,6 +195,9 @@ rule ApprovalRejected {
     ensures: approval.status = rejected
 
     @guidance
+        -- The row is deleted immediately after this rule fires; the
+        -- rejected status is observable only as the transition itself.
+        --
         -- Rejection is terminal for this PendingApproval row, but the agent
         -- may immediately re-request the same action: a fresh
         -- ApprovalRequested fires, generate_request_id() produces a new id,
@@ -132,10 +211,90 @@ rule ApprovalRejected {
         -- approval primitive itself.
 }
 
-rule ApprovalExpired {
-    when: approval: PendingApproval.expires_at <= now
+-- OneCLI approvals: creation, grant, reject, expire. ---------------------
+
+rule OneCLIApprovalRequested {
+    when: OneCLIApprovalRequested(
+        agent_group?,
+        action,
+        payload,
+        title,
+        options,
+        channel_type,
+        platform_id,
+        platform_message_id?,
+        expires_at
+    )
+    ensures: OneCLIApproval.created(
+        request_id: generate_request_id(),
+        action: action,
+        payload: payload,
+        agent_group: agent_group,
+        title: title,
+        options: options,
+        channel_type: channel_type,
+        platform_id: platform_id,
+        platform_message_id: platform_message_id,
+        created_at: now,
+        expires_at: expires_at,
+        status: pending
+    )
+
+    @guidance
+        -- expires_at is supplied verbatim by the OneCLI gateway as part
+        -- of its manual-approval handshake. The host does not derive it
+        -- locally; it is the gateway's TTL minus a small safety margin.
+}
+
+rule OneCLIApprovalGranted {
+    when: AdminGrantsOneCLIApproval(actor, approval)
+    requires: actor.is_owner
+             or actor.is_global_admin
+             or exists identity/UserRole{user: actor, role: admin, agent_group: approval.agent_group}
+    requires: approval.is_actionable
+    ensures: approval.status = approved
+
+    @guidance
+        -- The row is deleted immediately after this rule fires. The
+        -- gateway's HTTP side reads the decision through the
+        -- in-process Promise resolved by resolveOneCLIApproval; no
+        -- subsequent reader of the row exists. The card is auto-edited
+        -- to "Approved" by the chat-sdk bridge.
+}
+
+rule OneCLIApprovalRejected {
+    when: AdminRejectsOneCLIApproval(actor, approval)
+    requires: actor.is_owner
+             or actor.is_global_admin
+             or exists identity/UserRole{user: actor, role: admin, agent_group: approval.agent_group}
+    requires: approval.is_actionable
+    ensures: approval.status = rejected
+
+    @guidance
+        -- Same lifecycle as OneCLIApprovalGranted: the row is deleted
+        -- immediately after this rule fires; the card is auto-edited
+        -- to "Rejected" by the chat-sdk bridge.
+}
+
+rule OneCLIApprovalExpired {
+    when: approval: OneCLIApproval.expires_at <= now
     requires: approval.status = pending
     ensures: approval.status = expired
+
+    @guidance
+        -- This temporal trigger models behaviour driven by an in-process
+        -- setTimeout, not a DB sweep. Each OneCLIApproval has a dedicated
+        -- timer scheduled when the row is created; the timer fires once,
+        -- shortly before the gateway's own TTL elapses. On host restart,
+        -- a startup sweep takes the place of timers that were lost when
+        -- the process exited: it edits each leftover card to
+        -- "Expired (host restarted)" and deletes the row, equivalent to
+        -- this rule's effect modulo the reason string.
+        --
+        -- The row is deleted immediately after this rule fires, after
+        -- the host edits the card to "Expired (<reason>)". The expired
+        -- status is observable only for the instant the transition
+        -- fires; there is no persistent expired-state row to query.
 }
 
 ------------------------------------------------------------
@@ -154,4 +313,10 @@ invariant OnlyOneActivePendingPerAction {
         for b in PendingApprovals:
             a != b and a.agent_group = b.agent_group and a.action = b.action
                 implies not (a.status = pending and b.status = pending)
+}
+
+invariant UniqueOneCLIRequestId {
+    for a in OneCLIApprovals:
+        for b in OneCLIApprovals:
+            a != b implies a.request_id != b.request_id
 }

@@ -48,8 +48,16 @@ enum DeliveryStatus { delivered | failed }
 
 config {
     max_message_tries: Integer = 5
-    processing_ceiling: Duration = 30.minutes
-    stuck_claim_timeout: Duration = 60.seconds
+    -- Absolute ceiling on heartbeat staleness. If the container's heartbeat
+    -- has not been refreshed within this window, the session is considered
+    -- stuck regardless of whether any specific message claim is overdue.
+    -- Extended on a per-tick basis when a long-running tool is in flight
+    -- (see Session.active_tool_timeout).
+    heartbeat_ceiling: Duration = 30.minutes
+    -- Per-claim silence tolerance. A claim that has been held longer than
+    -- this without a fresher heartbeat is considered stuck. Also extended
+    -- by Session.active_tool_timeout when a long-running tool is in flight.
+    claim_stuck_timeout: Duration = 60.seconds
     scheduled_check_interval: Duration = 60.seconds
     max_concurrent_containers: Integer = 5
 }
@@ -66,6 +74,16 @@ entity Session {
     status: SessionStatus
     processing_state: ProcessingState
     last_active: Timestamp
+    -- Most recent heartbeat from the container. Null until the container has
+    -- reported any sign of life (a freshly-spawned container has not yet
+    -- written one). The host observes this signal as the mtime of an
+    -- in-container heartbeat file; the container is responsible for refreshing
+    -- it during normal SDK activity.
+    heartbeat_at: Timestamp?
+    -- When the container is currently inside a long-running tool call (e.g.
+    -- a Bash command with a declared timeout), this widens the stuck-detection
+    -- tolerances for this tick. Null when no such tool is in flight.
+    active_tool_timeout: Duration?
     created_at: Timestamp
 
     inbound_messages: InboundMessage with session = this
@@ -89,10 +107,6 @@ entity Session {
         processing -> idle
         processing -> stuck
         stuck -> idle
-        -- terminal: idle means "must be idle when the Session is closed",
-        -- not "no outgoing transitions". idle -> processing is valid while
-        -- the session is active. See NoProcessingInClosedSession invariant.
-        terminal: idle
     }
 }
 
@@ -108,6 +122,11 @@ entity InboundMessage {
     series_id: String?
     tries: Integer
     created_at: Timestamp
+    -- Timestamp at which the container claimed this message (status moved
+    -- from pending into processing). Used by stuck-claim detection to
+    -- compare claim age against heartbeat freshness. Cleared when the
+    -- message returns to pending after a retry or stuck-reset.
+    claimed_at: Timestamp? when status = processing | completed | failed
 
     is_due: process_after = null or process_after <= now
     is_retriable: tries < config.max_message_tries
@@ -234,19 +253,15 @@ rule InboundMessageQueued {
         -- a platform message arriving via a channel adapter and being routed to a
         -- session. It is not the only path that creates an InboundMessage.
         --
-        -- Recurring InboundMessages (rows with `recurrence` set and
-        -- `series_id = id`) do NOT pass through this rule. They originate from
-        -- the host's `schedule_task` delivery action: when the container emits a
-        -- ScheduledTaskCreated outcome (modelled in agent-to-agent.allium), the
-        -- host writes a row directly into the session's inbound store with the
-        -- cron string in `recurrence` and `series_id` set to the new row's own
-        -- id. This DB write bridges the agent-facing ScheduledTask entity in
-        -- agent-to-agent.allium to the InboundMessage entity here, but it is not
-        -- yet captured as a rule in either spec. Once the bridge is modelled, it
-        -- will be a second creation site for InboundMessage alongside this rule,
-        -- and the recurrence/series_id fields will be established there rather
-        -- than via InboundRecurrenceCloned (which only propagates the series
-        -- across subsequent firings).
+        -- Task-kind InboundMessages (rows with `kind = "task"`, `series_id = id`,
+        -- and optionally `recurrence` set) are created by ScheduledTaskCreated
+        -- in agent-to-agent.allium. That rule has a single ensures block that
+        -- creates both the ScheduledTask (the agent-facing view) and the
+        -- InboundMessage (the session-facing view) in lockstep, because the
+        -- underlying host action is a single SQL insert into messages_in. The
+        -- recurrence and series_id fields are established at that point;
+        -- subsequent firings of a recurring task are propagated by
+        -- InboundRecurrenceCloned below.
 }
 
 -- When a triggering inbound message is queued, wake the session so the container
@@ -386,20 +401,81 @@ rule SessionProcessingCompleted {
     ensures: session.processing_state = idle
 }
 
--- Stuck container detection. If a session has been in processing_state = processing
--- for longer than the ceiling, it is marked stuck and messages are reset for retry.
+-- Stuck container detection. The container exposes a heartbeat that the host
+-- observes (in implementation terms: the mtime of an in-container heartbeat
+-- file refreshed during normal SDK activity). Two independent predicates fire
+-- StuckContainerDetected; both lead to the same recovery (mark the session
+-- stuck, reset processing messages for retry).
+--
+-- 1. Heartbeat-stale ceiling. The heartbeat has not been refreshed within
+--    heartbeat_ceiling. This catches a container that is alive but silent
+--    (e.g. wedged in a syscall that produced no SDK output for the ceiling
+--    duration). It only fires once a heartbeat has ever been recorded — a
+--    freshly-spawned container with no heartbeat yet is handled by other
+--    paths (the per-claim predicate below, or the not-running cleanup),
+--    not here, otherwise every new container would be killed within seconds
+--    of spawn. When a long-running tool is in flight, the ceiling is
+--    widened to that tool's declared timeout.
+--
+-- 2. Message-scoped silence. A specific InboundMessage has been claimed
+--    (status = processing) for longer than claim_stuck_timeout, and no
+--    heartbeat fresher than the claim has been recorded. Semantics: "the
+--    container claimed this message and has shown no sign of life since
+--    claiming it". This catches the fresh-container-claims-then-dies case
+--    that the heartbeat ceiling cannot see (no heartbeat ever existed),
+--    and per-message wedges that occur within the absolute ceiling window.
+--    Like the ceiling, the tolerance widens when a long-running tool is
+--    in flight.
 
-rule StuckContainerDetected {
-    when: session: Session.last_active + config.processing_ceiling <= now
+rule StuckContainerDetectedByHeartbeat {
+    when: session: Session.heartbeat_at + config.heartbeat_ceiling <= now
     requires: session.processing_state = processing
+    requires: session.active_tool_timeout = null
+              or session.heartbeat_at + session.active_tool_timeout <= now
     ensures:
         session.processing_state = stuck
         for msg in session.inbound_messages where status = processing:
             if msg.is_retriable:
                 msg.status = pending
+                msg.claimed_at = null
                 msg.tries = msg.tries + 1
             else:
                 msg.status = failed
+
+    @guidance
+        -- Temporal trigger on Session.heartbeat_at: because heartbeat_at is
+        -- optional, the trigger does not fire until a heartbeat has been
+        -- recorded. Null + duration is null and null <= now is false, so the
+        -- "no heartbeat yet" case is naturally excluded — the per-claim rule
+        -- below covers it instead.
+}
+
+rule StuckContainerDetectedByClaim {
+    when: msg: InboundMessage.claimed_at + config.claim_stuck_timeout <= now
+    requires: msg.status = processing
+    requires: msg.session.processing_state = processing
+    requires: msg.session.heartbeat_at = null
+              or msg.session.heartbeat_at <= msg.claimed_at
+    requires: msg.session.active_tool_timeout = null
+              or msg.claimed_at + msg.session.active_tool_timeout <= now
+    ensures:
+        msg.session.processing_state = stuck
+        for other in msg.session.inbound_messages where status = processing:
+            if other.is_retriable:
+                other.status = pending
+                other.claimed_at = null
+                other.tries = other.tries + 1
+            else:
+                other.status = failed
+
+    @guidance
+        -- This rule complements StuckContainerDetectedByHeartbeat. The
+        -- heartbeat-freshness guard (heartbeat_at <= claimed_at) ensures the
+        -- two rules do not both fire for the same situation: if the heartbeat
+        -- post-dates the claim, the container has shown signs of life since
+        -- claiming the message and only the heartbeat ceiling can mark it
+        -- stuck. A fresh container that claims a message and then dies before
+        -- writing any heartbeat is caught here (heartbeat_at = null).
 }
 
 rule StuckSessionRecovered {
@@ -436,12 +512,39 @@ rule StuckSessionIdled {
     ensures: session.processing_state = idle
 }
 
+-- Container-to-host signals (mirrored from container).
+--
+-- The container reports liveness and tool-in-flight state to the host so
+-- that stuck-detection (StuckContainerDetectedByHeartbeat,
+-- StuckContainerDetectedByClaim) can compare against them. These are
+-- external-stimulus triggers in the same family as ContainerClaimedMessage
+-- and ContainerReportedIdle: surfaces for them are not yet declared.
+
+rule ContainerHeartbeatRefreshed {
+    when: ContainerReportedHeartbeat(session)
+    requires: session.processing_state = processing
+    ensures: session.heartbeat_at = now
+}
+
+rule ContainerToolStarted {
+    when: ContainerReportedToolStart(session, declared_timeout)
+    requires: session.processing_state = processing
+    ensures: session.active_tool_timeout = declared_timeout
+}
+
+rule ContainerToolFinished {
+    when: ContainerReportedToolEnd(session)
+    ensures: session.active_tool_timeout = null
+}
+
 -- Inbound message claim and completion (mirrored from container).
 
 rule InboundMessageClaimed {
     when: ContainerClaimedMessage(message)
     requires: message.status = pending
-    ensures: message.status = processing
+    ensures:
+        message.status = processing
+        message.claimed_at = now
 }
 
 rule InboundMessageCompleted {

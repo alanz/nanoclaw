@@ -1,4 +1,4 @@
-import type { PendingApproval, PendingQuestion, Session } from '../types.js';
+import type { PendingApproval, PendingQuestion, ProcessingState, Session } from '../types.js';
 import { getDb, hasTable } from './connection.js';
 
 // ── Sessions ──
@@ -6,8 +6,8 @@ import { getDb, hasTable } from './connection.js';
 export function createSession(session: Session): void {
   getDb()
     .prepare(
-      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at)
-       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at)`,
+      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, processing_state, last_active, created_at)
+       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @processing_state, @last_active, @created_at)`,
     )
     .run(session);
 }
@@ -71,9 +71,49 @@ export function getRunningSessions(): Session[] {
   return getDb().prepare("SELECT * FROM sessions WHERE container_status IN ('running', 'idle')").all() as Session[];
 }
 
+/**
+ * Count non-main sessions currently in the given processing_state.
+ * Used by the concurrency cap to count actively-processing sessions from the DB.
+ */
+export function countSessionsByProcessingState(state: ProcessingState): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM sessions
+         WHERE processing_state = ?
+           AND status = 'active'`,
+    )
+    .get(state) as { n: number };
+  return row.n;
+}
+
+/** Update only the processing_state of a session. */
+export function updateProcessingState(id: string, state: ProcessingState): void {
+  getDb().prepare('UPDATE sessions SET processing_state = ? WHERE id = ?').run(state, id);
+}
+
+/**
+ * Reset all non-main active sessions stuck in 'processing' back to 'idle'.
+ * Called on host startup after orphan containers are stopped — their containers
+ * are gone, so 'processing' in the DB is stale and would under-count the cap.
+ * Returns the number of sessions reset.
+ */
+export function resetStaleProcessingSessions(): number {
+  const result = getDb()
+    .prepare(
+      `UPDATE sessions SET processing_state = 'idle'
+         WHERE processing_state = 'processing'
+           AND status = 'active'
+           AND agent_group_id NOT IN (SELECT id FROM agent_groups WHERE is_main = 1)`,
+    )
+    .run();
+  return result.changes;
+}
+
 export function updateSession(
   id: string,
-  updates: Partial<Pick<Session, 'status' | 'container_status' | 'last_active' | 'agent_provider'>>,
+  updates: Partial<
+    Pick<Session, 'status' | 'container_status' | 'processing_state' | 'last_active' | 'agent_provider'>
+  >,
 ): void {
   const fields: string[] = [];
   const values: Record<string, unknown> = { id };

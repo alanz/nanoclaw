@@ -30,6 +30,7 @@ import { getAgentGroup, isMainGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
+import { getSpecialist } from './modules/specialists/db.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
@@ -47,6 +48,7 @@ import {
   sessionDir,
   writeSessionRouting,
 } from './session-manager.js';
+import { resetStaleProcessingSessions } from './db/sessions.js';
 import type { AgentGroup, Session } from './types.js';
 
 /** Active containers tracked by session ID. */
@@ -106,6 +108,19 @@ export function getActiveContainerCount(): number {
 
 export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
+}
+
+/**
+ * Reset stale processing_state on startup. Must be called once, after orphan
+ * containers are stopped, before any wakeOrQueue calls. Containers are gone
+ * after a host restart, so sessions left in 'processing' would silently
+ * under-count the concurrency cap until the next sweep.
+ */
+export function initConcurrencyCap(): void {
+  const reset = resetStaleProcessingSessions();
+  if (reset > 0) {
+    log.info('Reset stale processing sessions to idle on startup', { count: reset });
+  }
 }
 
 /**
@@ -405,7 +420,7 @@ function buildMounts(
   // Specialist groups share this type-template folder across concurrent tasks — mount RO
   // so no running task can mutate the template or affect sibling tasks. Per-task state
   // for specialists lives exclusively in the session DBs under /workspace.
-  const isSpecialist = agentGroup.id.startsWith('ag-specialist-');
+  const isSpecialist = !!getSpecialist(agentGroup.id);
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: isSpecialist });
 
   // container.json and CLAUDE.md are inside groupDir (mounted as /workspace/agent above).

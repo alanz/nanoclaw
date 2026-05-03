@@ -39,6 +39,7 @@ config {
     processing_ceiling: Duration = 30.minutes
     stuck_claim_timeout: Duration = 60.seconds
     scheduled_check_interval: Duration = 60.seconds
+    max_concurrent_containers: Integer = 5
 }
 
 ------------------------------------------------------------
@@ -76,6 +77,9 @@ entity Session {
         processing -> idle
         processing -> stuck
         stuck -> idle
+        -- terminal: idle means "must be idle when the Session is closed",
+        -- not "no outgoing transitions". idle -> processing is valid while
+        -- the session is active. See NoProcessingInClosedSession invariant.
         terminal: idle
     }
 }
@@ -126,6 +130,17 @@ entity DeliveredMessage {
     platform_message_id: String?
     status: DeliveryStatus
     delivered_at: Timestamp
+}
+
+-- A session queued because the concurrency cap is full.
+-- Sessions belonging to the main agent group bypass the cap and are never queued.
+-- WaitingSession is an in-memory queue; it is not persisted. On restart it is
+-- reconstructed when the host re-emits SessionWoken for sessions that have work,
+-- and their WaitingSession entries are recreated as a side effect. FIFO ordering
+-- across sessions is not preserved across restarts.
+entity WaitingSession {
+    session: Session
+    queued_at: Timestamp
 }
 
 ------------------------------------------------------------
@@ -222,6 +237,16 @@ rule InboundMessageQueued {
         -- subsequent firings).
 }
 
+-- When a triggering inbound message is queued, wake the session so the container
+-- can start processing. Non-triggering messages are stored but do not wake the
+-- container — they contribute context but not work.
+rule TriggeringMessageQueued {
+    when: msg: InboundMessage.created
+    requires: msg.trigger
+    requires: msg.session.status = active
+    ensures: SessionWoken(session: msg.session)
+}
+
 -- Scheduled messages (process_after set) are re-queued by the host at their due time.
 
 rule ScheduledMessageDue {
@@ -276,9 +301,71 @@ rule SessionProcessingStarted {
     requires: session.status = active
     requires: session.processing_state = idle
     requires: session.has_work
+    requires: session.agent_group.is_main
+              or Sessions where processing_state = processing .count < config.max_concurrent_containers
     ensures:
         session.processing_state = processing
         session.last_active = now
+
+    @guidance
+        -- The main agent group bypasses the concurrency gate entirely: it is
+        -- the primary user-facing interface and must always remain responsive.
+        -- All other sessions share the cap. When the cap is full and a non-main
+        -- session has work, SessionQueued fires instead and enqueues the session
+        -- in WaitingSession. When a slot frees (ContainerSlotFreed), the next
+        -- waiting session is woken in FIFO order.
+}
+
+-- When the concurrency cap is full, a non-main session that has work is queued.
+-- The session waits until a container slot frees (ContainerSlotFreed).
+rule SessionQueued {
+    when: SessionWoken(session)
+    requires: session.status = active
+    requires: session.processing_state = idle
+    requires: session.has_work
+    requires: not session.agent_group.is_main
+    requires: Sessions where processing_state = processing .count >= config.max_concurrent_containers
+    requires: not exists WaitingSession{session: session}
+    ensures: WaitingSession.created(
+        session: session,
+        queued_at: now
+    )
+}
+
+-- When a container finishes (processing → idle or stuck → idle), the next waiting
+-- session is dequeued FIFO and woken so it can claim the freed slot.
+rule ContainerSlotFreed {
+    when: session: Session.processing_state becomes idle
+
+    let next = next_waiting_session(WaitingSessions)
+
+    requires: not session.agent_group.is_main
+    requires: exists next
+
+    ensures:
+        not exists next
+        SessionWoken(session: next.session)
+
+    @guidance
+        -- next_waiting_session selects the WaitingSession with the earliest
+        -- queued_at (FIFO). Main-group sessions bypass the concurrency gate
+        -- and never appear in WaitingSessions.
+        --
+        -- The `not session.agent_group.is_main` guard is load-bearing: the
+        -- main-group session never consumes a non-main slot, so its going idle
+        -- does not free a slot for waiters. Without this guard, a main-group
+        -- idle transition would dequeue a waiting session, emit SessionWoken
+        -- for it, and that session would fail SessionProcessingStarted (cap still
+        -- full) — permanently losing its place in the queue with no way to
+        -- re-enter.
+        --
+        -- The `processing_state becomes idle` trigger covers two transitions
+        -- for non-main sessions:
+        -- (a) SessionProcessingCompleted (processing → idle, normal container exit)
+        -- (b) StuckSessionIdled / StuckSessionQueued (stuck → idle, no remaining
+        --     work or cap-full recovery path)
+        -- StuckSessionRecovered (stuck → processing) does NOT fire this rule
+        -- because the session re-enters processing immediately without going idle.
 }
 
 rule SessionProcessingCompleted {
@@ -306,7 +393,29 @@ rule StuckContainerDetected {
 rule StuckSessionRecovered {
     when: session: Session.processing_state becomes stuck
     requires: session.has_work
+    requires: session.agent_group.is_main or WaitingSessions.count = 0
     ensures: session.processing_state = processing
+}
+
+-- A stuck session that has work but has other sessions already waiting is
+-- transitioned to idle and placed at the back of the waiting queue, so it
+-- does not cut ahead of sessions that were queued before it went stuck.
+-- The idle transition triggers ContainerSlotFreed, which gives the freed slot
+-- to the oldest waiter (FIFO); the stuck session re-enters when it reaches
+-- the head of the queue. Only non-main sessions reach this rule: main sessions
+-- always recover immediately.
+rule StuckSessionQueued {
+    when: session: Session.processing_state becomes stuck
+    requires: session.has_work
+    requires: not session.agent_group.is_main
+    requires: WaitingSessions.count > 0
+    requires: not exists WaitingSession{session: session}
+    ensures:
+        session.processing_state = idle
+        WaitingSession.created(
+            session: session,
+            queued_at: now
+        )
 }
 
 rule StuckSessionIdled {
@@ -409,4 +518,17 @@ invariant SessionUniqueness {
 invariant NoProcessingInClosedSession {
     for s in Sessions:
         s.status = closed implies s.processing_state = idle
+}
+
+-- Total concurrently-processing non-main sessions is bounded by the cap.
+-- Main-group sessions are exempt because they bypass the concurrency gate.
+invariant ActiveContainerLimit {
+    Sessions where processing_state = processing and not agent_group.is_main .count <= config.max_concurrent_containers
+}
+
+-- A session appears in the waiting queue at most once.
+invariant AtMostOneWaitingEntryPerSession {
+    for a in WaitingSessions:
+        for b in WaitingSessions:
+            a != b implies a.session != b.session
 }

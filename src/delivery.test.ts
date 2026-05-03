@@ -13,7 +13,8 @@ import fs from 'fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('./container-runner.js', () => ({
-  wakeContainer: vi.fn().mockResolvedValue(undefined),
+  wakeOrQueue: vi.fn().mockResolvedValue(true),
+  wakeContainer: vi.fn().mockResolvedValue(true),
   isContainerRunning: vi.fn().mockReturnValue(false),
   killContainer: vi.fn(),
   buildAgentGroupImage: vi.fn().mockResolvedValue(undefined),

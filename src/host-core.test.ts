@@ -29,7 +29,8 @@ import type { InboundEvent } from './channels/adapter.js';
 
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
-  wakeContainer: vi.fn().mockResolvedValue(undefined),
+  wakeOrQueue: vi.fn().mockResolvedValue(true),
+  wakeContainer: vi.fn().mockResolvedValue(true),
   isContainerRunning: vi.fn().mockReturnValue(false),
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
@@ -248,7 +249,7 @@ describe('router', () => {
 
   it('should route a message end-to-end', async () => {
     const { routeInbound } = await import('./router.js');
-    const { wakeContainer } = await import('./container-runner.js');
+    const { wakeOrQueue } = await import('./container-runner.js');
 
     const event: InboundEvent = {
       channelType: 'discord',
@@ -278,7 +279,7 @@ describe('router', () => {
     expect(JSON.parse(rows[0].content).text).toBe('Hello agent!');
 
     // Verify container was woken
-    expect(wakeContainer).toHaveBeenCalled();
+    expect(wakeOrQueue).toHaveBeenCalled();
   });
 
   it('auto-creates messaging group only when the bot is addressed (mention/DM)', async () => {
@@ -353,8 +354,8 @@ describe('router', () => {
 
   it('fans out to every matching agent, each in its own session', async () => {
     const { routeInbound } = await import('./router.js');
-    const { wakeContainer } = await import('./container-runner.js');
-    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+    const { wakeOrQueue } = await import('./container-runner.js');
+    (wakeOrQueue as unknown as ReturnType<typeof vi.fn>).mockClear();
 
     // Wire a second agent to the same messaging group.
     createAgentGroup({
@@ -385,7 +386,7 @@ describe('router', () => {
     });
 
     // Both agents should now have their own session and be woken.
-    expect(wakeContainer).toHaveBeenCalledTimes(2);
+    expect(wakeOrQueue).toHaveBeenCalledTimes(2);
 
     const { getSessionsByAgentGroup } = await import('./db/sessions.js');
     expect(getSessionsByAgentGroup('ag-1')).toHaveLength(1);
@@ -394,8 +395,8 @@ describe('router', () => {
 
   it('accumulates without waking when engage fails + ignored_message_policy=accumulate', async () => {
     const { routeInbound } = await import('./router.js');
-    const { wakeContainer } = await import('./container-runner.js');
-    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+    const { wakeOrQueue } = await import('./container-runner.js');
+    (wakeOrQueue as unknown as ReturnType<typeof vi.fn>).mockClear();
 
     // Replace the seed row with a mention-only wiring whose accumulate
     // policy should store context even when the message doesn't mention us.
@@ -417,7 +418,7 @@ describe('router', () => {
       },
     });
 
-    expect(wakeContainer).not.toHaveBeenCalled();
+    expect(wakeOrQueue).not.toHaveBeenCalled();
 
     const session = findSession('mg-1', null);
     expect(session).toBeDefined();
@@ -433,8 +434,8 @@ describe('router', () => {
 
   it('drops silently when engage fails + ignored_message_policy=drop', async () => {
     const { routeInbound } = await import('./router.js');
-    const { wakeContainer } = await import('./container-runner.js');
-    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+    const { wakeOrQueue } = await import('./container-runner.js');
+    (wakeOrQueue as unknown as ReturnType<typeof vi.fn>).mockClear();
 
     const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
     updateMessagingGroupAgent('mga-1', { engage_mode: 'mention' }); // drop is the default
@@ -446,7 +447,7 @@ describe('router', () => {
       message: { id: 'msg-drop', kind: 'chat', content: JSON.stringify({ text: 'ignored' }), timestamp: now() },
     });
 
-    expect(wakeContainer).not.toHaveBeenCalled();
+    expect(wakeOrQueue).not.toHaveBeenCalled();
     // No session should have been created for this agent.
     expect(findSession('mg-1', null)).toBeUndefined();
   });

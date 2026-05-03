@@ -22,7 +22,8 @@ import { grantRole } from './db/user-roles.js';
 
 // Mock container runner — prevent actual docker spawn.
 vi.mock('../../container-runner.js', () => ({
-  wakeContainer: vi.fn().mockResolvedValue(undefined),
+  wakeOrQueue: vi.fn().mockResolvedValue(true),
+  wakeContainer: vi.fn().mockResolvedValue(true),
   isContainerRunning: vi.fn().mockReturnValue(false),
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
@@ -191,8 +192,8 @@ describe('unknown-sender request_approval flow', () => {
   it('approve → adds member and replays the original message', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
-    const { wakeContainer } = await import('../../container-runner.js');
-    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+    const { wakeOrQueue } = await import('../../container-runner.js');
+    (wakeOrQueue as unknown as ReturnType<typeof vi.fn>).mockClear();
 
     await routeInbound(stranger('please let me in'));
     await new Promise((r) => setTimeout(r, 10));
@@ -228,7 +229,7 @@ describe('unknown-sender request_approval flow', () => {
     expect(stillPending.c).toBe(0);
 
     // Message replayed + container woken.
-    expect(wakeContainer).toHaveBeenCalled();
+    expect(wakeOrQueue).toHaveBeenCalled();
   });
 
   it('deny → deletes the pending row without adding a member', async () => {

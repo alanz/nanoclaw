@@ -24,7 +24,8 @@ import { grantRole } from './db/user-roles.js';
 
 // Mock container runner — prevent actual docker spawn.
 vi.mock('../../container-runner.js', () => ({
-  wakeContainer: vi.fn().mockResolvedValue(undefined),
+  wakeOrQueue: vi.fn().mockResolvedValue(true),
+  wakeContainer: vi.fn().mockResolvedValue(true),
   isContainerRunning: vi.fn().mockReturnValue(false),
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
@@ -190,8 +191,8 @@ describe('unknown-channel registration flow', () => {
   it('approve → creates wiring, admits triggering sender, replays', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
-    const { wakeContainer } = await import('../../container-runner.js');
-    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+    const { wakeOrQueue } = await import('../../container-runner.js');
+    (wakeOrQueue as unknown as ReturnType<typeof vi.fn>).mockClear();
 
     await routeInbound(groupMention('chat-approve'));
     await new Promise((r) => setTimeout(r, 10));
@@ -243,7 +244,7 @@ describe('unknown-channel registration flow', () => {
     const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
       .c;
     expect(stillPending).toBe(0);
-    expect(wakeContainer).toHaveBeenCalled();
+    expect(wakeOrQueue).toHaveBeenCalled();
   });
 
   it('approve on a DM wires with pattern="." defaults', async () => {

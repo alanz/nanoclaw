@@ -305,6 +305,7 @@ describe('sessions', () => {
     agent_provider: null,
     status: 'active' as const,
     container_status: 'stopped' as const,
+    processing_state: 'idle' as const,
     last_active: null,
     created_at: now(),
   });
@@ -388,6 +389,7 @@ describe('pending questions', () => {
       agent_provider: null,
       status: 'active',
       container_status: 'stopped',
+      processing_state: 'idle',
       last_active: null,
       created_at: now(),
     });

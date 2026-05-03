@@ -1,12 +1,13 @@
+import { getNullMessagingGroupId } from '../../channels/null-channel.js';
 import { createSession } from '../../db/sessions.js';
 import { getDb } from '../../db/connection.js';
 import type { Session } from '../../types.js';
 
 /**
  * Find an active session for a specific agent group and thread_id.
- * Specialist task sessions have messaging_group_id = null and
- * thread_id = task.id, so the standard findSession() (which requires a
- * messaging_group_id) cannot be used.
+ * Used for specialist task sessions where thread_id = task.id.
+ * Does not filter on messaging_group_id — the null-channel singleton id
+ * suffices for new sessions, but existing rows may predate the singleton.
  */
 export function findSessionByAgentGroupAndThread(agentGroupId: string, threadId: string): Session | undefined {
   return getDb()
@@ -24,11 +25,12 @@ export function createSpecialistSession(agentGroupId: string, taskId: string): S
   const session: Session = {
     id,
     agent_group_id: agentGroupId,
-    messaging_group_id: null,
+    messaging_group_id: getNullMessagingGroupId(),
     thread_id: taskId,
     agent_provider: null,
     status: 'active',
     container_status: 'stopped',
+    processing_state: 'idle',
     last_active: now,
     created_at: now,
   };

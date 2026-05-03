@@ -31,11 +31,13 @@ function fakeSession(): Session {
     agent_group_id: 'ag-test',
     messaging_group_id: 'mg-test',
     thread_id: null,
+    agent_provider: null,
     status: 'active',
     created_at: new Date().toISOString(),
     last_active: new Date().toISOString(),
     container_status: 'stopped',
-  } as Session;
+    processing_state: 'idle',
+  };
 }
 
 afterEach(() => {

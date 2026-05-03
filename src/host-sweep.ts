@@ -42,7 +42,7 @@ import {
   type ContainerState,
 } from './db/session-db.js';
 import { log } from './log.js';
-import { openInboundDb, openOutboundDb, inboundDbPath, heartbeatPath } from './session-manager.js';
+import { openInboundDb, openOutboundDb, inboundDbPath, heartbeatPath, markSessionStuck } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeOrQueue } from './container-runner.js';
 import type { Session } from './types.js';
 
@@ -250,6 +250,7 @@ function enforceRunningContainerSla(
       heartbeatAgeMs: decision.heartbeatAgeMs,
       ceilingMs: decision.ceilingMs,
     });
+    markSessionStuck(session.id);
     killContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
     return;
@@ -261,6 +262,7 @@ function enforceRunningContainerSla(
     claimAgeMs: decision.claimAgeMs,
     toleranceMs: decision.toleranceMs,
   });
+  markSessionStuck(session.id);
   killContainer(session.id, 'claim-stuck');
   resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
 }

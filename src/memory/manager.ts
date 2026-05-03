@@ -15,6 +15,7 @@ import path from 'node:path';
 import parcelWatcher from '@parcel/watcher';
 
 import { log } from '../log.js';
+import { getSpecialist } from '../modules/specialists/db.js';
 import { MEMORY_CONFIG } from './config.js';
 import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
 import { chunkFile, type MemoryChunk } from './chunking.js';
@@ -484,7 +485,7 @@ export async function initMemoryManagers(params: {
   }
 
   for (const group of params.groups) {
-    if (group.id.startsWith('ag-specialist-')) continue;
+    if (getSpecialist(group.id)) continue;
     const memoryDir = path.join(params.groupsDir, group.folder, 'memory');
     const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
     const dbPath = path.join(dbDir, 'index.db');
@@ -511,7 +512,7 @@ export async function initMemoryManagerForGroup(params: {
   group: { id: string; folder: string };
 }): Promise<void> {
   if (!params.apiKey) return;
-  if (params.group.id.startsWith('ag-specialist-')) return;
+  if (getSpecialist(params.group.id)) return;
 
   const { group } = params;
   const memoryDir = path.join(params.groupsDir, group.folder, 'memory');

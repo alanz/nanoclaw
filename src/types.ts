@@ -99,6 +99,8 @@ export interface MessagingGroupAgent {
   created_at: string;
 }
 
+export type ProcessingState = 'idle' | 'processing' | 'stuck';
+
 export interface Session {
   id: string;
   agent_group_id: string;
@@ -107,6 +109,8 @@ export interface Session {
   agent_provider: string | null;
   status: 'active' | 'closed';
   container_status: 'running' | 'idle' | 'stopped';
+  /** Persistent container work lifecycle. See sessions.allium ProcessingState. */
+  processing_state: ProcessingState;
   last_active: string | null;
   created_at: string;
 }

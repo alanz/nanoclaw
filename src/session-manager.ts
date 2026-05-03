@@ -21,10 +21,10 @@ import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
-  findSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
+  updateProcessingState,
   updateSession,
 } from './db/sessions.js';
 import {
@@ -116,6 +116,7 @@ export function resolveSession(
     agent_provider: null,
     status: 'active',
     container_status: 'stopped',
+    processing_state: 'idle',
     last_active: null,
     created_at: new Date().toISOString(),
   };
@@ -404,9 +405,13 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
   }
 }
 
-/** Mark a container as running for a session. */
+/** Mark a container as running for a session. Also transitions processing_state to 'processing'. */
 export function markContainerRunning(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
+  updateSession(sessionId, {
+    container_status: 'running',
+    processing_state: 'processing',
+    last_active: new Date().toISOString(),
+  });
 }
 
 /** Mark a container as idle for a session. */
@@ -414,7 +419,16 @@ export function markContainerIdle(sessionId: string): void {
   updateSession(sessionId, { container_status: 'idle' });
 }
 
-/** Mark a container as stopped for a session. */
+/** Mark a container as stopped for a session. Also transitions processing_state to 'idle'. */
 export function markContainerStopped(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'stopped' });
+  updateSession(sessionId, { container_status: 'stopped', processing_state: 'idle' });
+}
+
+/**
+ * Mark a session's processing_state as 'stuck'.
+ * Called by the host sweep when stuck-container detection fires.
+ * Does NOT update container_status — the container is still running (until killContainer fires).
+ */
+export function markSessionStuck(sessionId: string): void {
+  updateProcessingState(sessionId, 'stuck');
 }

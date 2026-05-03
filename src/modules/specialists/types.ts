@@ -1,6 +1,6 @@
 export type IpcMountStatus = 'active' | 'cleared';
 export type TransferStatus = 'pending' | 'in_transit' | 'committed' | 'expired';
-export type TransferFileStatus = 'staged' | 'owned' | 'placed' | 'expired';
+export type TransferFileStatus = 'owned' | 'placed' | 'expired';
 
 export interface Invocation {
   id: string;

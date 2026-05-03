@@ -110,6 +110,8 @@ CREATE TABLE sessions (
   agent_provider     TEXT,
   status             TEXT DEFAULT 'active',
   container_status   TEXT DEFAULT 'stopped',
+  processing_state   TEXT NOT NULL DEFAULT 'idle',
+                     -- 'idle' | 'processing' | 'stuck'
   last_active        TEXT,
   created_at         TEXT NOT NULL
 );

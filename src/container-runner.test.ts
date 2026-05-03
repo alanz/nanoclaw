@@ -74,6 +74,7 @@ function makeSession(id: string, agentGroupId = 'ag-non-main'): Session {
     agent_provider: null,
     status: 'active',
     container_status: 'idle',
+    processing_state: 'idle',
     last_active: null,
     created_at: new Date().toISOString(),
   };

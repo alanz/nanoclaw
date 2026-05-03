@@ -3,6 +3,7 @@ export interface SpecialistsConfig {
   maxChainDelegations: number;
   maxSameTypeDispatches: number;
   maxTaskDurationMs: number;
+  maxSubTaskAwaitMs: number;
   maxRestartRetries: number;
   defaultLastTurnSubNotice: string;
   defaultLastTurnParentNotice: string;
@@ -16,6 +17,7 @@ export const SPECIALISTS_CONFIG: SpecialistsConfig = {
   maxChainDelegations: 20,
   maxSameTypeDispatches: 3,
   maxTaskDurationMs: 4 * 60 * 60 * 1000, // 4 hours
+  maxSubTaskAwaitMs: 30 * 60 * 1000, // 30 minutes
   maxRestartRetries: 2,
   defaultLastTurnSubNotice:
     '[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]',

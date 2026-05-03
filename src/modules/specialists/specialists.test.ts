@@ -53,6 +53,7 @@ function makeSession(id: string, agentGroupId: string) {
     agent_provider: null,
     status: 'active' as const,
     container_status: 'stopped' as const,
+    processing_state: 'idle' as const,
     last_active: now(),
     created_at: now(),
   };
@@ -178,10 +179,9 @@ describe('TransferStatus enum', () => {
 });
 
 describe('TransferFileStatus enum', () => {
-  it('has members: staged, owned, placed, expired', () => {
-    const statuses: TransferFileStatus[] = ['staged', 'owned', 'placed', 'expired'];
-    expect(statuses).toHaveLength(4);
-    expect(statuses).toContain('staged');
+  it('has members: owned, placed, expired', () => {
+    const statuses: TransferFileStatus[] = ['owned', 'placed', 'expired'];
+    expect(statuses).toHaveLength(3);
     expect(statuses).toContain('owned');
     expect(statuses).toContain('placed');
     expect(statuses).toContain('expired');
@@ -988,7 +988,7 @@ describe('InvocationEnded rule', () => {
 
 describe('TransferOwnershipTaken rule', () => {
   it.todo('success: creates ContainerTransfer with status=pending');
-  it.todo('success: creates one TransferFile per file_path with status=staged -> owned');
+  it.todo('success: creates one TransferFile per file_path with status=owned');
   it.todo('success: host_path is set for each TransferFile after copy');
   it.todo('success: file_count matches the number of file_paths');
   it.todo('failure: requires the delivering invocation has an active IpcOutMount');

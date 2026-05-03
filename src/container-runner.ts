@@ -13,6 +13,7 @@ import {
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
+  MAX_CONCURRENT_CONTAINERS,
   TIMEZONE,
 } from './config.js';
 import { detectAuthMode } from './credential-proxy.js';
@@ -25,7 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { getAgentGroup } from './db/agent-groups.js';
+import { getAgentGroup, isMainGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
@@ -60,6 +61,44 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  * racy double-replies.
  */
 const wakePromises = new Map<string, Promise<boolean>>();
+
+// ── Concurrency cap + FIFO waiting queue ────────────────────────────────────
+
+interface WaitingEntry {
+  session: Session;
+  queuedAt: number;
+}
+
+/** Sessions queued because the concurrency cap is full. FIFO ordered by queuedAt. */
+const waitingQueue: WaitingEntry[] = [];
+
+/**
+ * Session IDs for non-main containers that are currently running or have a
+ * reserved slot mid-spawn. Main-group sessions are never counted here because
+ * they bypass the cap entirely.
+ */
+const activeNonMainSessions = new Set<string>();
+
+// Internal wake function pointer — tests override this to avoid real Docker spawning.
+let _wakeImpl: (session: Session) => Promise<boolean> = wakeContainer;
+
+/** @internal Test seam — override the inner wake step without real Docker spawning. */
+export function _setWakeImplForTesting(fn: (session: Session) => Promise<boolean>): void {
+  _wakeImpl = fn;
+}
+
+/** @internal Test seam — reset all queue state and restore the default wake implementation. */
+export function _resetQueueStateForTesting(): void {
+  waitingQueue.length = 0;
+  activeNonMainSessions.clear();
+  _wakeImpl = wakeContainer;
+}
+
+/** @internal Test seam — simulate a container exit, releasing its slot and draining the queue. */
+export function _simulateContainerExitForTesting(sessionId: string): void {
+  activeNonMainSessions.delete(sessionId);
+  drainWaiting();
+}
 
 export function getActiveContainerCount(): number {
   return activeContainers.size;
@@ -102,6 +141,85 @@ export function wakeContainer(session: Session): Promise<boolean> {
     });
   wakePromises.set(session.id, promise);
   return promise;
+}
+
+/**
+ * Wake a container for a session, respecting the concurrency cap.
+ *
+ * Main-group sessions bypass the cap and always wake immediately.
+ * Non-main sessions queue when `activeNonMainSessions.size >= MAX_CONCURRENT_CONTAINERS`
+ * and are woken in FIFO order as slots free up on container exit.
+ *
+ * Returns true if the container was woken (or was already running), false if queued.
+ * Never throws — callers that only care about whether work started can ignore the return.
+ */
+export function wakeOrQueue(session: Session): Promise<boolean> {
+  if (isMainGroup(session.agent_group_id)) return _wakeImpl(session);
+
+  // Already running or mid-spawn — reuse the existing state.
+  if (activeContainers.has(session.id) || wakePromises.has(session.id)) {
+    return Promise.resolve(true);
+  }
+
+  // Already in the waiting queue — don't double-enqueue.
+  if (waitingQueue.some((w) => w.session.id === session.id)) {
+    log.debug('Session already in waiting queue', { sessionId: session.id });
+    return Promise.resolve(false);
+  }
+
+  if (activeNonMainSessions.size < MAX_CONCURRENT_CONTAINERS) {
+    // Reserve the slot synchronously before the async wake to prevent a race
+    // where two concurrent calls both see size < cap and both spawn.
+    activeNonMainSessions.add(session.id);
+    return _wakeImpl(session).then((ok) => {
+      if (!ok) {
+        // Wake failed — release the reserved slot and drain in case waiters can use it.
+        activeNonMainSessions.delete(session.id);
+        drainWaiting();
+      }
+      return ok;
+    });
+  }
+
+  // Cap reached — queue in FIFO order.
+  waitingQueue.push({ session, queuedAt: Date.now() });
+  log.info('Session queued (concurrency cap reached)', {
+    sessionId: session.id,
+    agentGroup: session.agent_group_id,
+    queuePos: waitingQueue.length,
+    activeNonMain: activeNonMainSessions.size,
+    cap: MAX_CONCURRENT_CONTAINERS,
+  });
+  return Promise.resolve(false);
+}
+
+function drainWaiting(): void {
+  while (waitingQueue.length > 0 && activeNonMainSessions.size < MAX_CONCURRENT_CONTAINERS) {
+    const next = waitingQueue.shift()!;
+    // Reserve the slot before the async wake.
+    activeNonMainSessions.add(next.session.id);
+    log.info('Dequeuing waiting session', {
+      sessionId: next.session.id,
+      agentGroup: next.session.agent_group_id,
+      waitedMs: Date.now() - next.queuedAt,
+    });
+    _wakeImpl(next.session)
+      .then((ok) => {
+        if (!ok) {
+          activeNonMainSessions.delete(next.session.id);
+          drainWaiting();
+        }
+      })
+      .catch(() => {
+        activeNonMainSessions.delete(next.session.id);
+        drainWaiting();
+      });
+  }
+}
+
+/** Returns current concurrency queue status for observability. */
+export function getQueueStatus(): { activeNonMain: number; max: number; waiting: number } {
+  return { activeNonMain: activeNonMainSessions.size, max: MAX_CONCURRENT_CONTAINERS, waiting: waitingQueue.length };
 }
 
 async function spawnContainer(session: Session): Promise<void> {
@@ -183,6 +301,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   container.on('close', (code) => {
     activeContainers.delete(session.id);
+    activeNonMainSessions.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.info('Container exited', { sessionId: session.id, code, containerName });
@@ -191,13 +310,16 @@ async function spawnContainer(session: Session): Promise<void> {
         .then(({ endInvocationById }) => endInvocationById(invocationId!))
         .catch((err) => log.warn('container-runner: invocation cleanup failed', { invocationId, err }));
     }
+    drainWaiting();
   });
 
   container.on('error', (err) => {
     activeContainers.delete(session.id);
+    activeNonMainSessions.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
+    drainWaiting();
   });
 }
 

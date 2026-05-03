@@ -201,7 +201,7 @@ async function sweepTask(
     updateTaskStatus(task.id, 'awaiting_restart', { restart_attempt_count: newRetryCount });
 
     const { findSessionByAgentGroupAndThread } = await import('./session-helpers.js');
-    const { wakeContainer } = await import('../../container-runner.js');
+    const { wakeOrQueue } = await import('../../container-runner.js');
     const { getSession } = await import('../../db/sessions.js');
     const { writeSessionMessage } = await import('../../session-manager.js');
     const session = findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
@@ -222,7 +222,7 @@ async function sweepTask(
           }),
           trigger: 1,
         });
-        await wakeContainer(fresh).catch((err) =>
+        await wakeOrQueue(fresh).catch((err) =>
           log.error('specialists: failed to wake container for restart', { err, taskId: task.id }),
         );
         log.info('specialists: re-waking container for awaiting_restart task', {

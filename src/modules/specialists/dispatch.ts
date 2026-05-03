@@ -3,7 +3,7 @@
  * dispatch_sub_task system actions from container agents.
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { wakeContainer } from '../../container-runner.js';
+import { wakeOrQueue } from '../../container-runner.js';
 import { initSessionFolder, writeSessionMessage } from '../../session-manager.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
@@ -55,7 +55,7 @@ async function spawnTaskSession(task: SpecialistTask): Promise<void> {
     }),
     trigger: 1,
   });
-  await wakeContainer(session).catch((err) =>
+  await wakeOrQueue(session).catch((err) =>
     log.error('specialists: failed to wake specialist container', { err, taskId: task.id }),
   );
 }

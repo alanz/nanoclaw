@@ -8,7 +8,7 @@ import fs from 'fs';
 
 import { getSession } from '../../db/sessions.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { wakeContainer } from '../../container-runner.js';
+import { wakeOrQueue } from '../../container-runner.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { log } from '../../log.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -55,7 +55,7 @@ async function sendToSession(agentGroupId: string, sessionId: string, text: stri
   });
   const fresh = getSession(sessionId);
   if (fresh) {
-    await wakeContainer(fresh).catch((err) =>
+    await wakeOrQueue(fresh).catch((err) =>
       log.error('specialists: failed to wake container after result routing', { err, taskId }),
     );
   }

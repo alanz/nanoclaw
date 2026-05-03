@@ -24,7 +24,7 @@ import path from 'path';
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
-import { wakeContainer } from '../../container-runner.js';
+import { wakeOrQueue } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
@@ -146,7 +146,7 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
   const fresh = getSession(targetSession.id);
-  if (fresh) await wakeContainer(fresh);
+  if (fresh) await wakeOrQueue(fresh);
 }
 
 /**

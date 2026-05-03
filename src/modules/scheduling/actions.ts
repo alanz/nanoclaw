@@ -9,7 +9,7 @@
  */
 import type Database from 'better-sqlite3';
 
-import { wakeContainer } from '../../container-runner.js';
+import { wakeOrQueue } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -105,9 +105,7 @@ export async function handleUpdateTask(
     });
     const fresh = getSession(session.id);
     if (fresh) {
-      wakeContainer(fresh).catch((err) =>
-        log.error('Failed to wake container after update_task notification', { err }),
-      );
+      wakeOrQueue(fresh).catch((err) => log.error('Failed to wake container after update_task notification', { err }));
     }
   }
 }

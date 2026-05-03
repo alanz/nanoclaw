@@ -7,7 +7,7 @@
  */
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
-import { wakeContainer } from '../../container-runner.js';
+import { wakeOrQueue } from '../../container-runner.js';
 import { isValidGroupFolder } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
@@ -28,7 +28,7 @@ function notifyAgent(session: Session, text: string): void {
   });
   const fresh = getSession(session.id);
   if (fresh) {
-    wakeContainer(fresh).catch((err) => log.error('Failed to wake container after notification', { err }));
+    wakeOrQueue(fresh).catch((err) => log.error('Failed to wake container after notification', { err }));
   }
 }
 

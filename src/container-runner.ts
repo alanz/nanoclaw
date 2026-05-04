@@ -405,10 +405,6 @@ function buildMounts(
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
   syncSkillSymlinks(claudeDir, containerConfig);
 
-  // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
-  // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-  composeGroupClaudeMd(agentGroup);
-
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
@@ -464,12 +460,21 @@ function buildMounts(
   // Per-group memory index — read-only so agents can run FTS5 / vector search
   // directly via bun:sqlite without host round-trip. Non-specialist only: specialists
   // use query_memory tool routed through a memory-provider group.
-  if (!isSpecialist) {
-    const memoryIndexDir = path.join(DATA_DIR, 'v2-memory', agentGroup.id);
-    if (fs.existsSync(memoryIndexDir)) {
-      mounts.push({ hostPath: memoryIndexDir, containerPath: '/workspace/memory', readonly: true });
-    }
+  const memoryEnabled = !isSpecialist && fs.existsSync(path.join(DATA_DIR, 'v2-memory', agentGroup.id));
+  if (memoryEnabled) {
+    mounts.push({
+      hostPath: path.join(DATA_DIR, 'v2-memory', agentGroup.id),
+      containerPath: '/workspace/memory',
+      readonly: true,
+    });
   }
+
+  // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
+  // fragments, and MCP server instructions. Done after memory is resolved so
+  // we can omit the memory fragment when the tools are not registered.
+  composeGroupClaudeMd(agentGroup, {
+    disabledModules: memoryEnabled ? undefined : new Set(['memory']),
+  });
 
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {

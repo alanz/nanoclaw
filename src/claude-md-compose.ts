@@ -38,8 +38,13 @@ const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.loc
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`. Creates
  * an empty `CLAUDE.local.md` if missing.
+ *
+ * `disabledModules` names module basenames (without `.instructions.md`) whose
+ * fragments should be omitted — use when the corresponding MCP tools are not
+ * registered for this container (e.g. `memory` when NANOCLAW_MEMORY_ENABLED
+ * is not set).
  */
-export function composeGroupClaudeMd(group: AgentGroup): void {
+export function composeGroupClaudeMd(group: AgentGroup, options?: { disabledModules?: Set<string> }): void {
   const groupDir = path.resolve(GROUPS_DIR, group.folder);
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
@@ -75,13 +80,15 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   // Built-in module fragments — every MCP tool source file that ships a
   // sibling `<name>.instructions.md`. These describe how the agent should
   // use that module's MCP tools (schedule_task, install_packages, etc.).
-  // Always included — these are built-in, not toggleable.
+  // Skipped for modules listed in options.disabledModules (tools not registered
+  // in this container).
   const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
   if (fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir)) {
       const match = entry.match(/^(.+)\.instructions\.md$/);
       if (!match) continue;
       const moduleName = match[1];
+      if (options?.disabledModules?.has(moduleName)) continue;
       desired.set(`module-${moduleName}.md`, {
         type: 'symlink',
         content: `${SHARED_MCP_TOOLS_CONTAINER_BASE}/${entry}`,

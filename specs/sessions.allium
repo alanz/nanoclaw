@@ -128,6 +128,10 @@ entity InboundMessage {
     -- message returns to pending after a retry or stuck-reset.
     claimed_at: Timestamp? when status = processing | completed | failed
 
+    invariant ClaimImpliesProcessing {
+        claimed_at != null implies status = processing | completed | failed
+    }
+
     is_due: process_after = null or process_after <= now
     is_retriable: tries < config.max_message_tries
 

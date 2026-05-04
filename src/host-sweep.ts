@@ -33,6 +33,7 @@ import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
   countDueMessages,
+  deleteProcessingClaims,
   getContainerState,
   getMessageForRetry,
   getProcessingClaims,
@@ -98,8 +99,7 @@ export function decideStuckAction(args: {
   // `0 > claimedAt` (a positive epoch ms) is always false, so the heartbeat
   // freshness guard never skips the stuck check. If the container just spawned
   // and a stale ack from a previous crash is present, resetStuckProcessingRows
-  // adds exponential backoff that prevents immediate re-kill of the next
-  // container spawn, so there is no infinite kill-loop.
+  // deletes the stale claim from outbound.db so subsequent spawns don't see it.
   const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
   for (const claim of claims) {
     const claimedAt = Date.parse(claim.status_changed);
@@ -275,6 +275,7 @@ function resetStuckProcessingRows(
 ): void {
   const claims = getProcessingClaims(outDb);
   const now = Date.now();
+  const toDelete: string[] = [];
   for (const { message_id } of claims) {
     const msg = getMessageForRetry(inDb, message_id, 'pending');
     if (!msg) continue;
@@ -302,5 +303,9 @@ function resetStuckProcessingRows(
         reason,
       });
     }
+    // Remove the stale claim from outbound.db so the next container spawn
+    // doesn't see it as still-in-flight and get killed immediately.
+    toDelete.push(message_id);
   }
+  deleteProcessingClaims(outDb, toDelete);
 }

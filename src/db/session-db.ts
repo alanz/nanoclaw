@@ -180,6 +180,15 @@ export function getProcessingClaims(outDb: Database.Database): ProcessingClaim[]
     .all() as ProcessingClaim[];
 }
 
+/** Delete stale processing_ack rows by message id so the host sweep doesn't re-detect them as stuck. */
+export function deleteProcessingClaims(outDb: Database.Database, messageIds: string[]): void {
+  if (messageIds.length === 0) return;
+  const stmt = outDb.prepare('DELETE FROM processing_ack WHERE message_id = ?');
+  outDb.transaction(() => {
+    for (const id of messageIds) stmt.run(id);
+  })();
+}
+
 export interface ContainerState {
   current_tool: string | null;
   tool_declared_timeout_ms: number | null;

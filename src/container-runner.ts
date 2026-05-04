@@ -33,6 +33,7 @@ import { stopTypingRefresh } from './modules/typing/index.js';
 import { getSpecialist } from './modules/specialists/db.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { readEnvFile } from './env.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -585,6 +586,12 @@ function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Optional third-party API keys — only injected if present in .env.
+  const optionalSecrets = readEnvFile(['BRAVE_API_KEY']);
+  if (optionalSecrets.BRAVE_API_KEY) {
+    args.push('-e', `BRAVE_API_KEY=${optionalSecrets.BRAVE_API_KEY}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {

@@ -86,7 +86,9 @@ async function main(): Promise<void> {
     nanoclaw: {
       command: 'bun',
       args: ['run', mcpServerPath],
-      env: {},
+      env: {
+        ...(process.env.BRAVE_API_KEY ? { BRAVE_API_KEY: process.env.BRAVE_API_KEY } : {}),
+      },
     },
   };
 

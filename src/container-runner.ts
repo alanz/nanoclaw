@@ -587,6 +587,13 @@ function buildContainerArgs(
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // Memory — signal to the container that the memory MCP tools should be registered.
+  // Inferred from mounts: the host only mounts /workspace/memory for non-specialist
+  // groups whose index directory exists (i.e. in the MEMORY_SEARCH_GROUPS allowlist).
+  if (mounts.some((m) => m.containerPath === '/workspace/memory')) {
+    args.push('-e', 'NANOCLAW_MEMORY_ENABLED=1');
+  }
+
   // Optional third-party API keys — only injected if present in .env.
   const optionalSecrets = readEnvFile(['BRAVE_API_KEY']);
   if (optionalSecrets.BRAVE_API_KEY) {

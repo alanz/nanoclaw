@@ -478,6 +478,7 @@ export async function initMemoryManagers(params: {
   apiKey: string;
   model?: string;
   groups: Array<{ id: string; folder: string }>;
+  allowedFolders?: Set<string>;
 }): Promise<void> {
   if (!params.apiKey) {
     log.warn('Memory search disabled: MEMORY_SEARCH_GEMINI_API_KEY not set');
@@ -486,6 +487,7 @@ export async function initMemoryManagers(params: {
 
   for (const group of params.groups) {
     if (getSpecialist(group.id)) continue;
+    if (params.allowedFolders && !params.allowedFolders.has(group.folder)) continue;
     const memoryDir = path.join(params.groupsDir, group.folder, 'memory');
     const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
     const dbPath = path.join(dbDir, 'index.db');
@@ -510,9 +512,11 @@ export async function initMemoryManagerForGroup(params: {
   apiKey: string;
   model?: string;
   group: { id: string; folder: string };
+  allowedFolders?: Set<string>;
 }): Promise<void> {
   if (!params.apiKey) return;
   if (getSpecialist(params.group.id)) return;
+  if (params.allowedFolders && !params.allowedFolders.has(params.group.folder)) return;
 
   const { group } = params;
   const memoryDir = path.join(params.groupsDir, group.folder, 'memory');

@@ -77,9 +77,16 @@ async function main(): Promise<void> {
   migrateGroupsToClaudeLocal();
 
   // 1c. Memory search — init per-group index managers if API key is configured.
-  const memEnv = readEnvFile(['MEMORY_SEARCH_GEMINI_API_KEY', 'MEMORY_SEARCH_MODEL']);
+  const memEnv = readEnvFile(['MEMORY_SEARCH_GEMINI_API_KEY', 'MEMORY_SEARCH_MODEL', 'MEMORY_SEARCH_GROUPS']);
   const geminiApiKey = process.env.MEMORY_SEARCH_GEMINI_API_KEY ?? memEnv.MEMORY_SEARCH_GEMINI_API_KEY ?? '';
   if (geminiApiKey) {
+    const rawGroups = process.env.MEMORY_SEARCH_GROUPS ?? memEnv.MEMORY_SEARCH_GROUPS ?? 'main';
+    const allowedFolders = new Set(
+      rawGroups
+        .split(',')
+        .map((g) => g.trim())
+        .filter(Boolean),
+    );
     const allGroups = getAllAgentGroups();
     await initMemoryManagers({
       dataDir: DATA_DIR,
@@ -87,6 +94,7 @@ async function main(): Promise<void> {
       apiKey: geminiApiKey,
       model: process.env.MEMORY_SEARCH_MODEL ?? memEnv.MEMORY_SEARCH_MODEL,
       groups: allGroups.map((g) => ({ id: g.id, folder: g.folder })),
+      allowedFolders,
     });
     onShutdown(() => closeAllMemoryManagers());
     log.info('Memory managers initialized', { groups: allGroups.length });

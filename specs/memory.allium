@@ -28,6 +28,10 @@
 -- and do not register the memory MCP tools. The rules and surface in this module gate on
 -- "not a specialist" via `group.specialist = null`. Specialists that need memory access
 -- delegate to a memory-provider specialist via the agent-to-agent query_memory tool.
+--
+-- Group allowlist: memory is only active for agent groups whose folder name appears in
+-- config.memory_search_groups (default: { "main" }). Groups not in the allowlist are
+-- silently inactive — no MemoryFile is created and no MCP tools are available to them.
 
 use "./identity.allium" as identity
 use "./sessions.allium" as sessions
@@ -168,6 +172,7 @@ config {
     embedding_tpm_limit: Integer = 15_000
     embedding_rpd_budget: Integer = 900 -- requests per session day; exhausted → defer to next session
     memory_search_enabled: Boolean = true
+    memory_search_groups: Set<String> = { "main" } -- folder names of groups with memory active; comma-separated in env
 }
 
 ------------------------------------------------------------
@@ -186,6 +191,7 @@ rule FileUpdated {
     let file = MemoryFile{group: group, path: path}
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: exists file
     requires: content_hash != file.content_hash
     requires: file.status in { pending, indexed }
@@ -199,6 +205,7 @@ rule FileDiscovered {
     when: WorkspaceFileChanged(group, path, content_hash)
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: not exists MemoryFile{group: group, path: path}
 
     ensures: MemoryFile.created(
@@ -222,6 +229,7 @@ rule FileRemoved {
     let file = MemoryFile{group: group, path: path}
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: exists file
     requires: file.status in { pending, indexed }
 
@@ -248,6 +256,7 @@ rule FileSynced {
     when: file: MemoryFile.status becomes pending
 
     requires: file.group.specialist = null  -- memory indexing is disabled for specialist groups
+    requires: file.group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: file.status = pending
 
     let new_chunks = chunk_file(file.path, config.chunk_tokens, config.chunk_overlap_tokens)
@@ -293,6 +302,7 @@ rule MemorySearched {
 
     requires: session.agent_group = group
     requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: config.memory_search_enabled
 
     let params = MemorySearchParams{
@@ -323,6 +333,7 @@ rule MemoryFileRead {
 
     requires: session.agent_group = group
     requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: config.memory_search_enabled
     requires: exists MemoryFile{group: group, path: path, status: indexed}
 
@@ -340,6 +351,7 @@ rule MemoryListed {
 
     requires: session.agent_group = group
     requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: config.memory_search_enabled
 
     let params = list_params ?? MemoryListParams{
@@ -390,6 +402,14 @@ invariant ChunksPresentOnlyWhenIndexed {
 invariant NoMemoryFilesForSpecialistGroups {
     for f in MemoryFiles:
         f.group.specialist = null
+}
+
+-- Memory indexing only applies to agent groups whose folder name is in
+-- config.memory_search_groups. No MemoryFile should ever be created for a group
+-- not in the allowlist.
+invariant NoMemoryFilesForNonAllowlistedGroups {
+    for f in MemoryFiles:
+        f.group.folder in config.memory_search_groups
 }
 
 ------------------------------------------------------------

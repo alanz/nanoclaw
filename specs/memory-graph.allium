@@ -1,0 +1,538 @@
+-- allium: 3
+-- memory-graph.allium
+--
+-- Research-driven knowledge graph construction.
+-- A researcher specialist investigates external sources in isolation and delivers
+-- a report; the main agent synthesises the report into a linked MemoryNote that
+-- integrates into the group's A-MEM knowledge graph.
+--
+-- NOTE: Ported from v1. Specialist delivery via specialists.allium result path
+--       (no container-ipc-transfer). The v1 IPC transfer substrate is replaced by
+--       the commit_to_memory flag on deliver_specialist_result, which writes
+--       committed paths to SpecialistTask.committed_files (see specialists.allium).
+--
+-- Scope: MemoryNote entity and lifecycle, researcher specialist isolation model,
+--        research dispatch, report writing, note creation, link generation,
+--        back-link propagation
+-- Includes: researcher access model (external internet + Zotero only, no group memory),
+--           result delivery via specialist pipeline (commit_to_memory path),
+--           note creation from research result, link candidate selection and
+--           back-link propagation
+-- Excludes:
+--   - Specialist task lifecycle mechanics (see specialists.allium)
+--   - Memory file indexing, chunking, and hybrid search (see memory.allium)
+--   - Core agent group / session lifecycle (see identity.allium, sessions.allium)
+--   - Zotero database sync, PDF scanning, and per-entry markdown generation (see zotero.allium)
+-- Dependencies: specialists.allium (root-task commit_to_memory delivery path)
+
+use "./identity.allium" as identity
+use "./specialists.allium" as specialists
+use "./memory.allium" as memory
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The origin of a MemoryNote's content.
+-- Always populated; records provenance for staleness detection.
+value NoteSource {
+    kind: file | url | conversation
+    path: String?          -- relative to group workspace; set when kind = file
+    url: String?           -- set when kind = url
+    mtime: Timestamp?      -- file mtime at note creation; used to detect source staleness
+    last_fetched: Timestamp?    -- set when kind = url
+    date: Timestamp?            -- set when kind = conversation
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+-- A structured, linked knowledge note in a group's memory graph.
+-- Notes are the atomic units of the A-MEM knowledge graph.
+-- Each note captures a single insight with explicit graph edges (links) to
+-- related notes. Notes are created by the main agent after synthesising a
+-- researcher report; they are never created by the researcher itself.
+entity MemoryNote {
+    group: identity/AgentGroup
+    id: String                         -- MEM-YYYY-MM-DD-{slug}; unique within group
+    title: String
+    content: String
+    keywords: Set<String>
+    tags: Set<String>
+    links: Set<String>                 -- IDs of related MemoryNotes within this group
+    created: Timestamp
+    sources: Set<NoteSource>           -- always non-empty; records content provenance
+    supersedes: MemoryNote?            -- non-null when this note replaces an older one
+
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: active | superseded | archived
+
+    -- Relationships
+    superseded_by: MemoryNote? with supersedes = this
+
+    transitions status {
+        active -> superseded           -- a newer note supersedes this one
+        active -> archived
+        superseded -> archived
+        terminal: archived
+    }
+}
+
+-- A note that consolidates multiple MemoryNotes into a unified perspective.
+-- Created by the main agent directly (no researcher involved).
+-- Carries directed synthesis edges to the source notes it consolidates;
+-- those edges are rendered separately from general link edges in the graph.
+entity SynthesisNote {
+    group: identity/AgentGroup
+    id: String                         -- SYN-YYYY-MM-DD-{slug}; unique within group
+    title: String
+    content: String
+    keywords: Set<String>
+    tags: Set<String>                  -- always includes "synthesis"
+    links: Set<String>                 -- IDs of related notes within this group
+    created: Timestamp
+    synthesises: Set<String>           -- IDs of MemoryNotes this note consolidates; always non-empty
+
+    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
+    status: active | superseded | archived
+
+    transitions status {
+        active -> superseded
+        active -> archived
+        superseded -> archived
+        terminal: archived
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Folder name of the researcher specialist AgentGroup. Used to identify
+    -- researcher tasks in the rules below; v2 has no SpecialistType entity,
+    -- so the specialist is identified by its AgentGroup folder.
+    researcher_folder: String = "researcher"
+
+    link_candidates_limit: Integer = 10  -- max notes retrieved as link candidates per new note
+    back_link_limit: Integer = 3         -- max existing notes updated with a back-link
+    min_link_score: Decimal = 0.6        -- minimum hybrid search score for a link to form
+    duplicate_check_limit: Integer = 3   -- max existing notes returned in pre-dispatch duplicate check
+    duplicate_check_score: Decimal = 0.8 -- minimum score to surface a note as a potential duplicate
+    synthesis_scan_schedule: String = "3 9 * * 6"   -- Saturday 09:03
+    synthesis_dense_tag_min: Integer = 15            -- notes per tag to qualify as a dense cluster
+    synthesis_dense_link_min: Integer = 12           -- inbound links to qualify as a dense node
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ---- Research Dispatch ----
+
+-- Before dispatching, the main agent checks for existing notes that may cover the
+-- same subject. If candidates are found above the duplicate check threshold, they
+-- are surfaced to the user before the task is submitted. The user decides whether
+-- to proceed (new information may be available) or rely on existing notes.
+-- This check is most useful for URL subjects, where exact duplication is likely;
+-- for search phrases, later queries on the same topic often warrant fresh investigation.
+rule DuplicateCheckPerformed {
+    when: MainAgentResearchRequest(group, subject)
+
+    let dup_params = memory/MemorySearchParams{
+        limit: config.duplicate_check_limit,
+        min_score: config.duplicate_check_score,
+        path_prefix: "memory/notes/",
+        source: null,
+        include_content: null
+    }
+    let candidates = memory_hybrid_search(group, subject, dup_params)
+
+    ensures: DuplicateCandidatesSurfaced(group: group, subject: subject, candidates: candidates)
+
+    @guidance
+        -- DuplicateCandidatesSurfaced is delivered to the user as a message listing the
+        -- candidate notes with their IDs and titles. If candidates is empty, no message
+        -- is sent and ResearchDispatched fires immediately.
+        -- For URL subjects, an exact path match in sources[].url is a strong duplicate
+        -- signal regardless of score.
+}
+
+-- The main agent dispatches a research task when the user provides a URL or
+-- search phrase to investigate. Fires after DuplicateCheckPerformed; the user
+-- may have already been shown existing notes and chosen to proceed.
+rule ResearchDispatched {
+    when: MainAgentResearchRequest(group, subject)
+
+    let researcher_group = identity/AgentGroup{folder: config.researcher_folder}
+    requires: exists researcher_group
+    requires: exists researcher_group.specialist
+
+    ensures: specialists/SpecialistTask.created(
+        specialist_group: researcher_group,
+        prompt: research_prompt(subject),
+        requester_group: group,
+        requester_task: null,
+        requester_session: main_session_for_group(group),
+        depth: 0,
+        chain_delegation_count: 1,
+        ancestor_groups: {},
+        is_last_same_type_dispatch: false,
+        status: queued,
+        dispatched_at: now,
+        restart_attempt_count: 0,
+        closed_at: null
+    )
+
+    @guidance
+        -- research_prompt(subject) wraps the subject in a standard instruction to:
+        -- investigate from external sources, consult Zotero for prior art, and deliver
+        -- a structured report via deliver_specialist_result with commit_to_memory = true.
+        -- The prompt must not reference any existing NanoClaw memory notes, reports,
+        -- or conversation history — the researcher's isolation depends on this.
+        -- subject may be a URL (fetch and analyse), a search phrase (WebSearch),
+        -- or a Zotero key (look up locally, then investigate further if needed).
+        --
+        -- main_session_for_group resolves the long-running main-agent session whose
+        -- agent_group is the requesting group. The result is routed back into that
+        -- session via specialists.SpecialistResultRoutedToMain when the researcher
+        -- delivers; the committed report path lands in task.committed_files.
+        --
+        -- In practice this rule shares its trigger with DuplicateCheckPerformed.
+        -- The two rules are intentionally not mutually exclusive on their requires
+        -- clauses; both fire on the same MainAgentResearchRequest and the host
+        -- decides whether to proceed with dispatch based on the surfaced candidates.
+}
+
+-- ---- Synthesis Workflow ----
+
+-- A weekly scheduled task scans the note graph for tag clusters (15+ notes per tag)
+-- and high-degree nodes (12+ inbound links), then surfaces 2-4 candidates to the
+-- operator. Synthesis notes are human-driven: the scan surfaces candidates only;
+-- the operator decides whether to proceed.
+rule SynthesisCandidatesScanned {
+    when: WeeklySynthesisScan(group)
+
+    requires: group.specialist = null
+
+    let tag_clusters = dense_tag_clusters(
+        group,
+        "memory/notes/",
+        config.synthesis_dense_tag_min
+    )
+    let dense_nodes = dense_link_nodes(
+        group,
+        "memory/notes/",
+        config.synthesis_dense_link_min
+    )
+
+    ensures: SynthesisCandidatesDelivered(
+        group: group,
+        tag_clusters: tag_clusters,
+        dense_nodes: dense_nodes
+    )
+
+    @guidance
+        -- WeeklySynthesisScan fires from a cron scheduled task (config.synthesis_scan_schedule,
+        -- currently "3 9 * * 6" — Saturday 09:03).
+        -- A pre-check script runs before the agent: it counts MEM-*.md and SYN-*.md files,
+        -- extracts tag frequencies and inbound-link counts from frontmatter, and passes the
+        -- result as task data. The agent is only woken when at least one dense cluster is found.
+        -- The agent reads the task data, samples notes from the top clusters via memory_search,
+        -- and surfaces 2-4 candidates as a digest sent to the operator.
+        -- The digest is also written to memory/digests/YYYY-MM-DD-synthesis-scan.md.
+        -- The agent must NOT write drafts or SynthesisNotes during this step. Its job ends
+        -- at identifying candidates; the operator decides whether to proceed.
+}
+
+-- When the operator selects a synthesis candidate and requests a draft, the agent
+-- consolidates the source notes into a draft SynthesisNote and shares it for review.
+-- Each revision produces a new versioned file in memory/drafts/.
+rule SynthesisDraftCreated {
+    when: OperatorRequestsSynthesisDraft(group, source_ids, slug)
+
+    requires: for id in source_ids: exists MemoryNote{group: group, id: id, status: active}
+
+    let draft_path = "memory/drafts/DRAFT-SYN-" + date_of(now) + "-" + slug + "-v" + draft_version_for_slug(group, slug) + ".md"
+
+    ensures: SynthesisDraftWritten(group: group, draft_path: draft_path)
+    ensures: DraftSharedWithOperator(group: group, draft_path: draft_path)
+
+    @guidance
+        -- The draft is written to memory/drafts/DRAFT-SYN-YYYY-MM-DD-{slug}-vN.md.
+        -- Each revision cycle produces a new versioned file (-v2.md, -v3.md, ...);
+        -- prior versions are preserved as a record of the editing process.
+        -- The draft uses the same frontmatter format as a final SynthesisNote,
+        -- including a synthesises: field listing the source_ids.
+        -- The agent sends the draft content to the operator for review before finalising.
+        -- Known gap: memory/drafts/ is currently indexed by chokidar alongside memory/notes/,
+        -- so draft content appears in memory_search results until the indexer excludes that path.
+}
+
+-- Once the operator approves a draft, the agent writes the final SynthesisNote to
+-- memory/notes/ and notifies the operator with a link to the new note.
+rule SynthesisNoteFinalised {
+    when: OperatorApprovesSynthesisDraft(group, source_ids, slug, approved_content)
+
+    requires: for id in source_ids: exists MemoryNote{group: group, id: id, status: active}
+
+    ensures: SynthesisNote.created(
+        group: group,
+        id: "SYN-" + date_of(now) + "-" + slug,
+        title: extract_title(approved_content),
+        content: approved_content,
+        keywords: extract_keywords(approved_content),
+        tags: extract_tags(approved_content) + { "synthesis" },
+        links: source_ids,
+        created: now,
+        synthesises: source_ids,
+        status: active
+    )
+    ensures: UserNotifiedOfSynthesis(
+        group: group,
+        note_id: "SYN-" + date_of(now) + "-" + slug
+    )
+
+    @guidance
+        -- The agent writes the final note to memory/notes/SYN-YYYY-MM-DD-{slug}.md.
+        -- Draft files remain in memory/drafts/ as a record of the editing process.
+        -- synthesises holds the source MemoryNote IDs for directed graph edges; links
+        -- holds the same IDs for general graph connectivity.
+        -- tags always include "synthesis" by convention.
+        -- Chokidar picks up the new file within 3 seconds and queues it for embedding.
+        -- No researcher task is involved; this is a main-agent-only operation.
+}
+
+-- ---- Report and Note Creation ----
+
+-- When the researcher task completes, the host has already committed the report
+-- file to memory/reports/ (via the commit_to_memory flag on deliver_specialist_result;
+-- see specialists/SpecialistResultRoutedToMain). The committed paths are recorded
+-- on the task's committed_files. The main agent creates a linked MemoryNote using
+-- the committed report as its source.
+rule ReportAndNoteCreated {
+    when: task: specialists/SpecialistTask.status becomes completed
+
+    requires: task.specialist_group.folder = config.researcher_folder
+    requires: task.requester_group != null
+    requires: task.committed_files != null
+    requires: task.committed_files.count > 0
+
+    let group = task.requester_group
+    let report_path = task.committed_files.first    -- committed path in memory/reports/
+    let slug = slug_from_path(report_path)
+
+    let link_params = memory/MemorySearchParams{
+        limit: config.link_candidates_limit,
+        min_score: config.min_link_score,
+        path_prefix: "memory/notes/",
+        source: null,
+        include_content: null
+    }
+    let candidates = memory_hybrid_search(group, task.result, link_params)
+    let links = extract_link_ids(candidates)
+
+    ensures: MemoryNote.created(
+        group: group,
+        id: "MEM-" + date_of(task.dispatched_at) + "-" + slug,
+        title: extract_title(task.result),
+        content: task.result,
+        keywords: extract_keywords(task.result),
+        tags: extract_tags(task.result),
+        links: links,
+        created: now,
+        sources: { NoteSource{kind: file, path: report_path, mtime: now} },
+        status: active
+    )
+    ensures: UserNotifiedOfResult(
+        group: group,
+        note_id: "MEM-" + date_of(task.dispatched_at) + "-" + slug,
+        report_path: report_path
+    )
+
+    @guidance
+        -- The report file is committed to memory/reports/ by the host before this rule fires,
+        -- as a result of the researcher calling deliver_specialist_result with commit_to_memory = true.
+        -- task.committed_files holds the workspace-relative committed paths (e.g.
+        -- "memory/reports/2026-04-08-slug.md"); the first entry is the primary report.
+        -- The main agent does NOT write the report — it reads it from the committed path.
+        -- slug_from_path extracts the date-slug portion from the report filename.
+        -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result
+        -- (the inline summary) or over the report file content if task.result is a brief summary.
+        -- date_of formats a Timestamp as a YYYY-MM-DD date string.
+        -- Writing the report to memory/reports/ causes memory.allium's FileDiscovered
+        -- rule to pick it up; it will be chunked and embedded for future searches.
+        -- memory_hybrid_search is the same search used by AgentMemorySearch in memory.allium.
+        -- UserNotifiedOfResult is fulfilled by the main agent replying to the user with a
+        -- brief summary of what was found and a web UI link to the created note.
+        -- This is enforced by instruction (groups/main/CLAUDE.md) and by a directive
+        -- appended to the injected specialist result message.
+        -- If task.committed_files is null or empty (researcher delivered text only), this rule
+        -- does not fire; the main agent may still create a note organically from the inline result.
+}
+
+-- The top back_link_limit linked notes are updated to reference the new note,
+-- forming bidirectional edges in the graph.
+rule BackLinksWritten {
+    when: note: MemoryNote.created
+
+    requires: note.status = active
+
+    let back_link_targets = top_links(note.links, config.back_link_limit)
+
+    ensures:
+        for target_id in back_link_targets:
+            let target = MemoryNote{group: note.group, id: target_id}
+            target.links.add(note.id)
+
+    @guidance
+        -- top_links returns the first back_link_limit elements in insertion order, which
+        -- corresponds to descending score order from the memory_search that populated note.links.
+        -- The update is idempotent: if note.id is already in target.links, no change occurs.
+        -- Only active notes receive back-links; superseded notes are not updated.
+        -- Back-link targets must exist and be active; this is enforced by the
+        -- LinksWithinActiveGraph invariant.
+}
+
+-- ---- Note Archival ----
+
+-- A MemoryNote transitions to archived when the agent decides it is no longer
+-- relevant (either directly from active, or after being superseded).
+rule MemoryNoteArchived {
+    when: note: MemoryNote.is_archive_requested
+
+    requires: note.status in { active, superseded }
+
+    ensures: note.status = archived
+    ensures:
+        for chunk in chunks_for_note(note):
+            not exists chunk
+
+    @guidance
+        -- This transition is agent-side: the agent writes updated frontmatter
+        -- (status: archived) to the note's markdown file, which the host memory
+        -- layer picks up via the file watcher and applies. No host rule directly
+        -- drives archival — the trigger here represents the file-write event that
+        -- follows the agent's decision. The chunk removal mirrors what FileRemoved
+        -- does in memory.allium and keeps the search index consistent.
+        -- chunks_for_note resolves the MemoryChunks belonging to the MemoryFile
+        -- whose path corresponds to this note (notes are not directly related to
+        -- MemoryFile entities in the spec; the host bridges the two).
+}
+
+-- A SynthesisNote transitions to archived when the agent decides it is no longer
+-- relevant (either directly from active, or after being superseded).
+rule SynthesisNoteArchived {
+    when: note: SynthesisNote.is_archive_requested
+
+    requires: note.status in { active, superseded }
+
+    ensures: note.status = archived
+
+    @guidance
+        -- Same agent-side mechanism as MemoryNoteArchived: the agent writes
+        -- updated frontmatter and the host picks it up via the file watcher.
+        -- SynthesisNotes do not have chunks (they are not chunked for embedding),
+        -- so no chunk removal is needed.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Every ID in a MemoryNote's links array references a note in the same group
+-- that has not been archived.
+invariant LinksWithinActiveGraph {
+    for note in MemoryNotes:
+        note.status = active implies (
+            for id in note.links:
+                exists MemoryNote{group: note.group, id: id, status: active | superseded}
+        )
+}
+
+-- Every ID in a SynthesisNote's synthesises array references an active or superseded
+-- MemoryNote in the same group. Synthesis edges must not dangle.
+invariant SynthesisesWithinActiveGraph {
+    for note in SynthesisNotes:
+        note.status = active implies (
+            for id in note.synthesises:
+                exists MemoryNote{group: note.group, id: id, status: active | superseded}
+        )
+}
+
+-- Both MemoryNotes and SynthesisNotes belong to the main group only. The knowledge
+-- graph is a single shared resource; specialist groups do not maintain graphs.
+-- (In v2 the main group is identified by specialist = null and is_main = true; the
+-- knowledge graph predicate uses specialist = null since the graph is also reachable
+-- only from non-specialist contexts — see ResearcherKnowledgeIsolation below.)
+invariant NotesCreatedByMainAgentOnly {
+    for note in MemoryNotes:
+        note.group.specialist = null
+    for note in SynthesisNotes:
+        note.group.specialist = null
+}
+
+-- The researcher specialist container has no access to any existing group memory,
+-- including previously generated reports. Isolation is total: the researcher must
+-- focus solely on the subject it is tasked with investigating, without synthesising
+-- comparisons to existing knowledge or prior research.
+-- Only the Zotero database (read-only) and the external internet are accessible.
+-- The Zotero database may also be mounted in other specialist containers; its
+-- sync and structure are governed by zotero.allium (deferred).
+--
+-- Enforcement: container configuration level in container-runner.ts.
+-- The researcher container MUST NOT be given any group workspace mount
+-- (memory/notes/, memory/reports/, CLAUDE.md, conversations/).
+-- The researcher container MUST mount the Zotero database read-only
+-- (see zotero.allium for canonical mount path).
+-- External internet access (WebSearch, WebFetch, agent-browser) is available.
+-- Violation of this invariant cannot be detected at runtime; it is prevented
+-- by the container configuration.
+invariant ResearcherKnowledgeIsolation {
+    for task in specialists/SpecialistTasks:
+        task.specialist_group.folder = config.researcher_folder implies task.requester_group != null
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred RetroactiveLinking      -- see: memory-graph-retroactive.allium
+                                  -- When a new note is created, the context and tags of
+                                  -- its linked neighbors are updated to reflect the new
+                                  -- connection. Implements A-MEM's retroactive neighbor
+                                  -- update mechanism.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred Consolidation           -- see: memory-graph-consolidation.allium
+                                  -- Automated cluster detection: a scheduled task identifies
+                                  -- high-degree MemoryNotes and dense tag clusters, then
+                                  -- proposes SynthesisNotes to consolidate each cluster.
+                                  -- The SynthesisCandidatesScanned rule implements the manual
+                                  -- (human-in-the-loop) version; this deferred spec covers
+                                  -- fully automated cluster detection and SynthesisNote
+                                  -- creation without operator confirmation. Implements A-MEM's
+                                  -- sleep/consolidation mechanism.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred OrphanDetection         -- see: memory-graph-consolidation.allium
+                                  -- Notes with no links after a grace period are flagged
+                                  -- for review, re-linking, or archival.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred NoteSupersession        -- see: memory-graph-supersession.allium
+                                  -- When source material changes significantly, a new note
+                                  -- supersedes the old one. The old note's links are
+                                  -- preserved and inherited by the superseding note.
+
+-- allium-ignore allium.deferred.missingLocationHint
+deferred ZoteroSync              -- see: zotero.allium
+                                  -- The Zotero database is a directory of per-entry markdown
+                                  -- files generated from the Zotero API. Each file is populated
+                                  -- with abstract, DOI, summary, and other metadata, including
+                                  -- content extracted from associated PDFs. The directory is
+                                  -- indexed via the Gemini embedding process and mounted
+                                  -- read-only into the researcher container (and potentially
+                                  -- other specialist containers).

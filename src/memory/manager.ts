@@ -18,6 +18,7 @@ import { log } from '../log.js';
 import { getSpecialist } from '../modules/specialists/db.js';
 import { MEMORY_CONFIG } from './config.js';
 import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
+import { readContainerConfig } from '../container-config.js';
 import { chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
@@ -132,6 +133,7 @@ export class MemoryIndexManager {
     private readonly dbPath: string,
     private readonly apiKey: string,
     private readonly model: string,
+    private readonly additionalDirs: Array<{ dir: string; source: string }> = [],
   ) {}
 
   async init(): Promise<void> {
@@ -158,15 +160,18 @@ export class MemoryIndexManager {
       }, WATCH_DEBOUNCE_MS);
     };
 
-    try {
-      const sub = await parcelWatcher.subscribe(this.memoryDir, (err: Error | null, events: parcelWatcher.Event[]) => {
-        if (err) return;
-        const relevant = events.some((e) => !e.path.split(path.sep).some((part: string) => IGNORED_DIRS.has(part)));
-        if (relevant) markDirty();
-      });
-      this.watchers.push(sub);
-    } catch (err) {
-      log.warn('Memory watcher failed to start', { groupId: this.groupId, err });
+    const dirsToWatch = [this.memoryDir, ...this.additionalDirs.map((d) => d.dir)];
+    for (const watchDir of dirsToWatch) {
+      try {
+        const sub = await parcelWatcher.subscribe(watchDir, (err: Error | null, events: parcelWatcher.Event[]) => {
+          if (err) return;
+          const relevant = events.some((e) => !e.path.split(path.sep).some((part: string) => IGNORED_DIRS.has(part)));
+          if (relevant) markDirty();
+        });
+        this.watchers.push(sub);
+      } catch (err) {
+        log.warn('Memory watcher failed to start', { groupId: this.groupId, dir: watchDir, err });
+      }
     }
 
     // Periodic sync every 24h in case watcher misses events
@@ -182,7 +187,12 @@ export class MemoryIndexManager {
     this.dirty = true;
     void this.sync({ force: true });
 
-    log.info('Memory index manager initialized', { groupId: this.groupId, memoryDir: this.memoryDir });
+    log.info('Memory index manager initialized', {
+      groupId: this.groupId,
+      groupFolder: this.groupFolder,
+      memoryDir: this.memoryDir,
+      additionalDirs: this.additionalDirs.map((d) => d.source),
+    });
   }
 
   async sync(opts?: { force?: boolean }): Promise<void> {
@@ -196,8 +206,16 @@ export class MemoryIndexManager {
     this.dirty = false;
     this._syncing = true;
 
-    const files = await listMemoryFiles(this.memoryDir);
-    log.info('Memory sync: starting', { groupId: this.groupId, count: files.length, force });
+    const allSources = [{ dir: this.memoryDir, source: 'memory' }, ...this.additionalDirs];
+
+    // Collect all files across all source dirs
+    const fileEntries: Array<{ absPath: string; source: string }> = [];
+    for (const { dir, source } of allSources) {
+      const files = await listMemoryFiles(dir);
+      for (const absPath of files) fileEntries.push({ absPath, source });
+    }
+
+    log.info('Memory sync: starting', { groupId: this.groupId, count: fileEntries.length, force });
 
     let indexed = 0,
       skipped = 0,
@@ -206,7 +224,7 @@ export class MemoryIndexManager {
     const MAX_CONSECUTIVE_RL = 3;
     const seenPaths = new Set<string>();
 
-    for (const absPath of files) {
+    for (const { absPath, source: fileSource } of fileEntries) {
       if (this.closed) break;
 
       let content: string;
@@ -218,14 +236,16 @@ export class MemoryIndexManager {
         continue;
       }
 
-      // Repo-relative path: groups/<folder>/memory/...
+      // Repo-relative path (may use ".." for dirs outside the repo)
       const repoPath = path.relative(path.resolve('.'), absPath).replace(/\\/g, '/');
       seenPaths.add(repoPath);
 
       const contentHash = hashFile(content);
 
-      // Update central DB (spec compliance)
-      handleWorkspaceFileChanged({ group_id: this.groupId, path: repoPath, content_hash: contentHash });
+      // Update central DB (spec compliance) — only for in-repo paths
+      if (!repoPath.startsWith('..')) {
+        handleWorkspaceFileChanged({ group_id: this.groupId, path: repoPath, content_hash: contentHash });
+      }
 
       // Check if already indexed with same hash
       const existing = this.index.db.prepare('SELECT hash FROM files WHERE path = ?').get(repoPath) as
@@ -317,7 +337,7 @@ export class MemoryIndexManager {
         insertChunk(this.index.db, {
           id: chunkId,
           path: repoPath,
-          source: 'memory',
+          source: fileSource,
           startLine: chunk.startLine,
           endLine: chunk.endLine,
           hash: chunk.hash,
@@ -330,7 +350,7 @@ export class MemoryIndexManager {
 
       upsertFileRecord(this.index.db, {
         path: repoPath,
-        source: 'memory',
+        source: fileSource,
         hash: contentHash,
         mtimeMs: stat.mtimeMs,
         size: stat.size,
@@ -401,7 +421,7 @@ export class MemoryIndexManager {
       results.map(async (r) => {
         const result: MemorySearchResult = { ...r };
         try {
-          const absPath = path.resolve(this.memoryDir, '..', r.path.replace(`groups/${this.groupFolder}/`, ''));
+          const absPath = path.resolve(process.cwd(), r.path);
           const content = await fs.readFile(absPath, 'utf-8');
           result.content = content;
           result.frontmatter = parseFrontmatterYaml(content);
@@ -449,6 +469,7 @@ export async function ensureMemoryManager(params: {
   dbPath: string;
   apiKey: string;
   model?: string;
+  additionalDirs?: Array<{ dir: string; source: string }>;
 }): Promise<MemoryIndexManager> {
   const existing = managers.get(params.groupId);
   if (existing) return existing;
@@ -460,6 +481,7 @@ export async function ensureMemoryManager(params: {
     params.dbPath,
     params.apiKey,
     params.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL,
+    params.additionalDirs ?? [],
   );
   await manager.init();
   managers.set(params.groupId, manager);
@@ -492,6 +514,12 @@ export async function initMemoryManagers(params: {
     const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
     const dbPath = path.join(dbDir, 'index.db');
 
+    const containerConfig = readContainerConfig(group.folder);
+    const additionalDirs = (containerConfig.memoryIndexDirs ?? []).map(({ path: p, source }) => ({
+      dir: path.resolve(process.cwd(), p),
+      source,
+    }));
+
     await ensureMemoryManager({
       groupId: group.id,
       groupFolder: group.folder,
@@ -499,6 +527,7 @@ export async function initMemoryManagers(params: {
       dbPath,
       apiKey: params.apiKey,
       model: params.model,
+      additionalDirs,
     }).catch((err) => {
       log.warn('Failed to init memory manager for group', { groupId: group.id, err });
     });

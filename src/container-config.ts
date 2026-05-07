@@ -30,6 +30,13 @@ export interface AdditionalMountConfig {
   readonly?: boolean;
 }
 
+export interface MemoryIndexDirConfig {
+  /** Path relative to the repo root (cwd). May use ".." to escape the repo. */
+  path: string;
+  /** Source label stored in the index DB (e.g. "zotero-md", "org"). */
+  source: string;
+}
+
 export interface ContainerConfig {
   mcpServers: Record<string, McpServerConfig>;
   packages: { apt: string[]; npm: string[] };
@@ -47,6 +54,8 @@ export interface ContainerConfig {
   agentGroupId?: string;
   /** Max messages per prompt. Falls back to code default if unset. */
   maxMessagesPerPrompt?: number;
+  /** Additional directories to include in the host-side memory search index (not passed to container). */
+  memoryIndexDirs?: MemoryIndexDirConfig[];
 }
 
 function emptyConfig(): ContainerConfig {
@@ -87,6 +96,7 @@ export function readContainerConfig(folder: string): ContainerConfig {
       assistantName: raw.assistantName,
       agentGroupId: raw.agentGroupId,
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
+      memoryIndexDirs: raw.memoryIndexDirs ?? [],
     };
   } catch (err) {
     console.error(`[container-config] failed to parse ${p}: ${String(err)}`);

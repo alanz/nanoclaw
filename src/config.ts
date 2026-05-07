@@ -16,6 +16,7 @@ const envConfig = readEnvFile([
   'TZ',
   'ZOTERO_GROUP_FOLDER',
   'ZOTERO_POLL_INTERVAL',
+  'WEB_UI_PORT',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -47,6 +48,8 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   process.env.CREDENTIAL_PROXY_PORT || envConfig.CREDENTIAL_PROXY_PORT || '3002',
   10,
 );
+// Web UI dashboard — bind to localhost only (expose via Tailscale Serve for HTTPS)
+export const WEB_UI_PORT = parseInt(process.env.WEB_UI_PORT || envConfig.WEB_UI_PORT || '3004', 10);
 // 0.0.0.0 so containers (Apple Container bridge, Docker bridge) can reach the proxy
 // via the host gateway IP. 127.0.0.1 would only work for host-network containers.
 export const CREDENTIAL_PROXY_HOST = process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST || '0.0.0.0';

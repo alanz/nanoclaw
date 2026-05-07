@@ -6,7 +6,7 @@
  */
 import path from 'path';
 
-import { CREDENTIAL_PROXY_HOST, CREDENTIAL_PROXY_PORT, DATA_DIR, GROUPS_DIR } from './config.js';
+import { CREDENTIAL_PROXY_HOST, CREDENTIAL_PROXY_PORT, DATA_DIR, GROUPS_DIR, WEB_UI_PORT } from './config.js';
 import { readEnvFile } from './env.js';
 import { getAllAgentGroups } from './db/agent-groups.js';
 import { initMemoryManagers, closeAllMemoryManagers } from './memory/manager.js';
@@ -216,6 +216,11 @@ async function main(): Promise<void> {
   } else {
     log.info('Dashboard disabled (no DASHBOARD_SECRET)');
   }
+
+  // 8. Web UI dashboard (optional — enabled by WEB_UI_PORT, defaults to 3004)
+  const { startWebUi } = await import('./web-ui.js');
+  const webUiServer = startWebUi(WEB_UI_PORT);
+  onShutdown(() => new Promise<void>((res) => webUiServer.close(() => res())));
 
   log.info('NanoClaw running');
 }

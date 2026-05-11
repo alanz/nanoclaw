@@ -600,9 +600,15 @@ function buildContainerArgs(
   }
 
   // Optional third-party API keys — only injected if present in .env.
-  const optionalSecrets = readEnvFile(['BRAVE_API_KEY']);
+  const optionalSecrets = readEnvFile(['BRAVE_API_KEY', 'ZOTERO_API_KEY', 'ZOTERO_USER_ID']);
   if (optionalSecrets.BRAVE_API_KEY) {
     args.push('-e', `BRAVE_API_KEY=${optionalSecrets.BRAVE_API_KEY}`);
+  }
+  if (optionalSecrets.ZOTERO_API_KEY) {
+    args.push('-e', `ZOTERO_API_KEY=${optionalSecrets.ZOTERO_API_KEY}`);
+  }
+  if (optionalSecrets.ZOTERO_USER_ID) {
+    args.push('-e', `ZOTERO_USER_ID=${optionalSecrets.ZOTERO_USER_ID}`);
   }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).

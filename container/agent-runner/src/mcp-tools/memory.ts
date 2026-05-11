@@ -44,6 +44,52 @@ function openDb(): Database | null {
   }
 }
 
+interface RawContainerConfig {
+  memoryIndexDirs?: Array<{ path: string; source: string }>;
+  additionalMounts?: Array<{ hostPath: string; containerPath: string }>;
+}
+
+let _rawContainerConfig: RawContainerConfig | null = null;
+function getRawContainerConfig(): RawContainerConfig {
+  if (_rawContainerConfig) return _rawContainerConfig;
+  try {
+    _rawContainerConfig = JSON.parse(
+      fs.readFileSync('/workspace/agent/container.json', 'utf-8'),
+    ) as RawContainerConfig;
+  } catch {
+    _rawContainerConfig = {};
+  }
+  return _rawContainerConfig;
+}
+
+/**
+ * Translate a repo-relative index path to an absolute container path.
+ *
+ * In-repo files:  groups/<folder>/X/Y  →  /workspace/agent/X/Y
+ * Extra mounts:   ../SOMETHING/X/Y    →  /workspace/extra/<containerPath>/X/Y
+ *                 Matched by aligning memoryIndexDirs[i].path with
+ *                 additionalMounts[j].containerPath (same basename).
+ */
+function resolveIndexedPath(repoPath: string): string | null {
+  if (!repoPath.startsWith('../')) {
+    const stripped = repoPath.replace(/^groups\/[^/]+\//, '');
+    return path.join('/workspace/agent', stripped);
+  }
+
+  const { memoryIndexDirs = [], additionalMounts = [] } = getRawContainerConfig();
+  for (const dir of memoryIndexDirs) {
+    const prefix = dir.path.endsWith('/') ? dir.path : `${dir.path}/`;
+    if (!repoPath.startsWith(prefix)) continue;
+    const fileRelative = repoPath.slice(prefix.length);
+    const dirBasename = path.basename(dir.path);
+    const mount = additionalMounts.find((m) => m.containerPath === dirBasename);
+    if (!mount) continue;
+    return path.join('/workspace/extra', mount.containerPath, fileRelative);
+  }
+
+  return null;
+}
+
 function parseFrontmatter(content: string): Record<string, unknown> | undefined {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
   if (!match?.[1]) return undefined;
@@ -173,11 +219,13 @@ export const memoryGetFileContent: McpToolDefinition = {
         return { content: [{ type: 'text' as const, text: `Error: file not indexed: ${filePath}` }], isError: true };
       }
 
-      // File lives under /workspace/agent relative to the container.
-      // The repo-relative path is groups/<folder>/memory/...
-      // Strip the groups/<folder>/ prefix to get the workspace-agent-relative path.
-      const stripped = filePath.replace(/^groups\/[^/]+\//, '');
-      const absPath = path.join('/workspace/agent', stripped);
+      const absPath = resolveIndexedPath(filePath);
+      if (!absPath) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: cannot resolve container path for: ${filePath}` }],
+          isError: true,
+        };
+      }
 
       let content: string;
       try {
@@ -244,9 +292,11 @@ export const memoryListFiles: McpToolDefinition = {
         const entry: Record<string, unknown> = { path: r.path, mtime: r.mtime, size: r.size, indexed: true };
         if (parseFm) {
           try {
-            const stripped = r.path.replace(/^groups\/[^/]+\//, '');
-            const content = fs.readFileSync(path.join('/workspace/agent', stripped), 'utf-8');
-            entry.frontmatter = parseFrontmatter(content);
+            const absPath = resolveIndexedPath(r.path);
+            if (absPath) {
+              const content = fs.readFileSync(absPath, 'utf-8');
+              entry.frontmatter = parseFrontmatter(content);
+            }
           } catch {}
         }
         return entry;

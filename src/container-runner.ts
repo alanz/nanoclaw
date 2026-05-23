@@ -15,6 +15,7 @@ import {
   GROUPS_DIR,
   MAX_CONCURRENT_CONTAINERS,
   TIMEZONE,
+  WEB_UI_BASE_URL,
 } from './config.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
@@ -408,6 +409,15 @@ function buildMounts(
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+
+  // Write nanoclaw_meta.json into the session dir so the container can read it
+  // from /workspace/nanoclaw_meta.json. The container never receives WEB_UI_BASE_URL
+  // as an env var — the file is the sole source so the host can change the URL
+  // without rebuilding or restarting containers.
+  fs.writeFileSync(
+    path.join(sessDir, 'nanoclaw_meta.json'),
+    JSON.stringify({ webUiBaseUrl: WEB_UI_BASE_URL, groupFolder: agentGroup.folder }, null, 2),
+  );
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });

@@ -21,6 +21,7 @@ if (process.env.NANOCLAW_MEMORY_ENABLED) {
   await import('./memory.js');
 }
 import './search.js';
+import './workspace.js';
 import { startMcpServer } from './server.js';
 
 function log(msg: string): void {

@@ -17,6 +17,7 @@ const envConfig = readEnvFile([
   'ZOTERO_GROUP_FOLDER',
   'ZOTERO_POLL_INTERVAL',
   'WEB_UI_PORT',
+  'WEB_UI_BASE_URL',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -50,6 +51,11 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
 );
 // Web UI dashboard — bind to localhost only (expose via Tailscale Serve for HTTPS)
 export const WEB_UI_PORT = parseInt(process.env.WEB_UI_PORT || envConfig.WEB_UI_PORT || '3004', 10);
+// Public-facing base URL for the web UI (e.g. a Tailscale Serve URL).
+// Written into nanoclaw_meta.json at container spawn so agents can generate
+// shareable dashboard links without holding the URL as an env var.
+export const WEB_UI_BASE_URL: string | null =
+  (process.env.WEB_UI_BASE_URL || envConfig.WEB_UI_BASE_URL || '').replace(/\/$/, '') || null;
 // 0.0.0.0 so containers (Apple Container bridge, Docker bridge) can reach the proxy
 // via the host gateway IP. 127.0.0.1 would only work for host-network containers.
 export const CREDENTIAL_PROXY_HOST = process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST || '0.0.0.0';

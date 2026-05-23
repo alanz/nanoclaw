@@ -165,7 +165,6 @@ entity SpecialistTask {
 
     transitions status {
         queued -> running
-        queued -> awaiting_restart
         queued -> failed
         running -> awaiting_sub_task
         running -> awaiting_restart
@@ -387,14 +386,12 @@ rule SpecialistTaskStarted {
     @guidance
         -- A task remains in queued while its specialist's container is
         -- unavailable at dispatch time (image not built, OneCLI agent not
-        -- yet provisioned, runtime unreachable). The host retries container
-        -- startup; the task only leaves queued when one of the following
-        -- occurs:
+        -- yet provisioned, runtime unreachable) or while it is waiting in
+        -- the host's in-memory concurrency queue for a slot to free. The
+        -- host retries container startup; the task only leaves queued when
+        -- one of the following occurs:
         --   - the container begins processing the trigger inbound message
         --     and this rule fires (queued -> running);
-        --   - the container starts but crashes before first processing,
-        --     causing SpecialistContainerCrashed to fire
-        --     (queued -> awaiting_restart);
         --   - the overall task timeout fires via SpecialistTaskTimedOut
         --     (queued -> failed with kind = timeout).
         -- A container that simply cannot be started yet is treated as a
@@ -402,6 +399,14 @@ rule SpecialistTaskStarted {
         -- failure. There is no queued -> failed/execution_error transition
         -- for unavailability at dispatch time; execution_error is reserved
         -- for failures observed once the container is processing.
+        --
+        -- There is no queued -> awaiting_restart transition. Crash
+        -- detection (SpecialistContainerCrashed) is gated on
+        -- task.status = running and does not consume restart_attempt_count
+        -- for a queued task. The presence of a queued task without a
+        -- running container is normal — it indicates either a transient
+        -- startup delay or a waiting-for-slot condition, neither of which
+        -- is a crash.
 }
 
 ------------------------------------------------------------
@@ -1320,6 +1325,67 @@ rule InvocationEndedOnTaskTerminal {
         -- live guard handles this case the same way.
 }
 
+-- Per-task session closure at task terminal transition. A specialist task's
+-- per-task Session must be closed once the task itself reaches a terminal
+-- state (completed or failed). Without this, the session remains
+-- status = active in the central session store with any still-pending
+-- inbound messages indefinitely eligible for redelivery, and the host sweep
+-- will keep waking a container for a task that is already concluded.
+--
+-- Closing the session is the canonical signal that no further container
+-- work will happen for this task. It guards every wake/queue rule
+-- downstream (each of which requires session.status = active) from
+-- reopening work against a terminated task.
+--
+-- This rule fires from the same SpecialistTaskReachedTerminal event as
+-- InvocationEndedOnTaskTerminal; the two run as siblings. Invocation
+-- mounts are cleared by the sibling rule, and the session itself is
+-- closed here.
+--
+-- Idempotence: the requires guard on session.status = active makes this
+-- rule a no-op if some other path (e.g. an admin invoking CloseSession on
+-- this session) has already closed it.
+
+rule SpecialistTaskSessionClosed {
+    when: SpecialistTaskReachedTerminal(task)
+    let session = specialist_task_session(task)
+    requires: exists session
+    requires: session.status = active
+    ensures:
+        session.status = closed
+
+    @guidance
+        -- specialist_task_session(task) is null for tasks created directly
+        -- in status = failed by the sub-task rejection rules
+        -- (SubTaskRejectedCycle/Depth/Count/SameTypeLimit). For those tasks
+        -- no session was provisioned and the exists session guard skips the
+        -- rule, matching the behaviour of InvocationEndedOnTaskTerminal.
+        --
+        -- Pending inbound messages on the closed session. In the central
+        -- session store, any messages_in row still in status = pending at
+        -- the moment of closure is also marked failed by the host, so a
+        -- stale sweep that reopens the inbound DB cannot revive it as work
+        -- to wake the container with. This is defensive cleanup against
+        -- redelivery; once the session is closed the downstream wake rules
+        -- (WakeOnInbound, ScheduledInboundDue, ContainerSlotFreed,
+        -- StuckSessionRecovered, StuckSessionQueued) all guard on
+        -- session.status = active and would not fire regardless.
+        --
+        -- The InboundMessage transition graph in sessions.allium does not
+        -- include a pending -> failed edge, so this fail-pending action is
+        -- not modelled as a rule-level ensures here. The host's behaviour
+        -- is recorded as guidance pending a sessions.allium revision that
+        -- adds the edge; see the open question
+        -- "InboundMessage pending -> failed edge for session closure" below.
+        --
+        -- Distinct from SessionClosed in sessions.allium. SessionClosed
+        -- requires an admin actor and an external CloseSession trigger;
+        -- this rule is system-driven from a task terminal transition with
+        -- no actor. The two paths are independent and converge on the same
+        -- session.status = closed terminal state in sessions.allium's
+        -- transition graph.
+}
+
 -- Transfers expire when the requester task reaches a terminal state.
 -- Both the in-transit (sub-task to parent) and committed (sub-task or root
 -- to memory) shapes converge here: staging copies in host-managed storage
@@ -1502,6 +1568,17 @@ rule PendingTransferExpiredOnDeliveringTaskFailed {
 --    SpecialistContainerCrashed (retries remain) or SpecialistRestartExhausted
 --    (retries exhausted).
 --
+--    Crash detection is gated on task.status = running. A queued task with
+--    no running container is not a crash: it is either waiting in the host's
+--    concurrency queue for a slot to free, or it has just been dispatched
+--    and the container has not yet started. Neither situation should
+--    consume restart_attempt_count. The only legitimate transitions out of
+--    queued are queued -> running (via SpecialistTaskStarted, on
+--    SpecialistContainerProcessing) and queued -> failed (via overall task
+--    timeout, SpecialistTaskTimedOut). There is no queued -> awaiting_restart
+--    edge; the queued state must reach running first before any
+--    crash-detection rule can fire against the task.
+--
 --    Recovery: SpecialistContainerCrashed moves the task to awaiting_restart
 --    and increments restart_attempt_count. sessions.allium then either
 --    re-queues and restarts the container (StuckSessionRecovered, for main-
@@ -1537,6 +1614,33 @@ rule SpecialistContainerCrashed {
     ensures:
         task.status = awaiting_restart
         task.restart_attempt_count = task.restart_attempt_count + 1
+
+    @guidance
+        -- The task.status = running guard is load-bearing. Crash detection
+        -- must only fire for tasks whose container has actually been
+        -- processing — i.e. tasks that have already transitioned through
+        -- SpecialistTaskStarted from queued (or awaiting_restart) into
+        -- running. A task that is still in status = queued with no running
+        -- container is either (a) waiting in the host's in-memory
+        -- concurrency queue for a slot to free, or (b) freshly dispatched
+        -- before the container has started. Neither is a crash, and neither
+        -- should consume restart_attempt_count.
+        --
+        -- The session processing_state transition from processing to stuck
+        -- can in principle reflect a stuck-detection signal observed on a
+        -- session whose task is not (yet) running. The exists task guard
+        -- plus the task.status = running guard together ensure that this
+        -- rule is silent in such cases. Without the running guard,
+        -- successive sweep ticks (e.g. every ~60 seconds) could each
+        -- observe the same not-yet-running task and increment its
+        -- restart_attempt_count, exhausting the restart budget in a handful
+        -- of ticks before the container had a chance to start.
+        --
+        -- Awaiting_sub_task is also excluded by this guard. A parent
+        -- specialist whose container exited cleanly to dispatch a sub-task
+        -- is not crashed — its session sits idle and the sub-task await
+        -- timeout is the relevant recovery path
+        -- (SubTaskAwaitTimedOut / SubTaskAwaitExhausted).
 }
 
 -- When a task transitions to awaiting_restart and was holding a pending
@@ -1605,6 +1709,16 @@ rule SpecialistRestartExhausted {
             detail: "specialist container failed and maximum restart retries were exhausted"
         }
         task.closed_at = now
+
+    @guidance
+        -- Like SpecialistContainerCrashed, this rule is gated on
+        -- task.status = running. A queued task cannot reach
+        -- restart_attempt_count >= max_restart_retries via this path because
+        -- the only rule that increments restart_attempt_count
+        -- (SpecialistContainerCrashed) is itself gated on running. A queued
+        -- task that fails to start eventually times out via
+        -- SpecialistTaskTimedOut (queued -> failed, kind = timeout); it does
+        -- not exhaust restart retries here.
 }
 
 -- Companion to ChildSubtreeCancelledOnParentCrash for the retries-exhausted
@@ -1805,4 +1919,41 @@ invariant AtMostOneActiveInvocationPerSession {
              and b.status = active)
                 implies a.invocation.session != b.invocation.session
 }
+
+-- Restart attempts are only consumed by a crash observed against a running
+-- task. A task that has never reached running must therefore have
+-- restart_attempt_count = 0. This protects queued tasks from having their
+-- restart budget burned through by repeated sweep ticks that mistake
+-- "waiting for a concurrency slot" or "container not yet started" for
+-- a crash.
+
+invariant QueuedTaskHasNoRestartAttempts {
+    for t in SpecialistTasks:
+        t.status = queued implies t.restart_attempt_count = 0
+}
+
+-- A task's per-task Session is closed once the task itself is terminal.
+-- This is the structural counterpart to SpecialistTaskSessionClosed: it
+-- asserts the resulting state at any single point in time after the
+-- terminal transition has been processed, independent of the route by
+-- which the task reached terminal (delivery, timeout, restart exhausted,
+-- subtree cancellation, sub-task await exhaustion).
+--
+-- The condition is bounded to tasks for which a per-task session exists.
+-- Tasks created directly in status = failed by the sub-task rejection
+-- rules (SubTaskRejectedCycle/Depth/Count/SameTypeLimit) never had a
+-- session provisioned and are excluded by the exists clause.
+
+invariant TerminalTaskHasClosedSession {
+    for t in SpecialistTasks:
+        let session = specialist_task_session(t)
+        (t.status in {completed, failed} and exists session)
+            implies session.status = closed
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "InboundMessage pending -> failed edge for session closure: the host marks any still-pending messages_in rows as failed when a specialist task's session is closed at terminal transition (see SpecialistTaskSessionClosed). The sessions.allium InboundMessage transition graph does not currently include a pending -> failed edge, so this fail-pending action cannot be expressed as a rule-level ensures here. Should sessions.allium add the pending -> failed edge so the cleanup can be witnessed by a rule, or should the closure rely solely on session.status = closed gating downstream wake rules to keep pending messages dormant?"
 

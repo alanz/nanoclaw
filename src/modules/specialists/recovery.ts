@@ -186,11 +186,17 @@ async function sweepTask(
   }
 
   // ── 4. Crash detection ───────────────────────────────────────────────────
-  // A task in running or queued whose container is stopped indicates a crash.
-  // awaiting_sub_task is intentionally excluded: the parent container exits
-  // cleanly after dispatch_sub_task; path 2 above handles liveness detection
-  // for that state. (spec: SpecialistContainerCrashed requires task.status = running)
-  if (!containerAlive && (task.status === 'running' || task.status === 'queued')) {
+  // Only running tasks are crash-detected. queued tasks are intentionally
+  // excluded: a queued task with no container is either (a) legitimately
+  // waiting in wakeOrQueue's in-memory concurrency queue for a slot to open,
+  // or (b) freshly dispatched before the container has started. Treating
+  // either as a crash would burn through restart_attempt_count while the
+  // task is merely waiting, exhausting retries before the container ever
+  // gets a chance to start. This matches v1 behaviour (specialists.ts only
+  // crash-detected running tasks). awaiting_sub_task is also excluded: the
+  // parent container exits cleanly after dispatch_sub_task; path 2 handles
+  // liveness detection for that state.
+  if (!containerAlive && task.status === 'running') {
     const newRetryCount = task.restart_attempt_count + 1;
     const pendingChildId = task.pending_sub_task_id;
 

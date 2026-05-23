@@ -15,7 +15,7 @@ import { getDb, hasTable } from '../../db/connection.js';
 import { GROUPS_DIR } from '../../config.js';
 import { getSpecialist, getTask, updateTaskStatus } from './db.js';
 import { SPECIALISTS_CONFIG } from './config.js';
-import { findSessionByAgentGroupAndThread } from './session-helpers.js';
+import { closeSpecialistSession, findSessionByAgentGroupAndThread } from './session-helpers.js';
 import {
   endActiveInvocationForSession,
   expireTransfersForTerminalTask,
@@ -188,6 +188,7 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
   const specialistSession = findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
   if (specialistSession) {
     endActiveInvocationForSession(specialistSession.id);
+    closeSpecialistSession(specialistSession);
   }
 
   if (task.requester_group_id) {

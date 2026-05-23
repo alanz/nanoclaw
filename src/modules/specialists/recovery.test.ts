@@ -320,7 +320,7 @@ describe('SpecialistTaskTimedOut rule — child subtree cancellation', () => {
   });
 });
 
-// ── Crash detection scope fix ─────────────────────────────────────────────────
+// ── Crash detection scope ─────────────────────────────────────────────────────
 
 describe('crash detection — awaiting_sub_task excluded', () => {
   it('does not crash-detect an awaiting_sub_task parent whose container is stopped', async () => {
@@ -339,5 +339,56 @@ describe('crash detection — awaiting_sub_task excluded', () => {
     // crash-restart nor exhaustion should fire — child is not yet overdue
     expect(getTask(parent.id)!.status).toBe('awaiting_sub_task');
     expect(getTask(parent.id)!.restart_attempt_count).toBe(0);
+  });
+});
+
+describe('crash detection — queued tasks excluded', () => {
+  it('does not crash-detect a queued task whose container is not yet running', async () => {
+    // A queued task with no container is legitimately waiting for a concurrency
+    // slot (wakeOrQueue enqueued it) or was just dispatched before the container
+    // started. Treating it as a crash would burn restart_attempt_count while the
+    // task is merely waiting, exhausting retries before any container runs.
+    const task = makeSpecialistTask({ status: 'queued' });
+
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('queued');
+    expect(getTask(task.id)!.restart_attempt_count).toBe(0);
+  });
+
+  it('does not crash-detect a queued task even after multiple sweep ticks', async () => {
+    // Verify the fix holds across repeated ticks (simulating the scenario
+    // where the concurrency cap stays full across several sweep intervals).
+    const task = makeSpecialistTask({ status: 'queued' });
+
+    await sweepSpecialistTasks();
+    await sweepSpecialistTasks();
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('queued');
+    expect(getTask(task.id)!.restart_attempt_count).toBe(0);
+  });
+
+  it('advances a queued task to running when its container starts', async () => {
+    // Once a slot opens and the container starts, step 3 advances the task.
+    const { isContainerRunning } = await import('../../container-runner.js');
+    vi.mocked(isContainerRunning).mockReturnValueOnce(true);
+
+    const task = makeSpecialistTask({ status: 'queued' });
+
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('running');
+  });
+
+  it('still crash-detects a running task whose container stopped', async () => {
+    // Regression guard: removing queued from crash detection must not also
+    // remove running.
+    const task = makeSpecialistTask({ status: 'running', restartAttemptCount: 0 });
+
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('awaiting_restart');
+    expect(getTask(task.id)!.restart_attempt_count).toBe(1);
   });
 });

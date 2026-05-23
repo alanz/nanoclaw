@@ -1,6 +1,10 @@
+import fs from 'fs';
+
 import { getNullMessagingGroupId } from '../../channels/null-channel.js';
-import { createSession } from '../../db/sessions.js';
+import { createSession, updateSession } from '../../db/sessions.js';
 import { getDb } from '../../db/connection.js';
+import { log } from '../../log.js';
+import { inboundDbPath, openInboundDb } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 
 /**
@@ -17,6 +21,32 @@ export function findSessionByAgentGroupAndThread(agentGroupId: string, threadId:
        LIMIT 1`,
     )
     .get(agentGroupId, threadId) as Session | undefined;
+}
+
+/**
+ * Close a specialist session once its task reaches a terminal state (completed
+ * or failed). Marks the session inactive in the central DB so the host sweep
+ * stops treating it as live, and marks any still-pending inbound messages as
+ * failed so they don't get re-queued on the next sweep tick.
+ *
+ * Matches v1 behaviour: specialists.ts `failSpecialistTask` /
+ * `deliverResult` both called `updateSpecialistSession(taskId, { status: 'cleared' })`.
+ */
+export function closeSpecialistSession(session: Session): void {
+  updateSession(session.id, { status: 'closed' });
+  const inPath = inboundDbPath(session.agent_group_id, session.id);
+  if (!fs.existsSync(inPath)) return;
+  const inDb = openInboundDb(session.agent_group_id, session.id);
+  try {
+    inDb.prepare("UPDATE messages_in SET status = 'failed' WHERE status = 'pending'").run();
+  } catch (err) {
+    log.warn('specialists: failed to mark pending inbound messages failed on session close', {
+      sessionId: session.id,
+      err,
+    });
+  } finally {
+    inDb.close();
+  }
 }
 
 export function createSpecialistSession(agentGroupId: string, taskId: string): Session {

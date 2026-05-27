@@ -33,7 +33,6 @@ import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
   countDueMessages,
-  deleteProcessingClaims,
   getContainerState,
   getMessageForRetry,
   getProcessingClaims,
@@ -98,8 +97,9 @@ export function decideStuckAction(args: {
   // the claim-stuck check below handles it correctly because
   // `0 > claimedAt` (a positive epoch ms) is always false, so the heartbeat
   // freshness guard never skips the stuck check. If the container just spawned
-  // and a stale ack from a previous crash is present, resetStuckProcessingRows
-  // deletes the stale claim from outbound.db so subsequent spawns don't see it.
+  // and a stale ack from a previous crash is present, the container's startup
+  // path (clearStaleProcessingAcks) deletes it from outbound.db before
+  // claiming new work.
   const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
   for (const claim of claims) {
     const claimedAt = Date.parse(claim.status_changed);
@@ -275,7 +275,6 @@ function resetStuckProcessingRows(
 ): void {
   const claims = getProcessingClaims(outDb);
   const now = Date.now();
-  const toDelete: string[] = [];
   for (const { message_id } of claims) {
     const msg = getMessageForRetry(inDb, message_id, 'pending');
     if (!msg) continue;
@@ -303,9 +302,7 @@ function resetStuckProcessingRows(
         reason,
       });
     }
-    // Remove the stale claim from outbound.db so the next container spawn
-    // doesn't see it as still-in-flight and get killed immediately.
-    toDelete.push(message_id);
+    // Stale processing_ack rows in outbound.db are cleaned by the container
+    // itself via clearStaleProcessingAcks() on startup — no host write needed.
   }
-  deleteProcessingClaims(outDb, toDelete);
 }

@@ -5,7 +5,7 @@
  * Scheduling operations are sent as system actions via messages_out — the host
  * reads them during delivery and applies the changes to inbound.db.
  */
-import { getInboundDb, closeInboundDb } from '../db/connection.js';
+import { getInboundDb } from '../db/connection.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { TIMEZONE, parseZonedToUtc } from '../timezone.js';
@@ -123,10 +123,8 @@ export const listTasks: McpToolDefinition = {
     // SQLite quirk: when MAX(seq) appears in the SELECT list of a GROUP BY
     // query, the bare columns take values from the row that contains that max
     // — that's how we pick "the latest live row per series" in one pass.
-    let rows;
-    try {
-      if (status) {
-        rows = db
+    const rows = status
+      ? db
           .prepare(
             `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
                FROM messages_in
@@ -134,9 +132,8 @@ export const listTasks: McpToolDefinition = {
               GROUP BY series_id
               ORDER BY process_after ASC`,
           )
-          .all(status);
-      } else {
-        rows = db
+          .all(status)
+      : db
           .prepare(
             `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
                FROM messages_in
@@ -145,10 +142,6 @@ export const listTasks: McpToolDefinition = {
               ORDER BY process_after ASC`,
           )
           .all();
-      }
-    } finally {
-      closeInboundDb(db);
-    }
 
     if ((rows as unknown[]).length === 0) return ok('No tasks found.');
 

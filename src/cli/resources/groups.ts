@@ -81,6 +81,9 @@ registerResource({
 
         const hasAgentDestinations = hasTable(db, 'agent_destinations');
         const hasPendingApprovals = hasTable(db, 'pending_approvals');
+        const hasSpecialistTasks = hasTable(db, 'specialist_tasks');
+        const hasMemoryFiles = hasTable(db, 'memory_files');
+        const hasZotero = hasTable(db, 'zotero_sync_state');
 
         // FK-ordered cascade. Single sync transaction — better-sqlite3 rolls
         // back the whole thing if any statement throws (e.g. an FK constraint
@@ -122,6 +125,69 @@ registerResource({
               )
               .run(groupId, groupId).changes;
           }
+
+          // Local module tables that reference sessions or agent_groups must be
+          // deleted before sessions and agent_groups rows are removed.
+          if (hasSpecialistTasks) {
+            // Null out self-referential requester_task_id among tasks being
+            // deleted to allow bulk deletion without FK ordering constraints.
+            db.prepare(
+              `UPDATE specialist_tasks SET requester_task_id = NULL
+               WHERE requester_task_id IN (
+                 SELECT id FROM specialist_tasks
+                 WHERE specialist_group_id = ? OR requester_group_id = ?
+                   OR requester_session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)
+               )`,
+            ).run(groupId, groupId, groupId);
+            db.prepare(
+              `DELETE FROM transfer_files WHERE transfer_id IN (
+                 SELECT id FROM container_transfers WHERE task_id IN (
+                   SELECT id FROM specialist_tasks
+                   WHERE specialist_group_id = ? OR requester_group_id = ?
+                     OR requester_session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)
+                 )
+               )`,
+            ).run(groupId, groupId, groupId);
+            db.prepare(
+              `DELETE FROM ipc_out_mounts WHERE invocation_id IN (
+                 SELECT id FROM invocations WHERE session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)
+               )`,
+            ).run(groupId);
+            db.prepare(
+              `DELETE FROM ipc_in_mounts WHERE invocation_id IN (
+                 SELECT id FROM invocations WHERE session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)
+               )`,
+            ).run(groupId);
+            db.prepare(
+              `DELETE FROM container_transfers
+               WHERE recipient_session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)
+                  OR task_id IN (
+                    SELECT id FROM specialist_tasks
+                    WHERE specialist_group_id = ? OR requester_group_id = ?
+                  )`,
+            ).run(groupId, groupId, groupId);
+            db.prepare(
+              `DELETE FROM invocations WHERE session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)`,
+            ).run(groupId);
+            db.prepare(
+              `DELETE FROM specialist_tasks
+               WHERE specialist_group_id = ? OR requester_group_id = ?
+                  OR requester_session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)`,
+            ).run(groupId, groupId, groupId);
+            db.prepare('DELETE FROM specialists WHERE agent_group_id = ?').run(groupId);
+          }
+
+          if (hasMemoryFiles) {
+            db.prepare(
+              `DELETE FROM memory_chunks WHERE file_id IN (SELECT id FROM memory_files WHERE group_id = ?)`,
+            ).run(groupId);
+            db.prepare('DELETE FROM memory_files WHERE group_id = ?').run(groupId);
+          }
+
+          if (hasZotero) {
+            db.prepare('DELETE FROM zotero_sync_state WHERE agent_group_id = ?').run(groupId);
+          }
+
           counts.sessions = db.prepare('DELETE FROM sessions WHERE agent_group_id = ?').run(groupId).changes;
           counts.pending_sender_approvals = db
             .prepare('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?')

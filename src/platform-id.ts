@@ -12,8 +12,8 @@
  * Native adapters (Signal, WhatsApp, iMessage, DeltaChat) use their own ID
  * formats and send them as-is — no channel prefix. WhatsApp/iMessage emit
  * JIDs/emails containing '@'. Signal emits raw phone numbers ('+15551234567')
- * for DMs and 'group:<id>' for group chats. DeltaChat emits numeric chat IDs
- * ('12'). Prefixing any of these would cause a mismatch with what the adapter
+ * for DMs and 'group:<id>' for group chats. DeltaChat emits prefixed chat IDs
+ * ('dc:12'). Prefixing any of these would cause a mismatch with what the adapter
  * later emits.
  */
 export function namespacedPlatformId(channel: string, raw: string): string {

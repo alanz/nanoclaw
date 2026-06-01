@@ -143,6 +143,8 @@ export async function run(args: string[]): Promise<void> {
     process.exit(2);
   }
 
+
+
   // Build-args from .env. Only INSTALL_CJK_FONTS is passed through today.
   const buildArgs: string[] = [];
   try {

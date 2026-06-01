@@ -19,6 +19,7 @@
 import { spawn } from 'child_process';
 
 import * as p from '@clack/prompts';
+import k from 'kleur';
 
 import { isHeadless } from '../platform.js';
 import { ensureAnswer } from './runner.js';
@@ -39,20 +40,42 @@ export function openUrl(url: string): void {
 }
 
 /**
+ * Format a URL for inclusion in a setup `note(...)` card. On
+ * headless devices we surface the URL inside the card with a
+ * "Get started:" label at full strength — copy-pasting onto
+ * another device is the actual action, not an incidental
+ * reference. The leading `\n` acts as a visual separator from
+ * the body steps above; callers `.filter(line => line !== null)`
+ * before joining, so on GUI we drop the line entirely (and the
+ * URL ends up below the next-step confirm prompt as a "if
+ * browser does not appear, please visit" fallback — see
+ * `confirmThenOpen`).
+ */
+export function formatNoteLink(url: string): string | null {
+  if (isHeadless()) return `\nGet started: ${url}`;
+  return null;
+}
+
+/**
  * Gate a browser-open on a confirm so the user is ready for their browser
- * to take focus. Proceeds on cancel as well — the user can always copy the
- * URL from the note that precedes the prompt. On headless devices both
- * the prompt and the open are skipped — there's no browser to time
- * focus for, and the URL is already visible in the surrounding note.
+ * to take focus. Proceeds on cancel as well. On headless devices both the
+ * prompt and the open are skipped — the URL is already surfaced inside
+ * the surrounding note (via `formatNoteLink`).
+ *
+ * On GUI devices the confirm message includes the fallback URL on the
+ * lines below the action ("If browser does not appear, please visit:
+ * <url>" in dim) so the user has a copy-paste path right next to the
+ * action button without needing to scroll back up to the card.
  */
 export async function confirmThenOpen(
   url: string,
   message = 'Press Enter to open your browser',
 ): Promise<void> {
   if (isHeadless()) return;
+  const fallback = `\n${k.dim(`If browser does not appear, please visit: ${url}`)}`;
   ensureAnswer(
     await p.confirm({
-      message,
+      message: `${message}${fallback}`,
       initialValue: true,
     }),
   );

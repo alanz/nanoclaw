@@ -27,10 +27,12 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import * as setupLog from '../logs.js';
+import { BACK_TO_CHANNEL_SELECTION, type ChannelFlowResult } from '../lib/back-nav.js';
 import { brightSelect } from '../lib/bright-select.js';
-import { confirmThenOpen } from '../lib/browser.js';
+import { confirmThenOpen, formatNoteLink } from '../lib/browser.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
+import { readEnvKey } from '../environment.js';
 import { accentGreen, brandBody, fmtDuration, note } from '../lib/theme.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
@@ -47,8 +49,10 @@ interface AppInfo {
   owner: { id: string; username: string } | null;
 }
 
-export async function runDiscordChannel(displayName: string): Promise<void> {
-  const hasBot = await askHasBotToken();
+export async function runDiscordChannel(displayName: string): Promise<ChannelFlowResult> {
+  const choice = await askHasBotToken();
+  if (choice === 'back') return BACK_TO_CHANNEL_SELECTION;
+  const hasBot = choice === 'yes';
   if (!hasBot) {
     await walkThroughBotCreation();
   }
@@ -141,17 +145,18 @@ export async function runDiscordChannel(displayName: string): Promise<void> {
   }
 }
 
-async function askHasBotToken(): Promise<boolean> {
+async function askHasBotToken(): Promise<'yes' | 'no' | 'back'> {
   const answer = ensureAnswer(
     await brightSelect({
       message: 'Do you already have a Discord bot?',
       options: [
         { value: 'yes', label: 'Yes, I have a bot token ready' },
         { value: 'no', label: "No, walk me through creating one" },
+        { value: 'back', label: '← Back to channel selection' },
       ],
     }),
   );
-  return answer === 'yes';
+  return answer as 'yes' | 'no' | 'back';
 }
 
 async function walkThroughBotCreation(): Promise<void> {
@@ -164,9 +169,8 @@ async function walkThroughBotCreation(): Promise<void> {
       '  2. In the "Bot" tab, click "Reset Token" and copy the token',
       '  3. On the same tab, enable "Message Content Intent"',
       '     (under Privileged Gateway Intents)',
-      '',
-      k.dim(url),
-    ].join('\n'),
+      formatNoteLink(url),
+    ].filter((line): line is string => line !== null).join('\n'),
     'Create a Discord bot',
   );
   await confirmThenOpen(url, 'Press Enter to open the Developer Portal');
@@ -224,9 +228,8 @@ async function walkThroughServerCreation(): Promise<void> {
       '  1. In Discord, click the "+" at the bottom of the server list',
       '  2. Choose "Create My Own" → "For me and my friends"',
       '  3. Give it any name (e.g. "NanoClaw")',
-      '',
-      k.dim(url),
-    ].join('\n'),
+      formatNoteLink(url),
+    ].filter((line): line is string => line !== null).join('\n'),
     'Create a Discord server',
   );
   await confirmThenOpen(url, 'Press Enter to open Discord');
@@ -240,7 +243,7 @@ async function walkThroughServerCreation(): Promise<void> {
 }
 
 async function collectDiscordToken(): Promise<string> {
-  const existing = process.env.DISCORD_BOT_TOKEN?.trim();
+  const existing = readEnvKey('DISCORD_BOT_TOKEN');
   if (existing && /^[A-Za-z0-9._-]{50,}$/.test(existing)) {
     const reuse = ensureAnswer(await p.confirm({
       message: `Found an existing Discord bot token (${existing.slice(0, 10)}…). Use it?`,
@@ -446,9 +449,8 @@ async function promptInviteBot(
       '',
       '  1. Pick any server you\'re in (a personal one is fine)',
       '  2. Click "Authorize"',
-      '',
-      k.dim(url),
-    ].join('\n'),
+      formatNoteLink(url),
+    ].filter((line): line is string => line !== null).join('\n'),
     'Add bot to a server',
   );
   await confirmThenOpen(url, 'Press Enter to open the invite page');

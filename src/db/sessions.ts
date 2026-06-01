@@ -9,7 +9,7 @@ export function createSession(session: Session): void {
       `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, processing_state, last_active, created_at)
        VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @processing_state, @last_active, @created_at)`,
     )
-    .run(session);
+    .run({ processing_state: 'idle', ...session });
 }
 
 export function getSession(id: string): Session | undefined {

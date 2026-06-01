@@ -10,7 +10,9 @@ import { migration010 } from './010-engage-modes.js';
 import { migration011 } from './011-pending-sender-approvals.js';
 import { migration012 } from './012-channel-registration.js';
 import { migration013 } from './013-approval-render-metadata.js';
-import { migration014 } from './014-session-processing-state.js';
+import { migration014 as migration014SessionProcessingState } from './014-session-processing-state.js';
+import { migration014 as migration014ContainerConfigs } from './014-container-configs.js';
+import { migration015 } from './015-cli-scope.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 import { moduleSpecialists } from './module-specialists.js';
@@ -36,7 +38,9 @@ const migrations: Migration[] = [
   migration011,
   migration012,
   migration013,
-  migration014,
+  migration014SessionProcessingState,
+  migration014ContainerConfigs,
+  migration015,
   moduleSpecialists,
   moduleSpecialistsFileHandover,
   moduleMemory,

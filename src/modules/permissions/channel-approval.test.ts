@@ -154,8 +154,10 @@ describe('unknown-channel registration flow', () => {
     expect(kind).toBe('chat-sdk');
     const payload = JSON.parse(content as string);
     expect(payload.type).toBe('ask_question');
-    // Card names the target agent so the owner knows what they're wiring to.
-    expect(payload.question).toContain('Andy');
+    // Single-agent card offers a direct "Connect to <name>" button.
+    const connectOption = payload.options.find((o: { value: string }) => o.value.startsWith('connect:'));
+    expect(connectOption).toBeDefined();
+    expect(connectOption.label).toContain('Andy');
 
     const { getDb } = await import('../../db/connection.js');
     const rows = getDb().prepare('SELECT * FROM pending_channel_approvals').all() as Array<{
@@ -203,11 +205,11 @@ describe('unknown-channel registration flow', () => {
     };
     expect(pending).toBeDefined();
 
-    // Owner clicks approve.
+    // Owner clicks "Connect to Andy" (single-agent card).
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
         questionId: pending.messaging_group_id,
-        value: 'approve',
+        value: 'connect:ag-1',
         userId: 'owner', // raw platform id — handler namespaces it
         channelType: 'telegram',
         platformId: 'dm-owner',
@@ -216,7 +218,7 @@ describe('unknown-channel registration flow', () => {
       if (claimed) break;
     }
 
-    // Wiring created with MVP defaults.
+    // Wiring created with defaults.
     const mga = getDb()
       .prepare('SELECT * FROM messaging_group_agents WHERE messaging_group_id = ?')
       .get(pending.messaging_group_id) as {
@@ -262,7 +264,7 @@ describe('unknown-channel registration flow', () => {
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
         questionId: pending.messaging_group_id,
-        value: 'approve',
+        value: 'connect:ag-1',
         userId: 'owner',
         channelType: 'telegram',
         platformId: 'dm-owner',
@@ -346,6 +348,87 @@ describe('unknown-channel registration flow', () => {
     }
 
     // No wiring created, pending row preserved so a real approver can act on it.
+    const mgaCount = (
+      getDb()
+        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?')
+        .get(pending.messaging_group_id) as { c: number }
+    ).c;
+    expect(mgaCount).toBe(0);
+    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
+      .c;
+    expect(stillPending).toBe(1);
+  });
+
+  it('does not let a scoped admin connect an unknown channel to another agent group', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    createAgentGroup({ id: 'ag-2', name: 'Betty', folder: 'betty', agent_provider: null, created_at: now() });
+    upsertUser({ id: 'telegram:scoped-admin', kind: 'telegram', display_name: 'Scoped Admin', created_at: now() });
+    grantRole({
+      user_id: 'telegram:scoped-admin',
+      role: 'admin',
+      agent_group_id: 'ag-1',
+      granted_by: 'telegram:owner',
+      granted_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-dm-scoped-admin',
+      channel_type: 'telegram',
+      platform_id: 'dm-scoped-admin',
+      name: 'Scoped Admin DM',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    getDb()
+      .prepare(
+        `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
+       VALUES (?, ?, ?, ?)`,
+      )
+      .run('telegram:scoped-admin', 'telegram', 'mg-dm-scoped-admin', now());
+
+    await routeInbound(groupMention('chat-scoped-cross-group'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+    expect(pending).toBeDefined();
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(deliverMock.mock.calls[0][1]).toBe('dm-scoped-admin');
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'choose_existing',
+        userId: 'scoped-admin',
+        channelType: 'telegram',
+        platformId: 'dm-scoped-admin',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    const followupPayload = JSON.parse(deliverMock.mock.calls[1][4] as string) as {
+      options: Array<{ label: string; value: string }>;
+    };
+    expect(followupPayload.options.map((option) => option.value)).toContain('connect:ag-1');
+    expect(followupPayload.options.map((option) => option.value)).not.toContain('connect:ag-2');
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'connect:ag-2',
+        userId: 'scoped-admin',
+        channelType: 'telegram',
+        platformId: 'dm-scoped-admin',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
     const mgaCount = (
       getDb()
         .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?')

@@ -18,7 +18,8 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
-import { readContainerConfig } from './container-config.js';
+import type { McpServerConfig } from './container-config.js';
+import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
@@ -59,7 +60,10 @@ export function composeGroupClaudeMd(group: AgentGroup, options?: { disabledModu
   }
 
   // Desired fragment set.
-  const config = readContainerConfig(group.folder);
+  const configRow = getContainerConfig(group.id);
+  const mcpServers: Record<string, McpServerConfig> = configRow
+    ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>)
+    : {};
   const desired = new Map<string, { type: 'symlink' | 'inline'; content: string }>();
 
   // Skill fragments — every skill that ships an `instructions.md`.
@@ -81,7 +85,8 @@ export function composeGroupClaudeMd(group: AgentGroup, options?: { disabledModu
   // sibling `<name>.instructions.md`. These describe how the agent should
   // use that module's MCP tools (schedule_task, install_packages, etc.).
   // Skipped for modules listed in options.disabledModules (tools not registered
-  // in this container).
+  // in this container). Skip cli.instructions.md when cli_scope is disabled.
+  const cliDisabled = configRow?.cli_scope === 'disabled';
   const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
   if (fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir)) {
@@ -89,6 +94,7 @@ export function composeGroupClaudeMd(group: AgentGroup, options?: { disabledModu
       if (!match) continue;
       const moduleName = match[1];
       if (options?.disabledModules?.has(moduleName)) continue;
+      if (moduleName === 'cli' && cliDisabled) continue;
       desired.set(`module-${moduleName}.md`, {
         type: 'symlink',
         content: `${SHARED_MCP_TOOLS_CONTAINER_BASE}/${entry}`,
@@ -98,7 +104,7 @@ export function composeGroupClaudeMd(group: AgentGroup, options?: { disabledModu
 
   // MCP server fragments — inline instructions from container.json for
   // user-added external MCP servers.
-  for (const [name, mcp] of Object.entries(config.mcpServers)) {
+  for (const [name, mcp] of Object.entries(mcpServers)) {
     if (mcp.instructions) {
       desired.set(`mcp-${name}.md`, {
         type: 'inline',

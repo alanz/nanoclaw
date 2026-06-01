@@ -350,6 +350,13 @@ async function processQuery(
         if (event.text) {
           dispatchResultText(event.text, routing);
         }
+        // A specialist tool (deliver_specialist_result / dispatch_sub_task)
+        // called requestShutdown() — close the query now so the container can
+        // exit instead of blocking indefinitely on follow-up polling.
+        if (isShutdownRequested()) {
+          query.abort();
+          break;
+        }
       }
     }
   } finally {

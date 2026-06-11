@@ -1,6 +1,7 @@
 import fs from 'fs';
 
 import { getNullMessagingGroupId } from '../../channels/null-channel.js';
+import { killContainer, isContainerRunning } from '../../container-runner.js';
 import { createSession, updateSession } from '../../db/sessions.js';
 import { getDb } from '../../db/connection.js';
 import { log } from '../../log.js';
@@ -34,6 +35,9 @@ export function findSessionByAgentGroupAndThread(agentGroupId: string, threadId:
  */
 export function closeSpecialistSession(session: Session): void {
   updateSession(session.id, { status: 'closed' });
+  if (isContainerRunning(session.id)) {
+    killContainer(session.id, 'task-complete');
+  }
   const inPath = inboundDbPath(session.agent_group_id, session.id);
   if (!fs.existsSync(inPath)) return;
   const inDb = openInboundDb(session.agent_group_id, session.id);

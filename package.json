@@ -37,9 +37,9 @@
     "@parcel/watcher": "^2.5.1",
     "better-sqlite3": "11.10.0",
     "chat": "^4.24.0",
-    "sqlite-vec": "^0.1.6",
     "cron-parser": "5.5.0",
-    "kleur": "^4.1.5"
+    "kleur": "^4.1.5",
+    "sqlite-vec": "^0.1.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

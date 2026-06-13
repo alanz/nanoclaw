@@ -27,8 +27,14 @@ export type { ApprovalHandler, ApprovalHandlerContext, RequestApprovalOptions } 
 
 registerResponseHandler(handleApprovalsResponse);
 
+// This fork uses the native credential proxy, not the OneCLI gateway, so the
+// OneCLI manual-approval long-poller has nothing to talk to and would just log
+// noise at boot. Keep it available behind an opt-in flag for installs that do
+// run a OneCLI gateway (set NANOCLAW_ONECLI_APPROVALS=true).
+const ONECLI_APPROVALS_ENABLED = process.env.NANOCLAW_ONECLI_APPROVALS === 'true';
+
 onDeliveryAdapterReady((adapter) => {
-  startOneCLIApprovalHandler(adapter);
+  if (ONECLI_APPROVALS_ENABLED) startOneCLIApprovalHandler(adapter);
 });
 
 onShutdown(() => {

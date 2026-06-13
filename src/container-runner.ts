@@ -371,6 +371,24 @@ export function resolveProviderName(
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
+/**
+ * Resolve the group's skill selection to concrete names — `'all'` recomputes
+ * from `container/skills/` so newly-added skills appear automatically.
+ */
+function selectedSkillNames(containerConfig: import('./container-config.js').ContainerConfig): string[] {
+  if (containerConfig.skills !== 'all') return containerConfig.skills;
+  const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
+  return fs.existsSync(sharedSkillsDir)
+    ? fs.readdirSync(sharedSkillsDir).filter((e) => {
+        try {
+          return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+    : [];
+}
+
 function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
@@ -382,6 +400,8 @@ function resolveProviderContribution(
     ? fn({
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
+        groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
+        selectedSkills: selectedSkillNames(containerConfig),
         hostEnv: process.env,
       })
     : {};

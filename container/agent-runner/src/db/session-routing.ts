@@ -17,8 +17,9 @@ export interface SessionRouting {
 }
 
 export function getSessionRouting(): SessionRouting {
+  const db = getInboundDb();
   try {
-    const row = getInboundDb()
+    const row = db
       .prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1')
       .get() as SessionRouting | undefined;
     if (row) return row;

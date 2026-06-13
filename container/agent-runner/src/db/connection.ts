@@ -24,11 +24,10 @@ const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
 const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
 const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
 
+let _inbound: Database | null = null;
 let _outbound: Database | null = null;
 let _heartbeatPath: string = DEFAULT_HEARTBEAT_PATH;
 let _testMode = false;
-
-let _inbound: Database | null = null;
 
 /**
  * Avoid all cached db reads; open inbound.db read-only with mmap and page cache disabled.
@@ -217,8 +216,8 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
   `);
 
   _outbound = new Database(':memory:');
-  _outbound!.exec('PRAGMA foreign_keys = ON');
-  _outbound!.exec(`
+  _outbound.exec('PRAGMA foreign_keys = ON');
+  _outbound.exec(`
     CREATE TABLE messages_out (
       id             TEXT PRIMARY KEY,
       seq            INTEGER UNIQUE,
@@ -251,7 +250,7 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
     );
   `);
 
-  return { inbound: _inbound!, outbound: _outbound! };
+  return { inbound: _inbound, outbound: _outbound };
 }
 
 export function closeSessionDb(): void {

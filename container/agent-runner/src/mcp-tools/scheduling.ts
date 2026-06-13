@@ -123,25 +123,28 @@ export const listTasks: McpToolDefinition = {
     // SQLite quirk: when MAX(seq) appears in the SELECT list of a GROUP BY
     // query, the bare columns take values from the row that contains that max
     // — that's how we pick "the latest live row per series" in one pass.
-    const rows = status
-      ? db
-          .prepare(
-            `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-               FROM messages_in
-              WHERE kind = 'task' AND status = ?
-              GROUP BY series_id
-              ORDER BY process_after ASC`,
-          )
-          .all(status)
-      : db
-          .prepare(
-            `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-               FROM messages_in
-              WHERE kind = 'task' AND status IN ('pending', 'paused')
-              GROUP BY series_id
-              ORDER BY process_after ASC`,
-          )
-          .all();
+    let rows;
+    if (status) {
+      rows = db
+        .prepare(
+          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
+             FROM messages_in
+            WHERE kind = 'task' AND status = ?
+            GROUP BY series_id
+            ORDER BY process_after ASC`,
+        )
+        .all(status);
+    } else {
+      rows = db
+        .prepare(
+          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
+             FROM messages_in
+            WHERE kind = 'task' AND status IN ('pending', 'paused')
+            GROUP BY series_id
+            ORDER BY process_after ASC`,
+        )
+        .all();
+    }
 
     if ((rows as unknown[]).length === 0) return ok('No tasks found.');
 

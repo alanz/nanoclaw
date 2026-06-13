@@ -44,11 +44,12 @@ export interface WriteMessageOut {
  */
 export function writeMessageOut(msg: WriteMessageOut): number {
   const outbound = getOutboundDb();
-  const maxIn = (getInboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
+  const inbound = getInboundDb();
 
   // Read max seq from both DBs to maintain global ordering.
   // Safe: each side only reads the other DB, never writes to it.
   const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+  const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
   const max = Math.max(maxOut, maxIn);
   const nextSeq = max % 2 === 0 ? max + 1 : max + 2; // next odd
 
@@ -88,8 +89,11 @@ export function writeMessageOut(msg: WriteMessageOut): number {
  */
 export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
+
   // Inbound messages: ID is already the platform message ID
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
+  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
+    | { id: string }
+    | undefined;
   if (inRow) return inRow.id;
 
   // Outbound messages: look up platform message ID from delivered table
@@ -115,7 +119,8 @@ export function getMessageIdBySeq(seq: number): string | null {
 export function getRoutingBySeq(
   seq: number,
 ): { channel_type: string | null; platform_id: string | null; thread_id: string | null } | null {
-  const inRow = getInboundDb()
+  const inbound = getInboundDb();
+  const inRow = inbound
     .prepare('SELECT channel_type, platform_id, thread_id FROM messages_in WHERE seq = ?')
     .get(seq) as { channel_type: string | null; platform_id: string | null; thread_id: string | null } | undefined;
   if (inRow) return inRow;

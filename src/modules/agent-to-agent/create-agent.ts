@@ -143,7 +143,7 @@ async function performCreateAgent(
     return;
   }
 
-  // Derive a folder, adding a numeric suffix if the base name is already taken globally.
+  // Derive a safe folder name, deduplicated globally across agent_groups.folder
   let folder = localName;
   let suffix = 2;
   while (getAgentGroupByFolder(folder)) {

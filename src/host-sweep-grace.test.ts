@@ -23,13 +23,13 @@ vi.mock('./config.js', async () => {
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
   isContainerRunning: vi.fn().mockReturnValue(false),
-  wakeContainer: vi.fn().mockResolvedValue(true),
+  wakeOrQueue: vi.fn().mockResolvedValue(true),
   killContainer: vi.fn(),
 }));
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { isContainerRunning, killContainer, wakeOrQueue } from './container-runner.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { initSessionFolder, openOutboundDbRw, writeSessionMessage } from './session-manager.js';
 
@@ -84,7 +84,7 @@ async function runSweepTick(): Promise<void> {
 beforeEach(() => {
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
   vi.mocked(killContainer).mockReset();
-  vi.mocked(wakeContainer)
+  vi.mocked(wakeOrQueue)
     .mockReset()
     // Simulate a successful spawn: after wake, the container reports running.
     .mockImplementation(async () => {
@@ -138,13 +138,13 @@ describe('host sweep justWoke grace period', () => {
     // Tick 1: due message + no running container → wake. The stale claim is
     // still in outbound.db, but the grace period must skip the SLA check.
     await runSweepTick();
-    expect(wakeContainer).toHaveBeenCalledTimes(1);
+    expect(wakeOrQueue).toHaveBeenCalledTimes(1);
     expect(killContainer).not.toHaveBeenCalled();
 
     // Tick 2: container is running (no fresh wake → no grace), the claim is
     // still stale because our simulated container never cleared it → kill.
     await runSweepTick();
-    expect(wakeContainer).toHaveBeenCalledTimes(1); // no second wake
+    expect(wakeOrQueue).toHaveBeenCalledTimes(1); // no second wake
     expect(killContainer).toHaveBeenCalledTimes(1);
     expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
   });

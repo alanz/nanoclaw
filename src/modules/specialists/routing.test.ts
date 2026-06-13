@@ -17,6 +17,8 @@ import type { SpecialistTask } from './types.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeOrQueue: vi.fn().mockResolvedValue(true),
+  isContainerRunning: vi.fn().mockReturnValue(false),
+  killContainer: vi.fn(),
 }));
 
 vi.mock('../../session-manager.js', () => ({

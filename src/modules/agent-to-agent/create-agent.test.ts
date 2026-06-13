@@ -47,6 +47,7 @@ vi.mock('../../session-manager.js', () => ({
 }));
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
+  wakeOrQueue: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../db/sessions.js', () => ({
   getSession: (id: string) => ({ id, agent_group_id: 'ag-1' }),

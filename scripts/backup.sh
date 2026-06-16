@@ -75,8 +75,25 @@ echo "Claude backup complete: $DEST_DIR/claude/"
 # Uses same BorgBase repo as v1, distinguished by archive prefix nanoclaw-v2-
 BORG_REPO="ssh://o5eh77xl@o5eh77xl.repo.borgbase.com/./repo"
 export BORG_PASSPHRASE
-borg create \
-  --compression lz4 \
-  "$BORG_REPO::nanoclaw-v2-{now:%Y%m%d-%H%M%S}" \
-  "$DEST_DIR"
+
+# SSH keepalive + non-interactive: probe the connection every 10s and give up
+# after ~60s of silence, so a dropped/idle link errors out instead of leaving
+# the run blocked. BatchMode prevents any interactive prompt under launchd.
+export BORG_RSH="ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=6"
+
+# Hard backstop: cap the whole borg run at 30 min. If a host hang or a wedged
+# server-side transaction stalls borg (which keepalive can't catch, since sshd
+# answers probes independently of borg serve), timeout kills it — SIGTERM, then
+# SIGKILL 60s later — so the hourly job fails fast instead of hanging forever.
+# Falls back to a bare run if no timeout binary is present.
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
+borg_create=(borg create
+  --compression lz4
+  "$BORG_REPO::nanoclaw-v2-{now:%Y%m%d-%H%M%S}"
+  "$DEST_DIR")
+if [[ -n "$TIMEOUT_BIN" ]]; then
+  "$TIMEOUT_BIN" --kill-after=60 1800 "${borg_create[@]}"
+else
+  "${borg_create[@]}"
+fi
 echo "Borg backup complete"

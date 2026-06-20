@@ -43,21 +43,30 @@ describe('MemoryMcpTools — tool names match surface provides', () => {
 // ── Tool input schemas ────────────────────────────────────────────────────────
 
 describe('MemoryMcpTools — tool input schemas', () => {
-  it('memory_search accepts query, group, and optional top_k', () => {
+  // The `group` param was dropped (see "drop group param from MCP tools"): each
+  // session is already scoped to its own agent group, which the host resolves,
+  // so the tools never take a group argument.
+  it('memory_search accepts query and optional top_k / path_prefix, no group', () => {
     const props = memorySearch.tool.inputSchema.properties as Record<string, unknown>;
     expect(props).toHaveProperty('query');
-    expect(props).toHaveProperty('group');
+    expect(props).toHaveProperty('top_k');
+    expect(props).toHaveProperty('path_prefix');
+    expect(props).not.toHaveProperty('group');
   });
 
-  it('memory_get_file_content accepts path, group, and optional parse_frontmatter', () => {
+  it('memory_get_file_content accepts path and optional parse_frontmatter, no group', () => {
     const props = memoryGetFileContent.tool.inputSchema.properties as Record<string, unknown>;
     expect(props).toHaveProperty('path');
-    expect(props).toHaveProperty('group');
+    expect(props).toHaveProperty('parse_frontmatter');
+    expect(props).not.toHaveProperty('group');
   });
 
-  it('memory_list_files accepts group and optional list params', () => {
+  it('memory_list_files accepts optional list params, no group', () => {
     const props = memoryListFiles.tool.inputSchema.properties as Record<string, unknown>;
-    expect(props).toHaveProperty('group');
+    expect(props).toHaveProperty('path_prefix');
+    expect(props).toHaveProperty('limit');
+    expect(props).toHaveProperty('parse_frontmatter');
+    expect(props).not.toHaveProperty('group');
   });
 });
 

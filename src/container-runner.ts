@@ -19,7 +19,7 @@ import {
 } from './config.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { materializeContainerJson } from './container-config.js';
-import { getContainerConfig, updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
+import { getContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
 import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
@@ -299,10 +299,16 @@ async function spawnContainer(session: Session): Promise<void> {
   activeContainers.set(session.id, { process: container, containerName });
   markContainerRunning(session.id);
 
-  // Log stderr
+  // Log stderr. A container that dies at boot (unknown provider, missing
+  // binary, bad config) explains itself only here — and debug is below the
+  // default log level — so keep a tail to surface on a non-zero exit.
+  const stderrTail: string[] = [];
   container.stderr?.on('data', (data) => {
     for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
+      if (!line) continue;
+      log.debug(line, { container: agentGroup.folder });
+      stderrTail.push(line);
+      if (stderrTail.length > 10) stderrTail.shift();
     }
   });
 
@@ -319,7 +325,12 @@ async function spawnContainer(session: Session): Promise<void> {
     activeNonMainSessions.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
-    log.info('Container exited', { sessionId: session.id, code, containerName });
+    // code null = killed by signal (normal shutdown path), not a boot failure.
+    if (code !== 0 && code !== null && stderrTail.length > 0) {
+      log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, stderrTail });
+    } else {
+      log.info('Container exited', { sessionId: session.id, code, containerName });
+    }
     if (invocationId) {
       import('./modules/specialists/invocation.js')
         .then(({ endInvocationById }) => endInvocationById(invocationId!))

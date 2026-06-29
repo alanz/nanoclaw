@@ -8,8 +8,10 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  CONTAINER_CPU_LIMIT,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
+  CONTAINER_MEMORY_LIMIT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
@@ -582,6 +584,13 @@ function buildContainerArgs(
   providerContribution: ProviderContainerContribution,
 ): string[] {
   const args: string[] = ['run', '--rm', '--name', containerName];
+
+  // Per-container resource caps (opt-in; empty = unbounded, today's behavior).
+  // Only --memory is set. Whether that's a hard cap depends on the host having no
+  // swap (a deployment concern) — on a swapless host --memory is hard and a runaway
+  // is OOM-killed; we don't manage swap from here.
+  if (CONTAINER_CPU_LIMIT) args.push('--cpus', CONTAINER_CPU_LIMIT);
+  if (CONTAINER_MEMORY_LIMIT) args.push('--memory', CONTAINER_MEMORY_LIMIT);
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).

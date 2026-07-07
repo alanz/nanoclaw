@@ -29,7 +29,7 @@ import { enforceUpgradeTripwire } from './upgrade-state.js';
 // effects, and the modules call registerResponseHandler/onShutdown at top
 // level — which would hit a TDZ error if the arrays lived here. Re-exported
 // here so existing callers see the same surface.
-import { getResponseHandlers, getShutdownCallbacks, type ResponsePayload } from './response-registry.js';
+import { getResponseHandlers, getShutdownCallbacks, onShutdown, type ResponsePayload } from './response-registry.js';
 
 async function dispatchResponse(payload: ResponsePayload): Promise<void> {
   for (const handler of getResponseHandlers()) {

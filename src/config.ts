@@ -18,6 +18,11 @@ const envConfig = readEnvFile([
   'ZOTERO_POLL_INTERVAL',
   'WEB_UI_PORT',
   'WEB_UI_BASE_URL',
+  'CONTAINER_CPU_LIMIT',
+  'CONTAINER_MEMORY_LIMIT',
+  'NANOCLAW_EGRESS_LOCKDOWN',
+  'NANOCLAW_EGRESS_NETWORK',
+  'ONECLI_GATEWAY_CONTAINER',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -34,6 +39,12 @@ export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+// Local agent-template library. Committed but ships empty (+ README). Resolved
+// once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
+// a remote URL, never an ncl flag, never runtime-mutable.
+export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
+  ? path.resolve(process.env.NANOCLAW_TEMPLATES_DIR)
+  : path.resolve(PROJECT_ROOT, 'templates');
 
 // Per-checkout image tag so two installs on the same host don't share
 // `nanoclaw-agent:latest` and clobber each other on rebuild.
@@ -61,31 +72,22 @@ export const WEB_UI_BASE_URL: string | null =
 export const CREDENTIAL_PROXY_HOST = process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST || '0.0.0.0';
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
-export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
-export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+// Concurrency cap for non-main session containers (fork feature: FIFO waiting
+// queue in container-runner.ts). Upstream lacks this feature; kept fork-side.
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
 // Per-container resource caps, passed through to `docker run`. Default empty =
 // no flag added = today's unbounded behavior (don't OOM existing OSS workloads).
 // Operators opt in: CONTAINER_CPU_LIMIT=2, CONTAINER_MEMORY_LIMIT=8g.
-export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || '';
-export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || '';
+export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || envConfig.CONTAINER_CPU_LIMIT || '';
+export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envConfig.CONTAINER_MEMORY_LIMIT || '';
 
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-export function buildTriggerPattern(trigger: string): RegExp {
-  return new RegExp(`^${escapeRegex(trigger.trim())}\\b`, 'i');
-}
-
-export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;
-
-export function getTriggerPattern(trigger?: string): RegExp {
-  const normalizedTrigger = trigger?.trim();
-  return buildTriggerPattern(normalizedTrigger || DEFAULT_TRIGGER);
-}
-
-export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
+// Egress lockdown — force all agent traffic through the OneCLI gateway on a
+// no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.
+export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
+export const EGRESS_NETWORK =
+  process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
+export const ONECLI_GATEWAY_CONTAINER =
+  process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
 
 // Zotero library sync
 export const ZOTERO_GROUP_FOLDER = process.env.ZOTERO_GROUP_FOLDER || envConfig.ZOTERO_GROUP_FOLDER || '';

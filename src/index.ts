@@ -7,13 +7,13 @@
 import path from 'path';
 
 import { backfillContainerConfigs } from './backfill-container-configs.js';
+import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { CREDENTIAL_PROXY_HOST, CREDENTIAL_PROXY_PORT, DATA_DIR, GROUPS_DIR, WEB_UI_PORT } from './config.js';
 import { readEnvFile } from './env.js';
 import { getAllAgentGroups } from './db/agent-groups.js';
 import { initMemoryManagers, closeAllMemoryManagers } from './memory/manager.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
-import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';

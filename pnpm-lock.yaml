@@ -16,10 +16,10 @@ importers:
         version: 1.2.0
       '@deltachat/jsonrpc-client':
         specifier: ^2.49.0
-        version: 2.49.0(ws@8.20.0)
+        version: 2.53.0(ws@8.21.1)
       '@deltachat/stdio-rpc-server':
         specifier: ^2.49.0
-        version: 2.49.0(@deltachat/jsonrpc-client@2.49.0(ws@8.20.0))
+        version: 2.53.0(@deltachat/jsonrpc-client@2.53.0(ws@8.21.1))
       '@nanoco/nanoclaw-dashboard':
         specifier: ^0.3.0
         version: 0.3.0
@@ -44,6 +44,9 @@ importers:
       sqlite-vec:
         specifier: ^0.1.6
         version: 0.1.9
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
     devDependencies:
       '@eslint/js':
         specifier: ^9.35.0
@@ -80,7 +83,7 @@ importers:
         version: 8.58.2(eslint@9.39.4)(typescript@5.9.3)
       vitest:
         specifier: ^4.0.18
-        version: 4.1.4(@types/node@22.19.17)(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0))
+        version: 4.1.4(@types/node@22.19.17)(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0))
 
 packages:
 
@@ -90,61 +93,61 @@ packages:
   '@clack/prompts@1.2.0':
     resolution: {integrity: sha512-4jmztR9fMqPMjz6H/UZXj0zEmE43ha1euENwkckKKel4XpSfokExPo5AiVStdHSAlHekz4d0CA/r45Ok1E4D3w==}
 
-  '@deltachat/jsonrpc-client@2.49.0':
-    resolution: {integrity: sha512-iZ93I6CvwQXKtjwPopigpwhOcEmaItrOcbF2i1WLVVrPiI8h1aZmHSnFl6cfwZyGpzW2Ku7mGWiZYExEdFfgLg==}
+  '@deltachat/jsonrpc-client@2.53.0':
+    resolution: {integrity: sha512-d1mdA2cm6GxpIaCWyYDJkK8406tK84RDIz1Kz2sKgrw5D7HcuwKCjo3C+OFKp42ev8YMSpsZVIfGhVc78Hsxwg==}
 
-  '@deltachat/stdio-rpc-server-android-arm64@2.49.0':
-    resolution: {integrity: sha512-rAFqEctejIUG+seT87W1jisxOU8heVOd/A2J/+cCQr0UdBCIoFuNehiQRIezLmWnYvyuVyj2UPHxvMShHrDQ6Q==}
+  '@deltachat/stdio-rpc-server-android-arm64@2.53.0':
+    resolution: {integrity: sha512-AnbRFXjTWdwst0ReGfcoT6WXGKfVt97JZkumDb9NcKhYGFcAwZtU04JpXRa62obmRlUB+T+s80KQFxSg1tI1wQ==}
     cpu: [arm64]
     os: [android]
 
-  '@deltachat/stdio-rpc-server-android-arm@2.49.0':
-    resolution: {integrity: sha512-O6AMt0fcbVsyLr9o+exQUnehqBqviLBX+YK4M/wO0605mhbMgnFbCl+HDRpCK1QsC2wFKXRet0lYjoxMhZO4rA==}
+  '@deltachat/stdio-rpc-server-android-arm@2.53.0':
+    resolution: {integrity: sha512-UqXXUsDnbvwgaJlhd0TlfX3aVzHELqn6JeY9YsYqQ+neu7nJBI8rT0oXYR6BDfvOTx5XP6FNt14EboOWs8EMug==}
     cpu: [arm]
     os: [android]
 
-  '@deltachat/stdio-rpc-server-darwin-arm64@2.49.0':
-    resolution: {integrity: sha512-MxCJcIl8X/4KuuSwc6byLXbukNUB+WnLh+AeeCs2Fr1ph0XnUSUkXIDcHuCyVZfd6YrrLabB2Tmwl7K7I9yzBg==}
+  '@deltachat/stdio-rpc-server-darwin-arm64@2.53.0':
+    resolution: {integrity: sha512-LyarYWm9+FgzKx7bt1tTO7FPNXMmy5OR6T2+tM/iL180upNA0BzaqgU+maK2rmxlqzAN2hzHjW9mVUblLkzMag==}
     cpu: [arm64]
     os: [darwin]
 
-  '@deltachat/stdio-rpc-server-darwin-x64@2.49.0':
-    resolution: {integrity: sha512-NE3T6EWiTa5ogZW/EmKV16Q7ooUE8CrvjIYu2aaYbFYNojnmd8ugGSuCZJxfFsdgpyBaJJXnKpPT0OBZrHOH1w==}
+  '@deltachat/stdio-rpc-server-darwin-x64@2.53.0':
+    resolution: {integrity: sha512-c1zWWMgi7C/zRKxSCn6q7LH3kf30idwc9FsTwnnq3QQrDyrlR3YfWOSPwHJbf98u+TymDrH76c+fMTpT8X8kgQ==}
     cpu: [x64]
     os: [darwin]
 
-  '@deltachat/stdio-rpc-server-linux-arm64@2.49.0':
-    resolution: {integrity: sha512-M/A51UM4HvWbDTSecVcOPq9a2PWjR2K377fiMasFRQetCrrPs9QD3b4dY9xtZpGv+PYP8MPUXG9ZpekniiRSMw==}
+  '@deltachat/stdio-rpc-server-linux-arm64@2.53.0':
+    resolution: {integrity: sha512-TqeRAmmt0NbKWIfSieqBB9OnHvpqNQm+FJn4q34y4TdS1+cjh6dWeX9ZJjG0QVRdgvxmToBHRIEPfV3n5org+g==}
     cpu: [arm64]
     os: [linux]
 
-  '@deltachat/stdio-rpc-server-linux-arm@2.49.0':
-    resolution: {integrity: sha512-5WGaMJjhwfn4/0xBPllii70adEVstKtMqI/VWs031H8312/Le2NZowL3K96TZjJfHzQkJ8AinhiRkRDUqMfT6g==}
+  '@deltachat/stdio-rpc-server-linux-arm@2.53.0':
+    resolution: {integrity: sha512-mGeyoJjqR9xioHXc/+F39HAfTgvDW2a/j4laISxu0IoLYB67+0eTnqIiiR3yvuYV5ElSB9jSCWDJU4UAswiJDA==}
     cpu: [arm]
     os: [linux]
 
-  '@deltachat/stdio-rpc-server-linux-ia32@2.49.0':
-    resolution: {integrity: sha512-9IHgb90kPJEXBOrbZARf8f1F82QaQCd0BxqLDRtb2BAxjY8ow0LOn4JPt4HG+f/Fl88KzNUbnnJcp/e8m/Ld6g==}
+  '@deltachat/stdio-rpc-server-linux-ia32@2.53.0':
+    resolution: {integrity: sha512-Pzkxy9d6+qxSHjKWTd4/AxfR/oGUZe7VWeNlBvon3fHQpLr/0qC6H6+yhvw0WhwwTmrH6+UyvcbIL75V11QTMQ==}
     cpu: [ia32]
     os: [linux]
 
-  '@deltachat/stdio-rpc-server-linux-x64@2.49.0':
-    resolution: {integrity: sha512-hXDNIABuaQ128cjeYk2a2p9tKZ+ypQe62fXprS94DmKNtYD2D2kFCvlhve8OZBZyx6X1RUNySBfCWiThYSJWlQ==}
+  '@deltachat/stdio-rpc-server-linux-x64@2.53.0':
+    resolution: {integrity: sha512-PoRGvyIEKBfzW1yaE7QG2liC7GJdWCfnZyXvP9/l0FWl83hTDvvCzNEPeypMZkplQr57if1Rf0FVfBIn6HsRvg==}
     cpu: [x64]
     os: [linux]
 
-  '@deltachat/stdio-rpc-server-win32-ia32@2.49.0':
-    resolution: {integrity: sha512-V6/+AGilKND+3/SHMcJeMJ5Dsgegva0vRqawSETWd7nx1lHnit0d4Nffy8G2QaihQljCvmMSrldTxS5GNeo5Uw==}
+  '@deltachat/stdio-rpc-server-win32-ia32@2.53.0':
+    resolution: {integrity: sha512-IMM/M5aNu+H5r5N3e0LUhMIUggi+rmAHgtcnJDnuaMXLbPeB/sKGcEmEO4hccLm6oS6bJxOSmIa6Nlq1l3XaWQ==}
     cpu: [ia32]
     os: [win32]
 
-  '@deltachat/stdio-rpc-server-win32-x64@2.49.0':
-    resolution: {integrity: sha512-+zvbmpKuEbZWAXFmGsa4Brr14m/O5GEYR2H7LqnCiH8/buwhHFbDPpZLUAM0zKQpVURQUuk9tir5AEuwfLMBng==}
+  '@deltachat/stdio-rpc-server-win32-x64@2.53.0':
+    resolution: {integrity: sha512-PtJbhoHRzrdxbW10H22xFtbdINek8Xwi6wY7rC7HwD1Eoq5201Yq2kLKJGvDj2SJ++jBh/ZJgz65kQZr+G6sEA==}
     cpu: [x64]
     os: [win32]
 
-  '@deltachat/stdio-rpc-server@2.49.0':
-    resolution: {integrity: sha512-Qic8mfxyvS9XPsBnGAdaLfvI83M/v6j/sd37R5iEleHI2Q0/3LjXOEwn8OImOwlaAE/WADbaVguOSz3NLvF9Rw==}
+  '@deltachat/stdio-rpc-server@2.53.0':
+    resolution: {integrity: sha512-kUOIDYaFwfNC7iqjDJoMb6jbb4L5AEFuS+bw+D6iegvo2I6aEYvRnn3Lvee3PpV1+UL7my+e9nRg+hleM6+dkw==}
     peerDependencies:
       '@deltachat/jsonrpc-client': '*'
 
@@ -1710,8 +1713,8 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
-  ws@8.20.0:
-    resolution: {integrity: sha512-sAt8BhgNbzCtgGbt2OxmpuryO63ZoDk/sqaB/znQm94T4fCEsy/yV+7CdC1kJhOU9lboAEU7R3kquuycDoibVA==}
+  ws@8.21.1:
+    resolution: {integrity: sha512-+0NTnW77fFN/DjQi6k/Sq/Yvk4Sgajw7urW8V+asjXnRgDs9gyGkdb7EzgfhA4goXsRIZKE28fzIXBHEzhuiWw==}
     engines: {node: '>=10.0.0'}
     peerDependencies:
       bufferutil: ^4.0.1
@@ -1721,6 +1724,11 @@ packages:
         optional: true
       utf-8-validate:
         optional: true
+
+  yaml@2.9.0:
+    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
 
   yerpc@0.6.4:
     resolution: {integrity: sha512-f/yBGREg5sR9aa6QG0thon6uL8jKJhQuRO/SwGsnOIIe45wFQrMYBV+A5cCNEgqzSHsz+Jl2F7sEO6h7CJfr5w==}
@@ -1746,60 +1754,60 @@ snapshots:
       fast-wrap-ansi: 0.1.6
       sisteransi: 1.0.5
 
-  '@deltachat/jsonrpc-client@2.49.0(ws@8.20.0)':
+  '@deltachat/jsonrpc-client@2.53.0(ws@8.21.1)':
     dependencies:
       '@deltachat/tiny-emitter': 3.0.0
-      isomorphic-ws: 5.0.0(ws@8.20.0)
+      isomorphic-ws: 5.0.0(ws@8.21.1)
       yerpc: 0.6.4
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
       - ws
 
-  '@deltachat/stdio-rpc-server-android-arm64@2.49.0':
+  '@deltachat/stdio-rpc-server-android-arm64@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-android-arm@2.49.0':
+  '@deltachat/stdio-rpc-server-android-arm@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-darwin-arm64@2.49.0':
+  '@deltachat/stdio-rpc-server-darwin-arm64@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-darwin-x64@2.49.0':
+  '@deltachat/stdio-rpc-server-darwin-x64@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-linux-arm64@2.49.0':
+  '@deltachat/stdio-rpc-server-linux-arm64@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-linux-arm@2.49.0':
+  '@deltachat/stdio-rpc-server-linux-arm@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-linux-ia32@2.49.0':
+  '@deltachat/stdio-rpc-server-linux-ia32@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-linux-x64@2.49.0':
+  '@deltachat/stdio-rpc-server-linux-x64@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-win32-ia32@2.49.0':
+  '@deltachat/stdio-rpc-server-win32-ia32@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server-win32-x64@2.49.0':
+  '@deltachat/stdio-rpc-server-win32-x64@2.53.0':
     optional: true
 
-  '@deltachat/stdio-rpc-server@2.49.0(@deltachat/jsonrpc-client@2.49.0(ws@8.20.0))':
+  '@deltachat/stdio-rpc-server@2.53.0(@deltachat/jsonrpc-client@2.53.0(ws@8.21.1))':
     dependencies:
-      '@deltachat/jsonrpc-client': 2.49.0(ws@8.20.0)
+      '@deltachat/jsonrpc-client': 2.53.0(ws@8.21.1)
     optionalDependencies:
-      '@deltachat/stdio-rpc-server-android-arm': 2.49.0
-      '@deltachat/stdio-rpc-server-android-arm64': 2.49.0
-      '@deltachat/stdio-rpc-server-darwin-arm64': 2.49.0
-      '@deltachat/stdio-rpc-server-darwin-x64': 2.49.0
-      '@deltachat/stdio-rpc-server-linux-arm': 2.49.0
-      '@deltachat/stdio-rpc-server-linux-arm64': 2.49.0
-      '@deltachat/stdio-rpc-server-linux-ia32': 2.49.0
-      '@deltachat/stdio-rpc-server-linux-x64': 2.49.0
-      '@deltachat/stdio-rpc-server-win32-ia32': 2.49.0
-      '@deltachat/stdio-rpc-server-win32-x64': 2.49.0
+      '@deltachat/stdio-rpc-server-android-arm': 2.53.0
+      '@deltachat/stdio-rpc-server-android-arm64': 2.53.0
+      '@deltachat/stdio-rpc-server-darwin-arm64': 2.53.0
+      '@deltachat/stdio-rpc-server-darwin-x64': 2.53.0
+      '@deltachat/stdio-rpc-server-linux-arm': 2.53.0
+      '@deltachat/stdio-rpc-server-linux-arm64': 2.53.0
+      '@deltachat/stdio-rpc-server-linux-ia32': 2.53.0
+      '@deltachat/stdio-rpc-server-linux-x64': 2.53.0
+      '@deltachat/stdio-rpc-server-win32-ia32': 2.53.0
+      '@deltachat/stdio-rpc-server-win32-x64': 2.53.0
 
   '@deltachat/tiny-emitter@3.0.0': {}
 
@@ -2222,13 +2230,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.0
 
-  '@vitest/mocker@4.1.4(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0))':
+  '@vitest/mocker@4.1.4(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 4.1.4
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)
+      vite: 8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0)
 
   '@vitest/pretty-format@4.1.4':
     dependencies:
@@ -2594,13 +2602,13 @@ snapshots:
 
   isexe@2.0.0: {}
 
-  isomorphic-ws@4.0.1(ws@8.20.0):
+  isomorphic-ws@4.0.1(ws@8.21.1):
     dependencies:
-      ws: 8.20.0
+      ws: 8.21.1
 
-  isomorphic-ws@5.0.0(ws@8.20.0):
+  isomorphic-ws@5.0.0(ws@8.21.1):
     dependencies:
-      ws: 8.20.0
+      ws: 8.21.1
 
   js-yaml@4.1.1:
     dependencies:
@@ -3319,7 +3327,7 @@ snapshots:
       '@types/unist': 3.0.3
       vfile-message: 4.0.3
 
-  vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0):
+  vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.32.0
       picomatch: 4.0.4
@@ -3331,11 +3339,12 @@ snapshots:
       esbuild: 0.27.7
       fsevents: 2.3.3
       tsx: 4.21.0
+      yaml: 2.9.0
 
-  vitest@4.1.4(@types/node@22.19.17)(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)):
+  vitest@4.1.4(@types/node@22.19.17)(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0)):
     dependencies:
       '@vitest/expect': 4.1.4
-      '@vitest/mocker': 4.1.4(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0))
+      '@vitest/mocker': 4.1.4(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0))
       '@vitest/pretty-format': 4.1.4
       '@vitest/runner': 4.1.4
       '@vitest/snapshot': 4.1.4
@@ -3352,7 +3361,7 @@ snapshots:
       tinyexec: 1.1.1
       tinyglobby: 0.2.16
       tinyrainbow: 3.1.0
-      vite: 8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)
+      vite: 8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 22.19.17
@@ -3372,15 +3381,17 @@ snapshots:
 
   wrappy@1.0.2: {}
 
-  ws@8.20.0: {}
+  ws@8.21.1: {}
+
+  yaml@2.9.0: {}
 
   yerpc@0.6.4:
     dependencies:
       '@types/ws': 8.18.1
-      isomorphic-ws: 4.0.1(ws@8.20.0)
+      isomorphic-ws: 4.0.1(ws@8.21.1)
       typescript: 4.9.5
     optionalDependencies:
-      ws: 8.20.0
+      ws: 8.21.1
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate

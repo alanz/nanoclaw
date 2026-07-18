@@ -22,6 +22,7 @@ import { moduleSpecialists } from './module-specialists.js';
 import { moduleSpecialistsFileHandover } from './module-specialists-file-handover.js';
 import { moduleMemory } from './module-memory.js';
 import { moduleZotero } from './module-zotero.js';
+import { migration019 } from './019-wiring-threads.js';
 
 export interface Migration {
   version: number;
@@ -60,6 +61,7 @@ export const migrations: Migration[] = [
   moduleSpecialistsFileHandover,
   moduleMemory,
   moduleZotero,
+  migration019,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a

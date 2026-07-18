@@ -12,7 +12,6 @@
  *     and groups not in the allowlist.
  */
 import './core.js';
-import './scheduling.js';
 import './interactive.js';
 import './agents.js';
 import './self-mod.js';

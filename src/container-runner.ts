@@ -13,6 +13,7 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_MEMORY_LIMIT,
+  CONTAINER_PIDS_LIMIT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
@@ -403,6 +404,39 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
     : [];
 }
 
+/**
+ * Container hardening flags. Applied to every agent container; no per-group or
+ * per-install override.
+ *
+ * cap-drop and no-new-privileges are inert while containers run under the
+ * `--user` mapping below (the capability sets are already empty and the image
+ * carries no file capabilities) — they are depth against a root-in-container
+ * path. `--init` is not optional: the `--entrypoint bash` override further down
+ * defeats the image's tini, leaving bun as PID 1 with no signal handler, and
+ * Linux discards default-action signals to PID 1. Without docker-init, SIGTERM
+ * is ignored and every stop ends in SIGKILL after the full grace period.
+ *
+ * Runtime-gated: Apple Container's `container run` has no `--security-opt` and
+ * no `--pids-limit`, and rejects unknown flags outright — emitting them there
+ * fails every spawn rather than hardening it. `--cap-drop` and `--init` it does
+ * support, so those apply on both runtimes.
+ */
+export function hardeningArgs(pidsLimit: string, runtime: string = CONTAINER_RUNTIME_BIN): string[] {
+  const appleContainer = runtime === 'container';
+  const args = ['--cap-drop=ALL'];
+  if (!appleContainer) args.push('--security-opt', 'no-new-privileges');
+  args.push('--init');
+
+  // Test >0, not truthiness: cgroups v2 rejects `--pids-limit 0` with EINVAL and
+  // fails the spawn, and '0' is a truthy string. Blank/unparseable means no cap.
+  const pids = Number(pidsLimit);
+  if (!appleContainer && Number.isFinite(pids) && pids > 0) {
+    args.push('--pids-limit', String(Math.floor(pids)));
+  }
+
+  return args;
+}
+
 function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
@@ -604,9 +638,16 @@ function buildContainerArgs(
   if (CONTAINER_CPU_LIMIT) args.push('--cpus', CONTAINER_CPU_LIMIT);
   if (CONTAINER_MEMORY_LIMIT) args.push('--memory', CONTAINER_MEMORY_LIMIT);
 
+  // Docker defaults /dev/shm to 64m, which silently short-writes past that size.
+  // agent-browser passes --disable-dev-shm-usage, but a third-party puppeteer or
+  // Playwright launcher may not.
+  args.push('--shm-size=1g');
+
+  args.push(...hardeningArgs(CONTAINER_PIDS_LIMIT));
+
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
-  args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `TZ=${containerConfig.timezone ?? TIMEZONE}`);
 
   // Memory — signal to the container that the memory MCP tools should be registered.
   // Inferred from mounts: the host only mounts /workspace/memory for non-specialist
@@ -693,6 +734,18 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     throw new Error('No packages to install. Use install_packages first.');
   }
 
+  // Which bytes this is built on. Recorded on the derived image so an operator
+  // can tell which base a group's packages were layered onto — the image id
+  // rather than a RepoDigest, because a locally built base has no RepoDigest at
+  // all and an id is unambiguous either way.
+  let baseId = '';
+  try {
+    const { stdout } = await execAsync(`${CONTAINER_RUNTIME_BIN} image inspect --format '{{.Id}}' ${CONTAINER_IMAGE}`);
+    baseId = stdout.trim();
+  } catch {
+    // Non-fatal: the build below fails on its own if the base is really absent.
+  }
+
   let dockerfile = `FROM ${CONTAINER_IMAGE}\nUSER root\n`;
   if (aptPackages.length > 0) {
     dockerfile += `RUN apt-get update && apt-get install -y ${aptPackages.join(' ')} && rm -rf /var/lib/apt/lists/*\n`;
@@ -706,6 +759,17 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
   }
   dockerfile += 'USER node\n';
+
+  // Overwrite the provenance label rather than letting it be inherited.
+  //
+  // `dev.nanoclaw.image-source` is documented as the one claim a retag cannot
+  // forge, and --status treats it as the trustworthy answer. But a derived
+  // build inherits the base's labels, so without this a group that has just
+  // added arbitrary apt/npm packages would keep asserting `hardened` — the
+  // vendor's claim, over bytes the vendor never saw. `derived` is the honest
+  // answer, and `derived-from` says what it was layered onto.
+  dockerfile += 'LABEL dev.nanoclaw.image-source="derived"\n';
+  if (baseId) dockerfile += `LABEL dev.nanoclaw.derived-from="${baseId}"\n`;
 
   const imageTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
 

@@ -21,6 +21,10 @@ import type { SpecialistTask } from './types.js';
 vi.mock('../../container-runner.js', () => ({
   isContainerRunning: vi.fn().mockReturnValue(false),
   wakeOrQueue: vi.fn().mockResolvedValue(undefined),
+  // Default: no boot crashes, so a queued task reads as "waiting for a slot"
+  // and the pre-existing queued-exclusion behaviour is unchanged.
+  getBootCrashState: vi.fn().mockReturnValue({ count: 0, stderrTail: [] }),
+  clearBootCrashState: vi.fn(),
 }));
 
 vi.mock('./routing.js', () => ({
@@ -390,5 +394,110 @@ describe('crash detection — queued tasks excluded', () => {
 
     expect(getTask(task.id)!.status).toBe('awaiting_restart');
     expect(getTask(task.id)!.restart_attempt_count).toBe(1);
+  });
+});
+
+// A container that dies ~800ms into boot is never observed dead: the host sweep
+// runs sweepSession() (which SPAWNS the container) before sweepSpecialistTasks(),
+// so isContainerRunning is true in the very tick that started it. queued gets
+// advanced to running by path 3, running never trips path 4, and the task lives
+// until the 4h global timeout. Real incident: 241 respawns over 4 hours with
+// restart_attempt_count still 0 and the reason (EROFS) unread in the stderr tail.
+describe('crash detection — container that cannot start', () => {
+  // These cases drive isContainerRunning/getBootCrashState directly, and
+  // mockReturnValue persists across tests — reset both to the healthy default
+  // so each case starts from the same ground state.
+  beforeEach(async () => {
+    const { getBootCrashState, isContainerRunning } = await import('../../container-runner.js');
+    vi.mocked(isContainerRunning).mockReturnValue(false);
+    vi.mocked(getBootCrashState).mockReturnValue({ count: 0, stderrTail: [] });
+  });
+
+  it('fails a queued task once its container has boot-crashed repeatedly', async () => {
+    const { getBootCrashState } = await import('../../container-runner.js');
+    vi.mocked(getBootCrashState).mockReturnValue({
+      count: 3,
+      stderrTail: ['[agent-runner] Fatal error: EROFS: read-only file system'],
+    });
+
+    const task = makeSpecialistTask({ status: 'queued' });
+
+    await sweepSpecialistTasks();
+
+    const fresh = getTask(task.id)!;
+    expect(fresh.status).toBe('failed');
+    expect(fresh.failure_kind).toBe('host_restart');
+    // The reason must reach the requester, not just the host log.
+    expect(fresh.failure_detail).toContain('EROFS');
+    expect(routeResult).toHaveBeenCalled();
+  });
+
+  // Regression guard for the exact defect a live run exposed: an earlier version
+  // of this fix required !containerAlive, which can never hold here because the
+  // sweep spawns the container immediately before sampling it.
+  it('fails despite the container appearing alive at sample time', async () => {
+    const { getBootCrashState, isContainerRunning } = await import('../../container-runner.js');
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    vi.mocked(getBootCrashState).mockReturnValue({ count: 3, stderrTail: ['Fatal error: boom'] });
+
+    const task = makeSpecialistTask({ status: 'queued' });
+
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('failed');
+  });
+
+  // The same race strands `running` tasks: path 4 needs !containerAlive too.
+  it('fails a running task whose container is crash-looping', async () => {
+    const { getBootCrashState, isContainerRunning } = await import('../../container-runner.js');
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    vi.mocked(getBootCrashState).mockReturnValue({ count: 4, stderrTail: ['Fatal error: boom'] });
+
+    const task = makeSpecialistTask({ status: 'running' });
+
+    await sweepSpecialistTasks();
+
+    const fresh = getTask(task.id)!;
+    expect(fresh.status).toBe('failed');
+    expect(fresh.failure_kind).toBe('host_restart');
+  });
+
+  // awaiting_sub_task's container is legitimately stopped; path 2 owns it.
+  it('leaves an awaiting_sub_task task to the sub-task await path', async () => {
+    const { getBootCrashState } = await import('../../container-runner.js');
+    vi.mocked(getBootCrashState).mockReturnValue({ count: 5, stderrTail: ['boom'] });
+
+    const task = makeSpecialistTask({ status: 'awaiting_sub_task' });
+
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('awaiting_sub_task');
+  });
+
+  it('leaves a queued task alone while it is merely waiting for a slot', async () => {
+    // Same state, no recorded crashes — this is the case the exclusion exists
+    // for, and it must keep working or queued tasks burn their retries waiting.
+    const { getBootCrashState } = await import('../../container-runner.js');
+    vi.mocked(getBootCrashState).mockReturnValue({ count: 0, stderrTail: [] });
+
+    const task = makeSpecialistTask({ status: 'queued' });
+
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('queued');
+    expect(routeResult).not.toHaveBeenCalled();
+  });
+
+  it('does not fail below the threshold', async () => {
+    // One or two fast exits can be transient (image pull, host hiccup); only a
+    // sustained loop is conclusive.
+    const { getBootCrashState } = await import('../../container-runner.js');
+    vi.mocked(getBootCrashState).mockReturnValue({ count: 2, stderrTail: ['boom'] });
+
+    const task = makeSpecialistTask({ status: 'queued' });
+
+    await sweepSpecialistTasks();
+
+    expect(getTask(task.id)!.status).toBe('queued');
   });
 });

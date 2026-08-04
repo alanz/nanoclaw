@@ -27,13 +27,22 @@
  *   5. Re-spawn: a task in awaiting_restart with no running container → re-wake.
  */
 import { log } from '../../log.js';
-import { isContainerRunning } from '../../container-runner.js';
+import { clearBootCrashState, getBootCrashState, isContainerRunning } from '../../container-runner.js';
 import { SPECIALISTS_CONFIG } from './config.js';
 import { getLiveTasksWithSessions, getTask, updateTaskStatus } from './db.js';
 import { routeResult } from './routing.js';
 import type { SpecialistTask } from './types.js';
 
 const LIVE_STATUSES = new Set(['queued', 'running', 'awaiting_sub_task', 'awaiting_restart']);
+
+/**
+ * Consecutive boot crashes before a `queued` task is declared unstartable.
+ * Deliberately not maxRestartRetries: those are retries of work that began,
+ * whereas these are attempts that never got off the ground and will fail
+ * identically forever. Three costs ~3 minutes at the 60s sweep cadence,
+ * against the 4 hours the global timeout would otherwise take.
+ */
+const BOOT_CRASH_THRESHOLD = 3;
 
 /**
  * Recursively cancel a sub-task subtree rooted at taskId.
@@ -175,6 +184,58 @@ async function sweepTask(
 
   const containerAlive = isContainerRunning(task.session_id);
 
+  // ── 2b. Container cannot start at all ────────────────────────────────────
+  // Every path below keys off `containerAlive`, an instantaneous sample — and
+  // that sample is unreliable for exactly the failure it most needs to catch.
+  // The host sweep runs sweepSession() (which wakes and SPAWNS the container)
+  // before sweepSpecialistTasks(), so a container is always observed alive by
+  // the very tick that started it. One that dies ~800ms into boot is therefore
+  // never seen dead: `queued` is advanced to `running` by path 3, and `running`
+  // never trips path 4. The task sits live until the 4h global timeout.
+  //
+  // That is the real shape of the incident this guard exists for: 241 respawns
+  // across 4 hours with restart_attempt_count still 0. Liveness sampling cannot
+  // fix it — the boot-crash counter can, because it is evidence accumulated
+  // across spawns rather than a snapshot. So this runs BEFORE the liveness
+  // paths and deliberately ignores `containerAlive`.
+  //
+  // awaiting_sub_task is excluded: its container is legitimately stopped and
+  // path 2 owns that state.
+  const bootCrash = getBootCrashState(task.session_id);
+  if (bootCrash.count >= BOOT_CRASH_THRESHOLD && task.status !== 'awaiting_sub_task') {
+    const ts = new Date().toISOString();
+    // The stderr tail is the only place the reason exists — carry it to the
+    // requester instead of a generic "container crashed".
+    const detail = `container failed to start (${bootCrash.count} consecutive boot crashes): ${
+      bootCrash.stderrTail.slice(-3).join(' | ') || 'no stderr captured'
+    }`;
+    updateTaskStatus(task.id, 'failed', {
+      failure_kind: 'host_restart',
+      failure_detail: detail,
+      closed_at: ts,
+      restart_attempt_count: bootCrash.count,
+      pending_sub_task_id: null,
+    });
+    if (task.pending_sub_task_id) await cancelSubtree(task.pending_sub_task_id);
+    clearBootCrashState(task.session_id);
+    await routeResult({
+      ...task,
+      status: 'failed' as const,
+      failure_kind: 'host_restart',
+      failure_detail: detail,
+      closed_at: ts,
+      pending_sub_task_id: null,
+    });
+    log.error('specialists: task failed — container never started', {
+      taskId: task.id,
+      sessionId: task.session_id,
+      status: task.status,
+      crashes: bootCrash.count,
+      stderrTail: bootCrash.stderrTail,
+    });
+    return;
+  }
+
   // ── 3. Container started → advance to running ─────────────────────────────
   // A queued or awaiting_restart task whose container became alive transitions
   // to running. This covers both first starts (queued → running) and restarts
@@ -196,6 +257,10 @@ async function sweepTask(
   // crash-detected running tasks). awaiting_sub_task is also excluded: the
   // parent container exits cleanly after dispatch_sub_task; path 2 handles
   // liveness detection for that state.
+  //
+  // A container that never starts at all is NOT handled here — see 2b above,
+  // which catches it before this point using accumulated boot-crash evidence
+  // rather than a liveness sample this path cannot trust.
   if (!containerAlive && task.status === 'running') {
     const newRetryCount = task.restart_attempt_count + 1;
     const pendingChildId = task.pending_sub_task_id;

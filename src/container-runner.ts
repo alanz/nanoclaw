@@ -71,6 +71,74 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+// ── Boot-crash tracking ─────────────────────────────────────────────────────
+
+/**
+ * A container that dies during startup — before the agent-runner reaches its
+ * poll loop — never claims a message, never writes to outbound.db, and never
+ * touches the heartbeat. Every host-side stall detector keys off one of those
+ * three signals, so a boot crash is invisible to all of them: the wake path
+ * just respawns on the next sweep tick, forever.
+ *
+ * That is not hypothetical. A read-only-workspace bug crashed specialist
+ * containers ~800ms into boot; the host respawned 241 times across 4 hours
+ * until the global task timeout finally fired, and the exit reason sat in the
+ * stderr tail the whole time.
+ *
+ * The exit code alone is not enough to distinguish this from ordinary failure:
+ * a container that ran real work and then exited non-zero is a different event.
+ * The discriminator is lifetime — a non-zero exit within
+ * {@link BOOT_CRASH_WINDOW_MS} of spawn means it died on the way up. Counting
+ * those *consecutively* per session gives a signal a stalled-work detector
+ * cannot produce, and any healthy exit clears it.
+ *
+ * This module only records the fact. Deciding what a crash loop means belongs
+ * to whoever owns the work — see `specialists/recovery.ts`, which uses this to
+ * tell a container that never started apart from one merely waiting for a slot.
+ */
+const BOOT_CRASH_WINDOW_MS = 10_000;
+
+interface BootCrashState {
+  /** Consecutive fast non-zero exits. Reset by any healthy exit. */
+  count: number;
+  /** Stderr tail of the most recent crash — the actual reason, e.g. EROFS. */
+  stderrTail: string[];
+}
+
+const bootCrashes = new Map<string, BootCrashState>();
+
+/**
+ * Consecutive boot crashes for a session, and the last crash's stderr tail.
+ * Returns count 0 when the session is healthy or unknown.
+ */
+export function getBootCrashState(sessionId: string): { count: number; stderrTail: string[] } {
+  const state = bootCrashes.get(sessionId);
+  return state ? { count: state.count, stderrTail: state.stderrTail } : { count: 0, stderrTail: [] };
+}
+
+/**
+ * Clear boot-crash state for a session. Call when the work owner has acted on
+ * the loop (failed the task, gave up), so a later retry of the same session
+ * starts from a clean count rather than tripping instantly.
+ */
+export function clearBootCrashState(sessionId: string): void {
+  bootCrashes.delete(sessionId);
+}
+
+/** Record a container exit against the session's boot-crash counter. */
+export function recordExit(sessionId: string, code: number | null, ranMs: number, stderrTail: string[]): number {
+  // code null = killed by signal (normal shutdown / task-complete), never a
+  // boot failure. A slow non-zero exit means real work ran first.
+  const isBootCrash = code !== 0 && code !== null && ranMs < BOOT_CRASH_WINDOW_MS;
+  if (!isBootCrash) {
+    bootCrashes.delete(sessionId);
+    return 0;
+  }
+  const next = (bootCrashes.get(sessionId)?.count ?? 0) + 1;
+  bootCrashes.set(sessionId, { count: next, stderrTail });
+  return next;
+}
+
 // ── Concurrency cap + FIFO waiting queue ────────────────────────────────────
 
 interface WaitingEntry {
@@ -299,6 +367,7 @@ async function spawnContainer(session: Session): Promise<void> {
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const spawnedAt = Date.now();
 
   activeContainers.set(session.id, { process: container, containerName });
   markContainerRunning(session.id);
@@ -329,11 +398,23 @@ async function spawnContainer(session: Session): Promise<void> {
     activeNonMainSessions.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    const ranMs = Date.now() - spawnedAt;
+    const crashes = recordExit(session.id, code, ranMs, stderrTail);
     // code null = killed by signal (normal shutdown path), not a boot failure.
     if (code !== 0 && code !== null && stderrTail.length > 0) {
-      log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, stderrTail });
+      log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, ranMs, crashes, stderrTail });
     } else {
       log.info('Container exited', { sessionId: session.id, code, containerName });
+    }
+    // Surface the loop itself, not just the individual exits. Without this a
+    // crash loop reads as N unrelated warnings and no one totals them up.
+    if (crashes >= 3) {
+      log.error('Container is crash-looping on startup', {
+        sessionId: session.id,
+        agentGroup: agentGroup.name,
+        consecutiveCrashes: crashes,
+        stderrTail,
+      });
     }
     if (invocationId) {
       import('./modules/specialists/invocation.js')

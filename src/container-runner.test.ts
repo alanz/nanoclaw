@@ -2,7 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { hardeningArgs, resolveProviderName } from './container-runner.js';
+import {
+  clearBootCrashState,
+  getBootCrashState,
+  hardeningArgs,
+  recordExit,
+  resolveProviderName,
+} from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -469,5 +475,62 @@ describe('hardeningArgs', () => {
   it('drops security-opt and pids-limit on Apple Container', () => {
     const args = hardeningArgs('2048', 'container');
     expect(args).toEqual(['--cap-drop=ALL', '--init']);
+  });
+});
+
+// Boot-crash tracking. A container that dies on the way up never claims a
+// message, writes to outbound.db, or touches the heartbeat — so every other
+// stall detector is blind to it and the wake path respawns forever. The
+// discriminator is lifetime, not exit code alone.
+describe('boot-crash tracking', () => {
+  const SID = 'sess-boot-crash';
+  beforeEach(() => clearBootCrashState(SID));
+
+  it('counts consecutive fast non-zero exits', () => {
+    expect(recordExit(SID, 1, 800, ['EROFS'])).toBe(1);
+    expect(recordExit(SID, 1, 800, ['EROFS'])).toBe(2);
+    expect(recordExit(SID, 1, 800, ['EROFS'])).toBe(3);
+    expect(getBootCrashState(SID).count).toBe(3);
+  });
+
+  it('keeps the latest stderr tail so the reason survives to the reporter', () => {
+    recordExit(SID, 1, 500, ['first']);
+    recordExit(SID, 1, 500, ['Fatal error: EROFS: read-only file system']);
+    expect(getBootCrashState(SID).stderrTail).toEqual(['Fatal error: EROFS: read-only file system']);
+  });
+
+  it('does not count a signal kill — that is the normal shutdown path', () => {
+    // task-complete and absolute-ceiling both SIGTERM the container; counting
+    // those would fail healthy sessions that simply finished their work.
+    expect(recordExit(SID, null, 50, [])).toBe(0);
+    expect(getBootCrashState(SID).count).toBe(0);
+  });
+
+  it('does not count a non-zero exit after real work ran', () => {
+    // Ran well past the boot window: the agent started and failed later, which
+    // is a different event with different handling.
+    expect(recordExit(SID, 1, 60_000, ['some later failure'])).toBe(0);
+  });
+
+  it('resets the streak on any healthy exit', () => {
+    recordExit(SID, 1, 800, ['boom']);
+    recordExit(SID, 1, 800, ['boom']);
+    expect(getBootCrashState(SID).count).toBe(2);
+    expect(recordExit(SID, 0, 900, [])).toBe(0);
+    expect(getBootCrashState(SID).count).toBe(0);
+  });
+
+  it('tracks sessions independently', () => {
+    const OTHER = 'sess-other';
+    clearBootCrashState(OTHER);
+    recordExit(SID, 1, 800, ['boom']);
+    recordExit(SID, 1, 800, ['boom']);
+    expect(recordExit(OTHER, 1, 800, ['boom'])).toBe(1);
+    expect(getBootCrashState(SID).count).toBe(2);
+    clearBootCrashState(OTHER);
+  });
+
+  it('reports a clean slate for an unknown session', () => {
+    expect(getBootCrashState('never-seen')).toEqual({ count: 0, stderrTail: [] });
   });
 });

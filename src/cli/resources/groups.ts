@@ -13,6 +13,7 @@ import {
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { validateMount } from '../../modules/mount-security/index.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
@@ -534,12 +535,35 @@ registerResource({
           containerPath,
           ...(args.ro || args.readonly ? { readonly: true } : {}),
         };
+
+        // Validate against the same allowlist the spawn path enforces
+        // (`validateAdditionalMounts` in container-runner.ts). Without this, a
+        // mount that can never satisfy the allowlist is stored, reported as
+        // added, and then silently rejected on every subsequent spawn — the
+        // operator sees success once and failure never. Reject at write time so
+        // the reason is visible where it can still be acted on.
+        const check = validateMount(mount);
+        if (!check.allowed) {
+          throw new Error(
+            `Mount rejected: ${check.reason}. Additional mounts are confined to /workspace/extra/, so ` +
+              `--container must be a relative name (e.g. "zotero-md", not "/workspace/zotero-md"), and ` +
+              `--host must resolve under a root in the mount allowlist.`,
+          );
+        }
+
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
           existing.push(mount);
           updateContainerConfigJson(id, 'additional_mounts', existing);
         }
-        return { added: mount, note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.` };
+        return {
+          added: mount,
+          // Where it actually lands — the stored containerPath is a name, not a
+          // path, and the difference is not otherwise discoverable.
+          mountedAt: `/workspace/extra/${check.resolvedContainerPath}`,
+          readonly: check.effectiveReadonly,
+          note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.`,
+        };
       },
     },
     'config remove-mount': {

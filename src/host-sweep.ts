@@ -37,6 +37,7 @@ import {
   getContainerState,
   getMessageForRetry,
   getProcessingClaims,
+  markAllPendingMessagesFailed,
   markMessageFailed,
   retryWithBackoff,
   syncProcessingAcks,
@@ -51,7 +52,15 @@ import {
   heartbeatPath,
   markSessionStuck,
 } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeOrQueue } from './container-runner.js';
+import {
+  clearBootCrashState,
+  getBootCrashState,
+  isContainerRunning,
+  killContainer,
+  wakeOrQueue,
+} from './container-runner.js';
+import { getMessagingGroup } from './db/messaging-groups.js';
+import { getDeliveryAdapter } from './delivery.js';
 import type { Session } from './types.js';
 
 /**
@@ -75,6 +84,101 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 export const CLAIM_STUCK_MS = 60 * 1000;
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
+
+/**
+ * Consecutive boot crashes before a session's queued work is declared
+ * undeliverable. Matches the specialist threshold in specialists/recovery.ts:
+ * one or two fast exits can be transient (image pull, host hiccup), a
+ * sustained streak cannot.
+ */
+const BOOT_CRASH_THRESHOLD = 3;
+
+/**
+ * Give up on a session whose container cannot start, and tell the human.
+ *
+ * MAX_TRIES above only covers messages a container *claimed* and then died
+ * holding. A container that dies during boot never claims anything, so that
+ * path never engages: countDueMessages stays above zero, the wake respawns
+ * once a tick, and the person who sent the message gets silence — for as long
+ * as the fault persists. Specialists got a bounded failure in
+ * specialists/recovery.ts; this is the same guarantee for everyone else.
+ *
+ * Returns true when it acted, so the caller skips the rest of the tick for
+ * this session (notably the wake that would spawn container N+1).
+ */
+async function failSessionIfContainerCannotStart(
+  inDb: Database.Database,
+  session: Session,
+  agentGroupName: string,
+): Promise<boolean> {
+  const crash = getBootCrashState(session.id);
+  if (crash.count < BOOT_CRASH_THRESHOLD) return false;
+
+  // Specialist sessions belong to the specialists recovery sweep, which fails
+  // the *task* and routes the reason back to the requesting agent. Failing
+  // their messages here would race that and strip the reporting.
+  if (await isSpecialistSession(session)) return false;
+
+  const reason = crash.stderrTail.at(-1) ?? 'no stderr captured';
+  const failed = markAllPendingMessagesFailed(inDb);
+  clearBootCrashState(session.id);
+
+  log.error('Session container cannot start — failed queued messages', {
+    sessionId: session.id,
+    agentGroup: agentGroupName,
+    consecutiveCrashes: crash.count,
+    failedMessages: failed,
+    stderrTail: crash.stderrTail,
+  });
+
+  await notifyChannelOfStartupFailure(session, reason);
+  return true;
+}
+
+/** True when this session belongs to a specialist agent group. */
+async function isSpecialistSession(session: Session): Promise<boolean> {
+  try {
+    const { getSpecialist } = await import('./modules/specialists/db.js');
+    return !!getSpecialist(session.agent_group_id);
+  } catch {
+    // Specialists module absent or its table not yet migrated — not one.
+    return false;
+  }
+}
+
+/**
+ * Tell the originating chat that its message will not be answered.
+ *
+ * The container is the only writer of outbound.db, so a container that never
+ * starts cannot apologise for itself — the host has to send this directly
+ * through the delivery adapter. Sessions with no messaging group (system task
+ * sessions, agent_shared inboxes) have no one to tell; the log above is the
+ * only report for those.
+ */
+async function notifyChannelOfStartupFailure(session: Session, reason: string): Promise<void> {
+  if (!session.messaging_group_id) return;
+  const adapter = getDeliveryAdapter();
+  if (!adapter) return;
+  const mg = getMessagingGroup(session.messaging_group_id);
+  if (!mg) return;
+
+  try {
+    await adapter.deliver(
+      mg.channel_type,
+      mg.platform_id,
+      session.thread_id,
+      'chat',
+      JSON.stringify({
+        text:
+          `I could not start — my container failed to boot ${BOOT_CRASH_THRESHOLD} times in a row, ` +
+          `so your message was not processed. Last error: ${reason}`,
+      }),
+    );
+  } catch (err) {
+    // Best-effort: the failure is already recorded at error level above.
+    log.warn('Could not notify channel of container startup failure', { sessionId: session.id, err });
+  }
+}
 
 export type StuckDecision =
   | { action: 'ok' }
@@ -214,6 +318,11 @@ async function sweepSession(session: Session): Promise<void> {
     if (outDb) {
       syncProcessingAcks(inDb, outDb);
     }
+
+    // 1b. Give up on a container that cannot start. Ordered BEFORE the wake:
+    // once the streak is conclusive, spawning attempt N+1 only adds another
+    // crash and another minute of silence for whoever is waiting.
+    if (await failSessionIfContainerCannotStart(inDb, session, agentGroup.name)) return;
 
     // 2. Wake a container if work is due and nothing is running. Ordered
     // before the crashed-container cleanup so a fresh container gets a chance

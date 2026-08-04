@@ -150,6 +150,18 @@ export function markMessageFailed(db: Database.Database, messageId: string): voi
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }
 
+/**
+ * Fail every pending message in one shot and report how many.
+ *
+ * Used when the session's container cannot start at all: the messages are not
+ * individually retryable, and leaving them pending keeps countDueMessages
+ * above zero, which keeps the wake path respawning a container that will
+ * never come up. Returns the number failed so the caller can report it.
+ */
+export function markAllPendingMessagesFailed(db: Database.Database): number {
+  return db.prepare("UPDATE messages_in SET status = 'failed' WHERE status = 'pending'").run().changes;
+}
+
 export function retryWithBackoff(db: Database.Database, messageId: string, backoffSec: number): void {
   const processAfter = new Date(Date.now() + backoffSec * 1000).toISOString();
   db.prepare('UPDATE messages_in SET tries = tries + 1, process_after = ? WHERE id = ?').run(processAfter, messageId);

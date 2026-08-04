@@ -25,6 +25,10 @@ vi.mock('./container-runner.js', () => ({
   isContainerRunning: vi.fn().mockReturnValue(false),
   wakeOrQueue: vi.fn().mockResolvedValue(true),
   killContainer: vi.fn(),
+  // Healthy default: no boot crashes, so the give-up path never engages and
+  // these tests exercise the normal wake/SLA flow.
+  getBootCrashState: vi.fn().mockReturnValue({ count: 0, stderrTail: [] }),
+  clearBootCrashState: vi.fn(),
 }));
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';

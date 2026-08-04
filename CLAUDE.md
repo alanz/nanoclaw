@@ -204,6 +204,32 @@ Four types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 | `/init-onecli` | Install OneCLI Agent Vault and migrate `.env` credentials |
 | `/migrate-memory` | Carry a group's agent memory across a provider switch (operator-run, both directions) |
 
+## Behaviour Specs (`specs/*.allium`)
+
+`specs/` holds 12 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. **Consult them before changing behaviour in the areas they cover, and update them when behaviour changes.** They are the intent of record; the code is one realisation of it.
+
+| Spec | Covers |
+|------|--------|
+| `sessions.allium` | Session lifecycle, inbound/outbound messages, wake, stuck detection, retry |
+| `specialists.allium` | Per-task specialist dispatch, sub-tasks, recovery/timeouts, **ipc-out/ipc-in file handover** |
+| `agent-to-agent.allium` | Long-lived named agents, `create_agent`, scheduling, interactive questions |
+| `routing.allium` | Channel routing, messaging groups, sender/channel approval |
+| `identity.allium` | Users, roles, agent groups |
+| `approvals.allium` | Human approval flow |
+| `memory.allium` / `memory-graph.allium` | Memory index and knowledge graph |
+| `self-mod.allium` / `scheduling.allium` / `zotero.allium` / `null-channel.allium` | As named |
+
+Two traps worth knowing:
+
+- **Scope boundaries are deliberate and stated in each header.** `agent-to-agent.allium` explicitly *excludes* specialists (they live in `specialists.allium`), so searching the wrong file yields a confident wrong answer.
+- **Specialist results reach the caller via a directory, not just text.** The specialist writes to `/workspace/ipc-out`, then `deliver_specialist_result(file_paths, commit_to_memory)` hands ownership to the host, which either commits the files into the *requester's* workspace under `memory/reports/` (recorded as `committed_files` on the task) or stages them into the requester's `/workspace/ipc-in`. Files land in the **requester's** group folder — not the specialist's. See `specialists.allium:195-303`.
+
+```bash
+allium check specs/            # currently 0 errors; 4 warnings in routing.allium
+```
+
+The `allium` CLI (Homebrew) validates; the `/allium` skill family (`tend`, `weed`, `distill`, `propagate`) edits specs and checks spec↔code alignment. `weed` is the one to reach for when you suspect drift.
+
 ## Contributing
 
 Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the four skill types and their guidelines, `SKILL.md` format rules, and the pre-submission checklist.
@@ -282,6 +308,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 
 | Doc | Purpose |
 |-----|---------|
+| [specs/](specs/) | Allium behaviour specs — the intent of record. Consult before changing behaviour, update when it changes (see [Behaviour Specs](#behaviour-specs-specsallium)) |
 | [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
 | [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
 | [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |

@@ -18,6 +18,12 @@ export interface RunnerConfig {
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   model?: string;
   effort?: string;
+  /**
+   * Set by the host for specialist groups, whose `/workspace/agent` mount is
+   * read-only. Anything that writes into the group dir must be skipped when
+   * this is true, or the runner dies with EROFS before the poll loop starts.
+   */
+  isSpecialist: boolean;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -47,6 +53,7 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    isSpecialist: raw.isSpecialist === true,
   };
 
   return _config;

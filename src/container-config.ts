@@ -14,6 +14,7 @@ import path from 'path';
 import { GROUPS_DIR, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getSpecialist } from './modules/specialists/db.js';
 import { isValidTimezone } from './timezone.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
@@ -51,6 +52,13 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
+  /**
+   * True when this agent group is a specialist. Specialists mount
+   * `/workspace/agent` read-only (see `container-runner.ts`), so the runner
+   * must skip anything that writes there. Passed explicitly rather than
+   * inferred from the agent group id — specialist ids carry no fixed prefix.
+   */
+  isSpecialist?: boolean;
   /** Additional directories to include in the host-side memory search index (not passed to container). */
   memoryIndexDirs?: MemoryIndexDirConfig[];
   timezone?: string;
@@ -85,6 +93,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
+    isSpecialist: !!getSpecialist(group.id),
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
   };
 }
@@ -119,6 +128,7 @@ export function readContainerConfig(folder: string): ContainerConfig {
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
       model: raw.model,
       effort: raw.effort,
+      isSpecialist: raw.isSpecialist,
       memoryIndexDirs: raw.memoryIndexDirs ?? [],
     };
   } catch (err) {

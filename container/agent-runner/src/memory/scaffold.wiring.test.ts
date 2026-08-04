@@ -9,9 +9,17 @@ import path from 'path';
 describe('memory scaffold boot wiring', () => {
   const indexSrc = fs.readFileSync(path.join(import.meta.dir, '..', 'index.ts'), 'utf-8');
 
-  it('scaffolds memory unconditionally in main()', () => {
-    expect(indexSrc).toMatch(/\n\s*ensureMemoryScaffold\(\);/);
-    expect(indexSrc).not.toContain('usesMemoryScaffold');
+  // Specialists mount /workspace/agent read-only, so scaffolding there throws
+  // EROFS and kills the runner before it ever polls — every specialist task
+  // then hangs until the 4h dispatch timeout. The gate must stay in place, and
+  // must key off the host-supplied flag rather than an agent-group-id prefix
+  // (specialist ids carry no fixed prefix).
+  it('scaffolds memory in main(), gated on non-specialist', () => {
+    expect(indexSrc).toMatch(/\n\s*if \(!config\.isSpecialist\) ensureMemoryScaffold\(\);/);
+  });
+
+  it('does not infer specialist status from the agent group id', () => {
+    expect(indexSrc).not.toContain('ag-specialist-');
   });
 
   it('imports ensureMemoryScaffold from the seam module', () => {

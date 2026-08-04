@@ -52,14 +52,17 @@ async function main(): Promise<void> {
   // Specialist containers must start every invocation fresh — no resumed
   // conversation history. Clear any stale continuation so the provider
   // always starts a new Claude Code session for each specialist task.
-  if (config.agentGroupId.startsWith('ag-specialist-')) {
+  if (config.isSpecialist) {
     clearContinuation(providerName);
     log('Specialist container — continuation cleared for fresh session');
   }
 
   // Every provider shares one persistent memory tree. Legacy imports are an
   // operator-run migration and never happen in this normal startup path.
-  ensureMemoryScaffold();
+  // Specialists mount /workspace/agent read-only and get no memory tree
+  // (the host gates their memory mount the same way) — scaffolding there
+  // would fail with EROFS and kill the runner before it polls.
+  if (!config.isSpecialist) ensureMemoryScaffold();
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module

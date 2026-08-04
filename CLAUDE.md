@@ -206,7 +206,9 @@ Four types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 
 ## Behaviour Specs (`specs/*.allium`)
 
-`specs/` holds 12 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. **Consult them before changing behaviour in the areas they cover, and update them when behaviour changes.** They are the intent of record; the code is one realisation of it.
+`specs/` holds 12 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. They are the intent of record; the code is one realisation of it.
+
+> **Read them; do not edit them.** Consult the relevant spec before changing behaviour in the areas it covers. **Never modify a `.allium` file without the repo owner's explicit approval** — not to "keep it in sync" after a code change, not to silence a checker warning, not as part of a larger task. If your change makes the code diverge from a spec, say so and propose the spec edit; the owner decides. This applies to the `/allium` skills too: `tend` and `weed` both write to specs, so ask before running them in write mode.
 
 | Spec | Covers |
 |------|--------|
@@ -228,7 +230,7 @@ Two traps worth knowing:
 allium check specs/            # currently 0 errors; 4 warnings in routing.allium
 ```
 
-The `allium` CLI (Homebrew) validates; the `/allium` skill family (`tend`, `weed`, `distill`, `propagate`) edits specs and checks spec↔code alignment. `weed` is the one to reach for when you suspect drift.
+`allium check` is read-only and always safe to run. The `/allium` skill family (`tend`, `weed`, `distill`, `propagate`) can *write* to specs — use it to report drift, and get approval before letting it edit anything under `specs/`.
 
 ## Contributing
 

@@ -49,6 +49,48 @@ describe('decideStuckAction', () => {
     expect(res.heartbeatAgeMs).toBeGreaterThan(ABSOLUTE_CEILING_MS);
   });
 
+  // The ceiling fires for two unrelated reasons and only one is a fault, so the
+  // decision has to say which. A container parked in an open SDK query between
+  // conversations ages out with nothing owed — routine. One that went silent
+  // holding a claimed message or an in-flight tool cost someone an answer.
+  it('marks a ceiling kill idle when nothing is claimed and no tool is in flight', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - ABSOLUTE_CEILING_MS - 1_000,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('kill-ceiling');
+    if (res.action !== 'kill-ceiling') return;
+    expect(res.idle).toBe(true);
+  });
+
+  it('marks a ceiling kill NOT idle when a message is still claimed', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - ABSOLUTE_CEILING_MS - 1_000,
+      containerState: null,
+      // Claimed after the heartbeat went stale, so the claim-stuck rule below
+      // does not fire first — this has to be caught as a non-idle ceiling kill.
+      claims: [claim('m1', 30_000)],
+    });
+    expect(res.action).toBe('kill-ceiling');
+    if (res.action !== 'kill-ceiling') return;
+    expect(res.idle).toBe(false);
+  });
+
+  it('marks a ceiling kill NOT idle when a tool is in flight', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - ABSOLUTE_CEILING_MS - 1_000,
+      containerState: { current_tool: 'Read', tool_declared_timeout_ms: null, tool_started_at: null },
+      claims: [],
+    });
+    expect(res.action).toBe('kill-ceiling');
+    if (res.action !== 'kill-ceiling') return;
+    expect(res.idle).toBe(false);
+  });
+
   it('skips the ceiling check when no heartbeat file exists (fresh container not yet ticked)', () => {
     // A freshly-spawned container hasn't produced any SDK events yet, so no
     // heartbeat. Prior behavior treated this as infinitely stale and killed

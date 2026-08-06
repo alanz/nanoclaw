@@ -182,7 +182,7 @@ async function notifyChannelOfStartupFailure(session: Session, reason: string): 
 
 export type StuckDecision =
   | { action: 'ok' }
-  | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
+  | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number; idle: boolean }
   | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
 
 /**
@@ -211,7 +211,24 @@ export function decideStuckAction(args: {
     const heartbeatAge = now - heartbeatMtimeMs;
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
-      return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
+      // Two very different situations reach this line, and only one is a fault.
+      //
+      // Idle: the container finished its conversation and the agent-runner is
+      // parked in an open SDK query awaiting the next message (it deliberately
+      // does not close the stream on silence — see the comment block in
+      // container/agent-runner/src/poll-loop.ts). No SDK events arrive while
+      // silent, so nothing touches the heartbeat and it ages out. Reaping it is
+      // the intended lifecycle: the next inbound spawns a fresh container that
+      // resumes the same session from its persisted continuation.
+      //
+      // Stuck: a claimed message or an in-flight tool is outstanding, so work
+      // was owed and the container went silent holding it. That is a fault and
+      // costs someone an answer.
+      //
+      // Both get killed the same way; they must not read the same way in logs,
+      // or a real hang hides among the routine reaps.
+      const idle = claims.length === 0 && !containerState?.current_tool;
+      return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling, idle };
     }
   }
 
@@ -418,13 +435,21 @@ function enforceRunningContainerSla(
   if (decision.action === 'ok') return;
 
   if (decision.action === 'kill-ceiling') {
-    log.warn('Killing container past absolute ceiling', {
-      sessionId: session.id,
-      heartbeatAgeMs: decision.heartbeatAgeMs,
-      ceilingMs: decision.ceilingMs,
-    });
+    if (decision.idle) {
+      log.info('Reaping idle container', {
+        sessionId: session.id,
+        idleMs: decision.heartbeatAgeMs,
+        ceilingMs: decision.ceilingMs,
+      });
+    } else {
+      log.warn('Killing container past absolute ceiling — work outstanding', {
+        sessionId: session.id,
+        heartbeatAgeMs: decision.heartbeatAgeMs,
+        ceilingMs: decision.ceilingMs,
+      });
+    }
     markSessionStuck(session.id);
-    killContainer(session.id, 'absolute-ceiling');
+    killContainer(session.id, decision.idle ? 'idle-ceiling' : 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
     return;
   }

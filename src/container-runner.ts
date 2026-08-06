@@ -125,6 +125,28 @@ export function clearBootCrashState(sessionId: string): void {
   bootCrashes.delete(sessionId);
 }
 
+/**
+ * Sessions the host deliberately stopped, keyed to why, consumed by the `close`
+ * handler below.
+ *
+ * A host-requested stop exits 143 (SIGTERM) with a populated stderr tail, which
+ * is indistinguishable at the exit site from a container that died on its own.
+ * Recording the intent here is what lets an expected shutdown log as an exit
+ * rather than as a fault.
+ */
+const intentionalKills = new Map<string, string>();
+
+/**
+ * Take the recorded kill reason for a session, if the host asked for this exit.
+ * Reading it clears it, so a later unexplained exit is never attributed to an
+ * old kill.
+ */
+function takeKillReason(sessionId: string): string | undefined {
+  const reason = intentionalKills.get(sessionId);
+  intentionalKills.delete(sessionId);
+  return reason;
+}
+
 /** Record a container exit against the session's boot-crash counter. */
 export function recordExit(sessionId: string, code: number | null, ranMs: number, stderrTail: string[]): number {
   // code null = killed by signal (normal shutdown / task-complete), never a
@@ -400,9 +422,23 @@ async function spawnContainer(session: Session): Promise<void> {
     stopTypingRefresh(session.id);
     const ranMs = Date.now() - spawnedAt;
     const crashes = recordExit(session.id, code, ranMs, stderrTail);
+    const killReason = takeKillReason(session.id);
     // code null = killed by signal (normal shutdown path), not a boot failure.
-    if (code !== 0 && code !== null && stderrTail.length > 0) {
+    // A kill the host asked for is not a fault either — whatever prompted it
+    // logged its own reason already, so this line stays informational. The
+    // stderr tail still rides along for a stop that implies something was
+    // wrong; an idle reap has nothing to explain.
+    if (code !== 0 && code !== null && stderrTail.length > 0 && !killReason) {
       log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, ranMs, crashes, stderrTail });
+    } else if (killReason) {
+      log.info('Container exited', {
+        sessionId: session.id,
+        code,
+        containerName,
+        ranMs,
+        killReason,
+        ...(killReason === 'idle-ceiling' ? {} : { stderrTail }),
+      });
     } else {
       log.info('Container exited', { sessionId: session.id, code, containerName });
     }
@@ -443,6 +479,7 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
     entry.process.once('close', onExit);
   }
 
+  intentionalKills.set(sessionId, reason);
   log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
   try {
     stopContainer(entry.containerName);

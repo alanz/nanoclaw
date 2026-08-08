@@ -7,6 +7,10 @@
 > credential proxy against `api.anthropic.com`. Two agents, two credential paths,
 > one DeltaChat bot.
 >
+> Two steps, independently useful:
+> **Step 1** — alternate *model endpoint*, same `claude` harness.
+> **Step 2** — alternate *harness* (OpenCode) for the same group.
+>
 > Guiding constraint: use the **provider seam upstream already ships** rather than
 > inventing a parallel mechanism. The only fork-specific work is teaching the
 > spawn path that a provider may bring its own endpoint.
@@ -267,6 +271,229 @@ ncl groups restart --id <nova-id> --message 'hello from openrouter'
 - Specs: none. Provider selection is not covered by any `specs/*.allium` file;
   if that changes, propose the spec edit rather than writing it
   (see CLAUDE.md).
+
+---
+
+# Step 2: an alternate harness (OpenCode)
+
+> Status: **PLANNED — not yet built.** Captured 2026-08-08. Depends on Step 1
+> only for the spawn-path gate, and on Phase 2 of
+> [docs/native-credential-proxy-plan.md](native-credential-proxy-plan.md) for
+> credentials. Read the "Sequencing" section before starting.
+
+Step 1 swaps the *endpoint* while keeping the Claude Agent SDK as the harness.
+Step 2 swaps the **harness itself** — a different agent loop, different tool
+orchestration, different session model — for one agent group.
+
+## What upstream ships
+
+Three real harnesses (plus `mock`, tests only). `claude` is baked into trunk; the
+other two live on the `upstream/providers` carrier branch:
+
+| Harness | Container deps | Steerable to a custom endpoint? |
+|---|---|---|
+| `claude` | — (baked in) | yes, via `ANTHROPIC_BASE_URL` |
+| `opencode` | `@opencode-ai/sdk@1.4.17` | yes, `baseURL` in its generated config |
+| `codex` | none (drives `codex app-server` over stdio JSON-RPC) | **no** — see "Why not codex first" |
+
+The contract is small (`container/agent-runner/src/providers/types.ts`):
+`query()`, `isSessionInvalid()`, `supportsNativeSlashCommands`,
+`registerMemorySessionHook()`, plus optional `onExchangeComplete` and
+`maybeRotateContinuation`.
+
+> **Do not copy `types.ts` from the providers branch.** That branch is a
+> *carrier*, not a buildable tree — its own `types.ts` is stale (no
+> `ProviderExchange`, no `model`/`effort`) while `codex.ts` on the same branch
+> uses those symbols. The provider files target **trunk's** interface, which this
+> fork already matches. Copy provider files only.
+
+## Fork readiness (good news first)
+
+All the modern seams are already merged here:
+
+- `container/cli-tools.json` + `container/install-cli-tools.sh` — the json-merge
+  CLI manifest that replaced hand-edited Dockerfile layers.
+- `DEFAULT_AGENT_PROVIDER` (`src/config.ts:42`, `src/db/container-configs.ts:66`).
+- `setup/providers/` registry + empty barrel.
+- `providerProvidesAgentSurfaces` consumed at `src/group-init.ts:68`.
+
+`opencode.ts` needs only `mcp-to-opencode.ts` and `../destinations.js` (present),
+and implements `supportsNativeSlashCommands`, `registerMemorySessionHook`,
+`isSessionInvalid`, `query` — conformant against trunk's interface. It does **not**
+need `exchange-archive.ts` (that is codex-only).
+
+## The decisive difference from Step 1: credentials
+
+Step 1 worked because the Claude SDK reads a key from the environment, so putting
+the OpenRouter key in `ANTHROPIC_API_KEY` was enough.
+
+**OpenCode has no such escape hatch.** The container provider hardcodes the
+credential:
+
+```ts
+// upstream/providers:container/agent-runner/src/providers/opencode.ts:282
+options: { apiKey: 'placeholder', baseURL: proxyUrl },
+```
+
+`options.model` and `options.effort` are never read either — the whole config
+comes from `OPENCODE_*` env. The design assumes **something injects the real
+credential on the wire**; upstream that was OneCLI's MITM gateway, which this fork
+removed.
+
+Since `baseURL` *is* steerable, this fork's existing **reverse** proxy is the
+right shape — point `baseURL` at it and let the proxy inject. What is missing is
+per-group routing, i.e. Phase 2 of the credential-proxy plan. That is the whole
+credential story for OpenCode: no new proxy architecture, just profiles.
+
+### Interaction with Step 1's gate — revise it
+
+Step 1 gates the credential-proxy block on
+`!providerContribution.env?.ANTHROPIC_BASE_URL`. The host OpenCode provider
+contributes `ANTHROPIC_BASE_URL` from `.env` (it is in its `PASSTHROUGH_KEYS`), so
+that sniffing gate would **silently opt OpenCode out of the proxy** — the exact
+opposite of what OpenCode needs.
+
+Fix the gate to be explicit rather than inferred: add a
+`bringsOwnCredentials?: boolean` capability to `ProviderHostCapabilities`
+(`src/providers/provider-container-registry.ts`, alongside
+`providesAgentSurfaces`) and gate on that.
+
+- `claude-openrouter` → `bringsOwnCredentials: true` (key in env, skip the proxy).
+- `opencode` → default `false` (keep the proxy; it supplies the credential).
+
+If Step 1 is already built when Step 2 starts, this is a small refactor of that
+gate — not new work. If Step 2 is on the roadmap, build Step 1's gate this way
+from the start.
+
+## Sequencing
+
+**Phase 2 of the credential-proxy plan first, then OpenCode as its first
+consumer.** Building OpenCode first means shipping a container-side patch to that
+`apiKey: 'placeholder'` line — a file owned wholesale by the install skill, so the
+patch is drift that a re-run silently reverts, and it is deleted again once
+profiles land. The only reason to invert the order is a throwaway spike to see
+OpenCode answer a message at all; if so, label it a spike and revert it.
+
+This also settles the credential-proxy plan's own "worth-it check", which
+concluded the work protected exactly one key (Brave). OpenCode adds a second
+consumer, and codex would add a third.
+
+## Blockers specific to this fork
+
+1. **An image rebuild is now required** — unlike Step 1. `/app/node_modules` is
+   baked from `agent-runner/bun.lock` at build time (`container/Dockerfile:73-81`,
+   recorded in the `dev.nanoclaw.agent-runner-lock-sha256` label), so adding
+   `@opencode-ai/sdk` means a rebuild. `/app/src` being bind-mounted does not help
+   here. Pre-start the Apple Container builder with `--memory 8g` or the build is
+   Killed; `container/build.sh:152` only starts it if not already running.
+2. **Supply-chain asymmetry.** The agent-runner tree is Bun, so
+   `minimumReleaseAge` does **not** apply to `bun add @opencode-ai/sdk@1.4.17` —
+   pin deliberately, never `bun update`. The `opencode-ai` **CLI** goes through
+   `cli-tools.json` → `pnpm install -g`, where the policy *does* apply. If the CLI
+   turns out to need a postinstall, `"onlyBuilt": true` requires explicit owner
+   sign-off per CLAUDE.md — do not add it unilaterally.
+3. **SDK and CLI versions must match exactly (1.4.x).** 1.14.x changes session ids
+   (`ses_` prefix) and is incompatible with SDK 1.4.x. Never `latest`.
+
+## Corrections to the bundled `add-opencode` skill
+
+The copy at `.claude/skills/add-opencode/SKILL.md` predates seams this fork now
+has. Do not follow it literally:
+
+| Skill step | Reality here |
+|---|---|
+| 5 — add `ARG OPENCODE_VERSION` + a `RUN pnpm install -g` block to the Dockerfile | The Dockerfile has no per-CLI blocks; add one `{ "name": "opencode-ai", "version": "1.4.17" }` entry to `container/cli-tools.json` |
+| 6 — copy `opencode-dockerfile.test.ts` | That guard asserts the `ARG` exists and **fails** against the cli-tools.json Dockerfile. Replace it with a manifest-entry assertion or drop it |
+| 8 — propagate to per-group `agent-runner-src` overlays | No overlays exist here; `/app/src` is one shared RO mount (`src/container-runner.ts:646`). No-op |
+| Credentials via `onecli secrets create` | No OneCLI in this fork — see the credential section above |
+
+Steps 1–4 and 7 (fetch, copy files, wire barrels, `bun add`, validate) are sound.
+
+## Limitations you inherit (accept or fix deliberately)
+
+- **`--model` / `--effort` are ignored.** OpenCode reads `OPENCODE_MODEL` /
+  `OPENCODE_SMALL_MODEL` from host `.env`, and never `options.model`. Those are
+  **host-global**, so every OpenCode group shares one model — per-group model
+  selection, which Step 1 gives you for free, does not exist here without
+  patching the provider. Fine for one experimental group; a real limit if OpenCode
+  spreads.
+- **No `conversations/` archive.** OpenCode keeps no on-disk transcript and does
+  not implement `onExchangeComplete`, so an OpenCode group produces no markdown
+  exchange archive the way a `claude` group does
+  (`container/agent-runner/src/providers/claude.ts:309`). Anything in this fork
+  that reads `conversations/` sees nothing for that group.
+- **Memory does not carry across a harness switch.** Same caveat as Step 1 —
+  `/migrate-memory` exists for moving an existing group.
+- **`NO_PROXY` for localhost matters.** The host provider merges
+  `127.0.0.1,localhost` into `NO_PROXY`/`no_proxy` so the in-container OpenCode
+  client can reach its own `opencode serve`. Keep that if the MITM forward proxy
+  from Phase 2 ever sets `HTTPS_PROXY`.
+
+## Why not codex first
+
+Codex is the more interesting harness (server-side history, no on-disk
+transcript) and the more expensive one here, for reasons unrelated to its quality:
+
+- **Not steerable to a custom endpoint at all.** `writeCodexConfigToml` emits
+  `sandbox_mode`, `model`, `effort` and MCP servers but **no `model_providers` /
+  `base_url` block**, and `CODEX_ENV_ALLOWLIST`
+  (`codex-app-server.ts:82`) omits `OPENAI_API_KEY` while admitting `HTTPS_PROXY`,
+  `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE`. That list is a
+  forward-MITM shopping list: codex only works behind the *full* proxy from the
+  credential-proxy plan, not the reverse-proxy half OpenCode needs.
+- **It mounts a single file.** The host contribution RO-mounts a composed
+  `AGENTS.md` at `/workspace/agent/AGENTS.md`, and Apple Container has no
+  file-level bind mounts (`src/container-runner.ts:639`) — the same wall already
+  worked around for `container.json` (`:618-621`).
+- **`buildMounts` lacks the surfaces gate.** Upstream gates default Claude
+  surfaces at `container-runner.ts:303`
+  (`defaultSurfaces = !providerProvidesAgentSurfaces(provider)`); this fork's
+  `buildMounts` does not take `provider` at all and syncs Claude skill symlinks
+  unconditionally. Codex declares `providesAgentSurfaces: true`, so it would get
+  both surface sets mounted. Fork drift from the Apple Container rewrite; a
+  prerequisite for codex, irrelevant to OpenCode.
+
+None of this blocks OpenCode. Revisit codex once Phase 2's forward proxy exists.
+
+## Touch list (when building)
+
+- `container/cli-tools.json` — add `opencode-ai` pinned to `1.4.17`.
+- `container/agent-runner/package.json` + `bun.lock` — `bun add
+  @opencode-ai/sdk@1.4.17` (run `bun install` in that tree, never `pnpm`).
+- Copy from `upstream/providers`: `src/providers/opencode.ts`,
+  `container/agent-runner/src/providers/opencode.ts`, `mcp-to-opencode.ts`, and
+  the registration/factory/mcp tests. **Not** `types.ts`, **not**
+  `exchange-archive.ts`, **not** `opencode-dockerfile.test.ts`.
+- Barrel imports in `src/providers/index.ts` and
+  `container/agent-runner/src/providers/index.ts`.
+- `src/providers/provider-container-registry.ts` — add `bringsOwnCredentials` to
+  `ProviderHostCapabilities`; re-point Step 1's gate at it.
+- `.env` — `OPENCODE_PROVIDER=openrouter`, `OPENCODE_MODEL`,
+  `OPENCODE_SMALL_MODEL`. Comments on their own lines: a `#` inside a value is
+  kept verbatim and breaks model ids.
+- Tests: both registration guards; a `buildContainerArgs` case asserting an
+  OpenCode group **keeps** the proxy env (the mirror of Step 1's assertion).
+- Validation: `pnpm run build`, `pnpm test`,
+  `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit`, then
+  `./container/build.sh` — **a rebuild is required this time**.
+- Verify with `ncl groups config update --id <g> --provider opencode` +
+  `ncl groups restart`. A clean round-trip shows no `Unknown provider: opencode`
+  and no UUID/session warnings.
+
+## Open decisions (Step 2)
+
+1. **Phase 2 scope.** OpenCode needs only the *reverse*-proxy half (per-group
+   upstream + credential). Build just that, or the full forward MITM at once
+   because codex will need it anyway?
+2. **Per-group model.** Accept the host-global `OPENCODE_MODEL` limitation, or
+   patch the provider to honour `options.model` (a skill-owned file — drift) or
+   move the `OPENCODE_*` values into the host provider's per-group contribution?
+3. **Exchange archiving.** Leave OpenCode groups without a `conversations/`
+   archive, or implement `onExchangeComplete` for it using the codex payload's
+   `exchange-archive.ts` as the model?
+4. **Keep or drop the stale skill.** Correct
+   `.claude/skills/add-opencode/SKILL.md` in place, or treat this doc as the
+   install procedure and leave the skill unused?
 
 [or-docs]: https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration
 [or-blog]: https://openrouter.ai/blog/tutorials/claude-code-openrouter/

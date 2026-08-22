@@ -19,6 +19,7 @@ import {
   markDelivered,
   markDeliveryFailed,
   markMessageFailed,
+  failPendingMessages,
   migrateDeliveredTable,
   migrateMessagesInTable,
   openInboundDb,
@@ -200,6 +201,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     insertMessage: async (message) => insertMessage(db, message, nextSequence()),
     countDueMessages: () => countDueMessages(db),
     markMessageFailed: (messageId) => markMessageFailed(db, messageId),
+    failPendingMessages: () => failPendingMessages(db),
     retryWithBackoff: (messageId, backoffSec) => retryWithBackoff(db, messageId, backoffSec),
     getMessageForRetry: (messageId, status) => {
       const row = getMessageForRetry(db, messageId, status);

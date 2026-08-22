@@ -96,6 +96,17 @@ export interface InboundMailbox {
   insertMessage(message: InboundMessage): Promise<void>;
   countDueMessages(): number;
   markMessageFailed(messageId: string): void;
+  /**
+   * Fail every message still waiting to be picked up, returning how many.
+   *
+   * The retry machinery walks messages a container CLAIMED and then died
+   * holding. A container that dies before it polls claims nothing, so those
+   * messages are unreachable by id from the host's side — there is no claim
+   * to enumerate them from. This is the only way to end them, and without it
+   * a session whose container cannot start leaves its sender in silence for
+   * as long as the fault persists.
+   */
+  failPendingMessages(): number;
   retryWithBackoff(messageId: string, backoffSec: number): void;
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;
   applyProcessingAcks(acks: ProcessingAck[]): void;

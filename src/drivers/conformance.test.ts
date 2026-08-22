@@ -16,11 +16,20 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { appleDialect } from './apple-driver.js';
+import type { RuntimeDialect } from './dialect.js';
 import { DockerSessionDriver } from './docker-driver.js';
 import { FakeCli } from './fake-cli.js';
 import { withSessionEvents, type SessionEventsDriver } from './session-events.js';
 import { FIXTURE_POLICY, fixtureSpec, fixtureSpecWithAux } from './spec-fixture.js';
-import { GROUP_FOLDER_LABEL, LABELS, validateSpec, type DriverCapabilities, type SessionSpec } from './types.js';
+import {
+  GROUP_FOLDER_LABEL,
+  LABELS,
+  validateSpec,
+  type DriverCapabilities,
+  type SessionPhase,
+  type SessionSpec,
+} from './types.js';
 
 vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
@@ -45,6 +54,27 @@ interface Realized {
   labels: Record<string, string>;
 }
 
+/** A container the runtime is to report, in vocabulary no runtime owns. */
+interface SeedRow {
+  name: string;
+  phase: SessionPhase;
+  group: string;
+  session: string;
+}
+
+/**
+ * How one runtime spells the answers this suite seeds.
+ *
+ * Seeding raw `ps -a` text here would pin the suite to Docker — the assertions
+ * would still read as driver-neutral while only one driver could ever satisfy
+ * them. A dialect renders its own answers instead, and the case states what
+ * the runtime *reports*, not how.
+ */
+interface DialectFixtures {
+  list(installSlug: string, rows: readonly SeedRow[]): { match: RegExp; output: string };
+  inspect(install: string, group: string, session: string): { match: RegExp; output: string };
+}
+
 type Harness = {
   name: string;
   driver: SessionEventsDriver;
@@ -52,17 +82,93 @@ type Harness = {
   realize(spec: SessionSpec): Promise<Realized>;
   /** Make the next realization fail with a runtime message of the given shape. */
   failWith(message: string): void;
+  /** Seed what the runtime reports for "which containers does this install have". */
+  seedList(installSlug: string, rows: readonly SeedRow[]): void;
+  /** Seed the canonical labels the runtime reports for an existing container. */
+  seedExisting(install: string, group: string, session: string): void;
 };
 
+const dockerFixtures: DialectFixtures = {
+  list: (_installSlug, rows) => ({
+    match: /^ps -a/,
+    output: rows.map((r) => `${r.name}|${dockerState(r.phase)}|${r.group}|${r.session}`).join('\n') + '\n',
+  }),
+  inspect: (install, group, session) => ({ match: /^inspect /, output: `${install}|${group}|${session}\n` }),
+};
+
+function dockerState(phase: SessionPhase): string {
+  return phase === 'running' ? 'running' : phase === 'starting' ? 'created' : 'exited';
+}
+
+const appleFixtures: DialectFixtures = {
+  list: (installSlug, rows) => ({
+    match: /^ls --all/,
+    output: JSON.stringify(
+      rows.map((r) => ({
+        id: r.name,
+        configuration: {
+          id: r.name,
+          labels: {
+            [LABELS.install]: installSlug,
+            [LABELS.group]: r.group,
+            [LABELS.session]: r.session,
+            [LABELS.role]: 'agent',
+          },
+        },
+        status: { state: appleState(r.phase) },
+      })),
+    ),
+  }),
+  inspect: (install, group, session) => ({
+    match: /^inspect /,
+    output: JSON.stringify([
+      {
+        id: 'ncl-spike-s1',
+        configuration: {
+          id: 'ncl-spike-s1',
+          labels: {
+            [LABELS.install]: install,
+            [LABELS.group]: group,
+            [LABELS.session]: session,
+            [LABELS.role]: 'agent',
+          },
+        },
+        status: { state: 'running' },
+      },
+    ]),
+  }),
+};
+
+function appleState(phase: SessionPhase): string {
+  return phase === 'running' ? 'running' : phase === 'starting' ? 'created' : 'stopped';
+}
+
 function dockerHarness(): Harness {
-  const cli = new FakeCli('docker');
+  return cliHarness('docker', new FakeCli('docker'), undefined, dockerFixtures);
+}
+
+/**
+ * The Apple Container dialect drives the same realization policy through the
+ * same `create` argv, so it reuses this harness wholesale — which is the point
+ * of the dialect seam, and the reason this file needed no per-driver branch.
+ */
+function appleHarness(): Harness {
+  return cliHarness('apple', new FakeCli('container'), appleDialect, appleFixtures);
+}
+
+function cliHarness(
+  name: string,
+  cli: FakeCli,
+  dialect: RuntimeDialect | undefined,
+  fixtures: DialectFixtures,
+): Harness {
   cli.responses = [{ match: /^inspect /, throws: new Error('No such object') }];
   // Wrapped exactly as `createSessionDriver` wraps it in production: the
   // conformance surface is the seam consumers see, and `onTerminal` lives in
   // the session-events hub, not in any driver.
-  const driver = withSessionEvents(new DockerSessionDriver({ ...FIXTURE_POLICY, cli }));
+  const driver = withSessionEvents(new DockerSessionDriver({ ...FIXTURE_POLICY, cli, dialect }));
   return {
-    name: 'docker',
+    name,
     driver,
     cli,
     async realize(spec) {
@@ -96,13 +202,19 @@ function dockerHarness(): Harness {
         { match: /^create /, throws: new Error(message) },
       ];
     },
+    seedList(installSlug, rows) {
+      cli.responses = [fixtures.list(installSlug, rows)];
+    },
+    seedExisting(install, group, session) {
+      cli.responses = [fixtures.inspect(install, group, session)];
+    },
   };
 }
 
 let harnesses: Harness[];
 beforeEach(() => {
   vi.clearAllMocks();
-  harnesses = [dockerHarness()];
+  harnesses = [dockerHarness(), appleHarness()];
 });
 
 /**
@@ -669,7 +781,7 @@ describe('conformance: lifecycle', () => {
   eachDriver('prepare is idempotent on key', async (h) => {
     // An existing live session for this key IS the session — this is also how
     // adoption works.
-    h.cli.responses = [{ match: /^inspect /, output: 'spike|g1|s1\n' }];
+    h.seedExisting('spike', 'g1', 's1');
 
     const first = await h.driver.prepare(fixtureSpec());
     const second = await h.driver.prepare(fixtureSpec());
@@ -717,7 +829,7 @@ describe('conformance: lifecycle', () => {
   });
 
   eachDriver('reconstructs adopted handles from labels alone', async (h) => {
-    h.cli.responses = [{ match: /^ps -a/, output: 'ncl-spike-s1|running|g1|s1\n' }];
+    h.seedList('spike', [{ name: 'ncl-spike-s1', phase: 'running', group: 'g1', session: 's1' }]);
 
     const snapshots = await h.driver.listSessions('spike');
 
@@ -730,12 +842,11 @@ describe('conformance: lifecycle', () => {
     // Fix 2's pinned behavior: adoption must tell adoptable sessions from
     // corpses (and from prepared-not-started incarnations) WITHOUT a
     // per-handle status() round trip.
-    h.cli.responses = [
-      {
-        match: /^ps -a/,
-        output: 'ncl-spike-s1|running|g1|s1\nncl-spike-s2|exited|g2|s2\nncl-spike-s3|created|g3|s3\n',
-      },
-    ];
+    h.seedList('spike', [
+      { name: 'ncl-spike-s1', phase: 'running', group: 'g1', session: 's1' },
+      { name: 'ncl-spike-s2', phase: 'terminal', group: 'g2', session: 's2' },
+      { name: 'ncl-spike-s3', phase: 'starting', group: 'g3', session: 's3' },
+    ]);
 
     const snapshots = await h.driver.listSessions('spike');
 
@@ -776,7 +887,9 @@ describe('conformance: capabilities are honest', () => {
     expect(capabilities.admissionEnforced).toBe(false);
     expect(capabilities.networkPolicy).toBe('topology');
     expect(capabilities.sharedNetworkNamespace).toBe(false);
-    expect(capabilities.auxiliaryContainers).toBe(true);
+    // Auxiliary containers need a per-session private network; Apple's
+    // dialect cannot build one, so it declares the capability absent.
+    expect(capabilities.auxiliaryContainers).toBe(h.name !== 'apple');
     // The session daemon doubles as the build daemon: rebuild-in-place works.
     expect(capabilities.imageBuild).toBe(true);
   });

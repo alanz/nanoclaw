@@ -440,6 +440,21 @@ class DockerHandle implements SessionHandle {
     private readonly emit: (event: SessionEvent) => void,
   ) {}
 
+  /**
+   * The container's last words, when it had any. Omitted rather than sent
+   * empty: an absent tail and a captured-but-silent one are different facts,
+   * and only the caller can decide what to do about the difference.
+   */
+  #died(exitCode: number): Extract<SessionFailure, { kind: 'started-then-died' }> {
+    const failure: Extract<SessionFailure, { kind: 'started-then-died' }> = {
+      kind: 'started-then-died',
+      retryable: false,
+      exitCode,
+    };
+    if (this.#stderrTail.length > 0) failure.stderrTail = [...this.#stderrTail];
+    return failure;
+  }
+
   async start(): Promise<void> {
     if (this.#proc) return; // idempotent
     for (const auxiliary of this.auxiliaryNames) {
@@ -482,7 +497,7 @@ class DockerHandle implements SessionHandle {
       if (!this.#stopping && typeof this.#attachExitCode === 'number' && this.#attachExitCode !== 0) {
         return {
           phase: 'failed',
-          failure: { kind: 'started-then-died', retryable: false, exitCode: this.#attachExitCode },
+          failure: this.#died(this.#attachExitCode),
         };
       }
       if (!this.#stopping && this.#proc && this.#attachExitCode === undefined) {
@@ -523,7 +538,7 @@ class DockerHandle implements SessionHandle {
     }
     if (status === 'created') return { phase: 'ready' };
     if (status === 'exited' && exit !== '0') {
-      return { phase: 'failed', failure: { kind: 'started-then-died', retryable: false, exitCode: Number(exit) } };
+      return { phase: 'failed', failure: this.#died(Number(exit)) };
     }
     return { phase: 'stopped' };
   }

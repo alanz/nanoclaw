@@ -35,6 +35,8 @@
   "dependencies": {
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
+    "@deltachat/jsonrpc-client": "^2.62.0",
+    "@deltachat/stdio-rpc-server": "^2.62.0",
     "better-sqlite3": "13.0.3",
     "chat": "4.29.0",
     "cron-parser": "5.5.0",

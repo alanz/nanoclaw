@@ -189,6 +189,10 @@ export const askUserQuestion: McpToolDefinition = {
 
     const questionId = generateId();
     const r = routing();
+    // When this call stops waiting. Channels without buttons use it to stop
+    // matching unquoted replies to the card (agent-to-agent.allium
+    // QuestionAnsweredByReply).
+    const expiresAt = new Date(Date.now() + timeout).toISOString();
 
     // Write question card to outbound.db
     await writeMessageOut({
@@ -203,6 +207,7 @@ export const askUserQuestion: McpToolDefinition = {
         title,
         question,
         options,
+        expiresAt,
       }),
     });
 

@@ -202,6 +202,24 @@ describe('buildMounts against the policy the drivers enforce', () => {
     expect(() => validateSpec(spec, mountPolicy())).toThrow(/denied-by-policy/);
   });
 
+  it('keeps module (session-contributor) mounts under a declared provider contract', async () => {
+    // The declared contract replaces the provider's callback mounts; module
+    // mounts ride their own lane and must survive it — the memory index was
+    // dropped exactly this way after the 2026-09-29 rebase.
+    const memoryDir = path.join(DATA_DIR, 'v2-memory', 'mount-composition-memory');
+    fs.mkdirSync(memoryDir, { recursive: true });
+    try {
+      const mounts = await buildMounts(agentGroup, session, containerConfig, 'claude', {}, undefined, [
+        { hostPath: memoryDir, containerPath: '/workspace/memory', readonly: true },
+      ]);
+      const memory = mounts.find((m) => m.containerPath === '/workspace/memory');
+      expect(memory).toMatchObject({ hostPath: memoryDir, readonly: true, mountClass: 'allowlisted-extra' });
+      expect(() => validateSpec(specFrom(mounts), mountPolicy())).not.toThrow();
+    } finally {
+      fs.rmSync(memoryDir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses the central DB dressed up as a release surface', async () => {
     const spec = specFrom(await composedMounts());
     spec.containers[0].mounts.push({

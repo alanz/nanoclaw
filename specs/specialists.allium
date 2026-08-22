@@ -1,0 +1,1959 @@
+-- allium: 3
+-- specialists.allium
+--
+-- Scope: Specialist orchestration — AgentGroups designated as typed task workers
+--        dispatched by the main group. A specialist is an AgentGroup that has a
+--        Specialist row in identity.allium.
+-- Includes: SpecialistTask lifecycle, delegation from main group, sub-task dispatch,
+--           chain limit enforcement (depth/count/same-type/cycle), memory provider
+--           bypass, result routing back to requester, overall task timeout,
+--           per-task session provisioning, container crash/restart recovery.
+-- Excludes: AgentGroup / Specialist registration (identity.allium), session lifecycle
+--           (sessions.allium), agent-to-agent messaging infra (agent-to-agent.allium).
+
+use "./identity.allium" as identity
+use "./sessions.allium" as sessions
+use "./agent-to-agent.allium" as a2a
+use "./routing.allium" as routing
+use "./null-channel.allium" as null_channel
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- The boundary between an agent container's MCP tool layer and the host.
+-- The agent (a main-group or specialist container) calls these tools and
+-- the host receives the request as an external stimulus on the rules
+-- below. The surface enumerates only the agent-initiated entry points;
+-- host-emitted system events (e.g. SpecialistContainerProcessing,
+-- HostTookOwnership, IpcInPopulated, ContainerInvocationStarted /
+-- ContainerInvocationEnded) are internal to the host and do not cross
+-- this boundary.
+
+surface SpecialistMcpTools {
+    facing agent: sessions/Session
+
+    provides:
+        AgentRequestsDispatchSpecialist(agent, specialist_group_id, prompt)
+        AgentRequestsDispatchSubTask(agent, specialist_group_id, prompt)
+        AgentRequestsDeliverSpecialistResult(agent, result_text, file_paths?, commit_to_memory?)
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum SpecialistTaskStatus {
+    queued | running | awaiting_sub_task | awaiting_restart | completed | failed
+}
+
+enum SpecialistFailureKind {
+    cycle_detected | depth_exceeded | count_exceeded
+    | same_type_limit_exceeded | timeout | execution_error | host_restart
+}
+
+enum IpcMountStatus { active | cleared }
+
+enum TransferStatus {
+    pending     -- host has taken ownership; awaiting recipient invocation
+    | in_transit -- recipient invocation has started; files placed in its ipc-in
+    | committed  -- files were committed to the requester group's memory area
+    | expired    -- transfer no longer needed; staging copies may be reclaimed
+}
+
+enum TransferFileStatus {
+    owned    -- host has taken ownership; copied to host-managed storage
+    | placed -- in the recipient invocation's ipc-in mount
+    | expired -- recipient task is terminal; storage may be reclaimed
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value TaskFailure {
+    kind: SpecialistFailureKind
+    detail: String
+}
+
+-- One run of a container, identified by a unique id assigned by the host at
+-- start time. A specialist task may span multiple invocations: an initial
+-- start, plus one re-invocation per sub-task result it consumes. A main-group
+-- container run is also a single invocation. Invocations are the unit of
+-- per-run isolation for ipc-out and ipc-in: each invocation gets a fresh,
+-- empty ipc-out and an ipc-in populated only with the files staged for it.
+value Invocation {
+    id: String
+    session: sessions/Session   -- the session whose container is running this invocation
+    task: SpecialistTask?       -- non-null when the invocation is for a specialist task
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_specialist_depth: Integer = 5
+    max_chain_delegations: Integer = 20
+    max_same_type_dispatches: Integer = 3
+    max_task_duration: Duration = 4.hours
+    max_sub_task_await: Duration = 30.minutes
+    max_restart_retries: Integer = 2
+    default_last_turn_sub_notice: String = "[Final iteration: this is your last opportunity to respond. Provide your best conclusive output as no further iterations will occur.]"
+    default_last_turn_parent_notice: String = "[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]"
+    -- Container-side mount points for the per-invocation file-handover area.
+    -- ipc_out is the staging area the specialist writes files to before delivery;
+    -- ipc_in is the area the host populates with files staged by other invocations
+    -- whose transfers target this one. Mounts are managed by the host: ipc_out is
+    -- read-write to the container, ipc_in is read-only.
+    ipc_out_container_path: String = "/workspace/ipc-out"
+    ipc_in_container_path: String = "/workspace/ipc-in"
+    -- Path inside a group's workspace where committed memory files are placed.
+    -- Resolved against requester_group.folder when commit_to_memory is true.
+    memory_reports_subpath: String = "memory/reports"
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- A SpecialistTask records one dispatch into a specialist agent group. Root
+-- tasks are dispatched by the main group (requester_group set, requester_task
+-- null). Sub-tasks are dispatched by another specialist (requester_task set,
+-- requester_group null). A task moves from queued (recorded by the host)
+-- through running (the specialist's container is processing the prompt) to
+-- either completed (the specialist returned a result) or failed (timeout,
+-- chain-policy rejection or execution error). awaiting_sub_task is the
+-- intermediate state held while the specialist's own dispatch_sub_task call
+-- is being processed by a child task; the parent resumes to running once the
+-- child's result is routed back.
+
+entity SpecialistTask {
+    id: String
+    specialist_group: identity/AgentGroup
+    prompt: String
+    requester_group: identity/AgentGroup?
+    requester_task: SpecialistTask?
+    -- The session that dispatched this task. For root tasks this is the
+    -- main-agent session that receives the result; for sub-tasks this is
+    -- the parent specialist's per-task session. Result routing for sub-
+    -- tasks follows requester_task, not this field.
+    requester_session: sessions/Session
+    depth: Integer
+    chain_delegation_count: Integer
+    ancestor_groups: Set<identity/AgentGroup>
+    is_last_same_type_dispatch: Boolean
+    status: SpecialistTaskStatus
+    dispatched_at: Timestamp
+    restart_attempt_count: Integer
+    closed_at: Timestamp?
+
+    pending_sub_task: SpecialistTask when status = awaiting_sub_task
+    result: String when status = completed
+    -- Workspace-relative paths of files committed to the requester group's
+    -- memory area when the specialist delivered with commit_to_memory = true.
+    -- Empty when the specialist delivered text only or staged files to ipc-in.
+    committed_files: List<String>? when status = completed
+    failure: TaskFailure when status = failed
+
+    has_cycle: specialist_group in ancestor_groups
+    is_overdue: status in {queued, running, awaiting_sub_task, awaiting_restart}
+                and now - dispatched_at > config.max_task_duration
+    sub_task_await_overdue: status = awaiting_sub_task
+                            and pending_sub_task != null
+                            and (pending_sub_task.dispatched_at + config.max_sub_task_await) <= now
+
+    transitions status {
+        queued -> running
+        queued -> failed
+        running -> awaiting_sub_task
+        running -> awaiting_restart
+        running -> completed
+        running -> failed
+        awaiting_sub_task -> awaiting_restart
+        awaiting_sub_task -> running
+        awaiting_sub_task -> failed
+        awaiting_restart -> running
+        awaiting_restart -> failed
+        terminal: completed, failed
+    }
+
+    invariant ExactlyOneRequester {
+        (requester_group != null) != (requester_task != null)
+    }
+
+    invariant DepthMatchesAncestorCount {
+        depth = ancestor_groups.count
+    }
+
+    invariant SpecialistGroupMustBeSpecialist {
+        exists specialist_group.specialist
+    }
+}
+
+-- ---------------------------------------------------------------
+-- File handover: per-invocation ipc-out / ipc-in mounts and transfers
+-- ---------------------------------------------------------------
+--
+-- Specialists may return files alongside their textual result. The handover
+-- is mediated by two host-managed mounts:
+--
+--   ipc_out_container_path  (read-write)  the running container writes files here
+--   ipc_in_container_path   (read-only)   the host populates here before start
+--
+-- When a specialist calls deliver_specialist_result with file_paths, the host
+-- takes ownership of those files (copies them to host-managed storage and
+-- removes them from ipc-out) and records the handover as a ContainerTransfer
+-- with one TransferFile per path. The transfer's downstream behaviour
+-- depends on commit_to_memory (carried on the transfer):
+--
+--   commit_to_memory = true  files are copied into the requester group's
+--                            workspace under memory_reports_subpath; the
+--                            committed paths are recorded on the parent task
+--                            as committed_files. The result text is path-
+--                            rewritten so the requester reads the memory
+--                            paths, not the original ipc-out paths.
+--   commit_to_memory = false files are placed under ipc_in_container_path
+--                            in the requester invocation's ipc-in mount on
+--                            its next start. The result text is path-rewritten
+--                            to reference the in-container ipc-in paths.
+--
+-- Routing (root vs sub-task) chooses the requester invocation; the file-
+-- handover lifecycle is the same in both cases.
+
+-- The outbound staging area for one invocation. Created fresh by the host
+-- when the invocation starts; cleared when the invocation ends. Files
+-- written here are immediate-staging only; files not consumed by a delivery
+-- are discarded at invocation end.
+entity IpcOutMount {
+    invocation: Invocation
+    status: IpcMountStatus
+
+    transitions status {
+        active -> cleared
+        terminal: cleared
+    }
+}
+
+-- The inbound staging area for one invocation. Created and populated by the
+-- host immediately before the container process begins. Contains only files
+-- explicitly placed there for transfers targeting this invocation. Cleared
+-- by the host at invocation end.
+entity IpcInMount {
+    invocation: Invocation
+    status: IpcMountStatus
+
+    transitions status {
+        active -> cleared
+        terminal: cleared
+    }
+}
+
+-- A file-handover bundle from a specialist task back to its requester. Each
+-- transfer carries zero or more files plus the accompanying result text and
+-- the commit_to_memory flag that determines whether the files end up in the
+-- requester group's memory area or in the requester invocation's ipc-in.
+-- One ContainerTransfer per delivery; multiple deliveries within a single
+-- task are not modelled (the deliver tool is fire-and-forget and exits the
+-- container).
+entity ContainerTransfer {
+    task: SpecialistTask              -- the delivering task
+    sender_invocation: Invocation     -- the specific invocation that wrote ipc-out
+    result_text: String               -- the rewritten result text the requester sees
+    commit_to_memory: Boolean
+    file_count: Integer
+    sent_at: Timestamp
+    status: TransferStatus
+
+    files: TransferFile with transfer = this
+
+    transitions status {
+        pending -> in_transit       -- placed into the requester invocation's ipc-in
+        pending -> committed        -- files committed to memory; no ipc-in placement
+        pending -> expired          -- empty transfer or no surviving files at expiry
+        in_transit -> pending       -- recipient invocation ended before its task reached terminal; re-stage on next invocation
+        in_transit -> expired       -- requester task reached terminal state
+        committed -> expired        -- staging copies reclaimed; memory copies persist
+        terminal: expired
+    }
+}
+
+-- One file in a ContainerTransfer. The host records the file's original
+-- ipc-out name, the host-managed storage path it was copied to, and (when
+-- the transfer commits to memory) the workspace-relative final path under
+-- the requester group's memory_reports_subpath.
+entity TransferFile {
+    transfer: ContainerTransfer
+    original_name: String     -- file name as written into ipc-out
+    host_path: String         -- absolute path in host-managed storage after ownership transfer
+    status: TransferFileStatus
+
+    -- Workspace-relative path under the requester group's folder when the
+    -- transfer committed to memory; null otherwise. Set on the commit path
+    -- so memory placements can be recorded once and persist after the
+    -- transfer expires (the memory copy survives staging cleanup).
+    memory_path: String?
+
+    transitions status {
+        owned -> placed
+        placed -> owned             -- recipient invocation ended before its task reached terminal; re-place on next invocation
+        placed -> expired
+        terminal: expired
+    }
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+------------------------------------------------------------
+-- Root dispatch (main group -> specialist)
+------------------------------------------------------------
+
+-- The main group's agent calls dispatch_specialist. The host creates a
+-- SpecialistTask and provisions a fresh per-task Session keyed on the task
+-- id (messaging_group = null, thread_id = task.id). The task prompt is
+-- written as the triggering inbound message into that session. The
+-- specialist's AgentGroup folder is mounted read-only into its container;
+-- the per-task session DBs are the only mutable surfaces.
+
+rule MainGroupDispatchesSpecialist {
+    when: AgentRequestsDispatchSpecialist(session, specialist_group_id, prompt)
+    requires: session.agent_group.is_main = true
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    let null_mg = routing/MessagingGroup{
+        channel_type: null_channel/config.channel_type,
+        platform_id: null_channel/config.singleton_platform_id
+    }
+    requires: exists null_mg
+    ensures:
+        let task = SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: session.agent_group,
+            requester_task: null,
+            requester_session: session,
+            depth: 0,
+            chain_delegation_count: 1,
+            ancestor_groups: {},
+            is_last_same_type_dispatch: false,
+            status: queued,
+            dispatched_at: now,
+            restart_attempt_count: 0,
+            closed_at: null
+        )
+        let task_session = sessions/Session.created(
+            agent_group: target_group,
+            messaging_group: null_mg,
+            thread_id: task.id,
+            status: active,
+            processing_state: idle,
+            last_active: now,
+            created_at: now
+        )
+        sessions/InboundMessage.created(
+            session: task_session,
+            seq: next_inbound_seq(task_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: prompt,
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: task_session)
+}
+
+------------------------------------------------------------
+-- Specialist container picks up the task
+------------------------------------------------------------
+
+-- When the host begins processing the trigger inbound message inside the
+-- specialist's container, the corresponding SpecialistTask transitions from
+-- queued (first start) or awaiting_restart (after a crash recovery) to
+-- running. SpecialistContainerProcessing is emitted by the host when it
+-- observes the task's per-task Session moving into the processing state.
+
+rule SpecialistTaskStarted {
+    when: SpecialistContainerProcessing(task)
+    requires: task.status in {queued, awaiting_restart}
+    ensures:
+        task.status = running
+
+    @guidance
+        -- A task remains in queued while its specialist's container is
+        -- unavailable at dispatch time (image not built, OneCLI agent not
+        -- yet provisioned, runtime unreachable) or while it is waiting in
+        -- the host's in-memory concurrency queue for a slot to free. The
+        -- host retries container startup; the task only leaves queued when
+        -- one of the following occurs:
+        --   - the container begins processing the trigger inbound message
+        --     and this rule fires (queued -> running);
+        --   - the overall task timeout fires via SpecialistTaskTimedOut
+        --     (queued -> failed with kind = timeout).
+        -- A container that simply cannot be started yet is treated as a
+        -- transient infrastructure delay, not an immediate execution
+        -- failure. There is no queued -> failed/execution_error transition
+        -- for unavailability at dispatch time; execution_error is reserved
+        -- for failures observed once the container is processing.
+        --
+        -- There is no queued -> awaiting_restart transition. Crash
+        -- detection (SpecialistContainerCrashed) is gated on
+        -- task.status = running and does not consume restart_attempt_count
+        -- for a queued task. The presence of a queued task without a
+        -- running container is normal — it indicates either a transient
+        -- startup delay or a waiting-for-slot condition, neither of which
+        -- is a crash.
+}
+
+------------------------------------------------------------
+-- Sub-task dispatch (specialist -> specialist)
+------------------------------------------------------------
+
+-- A running specialist may call dispatch_sub_task to delegate further work
+-- to another specialist. Memory providers may not delegate (they are
+-- read-only lookups). Five outcomes are possible: cycle, depth exceeded,
+-- chain count exceeded, same-type count exceeded, or accepted dispatch.
+-- The four rejection rules and the accepted-dispatch rule are mutually
+-- exclusive on their guards.
+--
+-- Per-task session: the child task receives its own Session (messaging_group
+-- = null, thread_id = child.id), isolating its inbound/outbound DBs from
+-- all other tasks and from the type template folder (mounted read-only).
+--
+-- Last-turn notice: format_task_prompt(child) returns the task's prompt
+-- text optionally suffixed with the specialist's last_turn_sub_notice
+-- (falling back to config.default_last_turn_sub_notice) when
+-- child.is_last_same_type_dispatch = true. The notice is baked into the
+-- triggering InboundMessage so the container sees it on first pickup.
+
+rule SpecialistDispatchesSubTask {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count < config.max_chain_delegations
+    requires: same_type_dispatch_count(parent_task, target_group)
+              < config.max_same_type_dispatches
+    let is_last = same_type_dispatch_count(parent_task, target_group)
+                  = config.max_same_type_dispatches - 1
+    let null_mg = routing/MessagingGroup{
+        channel_type: null_channel/config.channel_type,
+        platform_id: null_channel/config.singleton_platform_id
+    }
+    requires: exists null_mg
+    ensures:
+        let child = SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            requester_session: session,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: is_last,
+            status: queued,
+            dispatched_at: now,
+            restart_attempt_count: 0,
+            closed_at: null
+        )
+        parent_task.status = awaiting_sub_task
+        parent_task.pending_sub_task = child
+        let child_session = sessions/Session.created(
+            agent_group: target_group,
+            messaging_group: null_mg,
+            thread_id: child.id,
+            status: active,
+            processing_state: idle,
+            last_active: now,
+            created_at: now
+        )
+        sessions/InboundMessage.created(
+            session: child_session,
+            seq: next_inbound_seq(child_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: format_task_prompt(child),
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: child_session)
+}
+
+-- Cycle: the requested target appears in the parent's ancestor chain.
+-- Memory providers are not gated by this check, so the rule guards on
+-- non-memory-provider targets.
+
+rule SubTaskRejectedCycle {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: target_group in parent_task.ancestor_groups
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            requester_session: session,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: cycle_detected,
+                detail: "target specialist appears in dispatch chain"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: cycle detected"
+        )
+}
+
+-- Depth exceeded: this dispatch would push the chain past max_specialist_depth.
+
+rule SubTaskRejectedDepth {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 >= config.max_specialist_depth
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            requester_session: session,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: depth_exceeded,
+                detail: "specialist chain depth limit reached"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: depth limit reached"
+        )
+}
+
+-- Chain count exceeded: total delegations along this branch would exceed
+-- max_chain_delegations.
+
+rule SubTaskRejectedCount {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count >= config.max_chain_delegations
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            requester_session: session,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: count_exceeded,
+                detail: "specialist chain delegation count limit reached"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: chain delegation limit reached"
+        )
+}
+
+-- Same-type limit exceeded: parent has already dispatched to this same
+-- specialist group max_same_type_dispatches times.
+
+rule SubTaskRejectedSameTypeLimit {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = false
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    requires: not (target_group in parent_task.ancestor_groups)
+    requires: parent_task.depth + 1 < config.max_specialist_depth
+    requires: parent_task.chain_delegation_count < config.max_chain_delegations
+    requires: same_type_dispatch_count(parent_task, target_group)
+              >= config.max_same_type_dispatches
+    ensures:
+        SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            requester_session: session,
+            depth: parent_task.depth + 1,
+            chain_delegation_count: parent_task.chain_delegation_count + 1,
+            ancestor_groups: parent_task.ancestor_groups + {parent_task.specialist_group},
+            is_last_same_type_dispatch: false,
+            status: failed,
+            dispatched_at: now,
+            closed_at: now,
+            failure: TaskFailure{
+                kind: same_type_limit_exceeded,
+                detail: "specialist same-type dispatch limit reached"
+            }
+        )
+        a2a/AgentNotified(
+            session: session,
+            text: "sub-task rejected: same-type dispatch limit reached"
+        )
+}
+
+-- Memory provider dispatch: bypasses cycle/depth/count/same-type checks
+-- and is invisible to the chain counters. Memory provider lookups are
+-- transparent reads, not true delegations: the child task copies the
+-- parent's depth, chain_delegation_count and ancestor_groups unchanged,
+-- so a memory provider call neither consumes a delegation slot nor
+-- shortens the remaining depth budget. Memory providers are read-only;
+-- they cannot themselves delegate (enforced by SpecialistDispatchesSubTask's
+-- requesting-side guard and the MemoryProviderDoesNotDelegate invariant).
+-- The parent still moves into awaiting_sub_task while the lookup runs.
+
+rule MemoryProviderDispatched {
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    requires: exists session.agent_group.specialist
+    requires: session.agent_group.specialist.is_memory_provider = false
+    let target_group = identity/AgentGroup{id: specialist_group_id}
+    requires: exists target_group
+    requires: exists target_group.specialist
+    requires: target_group.specialist.is_memory_provider = true
+    let parent_task = running_task_for_group(session.agent_group)
+    requires: exists parent_task
+    requires: parent_task.status = running
+    let null_mg = routing/MessagingGroup{
+        channel_type: null_channel/config.channel_type,
+        platform_id: null_channel/config.singleton_platform_id
+    }
+    requires: exists null_mg
+    ensures:
+        let child = SpecialistTask.created(
+            specialist_group: target_group,
+            prompt: prompt,
+            requester_group: null,
+            requester_task: parent_task,
+            requester_session: session,
+            depth: parent_task.depth,
+            chain_delegation_count: parent_task.chain_delegation_count,
+            ancestor_groups: parent_task.ancestor_groups,
+            is_last_same_type_dispatch: false,
+            status: queued,
+            dispatched_at: now,
+            restart_attempt_count: 0,
+            closed_at: null
+        )
+        parent_task.status = awaiting_sub_task
+        parent_task.pending_sub_task = child
+        let child_session = sessions/Session.created(
+            agent_group: target_group,
+            messaging_group: null_mg,
+            thread_id: child.id,
+            status: active,
+            processing_state: idle,
+            last_active: now,
+            created_at: now
+        )
+        sessions/InboundMessage.created(
+            session: child_session,
+            seq: next_inbound_seq(child_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: prompt,
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: child_session)
+}
+
+------------------------------------------------------------
+-- Result delivery and routing
+------------------------------------------------------------
+
+-- The specialist calls deliver_specialist_result. The host transitions the
+-- running task to completed, captures the result text, and emits
+-- SpecialistResultReady so the result can be routed back to the requester.
+--
+-- file_paths and commit_to_memory are optional. When file_paths is non-null
+-- and non-empty, the host validates that each path exists under the
+-- specialist's ipc-out mount, takes ownership of the files (copies them to
+-- host-managed storage and removes them from ipc-out), and records a
+-- ContainerTransfer plus one TransferFile per path. The file-handover
+-- lifecycle continues independently of the SpecialistResultReady routing
+-- below: routing rules consume the transfer when they place files into the
+-- requester's ipc-in or commit them to memory.
+--
+-- commit_to_memory = null is treated identically to commit_to_memory = false
+-- (default behaviour: stage to ipc-in). When commit_to_memory = true and
+-- file_paths is null or empty, the flag is ignored and the result is
+-- delivered as plain text.
+rule SpecialistDeliveredResult {
+    when: AgentRequestsDeliverSpecialistResult(session, result_text, file_paths?, commit_to_memory?)
+    let task = running_task_for_group(session.agent_group)
+    let invocation = invocation_for_session(session)
+    let paths = file_paths
+    let commit = commit_to_memory ?? false
+    requires: exists task
+    requires: task.status = running
+    let resolved_text = resolve_delivery_paths(task, result_text, paths, commit)
+    let has_files = paths != null and paths.count > 0
+    ensures:
+        task.status = completed
+        task.result = resolved_text
+        task.closed_at = now
+        if has_files:
+            let transfer = ContainerTransfer.created(
+                task: task,
+                sender_invocation: invocation,
+                result_text: resolved_text,
+                commit_to_memory: commit,
+                file_count: paths.count,
+                sent_at: now,
+                status: pending
+            )
+            HostTookOwnership(
+                invocation: invocation,
+                transfer: transfer,
+                file_paths: paths
+            )
+        SpecialistResultReady(task: task)
+
+    @guidance
+        -- resolve_delivery_paths is a black box function. It returns the
+        -- result_text with any references to ipc-out paths rewritten to the
+        -- paths the requester will see:
+        --   commit_to_memory = true   ipc-out paths -> "{memory_reports_subpath}/<basename>"
+        --                             relative to the requester group's workspace
+        --   commit_to_memory = false  ipc-out paths -> "{ipc_in_container_path}/{transfer_id}/<basename>"
+        --                             as the requester's container will see them
+        -- When file_paths is null or empty, resolved_text = result_text unchanged.
+        --
+        -- HostTookOwnership is a per-file action emitted as a system event:
+        -- for each path p in file_paths, the host copies the file from ipc-out
+        -- to host-managed storage and creates a TransferFile(transfer, original_name:
+        -- basename(p), host_path: <storage>, status: owned). Files are removed
+        -- from ipc-out as part of the same action; the rule TransferFilesOwned
+        -- below witnesses the staged -> owned transition for each file.
+        --
+        -- invocation_for_session resolves the current Invocation for the
+        -- specialist's session (the one that wrote ipc-out). It is the same
+        -- invocation that emitted SpecialistContainerProcessing earlier.
+        --
+        -- Sub-task commit_to_memory degradation. When commit_to_memory = true
+        -- and the task is a sub-task (task.requester_task != null,
+        -- task.requester_group = null), resolve_delivery_paths silently
+        -- degrades: it treats commit_to_memory as false and rewrites ipc-out
+        -- paths to ipc-in paths instead of memory paths. The files are staged
+        -- to the parent's ipc-in via the normal in_transit path; no error is
+        -- returned to the specialist.
+        --
+        -- This is intentional. Specialists are designed to be composable and
+        -- should not need to know their position in the dispatch chain. A
+        -- specialist that prefers commit_to_memory = true will still have its
+        -- files delivered; they just land in the parent's ipc-in rather than
+        -- the main group's memory area. Rejecting commit_to_memory on sub-task
+        -- deliveries with a structured error would couple specialist behaviour
+        -- to chain position and break composability.
+        --
+        -- Only root-task deliveries (task.requester_group != null) can commit
+        -- files to memory. SpecialistResultRoutedToMain is the only place
+        -- where commit_to_memory = true takes effect; it copies files into the
+        -- requester group's memory area and records the workspace-relative
+        -- paths on the task's committed_files. SpecialistResultRoutedToParent
+        -- never commits to memory (the parent specialist is not a memory-area
+        -- owner).
+}
+
+-- The host has taken ownership of staged files. This rule witnesses the
+-- file-by-file transition emitted via HostTookOwnership. It does not
+-- describe the underlying copy and unlink operations — those are the host's
+-- responsibility — but it captures the resulting TransferFile records and
+-- their owned status.
+rule TransferFilesOwned {
+    when: HostTookOwnership(invocation, transfer, file_paths)
+    for path in file_paths:
+        ensures: TransferFile.created(
+            transfer: transfer,
+            original_name: basename(path),
+            host_path: host_storage_path(invocation, path),
+            status: owned,
+            memory_path: null
+        )
+
+    @guidance
+        -- basename and host_storage_path are black box functions that map an
+        -- ipc-out path to the file's basename and to a stable host-managed
+        -- storage path keyed on the originating invocation. The host removes
+        -- each file from ipc-out as part of the same action; that removal is
+        -- not modelled per-file here because ipc-out is cleared at invocation
+        -- end (see InvocationEnded), making the per-file removal an
+        -- implementation detail of the eager unlink, not a separate state.
+}
+
+-- Root tasks (dispatched by the main group) route their result back into
+-- the main group's agent_shared session as a triggering inbound message.
+--
+-- When a ContainerTransfer exists for the task, the file-handover side of
+-- routing is dispatched here too: commit_to_memory = true copies files into
+-- the requester group's memory area and records the workspace-relative
+-- paths on the parent task; commit_to_memory = false stages files for
+-- placement in the requester invocation's ipc-in mount on its next start.
+-- The result text used in the inbound message is the already-rewritten
+-- transfer.result_text when a transfer exists, otherwise the formatted
+-- task outcome.
+
+rule SpecialistResultRoutedToMain {
+    when: SpecialistResultReady(task)
+    requires: task.requester_group != null
+    let main_session = task.requester_session
+    let transfer = ContainerTransfer{task: task}
+    requires: main_session.status = active
+    ensures:
+        if exists transfer and transfer.commit_to_memory:
+            for f in transfer.files:
+                f.memory_path = group_memory_report_path(task.requester_group, f.original_name)
+            task.committed_files = group_memory_report_paths(task.requester_group, transfer)
+            transfer.status = committed
+        sessions/InboundMessage.created(
+            session: main_session,
+            seq: next_inbound_seq(main_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: routed_message_text(task, transfer),
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: main_session)
+
+    @guidance
+        -- routed_message_text returns transfer.result_text when transfer is
+        -- not null (already path-rewritten by resolve_delivery_paths during
+        -- delivery), otherwise format_specialist_outcome(task).
+        --
+        -- group_memory_report_path constructs the workspace-relative path:
+        --   "{config.memory_reports_subpath}/{original_name}"
+        -- group_memory_report_paths returns the list of such paths for every
+        -- file in the transfer, in the order they were originally listed.
+        -- The host copies each TransferFile from host-managed storage into
+        -- {requester_group.folder}/{memory_path} as part of this action.
+        --
+        -- Sub-task transfers (commit_to_memory = true with no requester_group)
+        -- fall through to SpecialistResultRoutedToParent and stage to ipc-in:
+        -- only root-task deliveries can commit to memory. The deliver tool
+        -- documentation should make this clear; the resolve_delivery_paths
+        -- helper degrades gracefully (treats commit_to_memory as false when
+        -- task.requester_group is null) so the specialist still gets file
+        -- handover even if it requested commit on a sub-task delivery.
+        --
+        -- Memory commit collision policy: when two deliveries produce the
+        -- same group_memory_report_path (same requester_group, same
+        -- original_name basename), the later host copy silently overwrites
+        -- the earlier one on disk. Both deliveries' result messages
+        -- reference the same path, so the requester sees the most-recently-
+        -- committed content at that path. This is intentional; no collision
+        -- detection or disambiguation (timestamping, task-id prefixing) is
+        -- performed. A future revision may prefix the workspace-relative
+        -- path with a task id to avoid collisions, but that would require a
+        -- corresponding change to resolve_delivery_paths so the rewritten
+        -- result_text reflects the disambiguated path.
+        --
+        -- The committed transfer status is a transient intermediate state.
+        -- The host transitions the transfer pending -> committed -> expired
+        -- in a single synchronous operation along this routing path: the
+        -- memory_path is recorded on each TransferFile, the workspace files
+        -- are written to the requester group's memory area, and the staging
+        -- copies are reclaimed immediately because the requester has no
+        -- ipc-in to wait on (commit-to-memory bypasses ipc-in entirely).
+        -- The memory copies on disk are preserved; only the transfer record
+        -- is expired. As a result no separate expiry rule is needed for
+        -- root-task transfers in status = committed: by the time any other
+        -- rule (TransferExpiredOnRequesterTerminal, the recipient-invocation
+        -- expiry, or any observer) could see them they are already in
+        -- status = expired. The committed value persists in the enum so the
+        -- transition graph and the CommitAndPlaceMutuallyExclusive
+        -- invariant remain expressible, but no live transfer ever rests in
+        -- it.
+}
+
+-- Sub-tasks route their result back into the parent specialist's per-task
+-- session. specialist_task_session(parent_task) resolves the Session whose
+-- thread_id = parent_task.id — the same session provisioned when the parent
+-- task was created. The parent task transitions from awaiting_sub_task back
+-- to running; the pending_sub_task pointer is cleared.
+--
+-- Parent notice: format_specialist_outcome(task) appends the specialist's
+-- last_turn_parent_notice (falling back to config.default_last_turn_parent_notice)
+-- when task.is_last_same_type_dispatch = true, so the parent container
+-- knows no further responses will follow from this specialist.
+--
+-- Correlation: the child task's id is embedded in format_specialist_outcome
+-- so the parent container can match the result to its original dispatch call.
+
+rule SpecialistResultRoutedToParent {
+    when: SpecialistResultReady(task)
+    requires: task.requester_task != null
+    requires: task.requester_task.status = awaiting_sub_task
+    let parent_task = task.requester_task
+    let parent_session = specialist_task_session(parent_task)
+    let transfer = ContainerTransfer{task: task}
+    requires: parent_session.status = active
+    ensures:
+        parent_task.status = running
+        parent_task.pending_sub_task = null
+        sessions/InboundMessage.created(
+            session: parent_session,
+            seq: next_inbound_seq(parent_session),
+            kind: "chat",
+            status: pending,
+            trigger: true,
+            content: routed_message_text(task, transfer),
+            process_after: null,
+            tries: 0,
+            created_at: now
+        )
+        sessions/SessionWoken(session: parent_session)
+
+    @guidance
+        -- Sub-task deliveries do not commit to memory: the parent specialist
+        -- is not a memory-area owner. When transfer is non-null its files
+        -- transition owned -> placed when the parent's next invocation starts
+        -- (see TransferFilesPlaced); transfer.status moves pending -> in_transit
+        -- at the same boundary.
+}
+
+-- Failure routing: when a task transitions to failed (timeout, execution
+-- error, or chain rejection), notify the requester the same way a result
+-- would be. SpecialistResultRoutedToMain / SpecialistResultRoutedToParent
+-- both subscribe to SpecialistResultReady so the routing rule for failures
+-- emits the same trigger.
+
+rule SpecialistFailureRoutedToRequester {
+    when: task: SpecialistTask.status transitions_to failed
+    ensures: SpecialistResultReady(task: task)
+
+    @guidance
+        -- This rule fires for every task that reaches failed, including
+        -- sub-tasks rejected immediately at dispatch time by
+        -- SubTaskRejectedCycle, SubTaskRejectedDepth, SubTaskRejectedCount
+        -- and SubTaskRejectedSameTypeLimit (each of which creates the
+        -- child task directly in status = failed). Two distinct routing
+        -- shapes follow from the SpecialistResultReady emission:
+        --
+        --   1. Normally-failed tasks (those that went through queued or
+        --      running before failing — timeout, execution_error, host_restart):
+        --      the parent task is in awaiting_sub_task, so
+        --      SpecialistResultRoutedToParent matches and routes the
+        --      failure into the parent's session as a triggering inbound
+        --      message. Root-task failures route via
+        --      SpecialistResultRoutedToMain in the same way.
+        --
+        --   2. Immediately-rejected sub-tasks (cycle / depth / count /
+        --      same-type rejections): the rejection rule creates the child
+        --      task already in status = failed and the parent task remains
+        --      in status = running (it never enters awaiting_sub_task).
+        --      SpecialistResultRoutedToParent's
+        --      requires: task.requester_task.status = awaiting_sub_task
+        --      is therefore false, and SpecialistResultRoutedToMain's
+        --      requires: task.requester_group != null is also false (sub-
+        --      tasks have requester_group = null). The
+        --      SpecialistResultReady event is deliberately unmatched in
+        --      this case. The AgentNotified event emitted directly by the
+        --      rejection rule is the canonical and sufficient notification
+        --      mechanism: it surfaces the rejection on the parent
+        --      specialist's session synchronously without dragging the
+        --      parent through an awaiting_sub_task -> running cycle.
+}
+
+-- Overall task timeout. A task that has been live (queued, running, or
+-- awaiting_sub_task) longer than max_task_duration is marked failed with
+-- a timeout failure and the result-ready event is emitted so the requester
+-- can be notified.
+
+rule SpecialistTaskTimedOut {
+    when: task: SpecialistTask.is_overdue
+    requires: task.status in {queued, running, awaiting_sub_task, awaiting_restart}
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: timeout,
+            detail: "task exceeded maximum duration"
+        }
+        task.closed_at = now
+        SpecialistResultReady(task: task)
+}
+
+------------------------------------------------------------
+-- Invocation lifecycle and file handover
+------------------------------------------------------------
+
+-- An invocation starts when the host launches a container for a session.
+-- ContainerInvocationStarted carries the host-assigned id and links to the
+-- session and (for specialist tasks) the task. The host creates fresh
+-- ipc-out and ipc-in mounts for the invocation. ipc-in is populated with
+-- any TransferFiles in status = owned whose transfer targets the
+-- recipient session of this invocation, before the container process
+-- begins reading its inbound message.
+
+rule InvocationStarted {
+    when: ContainerInvocationStarted(invocation)
+    ensures:
+        IpcOutMount.created(invocation: invocation, status: active)
+        IpcInMount.created(invocation: invocation, status: active)
+        IpcInPopulated(invocation: invocation)
+
+    @guidance
+        -- IpcInPopulated is a system event the host emits after copying all
+        -- TransferFiles whose transfer targets this invocation into ipc-in.
+        -- The host derives the ipc-in container path for each file as
+        --   "{config.ipc_in_container_path}/{transfer_id}/{f.original_name}"
+        -- using the transfer id as a per-transfer subdirectory to prevent
+        -- name collisions when multiple transfers arrive for the same
+        -- invocation (e.g. results from two specialist sub-tasks delivered
+        -- before the parent resumed).
+}
+
+-- Orphan invocation cleanup. When a new invocation begins for a session
+-- that already has an active invocation (no ContainerInvocationEnded was
+-- ever observed for the previous one — typically because the runtime did
+-- not deliver a container-close event), the previous invocation's mounts
+-- are cleared as if InvocationEnded had fired for it. Together with the
+-- AtMostOneActiveInvocationPerSession invariant this enforces that a
+-- session has at most one active invocation at any moment.
+
+rule OrphanInvocationEnded {
+    when: ContainerInvocationStarted(new_invocation)
+    let orphan = active_invocation_for_session(new_invocation.session)
+    requires: exists orphan
+    requires: orphan != new_invocation
+    let orphan_out = IpcOutMount{invocation: orphan}
+    let orphan_in = IpcInMount{invocation: orphan}
+    requires: exists orphan_out
+    requires: exists orphan_in
+    requires: orphan_out.status = active
+    requires: orphan_in.status = active
+    ensures:
+        orphan_out.status = cleared
+        orphan_in.status = cleared
+
+    @guidance
+        -- active_invocation_for_session(session) is a black box that returns
+        -- the Invocation for which an IpcOutMount with status = active still
+        -- exists for that session, or null if none does. The host populates
+        -- this from its in-memory invocation registry; the spec models it as
+        -- a query over current mount state.
+        --
+        -- The host enforces "at most one active invocation per session" by
+        -- ending any orphan synchronously before creating the new
+        -- invocation's mounts. This rule covers the recovery path where the
+        -- container runtime did not emit a close event for the previous
+        -- invocation (observed empirically with the Apple Container runtime).
+        -- Files staged in the orphan's ipc-out at this point are discarded;
+        -- a delivery that did not complete before the orphan went silent has
+        -- already been treated as a lost invocation upstream.
+        --
+        -- This rule does not emit ContainerInvocationEnded for the orphan;
+        -- if the runtime later emits a close event for the orphan it will
+        -- find the mounts already in status = cleared and InvocationEnded's
+        -- active-status guards will treat it as a no-op.
+}
+
+-- When ipc-in is populated for an invocation, every TransferFile in status
+-- = owned whose transfer targets that invocation transitions to placed,
+-- and the covering ContainerTransfer transitions pending -> in_transit.
+-- transfer_targets_invocation is a black box function: for sub-task
+-- transfers it returns true when invocation is the requester_task's next
+-- invocation; for root-task transfers it returns true when invocation is
+-- the requester_group's main session's next invocation. commit-to-memory
+-- transfers are not placed in ipc-in (they were committed to memory at
+-- routing time and transitioned to status = committed).
+
+rule TransferFilesPlaced {
+    when: IpcInPopulated(invocation)
+    for f in TransferFiles where status = owned and transfer_targets_invocation(transfer, invocation):
+        ensures: f.status = placed
+
+    @guidance
+        -- transfer_targets_invocation returns false for any transfer whose
+        -- status has already moved past pending (committed, in_transit,
+        -- expired); it implicitly only matches pending transfers whose
+        -- recipient is this invocation.
+}
+
+rule TransferMovedToInTransit {
+    when: IpcInPopulated(invocation)
+    for t in ContainerTransfers where status = pending and transfer_targets_invocation(t, invocation):
+        ensures: t.status = in_transit
+}
+
+-- Mid-invocation placement. When a transfer is staged at result-routing
+-- time and the recipient session already has a live (running) invocation,
+-- the host copies the transfer's files into that invocation's ipc-in
+-- directly rather than waiting for the recipient's next ContainerInvocationStarted.
+-- This handles the race where the recipient container was already running
+-- when the specialist delivered its result: the spawn-time IpcInPopulated
+-- ran before the transfer existed, so without this rule the files would
+-- never reach the running container's ipc-in.
+--
+-- Sub-task transfers between specialist deliveries don't usually hit this
+-- path: the parent specialist's container exits when it dispatches a
+-- sub-task and is restarted by the host only after the child's result is
+-- routed, so the transfer is placed via the spawn-time IpcInPopulated of
+-- the new parent invocation. The mid-invocation race is the main-group
+-- case where the main session's container is long-running and accepting
+-- inbound messages while specialists deliver.
+
+rule TransferPlacedIntoLiveIpcIn {
+    when: SpecialistResultReady(task)
+    let transfer = ContainerTransfer{task: task}
+    requires: exists transfer
+    requires: transfer.status = pending
+    requires: transfer.commit_to_memory = false
+    let recipient_session = recipient_session_for_transfer(transfer)
+    requires: exists recipient_session
+    let live = active_invocation_for_session(recipient_session)
+    requires: exists live
+    ensures:
+        for f in transfer.files where status = owned:
+            f.status = placed
+        transfer.status = in_transit
+
+    @guidance
+        -- recipient_session_for_transfer(transfer) returns:
+        --   for sub-task transfers (transfer.task.requester_task != null):
+        --     the parent task's per-task session
+        --     (specialist_task_session(transfer.task.requester_task))
+        --   for root-task transfers (transfer.task.requester_group != null):
+        --     transfer.task.requester_session (the main-agent session that
+        --     dispatched the root task)
+        -- This mirrors the recipient resolution in
+        -- SpecialistResultRoutedToParent and SpecialistResultRoutedToMain.
+        --
+        -- active_invocation_for_session(session) returns the Invocation for
+        -- which an IpcOutMount with status = active exists for that session,
+        -- or null if none does. The same helper is used by
+        -- OrphanInvocationEnded and InvocationEndedOnTaskTerminal.
+        --
+        -- Mid-invocation placement is mutually exclusive with
+        -- TransferFilesPlaced / TransferMovedToInTransit: those fire on
+        -- IpcInPopulated at the recipient's next start, by which time this
+        -- rule has already advanced the transfer to in_transit and its
+        -- files to placed. transfer_targets_invocation, used by the
+        -- IpcInPopulated rules, returns false for any transfer not in
+        -- status = pending, so a transfer placed mid-invocation here will
+        -- not be re-placed when the recipient subsequently starts a new
+        -- invocation.
+        --
+        -- commit_to_memory = true transfers are excluded: they are
+        -- committed to the requester group's memory area in
+        -- SpecialistResultRoutedToMain (which fires off the same trigger)
+        -- and never enter ipc-in.
+}
+
+-- An invocation ends when the container process exits. The host clears
+-- both mounts. Files remaining in ipc-out that were not consumed by a
+-- delivery are discarded as part of the clear.
+
+rule InvocationEnded {
+    when: ContainerInvocationEnded(invocation)
+    let out = IpcOutMount{invocation: invocation}
+    let in_ = IpcInMount{invocation: invocation}
+    requires: exists out
+    requires: exists in_
+    requires: out.status = active
+    requires: in_.status = active
+    ensures:
+        out.status = cleared
+        in_.status = cleared
+
+    @guidance
+        -- The active-status requires clauses make this rule idempotent: if
+        -- the mounts have already been cleared by OrphanInvocationEnded
+        -- (orphan recovery at the next ContainerInvocationStarted) or by
+        -- InvocationEndedOnTaskTerminal (host-driven synchronous end at
+        -- task terminal transition), a late or duplicate
+        -- ContainerInvocationEnded is silently dropped.
+        --
+        -- ipc-out is cleared on every container exit, including the exit
+        -- caused by a dispatch_sub_task call (where the parent task
+        -- transitions running -> awaiting_sub_task and the parent's
+        -- container terminates while the child runs). There is no
+        -- "pause-and-preserve" path: the awaiting_sub_task boundary is a
+        -- hard ipc-out reset, identical to any other invocation end.
+        --
+        -- Files written to ipc-out before a dispatch_sub_task call are
+        -- discarded when the parent container exits for the sub-task
+        -- dispatch. They will not be present in the resumed invocation's
+        -- ipc-out (each invocation gets a fresh, empty ipc-out per the
+        -- per-invocation isolation model documented on Invocation).
+        --
+        -- A specialist that intends to include files in its final delivery
+        -- must call deliver_specialist_result (which consumes those files
+        -- from ipc-out via HostTookOwnership) before calling
+        -- dispatch_sub_task. Calling dispatch_sub_task with unconsumed
+        -- ipc-out files is a specialist authoring error; the files are
+        -- silently lost. The deliver tool is fire-and-forget and exits the
+        -- container, so the natural ordering "deliver, then any further
+        -- delegation" is forced by the lifecycle: a specialist that
+        -- delivers cannot subsequently dispatch a sub-task on the same
+        -- task, and a specialist that dispatches a sub-task must defer all
+        -- file production until after the sub-task result returns and the
+        -- parent resumes in a fresh invocation with a fresh ipc-out.
+        --
+        -- This is consistent with the per-invocation isolation model: each
+        -- invocation starts with a fresh, empty ipc-out and an ipc-in
+        -- populated only with files staged for that invocation by
+        -- transfers targeting it.
+}
+
+-- Synchronous invocation end at task terminal transition. When a
+-- specialist task reaches a terminal state (completed or failed), the
+-- host clears the active invocation's mounts immediately, without waiting
+-- for ContainerInvocationEnded. This is more reliable than relying on the
+-- container-close event, which some runtimes do not deliver promptly (or
+-- at all).
+--
+-- Two parallel rules cover the two terminal transitions. They share an
+-- emitted internal event SpecialistTaskReachedTerminal so the cleanup
+-- logic only appears once, in InvocationEndedOnTaskTerminal.
+
+rule SpecialistTaskCompletedTerminal {
+    when: task: SpecialistTask.status transitions_to completed
+    ensures: SpecialistTaskReachedTerminal(task: task)
+}
+
+rule SpecialistTaskFailedTerminal {
+    when: task: SpecialistTask.status transitions_to failed
+    ensures: SpecialistTaskReachedTerminal(task: task)
+}
+
+rule InvocationEndedOnTaskTerminal {
+    when: SpecialistTaskReachedTerminal(task)
+    let session = specialist_task_session(task)
+    requires: exists session
+    let live = active_invocation_for_session(session)
+    requires: exists live
+    let out = IpcOutMount{invocation: live}
+    let in_ = IpcInMount{invocation: live}
+    requires: exists out
+    requires: exists in_
+    requires: out.status = active
+    requires: in_.status = active
+    ensures:
+        out.status = cleared
+        in_.status = cleared
+
+    @guidance
+        -- This rule fires synchronously on the host when a specialist task
+        -- reaches a terminal state, before the container process actually
+        -- exits. ContainerInvocationEnded for the same invocation may fire
+        -- afterward, but InvocationEnded's active-status guards make that
+        -- subsequent firing a no-op (the mounts are already cleared).
+        --
+        -- specialist_task_session(task) is null for tasks created directly
+        -- in status = failed by the sub-task rejection rules
+        -- (SubTaskRejectedCycle/Depth/Count/SameTypeLimit). For those tasks
+        -- no session was provisioned and no invocation exists; the
+        -- exists session and exists live guards together skip the rule.
+        --
+        -- For tasks failed by ChildSubtreeCancelledOnParentCrash propagation
+        -- a session was provisioned but no invocation may currently be
+        -- running (the child container may not have started). The exists
+        -- live guard handles this case the same way.
+}
+
+-- Per-task session closure at task terminal transition. A specialist task's
+-- per-task Session must be closed once the task itself reaches a terminal
+-- state (completed or failed). Without this, the session remains
+-- status = active in the central session store with any still-pending
+-- inbound messages indefinitely eligible for redelivery, and the host sweep
+-- will keep waking a container for a task that is already concluded.
+--
+-- Closing the session is the canonical signal that no further container
+-- work will happen for this task. It guards every wake/queue rule
+-- downstream (each of which requires session.status = active) from
+-- reopening work against a terminated task.
+--
+-- This rule fires from the same SpecialistTaskReachedTerminal event as
+-- InvocationEndedOnTaskTerminal; the two run as siblings. Invocation
+-- mounts are cleared by the sibling rule, and the session itself is
+-- closed here.
+--
+-- Idempotence: the requires guard on session.status = active makes this
+-- rule a no-op if some other path (e.g. an admin invoking CloseSession on
+-- this session) has already closed it.
+
+rule SpecialistTaskSessionClosed {
+    when: SpecialistTaskReachedTerminal(task)
+    let session = specialist_task_session(task)
+    requires: exists session
+    requires: session.status = active
+    ensures:
+        session.status = closed
+
+    @guidance
+        -- specialist_task_session(task) is null for tasks created directly
+        -- in status = failed by the sub-task rejection rules
+        -- (SubTaskRejectedCycle/Depth/Count/SameTypeLimit). For those tasks
+        -- no session was provisioned and the exists session guard skips the
+        -- rule, matching the behaviour of InvocationEndedOnTaskTerminal.
+        --
+        -- Pending inbound messages on the closed session. In the central
+        -- session store, any messages_in row still in status = pending at
+        -- the moment of closure is also marked failed by the host, so a
+        -- stale sweep that reopens the inbound DB cannot revive it as work
+        -- to wake the container with. This is defensive cleanup against
+        -- redelivery; once the session is closed the downstream wake rules
+        -- (WakeOnInbound, ScheduledInboundDue, ContainerSlotFreed,
+        -- StuckSessionRecovered, StuckSessionQueued) all guard on
+        -- session.status = active and would not fire regardless.
+        --
+        -- The InboundMessage transition graph in sessions.allium does not
+        -- include a pending -> failed edge, so this fail-pending action is
+        -- not modelled as a rule-level ensures here. The host's behaviour
+        -- is recorded as guidance pending a sessions.allium revision that
+        -- adds the edge; see the open question
+        -- "InboundMessage pending -> failed edge for session closure" below.
+        --
+        -- Distinct from SessionClosed in sessions.allium. SessionClosed
+        -- requires an admin actor and an external CloseSession trigger;
+        -- this rule is system-driven from a task terminal transition with
+        -- no actor. The two paths are independent and converge on the same
+        -- session.status = closed terminal state in sessions.allium's
+        -- transition graph.
+}
+
+-- Transfers expire when the requester task reaches a terminal state.
+-- Both the in-transit (sub-task to parent) and committed (sub-task or root
+-- to memory) shapes converge here: staging copies in host-managed storage
+-- can be reclaimed, while memory copies on disk persist. For root-task
+-- transfers (requester_group != null), the requester is the main group
+-- session, which has no terminal state in the same sense as a task; the
+-- expiry is gated on the delivering task itself reaching a terminal state,
+-- which it always does at delivery time. For sub-task transfers, expiry
+-- waits for the parent task's terminal transition so files remain
+-- available across any retries of the parent.
+
+-- When the requester task reaches a terminal state, the transfer files are
+-- no longer needed and may be reclaimed from host-managed storage. Memory
+-- copies persist on disk regardless because they live in the requester
+-- group's workspace, not the staging area.
+--
+-- For sub-task transfers, the requester is t.task.requester_task; expiry
+-- waits for that parent task's terminal transition so files remain
+-- available across any retries of the parent. For root-task transfers,
+-- there is no parent task; the rule TransferExpiredOnRecipientInvocationEnded
+-- below covers that case when the main-agent recipient invocation ends.
+
+rule TransferExpiredOnRequesterTerminal {
+    when: parent: SpecialistTask.status transitions_to completed
+    for t in ContainerTransfers where status in { in_transit, committed } and is_transfer_for_requester(t, parent):
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+
+    @guidance
+        -- is_transfer_for_requester(t, parent) is true when parent =
+        -- t.task.requester_task. For root-task transfers (requester_group
+        -- set, requester_task null), the function returns false; expiry
+        -- of those is handled in TransferExpiredOnRecipientInvocationEnded.
+}
+
+rule TransferExpiredOnRequesterFailed {
+    when: parent: SpecialistTask.status transitions_to failed
+    for t in ContainerTransfers where status in { in_transit, committed } and is_transfer_for_requester(t, parent):
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+}
+
+-- Root-task transfers expire when the recipient (main-agent) session's
+-- invocation ends. The main-agent session has no associated SpecialistTask,
+-- so its invocation lifecycle is the sole reliable expiry boundary for
+-- in_transit transfers staged into its ipc-in. When ContainerInvocationEnded
+-- fires for such an invocation, every in_transit transfer whose recipient is
+-- that session is expired and its files reclaimed from host-managed storage.
+
+rule TransferExpiredOnRecipientInvocationEnded {
+    when: ContainerInvocationEnded(invocation)
+    requires: invocation.task = null
+    for t in ContainerTransfers where status = in_transit and recipient_session_for_transfer(t) = invocation.session:
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+
+    @guidance
+        -- Why invocation-end is a sound proxy for "message consumed" on the
+        -- main-agent path. The routed delivery is consumed by the agent in a
+        -- single turn: the container reads the result text and any files
+        -- placed in ipc-in, then the invocation ends. There is no retry
+        -- semantics for a given delivery — the InboundMessage carrying the
+        -- result is processed once, and the next invocation gets a fresh,
+        -- empty ipc-in (per the per-invocation isolation model). Once the
+        -- recipient invocation ends, the staged files cannot be re-read by
+        -- any future invocation, so the staging copies are safe to reclaim.
+        --
+        -- This rule only handles the non-specialist (main-agent) recipient
+        -- case. Specialist-recipient transfers (i.e. sub-task transfers
+        -- whose recipient is the parent specialist's per-task session) are
+        -- expired via TransferExpiredOnRequesterTerminal /
+        -- TransferExpiredOnRequesterFailed when the parent task itself
+        -- reaches a terminal state, preserving file availability across any
+        -- parent restart retries. The invocation.task = null guard is what
+        -- selects the main-agent case here: a main-agent session has no
+        -- associated SpecialistTask, while every specialist invocation does.
+        --
+        -- recipient_session_for_transfer(t) is the same black box used by
+        -- TransferPlacedIntoLiveIpcIn: for root-task transfers it returns
+        -- t.task.requester_session (the main-agent session that dispatched
+        -- the root task); for sub-task transfers it returns the parent
+        -- task's per-task session. Combined with invocation.task = null
+        -- this rule matches only root-task transfers whose recipient is
+        -- the ending main-agent invocation.
+}
+
+-- Reset on recipient specialist crash. When a specialist invocation ends
+-- while its associated task is still alive (not in a terminal state), any
+-- in-transit transfer staged into this invocation's ipc-in is rolled back
+-- to pending, and each placed file is rolled back to owned. This preserves
+-- the file handover across the parent specialist's restart: the next
+-- invocation's ipc-in population path (see TransferFilesPlaced /
+-- TransferMovedToInTransit) will re-place the files from host-managed
+-- storage when the recipient resumes.
+--
+-- The guard invocation.task != null distinguishes the specialist-recipient
+-- case from the main-agent recipient case (handled by
+-- TransferExpiredOnRecipientInvocationEnded above, where invocation.task
+-- = null). The non-terminal-status guard is what makes this the reset
+-- branch rather than the expire branch: a specialist recipient whose task
+-- has already reached completed or failed is handled by the existing
+-- expire-on-requester-terminal rules and needs no further action here.
+
+rule TransferResetOnRecipientCrash {
+    when: ContainerInvocationEnded(invocation)
+    requires: invocation.task != null
+    requires: invocation.task.status not in {completed, failed}
+    for t in ContainerTransfers where status = in_transit and recipient_session_for_transfer(t) = invocation.session:
+        ensures: t.status = pending
+        for f in t.files where status = placed:
+            ensures: f.status = owned
+
+    @guidance
+        -- Condition: this rule only fires when the recipient invocation
+        -- ends while its specialist task is non-terminal. Concretely that
+        -- means the parent specialist has gone to awaiting_restart (or
+        -- still queued / running / awaiting_sub_task at the moment its
+        -- container exits, e.g. orphan-style runtime hiccups). In those
+        -- cases the parent will be restarted by the host and a new
+        -- invocation will start.
+        --
+        -- Purpose: files must survive container crashes and restarts.
+        -- The "files survive specialist task restarts" invariant is what
+        -- makes a sub-task transfer durable across the parent's retry
+        -- budget: a child's delivery is not lost just because the parent
+        -- crashed before consuming it. By moving the transfer back to
+        -- pending and the files back to owned, the next invocation's
+        -- IpcInPopulated step can re-place them via TransferFilesPlaced
+        -- and TransferMovedToInTransit, identical to the spawn-time path.
+        --
+        -- Counterpart (expire path). The expire branch fires when the
+        -- recipient is past the point where it can still consume the
+        -- files. Two distinct rules cover that:
+        --   - TransferExpiredOnRecipientInvocationEnded: same trigger
+        --     (ContainerInvocationEnded) but invocation.task = null,
+        --     i.e. a main-agent recipient with no specialist task. The
+        --     agent reads the transfer in a single turn; once the
+        --     invocation ends, the staged copies can be reclaimed.
+        --   - TransferExpiredOnRequesterTerminal / TransferExpiredOnRequesterFailed:
+        --     fired by the parent task itself transitioning to
+        --     completed or failed, which always precedes (or coincides
+        --     with) the parent's invocation ending. By the time
+        --     ContainerInvocationEnded fires for a terminal-task
+        --     recipient, transfers are already in status = expired and
+        --     this rule's status = in_transit guard is false; the rule
+        --     is a no-op in that case.
+}
+
+-- A pending transfer whose delivering task fails between ownership and
+-- routing (e.g. host crash mid-delivery) expires without ever being
+-- placed. In practice this is rare because SpecialistDeliveredResult
+-- moves the task to completed atomically with the transfer creation;
+-- this rule covers the recovery case where SpecialistResultReady was
+-- emitted but routing failed before the transfer reached a recipient.
+
+rule PendingTransferExpiredOnDeliveringTaskFailed {
+    when: task: SpecialistTask.status transitions_to failed
+    for t in ContainerTransfers where status = pending and t.task = task:
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+}
+
+------------------------------------------------------------
+-- Crash and restart recovery
+------------------------------------------------------------
+
+-- A specialist task can fail to make progress in three distinct ways, each
+-- with its own detection path and recovery rules:
+--
+-- 1. Crash while running. The specialist's container exits unexpectedly while
+--    the task is in status = running. One of sessions.allium's stuck-detection
+--    rules fires — StuckContainerDetectedByHeartbeat (heartbeat stale beyond
+--    ceiling) or StuckContainerDetectedByClaim (a claimed message has gone
+--    silent past tolerance) — moving the session processing_state from
+--    processing to stuck. This layer observes the transition via
+--    SpecialistContainerCrashed (retries remain) or SpecialistRestartExhausted
+--    (retries exhausted).
+--
+--    Crash detection is gated on task.status = running. A queued task with
+--    no running container is not a crash: it is either waiting in the host's
+--    concurrency queue for a slot to free, or it has just been dispatched
+--    and the container has not yet started. Neither situation should
+--    consume restart_attempt_count. The only legitimate transitions out of
+--    queued are queued -> running (via SpecialistTaskStarted, on
+--    SpecialistContainerProcessing) and queued -> failed (via overall task
+--    timeout, SpecialistTaskTimedOut). There is no queued -> awaiting_restart
+--    edge; the queued state must reach running first before any
+--    crash-detection rule can fire against the task.
+--
+--    Recovery: SpecialistContainerCrashed moves the task to awaiting_restart
+--    and increments restart_attempt_count. sessions.allium then either
+--    re-queues and restarts the container (StuckSessionRecovered, for main-
+--    group sessions or when no other sessions are waiting) or transitions the
+--    session stuck -> idle and places it at the back of the FIFO concurrency
+--    queue (StuckSessionQueued, for non-main specialist sessions when other
+--    sessions are already waiting). In the queued case the slot is given to
+--    the head waiter via ContainerSlotFreed; the stuck session re-enters
+--    processing when it reaches the head of the queue. Either way, the next
+--    invocation emits SpecialistContainerProcessing and SpecialistTaskStarted
+--    transitions the task back to running.
+--
+-- 2. Child sub-task not completing. The task is in status = awaiting_sub_task,
+--    its container has already exited cleanly (the dispatch_sub_task call
+--    terminates the parent invocation), and the child task is not making
+--    progress. There is no stuck-session signal here because the parent's
+--    session is idle, not processing. Detection is via the
+--    sub_task_await_overdue derived field, which fires SubTaskAwaitTimedOut
+--    (retries remain) or SubTaskAwaitExhausted (retries exhausted).
+--
+-- 3. Overall task timeout. The task has been live (queued, running,
+--    awaiting_sub_task, or awaiting_restart) longer than max_task_duration.
+--    SpecialistTaskTimedOut fires once is_overdue becomes true and transitions
+--    the task directly to failed with kind = timeout. This is the global
+--    deadline; it overrides path (1) and (2) once exceeded.
+
+rule SpecialistContainerCrashed {
+    when: session: sessions/Session.processing_state transitions_to stuck
+    let task = SpecialistTask{id: session.thread_id}
+    requires: exists task
+    requires: task.status = running
+    requires: task.restart_attempt_count < config.max_restart_retries
+    ensures:
+        task.status = awaiting_restart
+        task.restart_attempt_count = task.restart_attempt_count + 1
+
+    @guidance
+        -- The task.status = running guard is load-bearing. Crash detection
+        -- must only fire for tasks whose container has actually been
+        -- processing — i.e. tasks that have already transitioned through
+        -- SpecialistTaskStarted from queued (or awaiting_restart) into
+        -- running. A task that is still in status = queued with no running
+        -- container is either (a) waiting in the host's in-memory
+        -- concurrency queue for a slot to free, or (b) freshly dispatched
+        -- before the container has started. Neither is a crash, and neither
+        -- should consume restart_attempt_count.
+        --
+        -- The session processing_state transition from processing to stuck
+        -- can in principle reflect a stuck-detection signal observed on a
+        -- session whose task is not (yet) running. The exists task guard
+        -- plus the task.status = running guard together ensure that this
+        -- rule is silent in such cases. Without the running guard,
+        -- successive sweep ticks (e.g. every ~60 seconds) could each
+        -- observe the same not-yet-running task and increment its
+        -- restart_attempt_count, exhausting the restart budget in a handful
+        -- of ticks before the container had a chance to start.
+        --
+        -- Awaiting_sub_task is also excluded by this guard. A parent
+        -- specialist whose container exited cleanly to dispatch a sub-task
+        -- is not crashed — its session sits idle and the sub-task await
+        -- timeout is the relevant recovery path
+        -- (SubTaskAwaitTimedOut / SubTaskAwaitExhausted).
+}
+
+-- When a task transitions to awaiting_restart and was holding a pending
+-- sub-task (i.e. it was in awaiting_sub_task before the crash), the child
+-- subtree is cancelled immediately. The parent will restart clean and
+-- re-dispatch the sub-task from scratch; any work the child had done is
+-- lost. This prevents the parent's restart from re-dispatching the same
+-- sub-task and creating duplicate children.
+
+rule ChildSubtreeCancelledOnParentCrash {
+    when: task: SpecialistTask.status transitions_to awaiting_restart
+    requires: task.pending_sub_task != null
+    ensures:
+        SubtreeCancelled(task: task.pending_sub_task)
+}
+
+-- Apply a cancellation to a single task in the subtree. The task is failed
+-- with kind = execution_error and a cancellation detail string. If the
+-- cancelled task itself had a pending sub-task, the cancellation propagates
+-- recursively down the chain.
+
+rule SubtreeCancellationApplied {
+    when: SubtreeCancelled(task)
+    requires: task.status not in {completed, failed}
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: execution_error,
+            detail: "cancelled: ancestor specialist container crashed"
+        }
+        task.closed_at = now
+        if task.pending_sub_task != null:
+            SubtreeCancelled(task: task.pending_sub_task)
+
+    @guidance
+        -- Recursive propagation: ChildSubtreeCancelledOnParentCrash fires only
+        -- on transitions into awaiting_restart, not into failed, so it does not
+        -- itself cascade through the chain. Instead this rule emits
+        -- SubtreeCancelled on the cancelled task's own pending_sub_task when
+        -- present, so cancellation walks the pending_sub_task chain until no
+        -- further pending_sub_task exists. Each task cancelled this way also
+        -- emits SpecialistResultReady via SpecialistFailureRoutedToRequester,
+        -- but the routing rules will not match: SpecialistResultRoutedToParent
+        -- requires the parent to be in awaiting_sub_task, but the parent in a
+        -- cancelled subtree is either in awaiting_restart (the original
+        -- crashed task) or already failed itself (further up the chain). This
+        -- silent drop is intentional and consistent with the immediately-
+        -- rejected sub-task case documented on SpecialistFailureRoutedToRequester.
+        -- The parent restarts clean and re-dispatches the sub-task from
+        -- scratch; any work done by the cancelled subtree is lost.
+}
+
+-- When retries are exhausted the task fails. SpecialistFailureRoutedToRequester
+-- picks up the failed transition and routes the outcome to the requester.
+
+rule SpecialistRestartExhausted {
+    when: session: sessions/Session.processing_state transitions_to stuck
+    let task = SpecialistTask{id: session.thread_id}
+    requires: exists task
+    requires: task.status = running
+    requires: task.restart_attempt_count >= config.max_restart_retries
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: host_restart,
+            detail: "specialist container failed and maximum restart retries were exhausted"
+        }
+        task.closed_at = now
+
+    @guidance
+        -- Like SpecialistContainerCrashed, this rule is gated on
+        -- task.status = running. A queued task cannot reach
+        -- restart_attempt_count >= max_restart_retries via this path because
+        -- the only rule that increments restart_attempt_count
+        -- (SpecialistContainerCrashed) is itself gated on running. A queued
+        -- task that fails to start eventually times out via
+        -- SpecialistTaskTimedOut (queued -> failed, kind = timeout); it does
+        -- not exhaust restart retries here.
+}
+
+-- Companion to ChildSubtreeCancelledOnParentCrash for the retries-exhausted
+-- path. SpecialistRestartExhausted transitions the task directly to failed
+-- (not awaiting_restart), so the awaiting_restart-keyed rule does not fire.
+-- This rule cancels the child subtree when the parent was in awaiting_sub_task
+-- before exhausting retries.
+
+rule ChildSubtreeCancelledOnRestartExhausted {
+    when: task: SpecialistTask.status transitions_to failed
+    requires: task.failure.kind = host_restart
+    requires: task.pending_sub_task != null
+    ensures:
+        SubtreeCancelled(task: task.pending_sub_task)
+}
+
+-- Sub-task await timeout (retries remain). When a parent task has been in
+-- awaiting_sub_task longer than max_sub_task_await without the child reaching
+-- a terminal state, the parent is restarted. This handles the case where a
+-- crash on the child path produced no observable signal on the parent's
+-- session (the parent's container is already idle while it waits), so neither
+-- SpecialistContainerCrashed nor SpecialistRestartExhausted can fire for the
+-- parent on a stuck transition.
+--
+-- ChildSubtreeCancelledOnParentCrash already cancels the pending sub-task
+-- subtree on transitions into awaiting_restart, so no explicit cancellation
+-- is needed here: the awaiting_restart transition itself drives subtree
+-- cleanup via that rule.
+
+rule SubTaskAwaitTimedOut {
+    when: task: SpecialistTask.sub_task_await_overdue
+    requires: task.restart_attempt_count < config.max_restart_retries
+    ensures:
+        task.status = awaiting_restart
+        task.restart_attempt_count = task.restart_attempt_count + 1
+}
+
+-- Sub-task await timeout (retries exhausted). The parent has already used its
+-- restart budget; a further await timeout fails the task with kind = timeout.
+-- Companion rule ChildSubtreeCancelledOnSubTaskAwaitExhausted cancels the
+-- pending sub-task subtree on the failed transition.
+
+rule SubTaskAwaitExhausted {
+    when: task: SpecialistTask.sub_task_await_overdue
+    requires: task.restart_attempt_count >= config.max_restart_retries
+    ensures:
+        task.status = failed
+        task.failure = TaskFailure{
+            kind: timeout,
+            detail: "sub-task did not complete within the await window after exhausting restart retries"
+        }
+        task.closed_at = now
+}
+
+-- Companion to ChildSubtreeCancelledOnRestartExhausted for timeout failures.
+-- This rule fires whenever a task transitions to failed with kind = timeout
+-- while still holding a pending sub-task. Two paths produce this state:
+--   - SubTaskAwaitExhausted: the parent's await window expired and restart
+--     retries were exhausted.
+--   - SpecialistTaskTimedOut: the overall task duration was exceeded while
+--     the parent was in awaiting_sub_task.
+-- Both leave a child task running with no parent able to consume its result;
+-- this rule cancels the pending sub-task subtree on the failed transition.
+
+rule ChildSubtreeCancelledOnSubTaskAwaitExhausted {
+    when: task: SpecialistTask.status transitions_to failed
+    requires: task.failure.kind = timeout
+    requires: task.pending_sub_task != null
+    ensures:
+        SubtreeCancelled(task: task.pending_sub_task)
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Root specialist tasks may only be dispatched by the main group. Sub-tasks
+-- (requester_task != null) carry no constraint on requester_group because
+-- it is null for them.
+
+invariant SpecialistDispatchMainGroupOnly {
+    for t in SpecialistTasks:
+        t.requester_task = null implies (
+            t.requester_group != null
+            and t.requester_group.is_main = true
+        )
+}
+
+-- A live task never has its own specialist group in its ancestor chain.
+-- Cycle attempts are rejected at dispatch time and recorded as terminal
+-- failed tasks; only terminal tasks may have has_cycle = true.
+
+invariant NoCycleInLiveTask {
+    for t in SpecialistTasks:
+        t.status in {queued, running, awaiting_sub_task} implies not t.has_cycle
+}
+
+-- A memory provider is a leaf: it is read-only and cannot itself delegate.
+-- This invariant catches any path where a memory provider would appear as
+-- the immediate parent of a sub-task.
+
+invariant MemoryProviderDoesNotDelegate {
+    for t in SpecialistTasks:
+        t.requester_task != null implies (
+            t.requester_task.specialist_group.specialist?.is_memory_provider != true
+        )
+}
+
+-- Depth is bounded by config; the dispatch rules enforce this and the
+-- invariant captures the resulting structural property.
+
+invariant TaskDepthBounded {
+    for t in SpecialistTasks:
+        t.depth < config.max_specialist_depth
+}
+
+-- closed_at is present iff the task is in a terminal state. Live tasks
+-- (queued, running, awaiting_sub_task) have closed_at = null.
+
+invariant ClosedAtPresentWhenTerminal {
+    for t in SpecialistTasks:
+        (t.status in {completed, failed}) = (t.closed_at != null)
+}
+
+-- A running task is a leaf: it has no child task that is itself running.
+-- While a child is running, the parent should be in awaiting_sub_task.
+
+invariant RunningTaskIsLeaf {
+    for parent in SpecialistTasks:
+        for child in SpecialistTasks:
+            (parent.status = running and child.requester_task = parent)
+                implies child.status != running
+}
+
+-- Per-task session isolation: each specialist task's Session has
+-- messaging_group = the null-channel singleton MessagingGroup and
+-- thread_id = task.id, making it unique to that task. (See null-channel.allium
+-- for the singleton's role.) The specialist's AgentGroup folder (CLAUDE.md,
+-- skills) is mounted read-only and shared across all tasks of the same type;
+-- the only writable surfaces visible to the container are the per-task
+-- inbound.db and outbound.db. A running task therefore cannot alter the
+-- type template or another task's session state.
+
+-- File handover invariants
+--
+-- Each transfer commits at most one of the two delivery paths: it either
+-- ends up committed to memory (status = committed, eventually expired) or
+-- it ends up placed in the requester's ipc-in (status = in_transit,
+-- eventually expired). A transfer that committed to memory has no files
+-- in status = placed; a transfer that did not has no files with a
+-- memory_path. This prevents the spec from describing a transfer that
+-- both wrote to memory and was placed into ipc-in.
+
+invariant CommitAndPlaceMutuallyExclusive {
+    for t in ContainerTransfers:
+        for f in t.files:
+            (f.memory_path != null) implies t.commit_to_memory = true
+}
+
+-- Each TransferFile that lives in a recipient's ipc-in resolves to a
+-- distinct in-container path. Path construction uses the transfer id as a
+-- per-transfer subdirectory, so distinct transfers placing files for the
+-- same invocation cannot collide; within a transfer, original_name must
+-- be unique.
+
+invariant IpcInPathsUniquePerTransfer {
+    for t in ContainerTransfers:
+        for a in t.files:
+            for b in t.files:
+                a != b implies a.original_name != b.original_name
+}
+
+-- A transfer's files share its delivery state: a transfer in committed
+-- status has no files in placed status; a transfer in expired status has
+-- no files in any non-expired status. This is the cross-entity coherence
+-- guarantee that lets observability code report transfer state without
+-- inspecting each file.
+
+invariant TransferAndFilesInSync {
+    for t in ContainerTransfers:
+        for f in t.files:
+            (t.status = expired) implies (f.status = expired)
+}
+
+-- At most one invocation per session is active at any moment. The host
+-- enforces this by ending any orphan invocation synchronously at
+-- ContainerInvocationStarted (OrphanInvocationEnded) and by ending the
+-- active invocation synchronously when the specialist task reaches a
+-- terminal state (InvocationEndedOnTaskTerminal). The IpcOutMount status
+-- is the canonical witness of an invocation's liveness: an invocation is
+-- "active" iff its IpcOutMount is in status = active.
+
+invariant AtMostOneActiveInvocationPerSession {
+    for a in IpcOutMounts:
+        for b in IpcOutMounts:
+            (a != b
+             and a.status = active
+             and b.status = active)
+                implies a.invocation.session != b.invocation.session
+}
+
+-- Restart attempts are only consumed by a crash observed against a running
+-- task. A task that has never reached running must therefore have
+-- restart_attempt_count = 0. This protects queued tasks from having their
+-- restart budget burned through by repeated sweep ticks that mistake
+-- "waiting for a concurrency slot" or "container not yet started" for
+-- a crash.
+
+invariant QueuedTaskHasNoRestartAttempts {
+    for t in SpecialistTasks:
+        t.status = queued implies t.restart_attempt_count = 0
+}
+
+-- A task's per-task Session is closed once the task itself is terminal.
+-- This is the structural counterpart to SpecialistTaskSessionClosed: it
+-- asserts the resulting state at any single point in time after the
+-- terminal transition has been processed, independent of the route by
+-- which the task reached terminal (delivery, timeout, restart exhausted,
+-- subtree cancellation, sub-task await exhaustion).
+--
+-- The condition is bounded to tasks for which a per-task session exists.
+-- Tasks created directly in status = failed by the sub-task rejection
+-- rules (SubTaskRejectedCycle/Depth/Count/SameTypeLimit) never had a
+-- session provisioned and are excluded by the exists clause.
+
+invariant TerminalTaskHasClosedSession {
+    for t in SpecialistTasks:
+        let session = specialist_task_session(t)
+        (t.status in {completed, failed} and exists session)
+            implies session.status = closed
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "InboundMessage pending -> failed edge for session closure: the host marks any still-pending messages_in rows as failed when a specialist task's session is closed at terminal transition (see SpecialistTaskSessionClosed). The sessions.allium InboundMessage transition graph does not currently include a pending -> failed edge, so this fail-pending action cannot be expressed as a rule-level ensures here. Should sessions.allium add the pending -> failed edge so the cleanup can be witnessed by a rule, or should the closure rely solely on session.status = closed gating downstream wake rules to keep pending messages dormant?"
+

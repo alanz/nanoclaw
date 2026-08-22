@@ -365,6 +365,27 @@ describe('lifecycle', () => {
     expect(terminal).toHaveBeenCalledExactlyOnceWith({ kind: 'started-then-died', retryable: false, exitCode: 3 });
   });
 
+  it("carries the container's last words on the failure, so a caller can report the reason", async () => {
+    // The exit code cannot distinguish a read-only mount from a missing
+    // binary; the stderr the container emitted on the way down can.
+    const handle = await withSessionEvents(driver()).prepare(fixtureSpec());
+    const terminal = vi.fn();
+    handle.onTerminal(terminal);
+    await handle.start();
+
+    const started = cli.started.at(-1)!;
+    started.proc.emitStderr('EROFS: read-only file system');
+    started.proc.emitExit(1);
+    await settled();
+
+    expect(terminal).toHaveBeenCalledExactlyOnceWith({
+      kind: 'started-then-died',
+      retryable: false,
+      exitCode: 1,
+      stderrTail: ['EROFS: read-only file system'],
+    });
+  });
+
   it('surfaces the stderr tail at warn when the container exits non-zero', async () => {
     // A container that dies at boot (unknown provider, missing binary, bad
     // config) explains itself only on stderr, which logs at debug.

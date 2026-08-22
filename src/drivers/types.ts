@@ -148,7 +148,14 @@ export type SessionFailure =
   | { kind: 'image-unavailable'; retryable: true }
   | { kind: 'runtime-unavailable'; retryable: true }
   | { kind: 'resources-exhausted'; retryable: true }
-  | { kind: 'started-then-died'; retryable: false; exitCode?: number }
+  /**
+   * `stderrTail` is the container's last words. A container that dies on the
+   * way up explains itself only on stderr, and the exit code alone cannot say
+   * whether it was a bad image, a read-only mount, or a missing binary. The
+   * driver already keeps the tail to log it; carrying it here is what lets a
+   * caller put the actual reason in front of a human instead of a number.
+   */
+  | { kind: 'started-then-died'; retryable: false; exitCode?: number; stderrTail?: readonly string[] }
   | { kind: 'unknown'; retryable: false; opaqueRef: string };
 
 export type SessionStatus =

@@ -1,0 +1,139 @@
+-- allium: 3
+-- null-channel.allium
+--
+-- NullChannel: a virtual channel type with no messaging platform backing.
+-- It exists so that per-task specialist sessions can satisfy NanoClaw's
+-- "every session has a messaging group" model without requiring a real
+-- chat platform.
+--
+-- In v1 the null channel owned a synthetic "specialist:{task-id}" JID per
+-- task. In v2, sessions are identified by (agent_group, messaging_group,
+-- thread_id), so the null channel instead owns a single virtual
+-- MessagingGroup. Per-task isolation comes from thread_id = task.id, not
+-- from a per-task JID.
+--
+-- Scope: NullChannel registration, the singleton null MessagingGroup, and
+--        the constraint that no inbound traffic ever flows from this channel.
+-- Includes: channel-type label, singleton MessagingGroup ensure-on-startup,
+--           silently-discarded outbound delivery, NoInboundFromNullChannel
+--           invariant.
+-- Excludes:
+--   - Specialist task lifecycle (see specialists.allium).
+--   - Session lifecycle (see sessions.allium).
+--   - Channel-adapter mechanics for real channels.
+--
+-- The singleton MessagingGroup pattern. There is exactly one MessagingGroup
+-- with channel_type = "null_channel". All per-task specialist sessions
+-- reference it as their messaging_group. The platform_id is a fixed sentinel
+-- so the entity can be looked up deterministically without storing a
+-- reference anywhere. The MessagingGroup is created once at host startup by
+-- NullMessagingGroupEnsured; the rule is a no-op on subsequent starts.
+
+use "./routing.allium" as routing
+use "./sessions.allium" as sessions
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Channel-type label written into the singleton MessagingGroup and
+    -- carried on any OutboundMessage destined for the null channel. Routing
+    -- adapters compare against this string to decide whether to attempt a
+    -- real platform send.
+    channel_type: String = "null_channel"
+
+    -- Sentinel platform_id for the singleton. MessagingGroup uniqueness in
+    -- v2 is keyed on (channel_type, platform_id); a fixed sentinel makes
+    -- the singleton deterministically discoverable from any caller.
+    singleton_platform_id: String = "specialist"
+
+    -- Display name for the singleton MessagingGroup. Surfaced only in
+    -- operator-facing listings; never seen by end users.
+    singleton_name: String = "Specialist Tasks (null channel)"
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- NullChannel registers its singleton MessagingGroup at host startup. The
+-- rule is idempotent: if the singleton already exists (a previous run
+-- created it and it is still in the central DB), the rule does not fire
+-- again.
+rule NullMessagingGroupEnsured {
+    when: RegisterNullChannel()
+    requires: not exists routing/MessagingGroup{
+        channel_type: config.channel_type,
+        platform_id: config.singleton_platform_id
+    }
+    ensures: routing/MessagingGroup.created(
+        channel_type: config.channel_type,
+        platform_id: config.singleton_platform_id,
+        name: config.singleton_name,
+        is_group: false,
+        unknown_sender_policy: strict,
+        created_at: now
+    )
+
+    @guidance
+        -- RegisterNullChannel is emitted once during host startup, in the
+        -- same self-registration phase where real channel adapters attach.
+        -- The rule's idempotence guard means restarting the host is safe:
+        -- on first boot the singleton is created; on subsequent boots the
+        -- existing row is reused.
+        --
+        -- unknown_sender_policy is set to strict because no inbound traffic
+        -- can originate from this channel: there is no real platform to
+        -- receive messages from. The policy is therefore unreachable in
+        -- practice, but strict is the safest default if the invariant
+        -- NoInboundFromNullChannel is ever violated by a misconfigured
+        -- adapter.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- The null channel never produces inbound traffic. Any RoutedMessage whose
+-- wiring is on the null-channel MessagingGroup would represent a real
+-- platform message arriving on a virtual channel, which cannot happen.
+invariant NoInboundFromNullChannel {
+    for r in routing/RoutedMessages:
+        r.wiring.messaging_group.channel_type != config.channel_type
+}
+
+-- The null channel never produces outbound traffic either. Specialist
+-- results travel back to the requester via a fresh InboundMessage on the
+-- requester's session (see specialists/SpecialistResultRoutedToMain and
+-- SpecialistResultRoutedToParent), not as an OutboundMessage on a channel.
+-- An OutboundMessage carrying channel_type = "null_channel" would represent
+-- an attempt to send to a non-existent platform; this invariant flags it.
+invariant NoOutboundOnNullChannel {
+    for o in sessions/OutboundMessages:
+        o.channel_type != config.channel_type
+}
+
+-- At most one MessagingGroup exists for the null channel. The
+-- ensure-on-startup rule's guard prevents creation of a second; this
+-- invariant captures the resulting structural property so any other path
+-- that produces a duplicate is flagged.
+invariant SingletonNullMessagingGroup {
+    for a in routing/MessagingGroups:
+        for b in routing/MessagingGroups:
+            (a != b
+             and a.channel_type = config.channel_type
+             and b.channel_type = config.channel_type)
+                implies false
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+-- No surface in v2 currently provides RegisterNullChannel(). In v1 the
+-- trigger was emitted alongside the registrations of real channel adapters
+-- (Telegram, DeltaChat, etc.) during host startup. v2 has not yet modelled
+-- the host-startup surface; once it is added, it should provide
+-- RegisterNullChannel() so this rule's trigger has a producer in the spec.
+open question "Where should RegisterNullChannel() be provided from? A host-startup surface analogous to v1's channel-registration phase is missing in v2."

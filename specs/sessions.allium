@@ -1,0 +1,653 @@
+-- allium: 3
+-- sessions.allium
+--
+-- Scope: Session lifecycle, inbound message queuing, outbound delivery, and
+--        container processing state.
+-- Includes: Session creation and resolution, InboundMessage, OutboundMessage,
+--           delivery, stuck-container detection and recovery.
+-- Excludes: User identity (identity.allium), wiring rules (routing.allium).
+--
+-- A session is the unit of conversation context shared between one agent group
+-- and one messaging group (or thread within that group). Session identity depends
+-- on the wiring's session_mode:
+--   shared       — one session per (agent_group, messaging_group)
+--   per_thread   — one session per (agent_group, messaging_group, thread_id)
+--   agent_shared — one session per agent_group, spanning all messaging groups
+--
+-- The host and the agent container communicate only via two per-session SQLite
+-- databases. The host writes inbound messages; the container writes outbound
+-- messages. There is no other IPC.
+--
+-- This spec governs both human-channel sessions (created from
+-- routing/RoutedMessage via the SessionResolvedFor*Wiring rules) and
+-- per-task specialist sessions (per_thread sessions on the null-channel
+-- singleton MessagingGroup, see null-channel.allium and
+-- specialists.allium). It does NOT govern agent-to-agent agent_shared
+-- sessions: those are created by agent-to-agent.allium directly in
+-- response to an OutboundMessage with channel_type = "agent", bypassing
+-- the routing wiring model entirely. The Session entity here is shared
+-- across all three paths, but the creation path matters because
+-- agent_shared sessions have no MessagingGroupAgentWiring row to anchor
+-- session_mode, no channel adapter origin and no thread.
+
+use "./identity.allium" as identity
+use "./routing.allium" as routing
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum SessionStatus { active | closed }
+enum ProcessingState { idle | processing | stuck }
+enum MessageStatus { pending | processing | completed | failed }
+enum DeliveryStatus { delivered | failed }
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_message_tries: Integer = 5
+    -- Absolute ceiling on heartbeat staleness. If the container's heartbeat
+    -- has not been refreshed within this window, the session is considered
+    -- stuck regardless of whether any specific message claim is overdue.
+    -- Extended on a per-tick basis when a long-running tool is in flight
+    -- (see Session.active_tool_timeout).
+    heartbeat_ceiling: Duration = 30.minutes
+    -- Per-claim silence tolerance. A claim that has been held longer than
+    -- this without a fresher heartbeat is considered stuck. Also extended
+    -- by Session.active_tool_timeout when a long-running tool is in flight.
+    claim_stuck_timeout: Duration = 60.seconds
+    scheduled_check_interval: Duration = 60.seconds
+    max_concurrent_containers: Integer = 5
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity Session {
+    id: String
+    agent_group: identity/AgentGroup
+    messaging_group: routing/MessagingGroup?
+    thread_id: String?
+    status: SessionStatus
+    processing_state: ProcessingState
+    last_active: Timestamp
+    -- Most recent heartbeat from the container. Null until the container has
+    -- reported any sign of life (a freshly-spawned container has not yet
+    -- written one). The host observes this signal as the mtime of an
+    -- in-container heartbeat file; the container is responsible for refreshing
+    -- it during normal SDK activity.
+    heartbeat_at: Timestamp?
+    -- When the container is currently inside a long-running tool call (e.g.
+    -- a Bash command with a declared timeout), this widens the stuck-detection
+    -- tolerances for this tick. Null when no such tool is in flight.
+    active_tool_timeout: Duration?
+    created_at: Timestamp
+
+    inbound_messages: InboundMessage with session = this
+    outbound_messages: OutboundMessage with session = this
+    pending_messages: inbound_messages where status = pending
+    triggering_messages: inbound_messages where status = pending and trigger = true
+
+    has_work: triggering_messages.count > 0
+
+    invariant AgentSharedHasNoMessagingGroup {
+        messaging_group = null implies thread_id = null
+    }
+
+    transitions status {
+        active -> closed
+        terminal: closed
+    }
+
+    transitions processing_state {
+        idle -> processing
+        processing -> idle
+        processing -> stuck
+        stuck -> idle
+    }
+}
+
+entity InboundMessage {
+    session: Session
+    seq: Integer
+    kind: String
+    status: MessageStatus
+    trigger: Boolean
+    content: String
+    process_after: Timestamp?
+    recurrence: String?
+    series_id: String?
+    tries: Integer
+    created_at: Timestamp
+    -- Timestamp at which the container claimed this message (status moved
+    -- from pending into processing). Used by stuck-claim detection to
+    -- compare claim age against heartbeat freshness. Cleared when the
+    -- message returns to pending after a retry or stuck-reset.
+    claimed_at: Timestamp? when status = processing | completed | failed
+
+    invariant ClaimImpliesProcessing {
+        claimed_at != null implies status = processing | completed | failed
+    }
+
+    is_due: process_after = null or process_after <= now
+    is_retriable: tries < config.max_message_tries
+
+    transitions status {
+        pending -> processing
+        processing -> completed
+        processing -> failed
+        failed -> pending
+        terminal: completed
+    }
+}
+
+entity OutboundMessage {
+    session: Session
+    seq: Integer
+    in_reply_to: InboundMessage?
+    kind: String
+    content: String
+    channel_type: String?
+    platform_id: String?
+    thread_id: String?
+    deliver_after: Timestamp?
+    recurrence: String?
+    created_at: Timestamp
+
+    is_due: deliver_after = null or deliver_after <= now
+}
+
+entity DeliveredMessage {
+    outbound_message: OutboundMessage
+    platform_message_id: String?
+    status: DeliveryStatus
+    delivered_at: Timestamp
+}
+
+-- A session queued because the concurrency cap is full.
+-- Sessions belonging to the main agent group bypass the cap and are never queued.
+-- WaitingSession is an in-memory queue; it is not persisted. On restart it is
+-- reconstructed when the host re-emits SessionWoken for sessions that have work,
+-- and their WaitingSession entries are recreated as a side effect. FIFO ordering
+-- across sessions is not preserved across restarts.
+entity WaitingSession {
+    session: Session
+    queued_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Session resolution: lazily created on first engagement.
+
+rule SessionResolvedForSharedWiring {
+    when: routed: routing/RoutedMessage.created
+    requires: routed.wiring.session_mode = shared
+    requires: not exists Session{agent_group: routed.wiring.agent_group,
+                                 messaging_group: routed.wiring.messaging_group,
+                                 thread_id: null}
+    ensures: Session.created(
+        agent_group: routed.wiring.agent_group,
+        messaging_group: routed.wiring.messaging_group,
+        thread_id: null,
+        status: active,
+        processing_state: idle,
+        last_active: now,
+        created_at: now
+    )
+}
+
+rule SessionResolvedForPerThreadWiring {
+    when: routed: routing/RoutedMessage.created
+    requires: routed.wiring.session_mode = per_thread
+    requires: not exists Session{agent_group: routed.wiring.agent_group,
+                                 messaging_group: routed.wiring.messaging_group,
+                                 thread_id: routed.message.thread_id}
+    ensures: Session.created(
+        agent_group: routed.wiring.agent_group,
+        messaging_group: routed.wiring.messaging_group,
+        thread_id: routed.message.thread_id,
+        status: active,
+        processing_state: idle,
+        last_active: now,
+        created_at: now
+    )
+}
+
+rule SessionResolvedForAgentSharedWiring {
+    when: routed: routing/RoutedMessage.created
+    requires: routed.wiring.session_mode = agent_shared
+    requires: not exists Session{agent_group: routed.wiring.agent_group, messaging_group: null}
+    ensures: Session.created(
+        agent_group: routed.wiring.agent_group,
+        messaging_group: null,
+        thread_id: null,
+        status: active,
+        processing_state: idle,
+        last_active: now,
+        created_at: now
+    )
+}
+
+-- Inbound message queuing.
+
+rule InboundMessageQueued {
+    when: routed: routing/RoutedMessage.created
+    let session = resolve_session(routed.wiring, routed.message)
+    requires: exists session
+    requires: session.status = active
+    ensures: InboundMessage.created(
+        session: session,
+        seq: next_inbound_seq(session),
+        kind: routed.message.kind,
+        status: pending,
+        trigger: routed.trigger,
+        content: routed.message.text,
+        process_after: null,
+        tries: 0,
+        created_at: now
+    )
+
+    @guidance
+        -- This rule covers InboundMessages that originate from external routing —
+        -- a platform message arriving via a channel adapter and being routed to a
+        -- session. It is not the only path that creates an InboundMessage.
+        --
+        -- Task-kind InboundMessages (rows with `kind = "task"`, `series_id = id`,
+        -- and optionally `recurrence` set) are created by ScheduledTaskCreated
+        -- in agent-to-agent.allium. That rule has a single ensures block that
+        -- creates both the ScheduledTask (the agent-facing view) and the
+        -- InboundMessage (the session-facing view) in lockstep, because the
+        -- underlying host action is a single SQL insert into messages_in. The
+        -- recurrence and series_id fields are established at that point;
+        -- subsequent firings of a recurring task are propagated by
+        -- InboundRecurrenceCloned below.
+}
+
+-- When a triggering inbound message is queued, wake the session so the container
+-- can start processing. Non-triggering messages are stored but do not wake the
+-- container — they contribute context but not work.
+rule TriggeringMessageQueued {
+    when: msg: InboundMessage.created
+    requires: msg.trigger
+    requires: msg.session.status = active
+    ensures: SessionWoken(session: msg.session)
+}
+
+-- Scheduled messages (process_after set) are re-queued by the host at their due time.
+
+rule ScheduledMessageDue {
+    when: msg: InboundMessage.process_after <= now
+    requires: msg.status = pending
+    requires: msg.is_due
+    ensures: SessionWoken(session: msg.session)
+}
+
+-- Recurrence cloning. A completed inbound message that still carries a recurrence
+-- string is the signal to schedule its next firing. The completed row's recurrence
+-- is cleared so it cannot re-fire; a new pending row is created carrying the same
+-- series identity and the next firing time. By induction, exactly one live (non-
+-- completed) row exists per series at any time: the previous live row only completes
+-- after the new live row has been created here. Series-scoped operations (cancel,
+-- pause/resume, update) target the live row by matching on series_id, so the handle
+-- remains stable across firings even though each firing has its own InboundMessage id.
+
+rule InboundRecurrenceCloned {
+    when: msg: InboundMessage.status becomes completed
+    requires: msg.recurrence != null
+    ensures:
+        InboundMessage.created(
+            session: msg.session,
+            seq: next_inbound_seq(msg.session),
+            kind: msg.kind,
+            status: pending,
+            trigger: msg.trigger,
+            content: msg.content,
+            process_after: next_recurrence(msg.recurrence, now),
+            recurrence: msg.recurrence,
+            series_id: msg.series_id,
+            tries: 0,
+            created_at: now
+        )
+        msg.recurrence = null
+
+    @guidance
+        -- Realised by the host's 60-second sweep: it queries `messages_in` for
+        -- rows where `status = completed and recurrence != null` and applies the
+        -- ensures clauses above. Modelled as `becomes completed` because the
+        -- behaviour is observable from the message's lifecycle, not from the tick.
+        -- Clearing `recurrence` on the completed row is what guarantees the rule
+        -- fires once per firing rather than re-firing on every sweep.
+}
+
+-- Container processing lifecycle.
+-- The container is started when there are triggering messages to process.
+
+rule SessionProcessingStarted {
+    when: SessionWoken(session)
+    requires: session.status = active
+    requires: session.processing_state = idle
+    requires: session.has_work
+    requires: session.agent_group.is_main
+              or Sessions where processing_state = processing .count < config.max_concurrent_containers
+    ensures:
+        session.processing_state = processing
+        session.last_active = now
+
+    @guidance
+        -- The main agent group bypasses the concurrency gate entirely: it is
+        -- the primary user-facing interface and must always remain responsive.
+        -- All other sessions share the cap. When the cap is full and a non-main
+        -- session has work, SessionQueued fires instead and enqueues the session
+        -- in WaitingSession. When a slot frees (ContainerSlotFreed), the next
+        -- waiting session is woken in FIFO order.
+}
+
+-- When the concurrency cap is full, a non-main session that has work is queued.
+-- The session waits until a container slot frees (ContainerSlotFreed).
+rule SessionQueued {
+    when: SessionWoken(session)
+    requires: session.status = active
+    requires: session.processing_state = idle
+    requires: session.has_work
+    requires: not session.agent_group.is_main
+    requires: Sessions where processing_state = processing .count >= config.max_concurrent_containers
+    requires: not exists WaitingSession{session: session}
+    ensures: WaitingSession.created(
+        session: session,
+        queued_at: now
+    )
+}
+
+-- When a container finishes (processing → idle or stuck → idle), the next waiting
+-- session is dequeued FIFO and woken so it can claim the freed slot.
+rule ContainerSlotFreed {
+    when: session: Session.processing_state becomes idle
+
+    let next = next_waiting_session(WaitingSessions)
+
+    requires: not session.agent_group.is_main
+    requires: exists next
+
+    ensures:
+        not exists next
+        SessionWoken(session: next.session)
+
+    @guidance
+        -- next_waiting_session selects the WaitingSession with the earliest
+        -- queued_at (FIFO). Main-group sessions bypass the concurrency gate
+        -- and never appear in WaitingSessions.
+        --
+        -- The `not session.agent_group.is_main` guard is load-bearing: the
+        -- main-group session never consumes a non-main slot, so its going idle
+        -- does not free a slot for waiters. Without this guard, a main-group
+        -- idle transition would dequeue a waiting session, emit SessionWoken
+        -- for it, and that session would fail SessionProcessingStarted (cap still
+        -- full) — permanently losing its place in the queue with no way to
+        -- re-enter.
+        --
+        -- The `processing_state becomes idle` trigger covers two transitions
+        -- for non-main sessions:
+        -- (a) SessionProcessingCompleted (processing → idle, normal container exit)
+        -- (b) StuckSessionIdled / StuckSessionQueued (stuck → idle, no remaining
+        --     work or cap-full recovery path)
+        -- StuckSessionRecovered (stuck → processing) does NOT fire this rule
+        -- because the session re-enters processing immediately without going idle.
+}
+
+rule SessionProcessingCompleted {
+    when: ContainerReportedIdle(session)
+    requires: session.processing_state = processing
+    ensures: session.processing_state = idle
+}
+
+-- Stuck container detection. The container exposes a heartbeat that the host
+-- observes (in implementation terms: the mtime of an in-container heartbeat
+-- file refreshed during normal SDK activity). Two independent predicates fire
+-- StuckContainerDetected; both lead to the same recovery (mark the session
+-- stuck, reset processing messages for retry).
+--
+-- 1. Heartbeat-stale ceiling. The heartbeat has not been refreshed within
+--    heartbeat_ceiling. This catches a container that is alive but silent
+--    (e.g. wedged in a syscall that produced no SDK output for the ceiling
+--    duration). It only fires once a heartbeat has ever been recorded — a
+--    freshly-spawned container with no heartbeat yet is handled by other
+--    paths (the per-claim predicate below, or the not-running cleanup),
+--    not here, otherwise every new container would be killed within seconds
+--    of spawn. When a long-running tool is in flight, the ceiling is
+--    widened to that tool's declared timeout.
+--
+-- 2. Message-scoped silence. A specific InboundMessage has been claimed
+--    (status = processing) for longer than claim_stuck_timeout, and no
+--    heartbeat fresher than the claim has been recorded. Semantics: "the
+--    container claimed this message and has shown no sign of life since
+--    claiming it". This catches the fresh-container-claims-then-dies case
+--    that the heartbeat ceiling cannot see (no heartbeat ever existed),
+--    and per-message wedges that occur within the absolute ceiling window.
+--    Like the ceiling, the tolerance widens when a long-running tool is
+--    in flight.
+
+rule StuckContainerDetectedByHeartbeat {
+    when: session: Session.heartbeat_at + config.heartbeat_ceiling <= now
+    requires: session.processing_state = processing
+    requires: session.active_tool_timeout = null
+              or session.heartbeat_at + session.active_tool_timeout <= now
+    ensures:
+        session.processing_state = stuck
+        for msg in session.inbound_messages where status = processing:
+            if msg.is_retriable:
+                msg.status = pending
+                msg.claimed_at = null
+                msg.tries = msg.tries + 1
+            else:
+                msg.status = failed
+
+    @guidance
+        -- Temporal trigger on Session.heartbeat_at: because heartbeat_at is
+        -- optional, the trigger does not fire until a heartbeat has been
+        -- recorded. Null + duration is null and null <= now is false, so the
+        -- "no heartbeat yet" case is naturally excluded — the per-claim rule
+        -- below covers it instead.
+}
+
+rule StuckContainerDetectedByClaim {
+    when: msg: InboundMessage.claimed_at + config.claim_stuck_timeout <= now
+    requires: msg.status = processing
+    requires: msg.session.processing_state = processing
+    requires: msg.session.heartbeat_at = null
+              or msg.session.heartbeat_at <= msg.claimed_at
+    requires: msg.session.active_tool_timeout = null
+              or msg.claimed_at + msg.session.active_tool_timeout <= now
+    ensures:
+        msg.session.processing_state = stuck
+        for other in msg.session.inbound_messages where status = processing:
+            if other.is_retriable:
+                other.status = pending
+                other.claimed_at = null
+                other.tries = other.tries + 1
+            else:
+                other.status = failed
+
+    @guidance
+        -- This rule complements StuckContainerDetectedByHeartbeat. The
+        -- heartbeat-freshness guard (heartbeat_at <= claimed_at) ensures the
+        -- two rules do not both fire for the same situation: if the heartbeat
+        -- post-dates the claim, the container has shown signs of life since
+        -- claiming the message and only the heartbeat ceiling can mark it
+        -- stuck. A fresh container that claims a message and then dies before
+        -- writing any heartbeat is caught here (heartbeat_at = null).
+}
+
+rule StuckSessionRecovered {
+    when: session: Session.processing_state becomes stuck
+    requires: session.has_work
+    requires: session.agent_group.is_main or WaitingSessions.count = 0
+    ensures: session.processing_state = processing
+}
+
+-- A stuck session that has work but has other sessions already waiting is
+-- transitioned to idle and placed at the back of the waiting queue, so it
+-- does not cut ahead of sessions that were queued before it went stuck.
+-- The idle transition triggers ContainerSlotFreed, which gives the freed slot
+-- to the oldest waiter (FIFO); the stuck session re-enters when it reaches
+-- the head of the queue. Only non-main sessions reach this rule: main sessions
+-- always recover immediately.
+rule StuckSessionQueued {
+    when: session: Session.processing_state becomes stuck
+    requires: session.has_work
+    requires: not session.agent_group.is_main
+    requires: WaitingSessions.count > 0
+    requires: not exists WaitingSession{session: session}
+    ensures:
+        session.processing_state = idle
+        WaitingSession.created(
+            session: session,
+            queued_at: now
+        )
+}
+
+rule StuckSessionIdled {
+    when: session: Session.processing_state becomes stuck
+    requires: not session.has_work
+    ensures: session.processing_state = idle
+}
+
+-- Container-to-host signals (mirrored from container).
+--
+-- The container reports liveness and tool-in-flight state to the host so
+-- that stuck-detection (StuckContainerDetectedByHeartbeat,
+-- StuckContainerDetectedByClaim) can compare against them. These are
+-- external-stimulus triggers in the same family as ContainerClaimedMessage
+-- and ContainerReportedIdle: surfaces for them are not yet declared.
+
+rule ContainerHeartbeatRefreshed {
+    when: ContainerReportedHeartbeat(session)
+    requires: session.processing_state = processing
+    ensures: session.heartbeat_at = now
+}
+
+rule ContainerToolStarted {
+    when: ContainerReportedToolStart(session, declared_timeout)
+    requires: session.processing_state = processing
+    ensures: session.active_tool_timeout = declared_timeout
+}
+
+rule ContainerToolFinished {
+    when: ContainerReportedToolEnd(session)
+    ensures: session.active_tool_timeout = null
+}
+
+-- Inbound message claim and completion (mirrored from container).
+
+rule InboundMessageClaimed {
+    when: ContainerClaimedMessage(message)
+    requires: message.status = pending
+    ensures:
+        message.status = processing
+        message.claimed_at = now
+}
+
+rule InboundMessageCompleted {
+    when: ContainerCompletedMessage(message)
+    requires: message.status = processing
+    ensures:
+        message.status = completed
+        message.session.last_active = now
+}
+
+-- Outbound message delivery.
+
+rule OutboundMessageDelivered {
+    when: OutboundMessageDue(outbound_message)
+    requires: outbound_message.is_due
+    requires: not exists DeliveredMessage{outbound_message: outbound_message}
+    ensures: DeliveredMessage.created(
+        outbound_message: outbound_message,
+        platform_message_id: null,
+        status: delivered,
+        delivered_at: now
+    )
+
+    @guidance
+        -- The OutboundMessage's channel_type, platform_id and thread_id fields
+        -- determine where this delivery goes. Three mechanisms populate them, in
+        -- precedence order:
+        --
+        -- 1. Explicit destination tag. The agent wraps output in
+        --    `<message to="name">...</message>` blocks naming a destination from
+        --    its destinations table. The destination entry carries its own
+        --    channel_type and platform_id; thread_id is inherited from the
+        --    inbound routing context. This is how an agent replies to a channel
+        --    other than the one that triggered the session.
+        --
+        -- 2. Default session routing. If the agent emits plain text with no
+        --    `<message>` blocks and the session has session_routing set
+        --    (always true for channel-originated sessions), the reply goes to
+        --    the (channel_type, platform_id, thread_id) stored in
+        --    session_routing — i.e. exactly the origin channel and thread.
+        --
+        -- 3. Single-destination shortcut. If session_routing is null (e.g. an
+        --    agent_shared session with no channel origin) and exactly one
+        --    destination is registered, plain-text output is sent there
+        --    automatically.
+        --
+        -- The OutboundMessage is created with channel_type, platform_id and
+        -- thread_id already populated by whichever mechanism fires; this rule
+        -- only witnesses the act of delivery, not the routing decision.
+}
+
+rule OutboundDeliveryFailed {
+    when: DeliveryAttemptFailed(outbound_message, reason)
+    requires: not exists DeliveredMessage{outbound_message: outbound_message}
+    ensures: DeliveredMessage.created(
+        outbound_message: outbound_message,
+        platform_message_id: null,
+        status: failed,
+        delivered_at: now
+    )
+}
+
+-- Session closure.
+
+rule SessionClosed {
+    when: CloseSession(actor, session)
+    requires: actor.is_owner or actor.is_global_admin
+    requires: session.status = active
+    ensures: session.status = closed
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant SessionUniqueness {
+    for a in Sessions:
+        for b in Sessions:
+            a != b implies not (
+                a.agent_group = b.agent_group
+                and a.messaging_group = b.messaging_group
+                and a.thread_id = b.thread_id
+            )
+}
+
+invariant NoProcessingInClosedSession {
+    for s in Sessions:
+        s.status = closed implies s.processing_state = idle
+}
+
+-- Total concurrently-processing non-main sessions is bounded by the cap.
+-- Main-group sessions are exempt because they bypass the concurrency gate.
+invariant ActiveContainerLimit {
+    Sessions where processing_state = processing and not agent_group.is_main .count <= config.max_concurrent_containers
+}
+
+-- A session appears in the waiting queue at most once.
+invariant AtMostOneWaitingEntryPerSession {
+    for a in WaitingSessions:
+        for b in WaitingSessions:
+            a != b implies a.session != b.session
+}

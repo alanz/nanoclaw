@@ -1,0 +1,173 @@
+-- allium: 3
+-- self-mod.allium
+--
+-- Scope: Agent self-modification flows — requesting package installation and
+--        MCP (Model Context Protocol) server addition.
+-- Includes: approval-gated container mutations driven by approvals/PendingApproval.
+-- Excludes: The approval primitive itself (approvals.allium), container runtime
+--           details (treated as black boxes here).
+--
+-- Agents may request two categories of container mutation:
+--   install_packages — APT system packages and/or npm packages
+--   add_mcp_server   — wire a new MCP server into the container config
+--
+-- Both require admin approval. On approval:
+--   install_packages — the container image is rebuilt and the session is restarted
+--   add_mcp_server   — the container config is updated; the next container spawn
+--                      picks up the new server automatically
+--
+-- Motivation: agents discover they need a tool mid-conversation and can request
+-- it without an operator having to manually edit config files.
+--
+-- Persistence model: there is no self-mod request entity. A request and its
+-- payload (package list / MCP server config) live entirely on the
+-- approvals/PendingApproval row that the request rule emits. On admin approve,
+-- the apply rule reads the payload off that row and mutates the container
+-- config in place. On admin reject, the row is removed by approvals.allium and
+-- no further self-mod action runs. There is no "applied" state to record:
+-- successful application is observable through the container image rebuild
+-- and restart events emitted by the apply rules.
+
+use "./identity.allium" as identity
+use "./approvals.allium" as approvals
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_packages_per_request: Integer = 20
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- install_packages flow ---------------------------------------------------
+
+-- Agents initiate a package install request from within the container. The
+-- request data (apt list, npm list, reason) travels on the PendingApproval
+-- row created in response to the ApprovalRequested emission below; this spec
+-- does not maintain a separate request entity.
+
+rule PackageInstallRequested {
+    when: AgentRequestsPackageInstall(session, apt_packages, npm_packages, reason)
+    requires: apt_packages.count + npm_packages.count > 0
+    requires: apt_packages.count + npm_packages.count <= config.max_packages_per_request
+    ensures: approvals/ApprovalRequested(
+        agent_group: session.agent_group,
+        session_id: session.id,
+        action: "install_packages",
+        payload: reason,
+        title: reason,
+        options: "Approve / Reject"
+    )
+
+    @guidance
+        -- Package names are validated for shape only, not against any
+        -- allowlist or blocklist. APT package names must match
+        --   ^[a-z0-9][a-z0-9._+-]*$
+        -- (start with a lowercase alphanumeric, then lowercase
+        -- alphanumerics, dots, underscores, plus signs or hyphens).
+        -- npm package names must match
+        --   ^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$
+        -- which permits scoped packages (`@scope/name`) and otherwise
+        -- the same lowercase alphanumeric + dot/underscore/hyphen set
+        -- (note: no `+` in npm names).
+        --
+        -- There is no curated allowlist or blocklist of package names.
+        -- Admin approval is the sole security gate: on apply, the
+        -- approved package names are passed verbatim to a shell exec
+        -- (apt-get install / npm install) with no further filtering.
+        -- Approvers must therefore treat the package list as the
+        -- security boundary and verify each entry before approving.
+}
+
+rule PackageInstallApproved {
+    when: approval: approvals/PendingApproval.status transitions_to approved
+    requires: approval.action = "install_packages"
+    ensures:
+        ContainerImageRebuilt(agent_group: approval.agent_group)
+        ContainerRestarted(agent_group: approval.agent_group)
+
+    @guidance
+        -- The host reads the package list off the approval's payload,
+        -- calls updateContainerConfig to append the entries to the
+        -- agent group's container.json, then triggers the image
+        -- rebuild and kills the running container. The config mutation
+        -- happens first and is not rolled back if the subsequent
+        -- rebuild fails.
+        --
+        -- There is no "applied" state to record: successful application
+        -- is observable through ContainerImageRebuilt and
+        -- ContainerRestarted, which downstream readers (logs, metrics,
+        -- the agent itself via a follow-up system message) can react
+        -- to. On rebuild failure, neither emission fires; the host
+        -- notifies the approver via chat instead. There is no replay
+        -- mechanism: a retry requires the agent to issue a fresh
+        -- install_packages request, which produces a new approval cycle.
+}
+
+-- Rejection on approvals/PendingApproval.status transitions_to rejected is
+-- handled entirely inside approvals.allium (row deletion + agent
+-- notification). No self-mod rule is needed: there is nothing to undo.
+
+-- add_mcp_server flow -----------------------------------------------------
+
+-- Agents initiate an MCP server addition request. As with install_packages,
+-- the request payload (server name, command, args, env) travels on the
+-- PendingApproval row, not on a separate self-mod entity.
+
+rule McpServerAddRequested {
+    when: AgentRequestsMcpServer(session, server_name, command, args, env, reason)
+    ensures: approvals/ApprovalRequested(
+        agent_group: session.agent_group,
+        session_id: session.id,
+        action: "add_mcp_server",
+        payload: reason,
+        title: reason,
+        options: "Approve / Reject"
+    )
+
+    @guidance
+        -- The `env` map carries full key-value pairs supplied verbatim
+        -- by the requesting agent. There is no secret-vault resolution:
+        -- values are not looked up from a credential store, and the
+        -- keys are not validated against a vault allowlist at request
+        -- time or at apply time. On approval, the host's
+        -- updateContainerConfig writes the env entries directly into
+        -- the agent group's container.json as-is.
+        --
+        -- Admin approval is the sole gate. Approvers must treat the
+        -- env map as the security boundary and inspect the values
+        -- (which may include API keys or tokens) before approving.
+}
+
+rule McpServerApproved {
+    when: approval: approvals/PendingApproval.status transitions_to approved
+    requires: approval.action = "add_mcp_server"
+    ensures:
+        ContainerConfigUpdated(agent_group: approval.agent_group)
+        ContainerRestarted(agent_group: approval.agent_group)
+
+    @guidance
+        -- The host reads the server config (name, command, args, env)
+        -- off the approval's payload, writes it into the agent group's
+        -- container.json, and kills the running container. No image
+        -- rebuild is required: bun runs TypeScript directly, so a pure
+        -- MCP wiring change picks up on the next container start.
+        --
+        -- As with PackageInstallApproved, there is no "applied" state
+        -- to record. ContainerConfigUpdated and ContainerRestarted are
+        -- the observable signals.
+}
+
+-- Rejection: see the note above PackageInstallApproved. Same reasoning
+-- applies to add_mcp_server.
+
+-- ContainerImageRebuilt, ContainerRestarted, and ContainerConfigUpdated are
+-- trigger emissions that the host processes outside this spec. Their execution
+-- is an implementation concern (image rebuild pipeline, container process
+-- restart). The "at most one pending request per (agent_group, action) pair"
+-- property is enforced generically by approvals/OnlyOneActivePendingPerAction
+-- and does not need restating here.

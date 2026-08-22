@@ -1,0 +1,168 @@
+/**
+ * Container concurrency cap and FIFO waiting queue.
+ *
+ * Every session wants a container and every container wants a VM's worth of
+ * memory. Without a bound, a burst of inbound messages across many agent
+ * groups spawns one container per session simultaneously and the host swaps
+ * itself to death — the failure is not a crash but a machine that stops
+ * answering, including for the sessions that were already healthy.
+ *
+ * So non-main sessions run under a cap and queue in arrival order when it is
+ * full. The main group is exempt: it is the operator's own line, and an
+ * assistant that stops answering because six of its own background agents are
+ * busy is worse than one that occasionally overcommits by one container.
+ *
+ * Two seams carry it, both trunk-owned:
+ *   - `setWakeGate` decides, in the one place every wake passes through,
+ *     whether this session may start now.
+ *   - `registerSessionExitHook` releases the slot and starts the next waiter.
+ *
+ * Neither the router nor any of the other wake callers knows this module
+ * exists. Installing it is one appended import in the modules barrel.
+ */
+import { registerSessionExitHook, setWakeGate, wakeContainer, type SessionExitEvent } from '../../container-runner.js';
+import { getDb } from '../../db/index.js';
+import { readEnvFile } from '../../env.js';
+import { log } from '../../log.js';
+import type { Session } from '../../types.js';
+
+import './migration.js';
+
+/**
+ * How many non-main containers may run at once.
+ *
+ * Read once. A cap that could change under a running queue would let the
+ * accounting and the limit disagree, and the symptom (slots that never free)
+ * is far harder to read than a restart.
+ */
+export const MAX_CONCURRENT_CONTAINERS = (() => {
+  const raw =
+    process.env.MAX_CONCURRENT_CONTAINERS?.trim() ||
+    readEnvFile(['MAX_CONCURRENT_CONTAINERS']).MAX_CONCURRENT_CONTAINERS?.trim() ||
+    '';
+  return Math.max(1, parseInt(raw || '5', 10) || 5);
+})();
+
+/**
+ * Main-group membership, cached.
+ *
+ * The gate runs on every wake and the answer changes about once in an
+ * install's lifetime, so a DB round trip per wake would be pure overhead on
+ * the hot path. A miss costs one read; there is no invalidation because
+ * promoting a different group to main is a deliberate act that comes with a
+ * restart.
+ */
+const mainGroupCache = new Map<string, boolean>();
+
+async function isMainGroup(agentGroupId: string): Promise<boolean> {
+  const cached = mainGroupCache.get(agentGroupId);
+  if (cached !== undefined) return cached;
+  let value = false;
+  try {
+    const row = (await getDb().get('SELECT is_main FROM agent_groups WHERE id = ?', [agentGroupId])) as
+      | { is_main: number }
+      | undefined;
+    value = row?.is_main === 1;
+  } catch (err) {
+    // An install whose column is missing (or a read that failed) is one where
+    // nothing is main — the cap applies to everything, which is the safe way
+    // to be wrong: it throttles, it never overcommits.
+    log.debug('is_main lookup failed; treating group as non-main', { agentGroupId, err });
+  }
+  mainGroupCache.set(agentGroupId, value);
+  return value;
+}
+
+interface WaitingEntry {
+  session: Session;
+  queuedAt: number;
+}
+
+/** Arrival-ordered. A cap that reordered would starve whoever queued first. */
+const waitingQueue: WaitingEntry[] = [];
+
+/**
+ * Sessions holding a slot: running, or mid-spawn with the slot reserved.
+ *
+ * Reserved synchronously at admission rather than when the container reports
+ * itself running — two wakes arriving in the same tick would otherwise both
+ * see room and both spawn, and the cap would be advisory.
+ */
+const activeNonMainSessions = new Set<string>();
+
+async function admit(session: Session): Promise<boolean> {
+  if (await isMainGroup(session.agent_group_id)) return true;
+
+  // Re-entry: a dequeued session passes back through the gate, and it already
+  // holds the slot that let it be dequeued.
+  if (activeNonMainSessions.has(session.id)) return true;
+
+  if (activeNonMainSessions.size < MAX_CONCURRENT_CONTAINERS) {
+    activeNonMainSessions.add(session.id);
+    return true;
+  }
+
+  if (waitingQueue.some((w) => w.session.id === session.id)) {
+    log.debug('Session already in waiting queue', { sessionId: session.id });
+    return false;
+  }
+
+  waitingQueue.push({ session, queuedAt: Date.now() });
+  log.info('Session queued (concurrency cap reached)', {
+    sessionId: session.id,
+    agentGroup: session.agent_group_id,
+    queuePos: waitingQueue.length,
+    activeNonMain: activeNonMainSessions.size,
+    cap: MAX_CONCURRENT_CONTAINERS,
+  });
+  return false;
+}
+
+function releaseAndDrain(event: SessionExitEvent): void {
+  if (!activeNonMainSessions.delete(event.sessionId)) return;
+  drainWaiting();
+}
+
+function drainWaiting(): void {
+  while (waitingQueue.length > 0 && activeNonMainSessions.size < MAX_CONCURRENT_CONTAINERS) {
+    const next = waitingQueue.shift()!;
+    activeNonMainSessions.add(next.session.id);
+    log.info('Dequeuing waiting session', {
+      sessionId: next.session.id,
+      agentGroup: next.session.agent_group_id,
+      waitedMs: Date.now() - next.queuedAt,
+    });
+    // A wake that fails to spawn must not hold the slot it was given, or the
+    // cap leaks a slot per failure until nothing can start at all.
+    void wakeContainer(next.session).then(
+      (ok) => {
+        if (!ok) {
+          activeNonMainSessions.delete(next.session.id);
+          drainWaiting();
+        }
+      },
+      () => {
+        activeNonMainSessions.delete(next.session.id);
+        drainWaiting();
+      },
+    );
+  }
+}
+
+/** Current cap state, for observability. */
+export function getQueueStatus(): { activeNonMain: number; max: number; waiting: number } {
+  return { activeNonMain: activeNonMainSessions.size, max: MAX_CONCURRENT_CONTAINERS, waiting: waitingQueue.length };
+}
+
+/** @internal Test seam — drop all queue and cache state. */
+export function resetConcurrencyStateForTesting(): void {
+  waitingQueue.length = 0;
+  activeNonMainSessions.clear();
+  mainGroupCache.clear();
+}
+
+/** @internal Test seam — the gate, so a suite can drive it without a wake. */
+export const admitForTesting = admit;
+
+setWakeGate(admit);
+registerSessionExitHook(releaseAndDrain);

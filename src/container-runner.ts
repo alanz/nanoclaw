@@ -326,6 +326,26 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
  * need to wrap — the inbound row stays pending and host-sweep retries on its
  * next tick.
  */
+/**
+ * Admission gate consulted before a wake spawns anything.
+ *
+ * A host with a bounded runtime budget has to be able to say "not yet" in ONE
+ * place: `wakeContainer` has a dozen callers (router, sweep, approvals,
+ * agent-to-agent, self-mod, …) and a cap enforced at the call sites would be a
+ * cap with a dozen ways to be forgotten. Returning false defers — the caller
+ * sees the same false a transient spawn failure produces, so nothing has to
+ * learn a new outcome.
+ *
+ * Null by default: with no gate installed this is exactly the old behavior.
+ */
+export type WakeGate = (session: Session) => boolean | Promise<boolean>;
+
+let wakeGate: WakeGate | null = null;
+
+export function setWakeGate(gate: WakeGate | null): void {
+  wakeGate = gate;
+}
+
 export function wakeContainer(session: Session): Promise<boolean> {
   if (activeContainers.has(session.id)) {
     log.debug('Container already running', { sessionId: session.id });
@@ -336,15 +356,29 @@ export function wakeContainer(session: Session): Promise<boolean> {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
   }
-  const promise = spawnContainer(session)
-    .then(() => true)
-    .catch((err) => {
+  // The gate is consulted inside the promise, but the promise is registered
+  // synchronously below — so concurrent wakes still dedupe on the same
+  // in-flight entry rather than racing an await to reach the gate twice.
+  const promise = (async (): Promise<boolean> => {
+    // Asked after the running/in-flight checks so a session that is already
+    // up never consumes admission, and before the spawn so a declined wake
+    // costs nothing. A decline reads to callers exactly like a transient
+    // spawn failure, which is the behavior they already handle: the inbound
+    // row stays pending and the sweep retries.
+    if (wakeGate && !(await wakeGate(session))) {
+      log.debug('Wake deferred by admission gate', { sessionId: session.id });
+      return false;
+    }
+    try {
+      await spawnContainer(session);
+      return true;
+    } catch (err) {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
       return false;
-    })
-    .finally(() => {
-      wakePromises.delete(session.id);
-    });
+    }
+  })().finally(() => {
+    wakePromises.delete(session.id);
+  });
   wakePromises.set(session.id, promise);
   return promise;
 }
@@ -745,11 +779,59 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   } catch (err) {
     log.error('Gateway session release failed', { sessionId, containerName, err });
   }
+  // After the delete, the claim release and the gateway release, so a hook
+  // that asks whether this session is still running — or that wants to start
+  // the next one — sees the slot, the claim and the gateway lease all free.
+  dispatchSessionExit({
+    sessionId,
+    ranMs: Date.now() - runtime.startedAtMs,
+    adopted: runtime.adopted,
+    failure,
+  });
   for (const callback of runtime.exitCallbacks) {
     try {
       callback();
     } catch (err) {
       log.error('Container exit callback failed', { sessionId, containerName, err });
+    }
+  }
+}
+
+/**
+ * Session-exit hooks — the counterpart to the router's session-created hooks,
+ * and the same contract: fire-and-forget, isolated, never able to affect the
+ * exit path. A module that tracks what sessions cost (slots, crash counts,
+ * timings) needs the end of a session as an event, and without this it can
+ * only get it by patching `finish` itself.
+ *
+ * `ranMs` is the discriminator a crash detector needs: an exit code says a
+ * container failed, but only its lifetime says whether it failed on the way
+ * up or after doing real work.
+ */
+export interface SessionExitEvent {
+  sessionId: string;
+  /** Wall time from spawn to terminal. */
+  ranMs: number;
+  /** True when the host adopted an already-running container rather than spawning it. */
+  adopted: boolean;
+  /** The terminal failure, when the runtime reported one. */
+  failure?: SessionFailure;
+}
+
+export type SessionExitHook = (event: SessionExitEvent) => void;
+
+const sessionExitHooks: SessionExitHook[] = [];
+
+export function registerSessionExitHook(hook: SessionExitHook): void {
+  sessionExitHooks.push(hook);
+}
+
+function dispatchSessionExit(event: SessionExitEvent): void {
+  for (const hook of sessionExitHooks) {
+    try {
+      hook(event);
+    } catch (err) {
+      log.error('Session-exit hook threw', { sessionId: event.sessionId, err });
     }
   }
 }

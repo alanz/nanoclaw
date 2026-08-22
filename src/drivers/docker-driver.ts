@@ -23,6 +23,7 @@ import fs from 'fs';
 import { log } from '../log.js';
 
 import { realCli, validateRuntimeName, type Cli, type SupervisedProcess } from './cli.js';
+import type { RuntimeDialect, RuntimeResidue, RuntimeRow, RuntimeSubscription } from './dialect.js';
 import { JsonDocumentStream } from './json-stream.js';
 import {
   LABELS,
@@ -51,6 +52,12 @@ export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
+  /**
+   * How to talk to this runtime. Defaults to Docker, so every existing
+   * construction is unchanged. An overlay supplies its own to reuse the
+   * realization policy in this file against a different CLI — see `dialect.ts`.
+   */
+  dialect?: RuntimeDialect;
 }
 
 /** Watch reconnection: bounded backoff, never give up (see `watchSessions`). */
@@ -60,11 +67,14 @@ const WATCH_RECOVERY_MAX_MS = 30_000;
 interface InstallWatch {
   subscribers: Set<(event: SessionEvent) => void>;
   attempt: number;
+  /** The live dialect subscription, replaced on every reconnect. */
+  subscription?: RuntimeSubscription;
 }
 
 export class DockerSessionDriver implements SessionDriver {
-  readonly kind = 'docker' as const;
+  readonly kind: string;
   readonly #cli: Cli;
+  readonly #dialect: RuntimeDialect;
   readonly #policy: MountPolicy;
   /** One `docker events` subscription per install slug — never per session. */
   readonly #watches = new Map<string, InstallWatch>();
@@ -77,8 +87,10 @@ export class DockerSessionDriver implements SessionDriver {
   readonly #knownKeys = new Map<string, Map<string, SessionKey>>();
 
   constructor(private readonly opts: DockerDriverOptions) {
-    this.#cli = opts.cli ?? realCli('docker');
+    this.#dialect = opts.dialect ?? dockerDialect;
+    this.#cli = opts.cli ?? realCli(this.#dialect.bin);
     this.#policy = opts;
+    this.kind = this.#dialect.kind;
   }
 
   capabilities(): DriverCapabilities {
@@ -100,7 +112,7 @@ export class DockerSessionDriver implements SessionDriver {
   }
 
   async ensureReady(): Promise<void> {
-    ensureDockerRunning(this.#cli);
+    this.#dialect.ensureReady(this.#cli);
   }
 
   async prepare(spec: SessionSpec): Promise<SessionHandle> {
@@ -115,7 +127,7 @@ export class DockerSessionDriver implements SessionDriver {
       // here. Composition gates on capabilities().auxiliaryContainers, so this
       // is the backstop for a composer that did not.
       throw specInvalid(
-        `docker driver does not manage container role '${extra[0].role}'; ` +
+        `${this.kind} driver does not manage container role '${extra[0].role}'; ` +
           `auxiliary containers require a driver with capabilities().auxiliaryContainers`,
       );
     }
@@ -139,7 +151,7 @@ export class DockerSessionDriver implements SessionDriver {
     const args = ['create', '--rm', '--name', name];
     args.push(...labelArgs(labelsForKey(spec.key, 'agent', { ...spec.labels, ...(agent.labels ?? {}) })));
     args.push(...resourceArgs(spec));
-    args.push(...hardeningArgs(spec));
+    args.push(...this.#dialect.hardeningArgs(spec));
     args.push(...userArgs(spec));
     // Composed env first, contributed env second: on a duplicate `-e` key
     // Docker's last flag wins, which realizes the contract rule that the
@@ -179,34 +191,20 @@ export class DockerSessionDriver implements SessionDriver {
     // rides along because `ps -a` includes exited/created containers, and a
     // caller must be able to tell an adoptable session from a corpse without
     // a per-handle status() round trip.
-    let out: string;
+    let rows: RuntimeRow[];
     try {
-      out = this.#cli.run([
-        'ps',
-        '-a',
-        '--filter',
-        `label=${LABELS.install}=${installSlug}`,
-        '--filter',
-        `label=${LABELS.role}=agent`,
-        '--format',
-        `{{.Names}}|{{.State}}|{{.Label "${LABELS.group}"}}|{{.Label "${LABELS.session}"}}`,
-      ]);
+      rows = this.#dialect.listAgents(this.#cli, installSlug);
     } catch (error) {
       throw normalizeDockerError(error);
     }
-    return out
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => {
-        const [name, state, agentGroupId, sessionId] = line.split('|');
-        const key: SessionKey = { installSlug, agentGroupId, sessionId };
-        this.#remember(key);
-        return {
-          handle: new DockerHandle(key, name, this.#cli, null, this.#emit),
-          phase: dockerStatePhase(state),
-        };
-      });
+    return rows.map((row) => {
+      const key: SessionKey = { installSlug, agentGroupId: row.agentGroupId, sessionId: row.sessionId };
+      this.#remember(key);
+      return {
+        handle: new DockerHandle(key, row.name, this.#cli, null, this.#emit),
+        phase: this.#dialect.statePhase(row.state),
+      };
+    });
   }
 
   watchSessions(installSlug: string, onEvent: (event: SessionEvent) => void): SessionWatch {
@@ -232,39 +230,28 @@ export class DockerSessionDriver implements SessionDriver {
    * the session-events hub's job, not this driver's.
    */
   #connectWatch(installSlug: string, watch: InstallWatch, reconnected = false): void {
-    const stream = new JsonDocumentStream();
-    const proc = this.#cli.start(
-      [
-        'events',
-        '--filter',
-        'type=container',
-        '--filter',
-        `label=${LABELS.install}=${installSlug}`,
-        '--filter',
-        `label=${LABELS.role}=agent`,
-        '--format',
-        '{{json .}}',
-      ],
-      { captureStdout: true },
-    );
-    proc.onStdout((chunk) => {
-      // Data flowing means the subscription is healthy again.
-      watch.attempt = 0;
-      for (const doc of stream.push(chunk)) {
-        const event = dockerEventToSessionEvent(doc, installSlug);
-        if (!event) continue;
+    // A stream dialect's previous process has already exited by the time we
+    // reconnect; a polling one's timer has not, and would otherwise double up.
+    watch.subscription?.stop();
+    watch.subscription = this.#dialect.subscribe(
+      this.#cli,
+      installSlug,
+      (event) => {
+        // Data flowing means the subscription is healthy again.
+        watch.attempt = 0;
         for (const subscriber of watch.subscribers) subscriber(event);
-      }
-    });
-    proc.onExit(() => {
-      if (this.#watches.get(installSlug) !== watch) return;
-      // Bounded backoff, never give up: an unrecovered drop would end
-      // supervision for every session of the install at once.
-      const delay = Math.min(WATCH_RECOVERY_BASE_MS * 2 ** watch.attempt, WATCH_RECOVERY_MAX_MS);
-      watch.attempt += 1;
-      const timer = setTimeout(() => this.#connectWatch(installSlug, watch, true), delay);
-      timer.unref?.();
-    });
+      },
+      () => {
+        if (this.#watches.get(installSlug) !== watch) return;
+        // Bounded backoff, never give up: an unrecovered drop would end
+        // supervision for every session of the install at once. A dialect that
+        // cannot drop never lands here, and so never reconnects.
+        const delay = Math.min(WATCH_RECOVERY_BASE_MS * 2 ** watch.attempt, WATCH_RECOVERY_MAX_MS);
+        watch.attempt += 1;
+        const timer = setTimeout(() => this.#connectWatch(installSlug, watch, true), delay);
+        timer.unref?.();
+      },
+    );
     if (reconnected) void this.#reconcileWatchGap(installSlug, watch);
   }
 
@@ -321,22 +308,15 @@ export class DockerSessionDriver implements SessionDriver {
   async reapResidue(installSlug: string): Promise<void> {
     // Containers first: an auxiliary container whose host died has no owner left
     // to close it. Only non-running ones — an adopted session's are still serving it.
+    let residue: RuntimeResidue = { stale: [], preSeam: [] };
     try {
-      const out = this.#cli.run([
-        'ps',
-        '-a',
-        '--filter',
-        `label=${LABELS.install}=${installSlug}`,
-        '--filter',
-        'status=exited',
-        '--filter',
-        'status=created',
-        '--filter',
-        'status=dead',
-        '--format',
-        '{{.Names}}',
-      ]);
-      const stale = out.trim().split('\n').filter(Boolean);
+      residue = this.#dialect.listResidue(this.#cli, installSlug);
+    } catch (err) {
+      log.warn('Failed to list install-owned containers', { err });
+    }
+
+    try {
+      const { stale } = residue;
       for (const name of stale) {
         try {
           this.#cli.run(['rm', '--force', validateRuntimeName(name, 'container')]);
@@ -356,20 +336,7 @@ export class DockerSessionDriver implements SessionDriver {
     // session directory. Stopping them is exactly what the old
     // `cleanupOrphans()` did to every container on every start.
     try {
-      const out = this.#cli.run([
-        'ps',
-        '--filter',
-        `label=${LABELS.install}=${installSlug}`,
-        '--format',
-        `{{.Names}}|{{.Label "${LABELS.session}"}}`,
-      ]);
-      const preSeam = out
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => line.split('|'))
-        .filter(([, sessionId]) => !sessionId)
-        .map(([name]) => name);
+      const { preSeam } = residue;
       for (const name of preSeam) {
         try {
           this.#cli.run(['rm', '--force', validateRuntimeName(name, 'container')]);
@@ -384,15 +351,7 @@ export class DockerSessionDriver implements SessionDriver {
 
     let names: string[] = [];
     try {
-      const out = this.#cli.run([
-        'network',
-        'ls',
-        '--filter',
-        `label=${LABELS.install}=${installSlug}`,
-        '--format',
-        '{{.Name}}',
-      ]);
-      names = out.trim().split('\n').filter(Boolean);
+      names = this.#dialect.listNetworks(this.#cli, installSlug);
     } catch (err) {
       log.warn('Failed to list install-owned networks', { err });
       return;
@@ -418,18 +377,9 @@ export class DockerSessionDriver implements SessionDriver {
    * loudly instead of aliasing.
    */
   #existingSession(name: string, key: SessionKey): boolean {
-    let out: string;
-    try {
-      out = this.#cli.run([
-        'inspect',
-        '--format',
-        `{{index .Config.Labels "${LABELS.install}"}}|{{index .Config.Labels "${LABELS.group}"}}|{{index .Config.Labels "${LABELS.session}"}}`,
-        name,
-      ]);
-    } catch {
-      return false;
-    }
-    const [install, group, session] = out.trim().split('|');
+    const labels = this.#dialect.inspectLabels(this.#cli, name);
+    if (!labels) return false;
+    const [install, group, session] = labels;
     if (install === key.installSlug && group === key.agentGroupId && session === key.sessionId) return true;
     log.warn('Container name collision: existing container is not this session', {
       containerName: name,
@@ -720,5 +670,136 @@ export function ensureDockerRunning(cli: Cli = realCli('docker')): void {
     throw new Error('Container runtime is required but failed to start', { cause: err });
   }
 }
+
+/**
+ * Docker's dialect: the queries this driver was written against.
+ *
+ * Every argv here is the one that used to sit inline in the method that
+ * consumed it, so the default path is byte-identical to the pre-dialect
+ * driver. Docker answers all of these server-side, which is why the shapes
+ * look like formatting strings rather than filtering code — a runtime without
+ * `--filter` does that work in its own dialect instead.
+ */
+export const dockerDialect: RuntimeDialect = {
+  kind: 'docker',
+  bin: 'docker',
+
+  ensureReady(cli) {
+    ensureDockerRunning(cli);
+  },
+
+  hardeningArgs,
+
+  statePhase: dockerStatePhase,
+
+  listAgents(cli, installSlug) {
+    const out = cli.run([
+      'ps',
+      '-a',
+      '--filter',
+      `label=${LABELS.install}=${installSlug}`,
+      '--filter',
+      `label=${LABELS.role}=agent`,
+      '--format',
+      `{{.Names}}|{{.State}}|{{.Label "${LABELS.group}"}}|{{.Label "${LABELS.session}"}}`,
+    ]);
+    return out
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [name, state, agentGroupId, sessionId] = line.split('|');
+        return { name, state, agentGroupId, sessionId };
+      });
+  },
+
+  listResidue(cli, installSlug) {
+    const staleOut = cli.run([
+      'ps',
+      '-a',
+      '--filter',
+      `label=${LABELS.install}=${installSlug}`,
+      '--filter',
+      'status=exited',
+      '--filter',
+      'status=created',
+      '--filter',
+      'status=dead',
+      '--format',
+      '{{.Names}}',
+    ]);
+    const preSeamOut = cli.run([
+      'ps',
+      '--filter',
+      `label=${LABELS.install}=${installSlug}`,
+      '--format',
+      `{{.Names}}|{{.Label "${LABELS.session}"}}`,
+    ]);
+    return {
+      stale: staleOut.trim().split('\n').filter(Boolean),
+      preSeam: preSeamOut
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => line.split('|'))
+        .filter(([, sessionId]) => !sessionId)
+        .map(([name]) => name),
+    };
+  },
+
+  listNetworks(cli, installSlug) {
+    const out = cli.run([
+      'network',
+      'ls',
+      '--filter',
+      `label=${LABELS.install}=${installSlug}`,
+      '--format',
+      '{{.Name}}',
+    ]);
+    return out.trim().split('\n').filter(Boolean);
+  },
+
+  inspectLabels(cli, name) {
+    let out: string;
+    try {
+      out = cli.run([
+        'inspect',
+        '--format',
+        `{{index .Config.Labels "${LABELS.install}"}}|{{index .Config.Labels "${LABELS.group}"}}|{{index .Config.Labels "${LABELS.session}"}}`,
+        name,
+      ]);
+    } catch {
+      return null;
+    }
+    const [install, group, session] = out.trim().split('|');
+    return [install, group, session];
+  },
+
+  subscribe(cli, installSlug, onEvent, onEnd) {
+    const stream = new JsonDocumentStream();
+    const proc = cli.start(
+      [
+        'events',
+        '--filter',
+        'type=container',
+        '--filter',
+        `label=${LABELS.install}=${installSlug}`,
+        '--filter',
+        `label=${LABELS.role}=agent`,
+        '--format',
+        '{{json .}}',
+      ],
+      { captureStdout: true },
+    );
+    proc.onStdout((chunk) => {
+      for (const doc of stream.push(chunk)) {
+        const event = dockerEventToSessionEvent(doc, installSlug);
+        if (event) onEvent(event);
+      }
+    });
+    proc.onExit(() => onEnd());
+    return { stop: () => proc.kill() };
+  },
+};
 
 export type { ContainerSpec };

@@ -122,6 +122,17 @@ export function markMessageFailed(db: Database.Database, messageId: string): voi
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }
 
+/**
+ * Fail everything still pending. Returns the number ended.
+ *
+ * Deliberately not scoped to a single message: the caller reaching for this
+ * has established that nothing in this session can run, not that one message
+ * is bad.
+ */
+export function failPendingMessages(db: Database.Database): number {
+  return db.prepare("UPDATE messages_in SET status = 'failed' WHERE status = 'pending'").run().changes;
+}
+
 export function retryWithBackoff(db: Database.Database, messageId: string, backoffSec: number): void {
   const processAfter = new Date(Date.now() + backoffSec * 1000).toISOString();
   db.prepare('UPDATE messages_in SET tries = tries + 1, process_after = ? WHERE id = ?').run(processAfter, messageId);

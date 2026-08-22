@@ -26,3 +26,4 @@ import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './concurrency/index.js';
 import './boot-crash/index.js';
+import './memory/index.js';

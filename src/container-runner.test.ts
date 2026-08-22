@@ -19,9 +19,11 @@ import {
   composeSessionSpec,
   parseMemoryMb,
   parsePidsLimit,
+  registerSessionContributor,
   resolveProviderName,
   syncSkillSymlinks,
   toMountSpecs,
+  withSessionContributions,
 } from './container-runner.js';
 import type { SupervisedHandle } from './drivers/session-events.js';
 import { log } from './log.js';
@@ -314,6 +316,52 @@ describe('composeSessionSpec', () => {
     expect(spec.resources.cpus).toBeUndefined();
     expect(spec.resources.memoryMb).toBeUndefined();
     expect(spec.resources.shmSizeMb).toBe(1024);
+  });
+});
+
+describe('withSessionContributions', () => {
+  // The registry is module-global and has no reset, so these cases register
+  // once and are written to hold with every contributor below in place.
+  registerSessionContributor(({ agentGroup }) =>
+    agentGroup.id === 'agent-1'
+      ? {
+          mounts: [{ hostPath: '/data/v2-memory/agent-1', containerPath: '/workspace/memory', readonly: true }],
+          env: { NANOCLAW_MEMORY_ENABLED: '1' },
+        }
+      : undefined,
+  );
+  registerSessionContributor(() => {
+    throw new Error('broken contributor');
+  });
+  registerSessionContributor(() => ({ env: { BRAVE_API_KEY: 'module-value' } }));
+
+  it('appends module mounts and env to the provider contribution', async () => {
+    const merged = await withSessionContributions(
+      { mounts: [{ hostPath: '/p', containerPath: '/provider', readonly: false }], env: { XDG_DATA_HOME: '/x' } },
+      { agentGroup, session },
+    );
+    expect(merged.mounts?.map((m) => m.containerPath)).toEqual(['/provider', '/workspace/memory']);
+    expect(merged.env).toEqual({ XDG_DATA_HOME: '/x', NANOCLAW_MEMORY_ENABLED: '1', BRAVE_API_KEY: 'module-value' });
+  });
+
+  it('skips a contributor that declines for this group', async () => {
+    const merged = await withSessionContributions({}, { agentGroup: { ...agentGroup, id: 'agent-2' }, session });
+    expect(merged.mounts).toEqual([]);
+    expect(merged.env).toEqual({ BRAVE_API_KEY: 'module-value' });
+  });
+
+  it('logs and skips a contributor that throws rather than failing the spawn', async () => {
+    await withSessionContributions({}, { agentGroup, session });
+    expect(log.error).toHaveBeenCalledWith(
+      'Session contributor threw',
+      expect.objectContaining({ sessionId: session.id }),
+    );
+  });
+
+  it('lands module env on the contributed lane, not the composed one', async () => {
+    const spec = compose({ contribution: { ...(await withSessionContributions({}, { agentGroup, session })) } });
+    expect(spec.containers[0].contributedEnv).toMatchObject({ BRAVE_API_KEY: 'module-value' });
+    expect(spec.containers[0].env.BRAVE_API_KEY).toBeUndefined();
   });
 });
 

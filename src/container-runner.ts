@@ -419,10 +419,28 @@ async function spawnContainer(session: Session): Promise<void> {
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
-  const { provider, contribution, surfaces } = await resolveProviderContribution(session, agentGroup, containerConfig);
+  const resolved = await resolveProviderContribution(session, agentGroup, containerConfig);
+  const { provider, surfaces } = resolved;
+  // Module contributions travel beside the provider's, not inside it: a
+  // declared provider contract replaces the provider's callback mounts, and
+  // module mounts (the memory index) must not be dropped with them. Env merges
+  // onto the provider contribution, where it takes the contributed lane.
+  const moduleContribution = await withSessionContributions({}, { agentGroup, session });
+  const contribution: ProviderContainerContribution = {
+    ...resolved.contribution,
+    env: { ...(resolved.contribution.env ?? {}), ...(moduleContribution.env ?? {}) },
+  };
 
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
-  const mounts = await buildMounts(agentGroup, session, containerConfig, provider, contribution, surfaces);
+  const mounts = await buildMounts(
+    agentGroup,
+    session,
+    containerConfig,
+    provider,
+    contribution,
+    surfaces,
+    moduleContribution.mounts ?? [],
+  );
   const mailboxEnvironment = await mailbox.runnerEnvironment(mailboxKey);
 
   const driver = getSessionDriver();
@@ -836,6 +854,55 @@ function dispatchSessionExit(event: SessionExitEvent): void {
   }
 }
 
+/**
+ * Per-session contributions from modules: mounts and env a module needs
+ * inside the agent container (the memory index, keys for in-container tools).
+ *
+ * Same shape as a provider's contribution and merged into it, so the result
+ * takes the provider lane through composition — mounts classed
+ * `allowlisted-extra`, env on `contributedEnv` where credential VALUES are
+ * still refused. Without this seam every such feature is a patch to
+ * `buildMounts`/`composeSessionSpec`.
+ *
+ * A contributor that throws is logged and skipped: a missing optional tool
+ * must not stop the session from starting.
+ */
+export interface SessionContributionContext {
+  agentGroup: AgentGroup;
+  session: Session;
+}
+
+export type SessionContributor = (
+  ctx: SessionContributionContext,
+) => ProviderContainerContribution | undefined | Promise<ProviderContainerContribution | undefined>;
+
+const sessionContributors: SessionContributor[] = [];
+
+export function registerSessionContributor(contributor: SessionContributor): void {
+  sessionContributors.push(contributor);
+}
+
+export async function withSessionContributions(
+  base: ProviderContainerContribution,
+  ctx: SessionContributionContext,
+): Promise<ProviderContainerContribution> {
+  const mounts = [...(base.mounts ?? [])];
+  const env = { ...(base.env ?? {}) };
+  for (const contributor of sessionContributors) {
+    let extra: ProviderContainerContribution | undefined;
+    try {
+      extra = await contributor(ctx);
+    } catch (err) {
+      log.error('Session contributor threw', { sessionId: ctx.session.id, err });
+      continue;
+    }
+    if (!extra) continue;
+    mounts.push(...(extra.mounts ?? []));
+    Object.assign(env, extra.env ?? {});
+  }
+  return { ...base, mounts, env };
+}
+
 /** Kill a container for a session. */
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
   const entry = activeContainers.get(sessionId);
@@ -1109,6 +1176,8 @@ export async function buildMounts(
   provider: string,
   providerContribution: ProviderContainerContribution,
   providerSurfaces?: ProviderSpawnRealization,
+  /** Session-contributor (module) mounts — see `registerSessionContributor`. */
+  moduleMounts: readonly VolumeMount[] = [],
 ): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
 
@@ -1311,6 +1380,11 @@ export async function buildMounts(
   if (!contract && providerContribution.mounts) {
     mounts.push(...providerContribution.mounts.map((m) => ({ ...m, mountClass: 'allowlisted-extra' as const, scope })));
   }
+
+  // Module mounts, whatever the provider declares: vetted by the in-tree
+  // module that registered the contributor, the same 'allowlisted-extra'
+  // contract as a provider's.
+  mounts.push(...moduleMounts.map((m) => ({ ...m, mountClass: 'allowlisted-extra' as const, scope })));
 
   return mounts;
 }

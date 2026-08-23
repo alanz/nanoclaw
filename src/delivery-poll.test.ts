@@ -46,7 +46,13 @@ const TEST_DIR = '/tmp/nanoclaw-test-delivery-poll';
 
 import { closeDb, createAgentGroup, createMessagingGroup, initTestDb, runMigrations } from './db/index.js';
 import { getRunningSessions } from './db/sessions.js';
-import { deliverToSessions, setDeliveryAdapter, startActiveDeliveryPoll, stopDeliveryPolls } from './delivery.js';
+import {
+  deliverSessionMessages,
+  deliverToSessions,
+  setDeliveryAdapter,
+  startActiveDeliveryPoll,
+  stopDeliveryPolls,
+} from './delivery.js';
 import { log } from './log.js';
 import { outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession } from './session-manager.js';
@@ -154,6 +160,47 @@ describe('deliverToSessions', () => {
       'Session delivery failed',
       expect.objectContaining({ sessionId: broken.id, err: expect.any(Error) }),
     );
+  });
+});
+
+describe('deliverSessionMessages while a drain is in flight', () => {
+  // The specialist exit hook must not end the invocation (clearing ipc-out)
+  // while a poll's drain is still copying files out of it. A plain call
+  // skips an in-flight session; the exit hook waits for it, then drains
+  // anything written meanwhile.
+  it('a plain call skips; a waiting call returns after the in-flight drain and delivers rows written meanwhile', async () => {
+    const [session] = await seedSessions(1);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reached = false;
+    const delivered: string[] = [];
+    setDeliveryAdapter({
+      deliver: async (_ct, _pid, _tid, _kind, content) => {
+        reached = true;
+        await gate;
+        delivered.push(JSON.parse(content).text);
+        return 'pm';
+      },
+    });
+
+    const poll = deliverSessionMessages(session);
+    await vi.waitFor(() => expect(reached).toBe(true));
+    insertOutbound(session, 'out-late');
+
+    await deliverSessionMessages(session); // skips: the poll owns the session
+    expect(delivered).toHaveLength(0);
+
+    let waited = false;
+    const waiter = deliverSessionMessages(session, { waitForInflight: true }).then(() => {
+      waited = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(waited).toBe(false);
+
+    release();
+    await poll;
+    await waiter;
+    expect(delivered).toHaveLength(2);
   });
 });
 

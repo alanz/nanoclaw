@@ -102,10 +102,12 @@ async function clearAttemptRow(messageId: string): Promise<void> {
  * the channel adapter, both markDelivered (idempotent in the DB via
  * INSERT OR IGNORE — but the user has already seen the message twice).
  *
- * Skipping (vs. queueing) is correct: any message left over when the
- * second caller skips will be picked up on the next poll tick (~1s).
+ * Skipping (vs. queueing) is correct for the polls: any message left over
+ * when the second caller skips will be picked up on the next poll tick (~1s).
+ * A caller that cannot wait for a tick — one about to tear down what the
+ * drain reads from — asks to wait instead (`waitForInflight`).
  */
-const inflightDeliveries = new Set<string>();
+const inflightDeliveries = new Map<string, Promise<void>>();
 
 export interface ChannelDeliveryAdapter {
   deliver(
@@ -239,14 +241,24 @@ export async function deliverToSessions(sessions: readonly Session[]): Promise<v
   });
 }
 
-export async function deliverSessionMessages(session: Session): Promise<void> {
+export async function deliverSessionMessages(
+  session: Session,
+  options: { waitForInflight?: boolean } = {},
+): Promise<void> {
   // Reject re-entry from a concurrent poll on the same session — see the
-  // comment on inflightDeliveries above.
-  if (inflightDeliveries.has(session.id)) return;
-  inflightDeliveries.add(session.id);
-
+  // comment on inflightDeliveries above. A waiting caller lets the running
+  // drain finish, then drains again itself: rows written after that drain
+  // read its batch would otherwise be missed.
+  let running = inflightDeliveries.get(session.id);
+  while (running) {
+    if (!options.waitForInflight) return;
+    await running.catch(() => {});
+    running = inflightDeliveries.get(session.id);
+  }
+  const drain = drainSession(session);
+  inflightDeliveries.set(session.id, drain);
   try {
-    await drainSession(session);
+    await drain;
   } finally {
     inflightDeliveries.delete(session.id);
   }

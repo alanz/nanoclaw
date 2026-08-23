@@ -12,7 +12,7 @@ registerMigration({
       -- It is a property of an agent group, not of this feature, and the
       -- concurrency cap reads the same column to exempt the operator's line.
 
-      CREATE TABLE specialists (
+      CREATE TABLE IF NOT EXISTS specialists (
         agent_group_id        TEXT PRIMARY KEY REFERENCES agent_groups(id),
         is_memory_provider    INTEGER NOT NULL DEFAULT 0,
         last_turn_sub_notice   TEXT,
@@ -20,7 +20,7 @@ registerMigration({
         created_at            TEXT NOT NULL
       );
 
-      CREATE TABLE specialist_tasks (
+      CREATE TABLE IF NOT EXISTS specialist_tasks (
         id                        TEXT PRIMARY KEY,
         specialist_group_id       TEXT NOT NULL REFERENCES agent_groups(id),
         prompt                    TEXT NOT NULL,
@@ -40,9 +40,9 @@ registerMigration({
         failure_detail            TEXT,
         pending_sub_task_id       TEXT REFERENCES specialist_tasks(id)
       );
-      CREATE INDEX idx_specialist_tasks_status ON specialist_tasks(status);
-      CREATE INDEX idx_specialist_tasks_requester_task ON specialist_tasks(requester_task_id);
-      CREATE INDEX idx_specialist_tasks_session ON specialist_tasks(requester_session_id);
+      CREATE INDEX IF NOT EXISTS idx_specialist_tasks_status ON specialist_tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_specialist_tasks_requester_task ON specialist_tasks(requester_task_id);
+      CREATE INDEX IF NOT EXISTS idx_specialist_tasks_session ON specialist_tasks(requester_session_id);
     `);
   },
 });

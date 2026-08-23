@@ -1,16 +1,19 @@
 import type Database from 'better-sqlite3';
 
 import { registerMigration } from './index.js';
+import { addColumnIfMissing } from './legacy-names.js';
 
 registerMigration({
   version: 21,
   name: 'module:specialists:file-handover',
   sqliteOnly: true,
   up(db: Database.Database) {
+    // Guarded for the same reason as the tables below: this may have run
+    // already under 'module-specialists-file-handover'. See legacy-names.ts.
+    addColumnIfMissing(db, 'specialist_tasks', 'committed_files', 'TEXT');
     db.exec(`
-      ALTER TABLE specialist_tasks ADD COLUMN committed_files TEXT;
 
-      CREATE TABLE invocations (
+      CREATE TABLE IF NOT EXISTS invocations (
         id                TEXT PRIMARY KEY,
         session_id        TEXT NOT NULL REFERENCES sessions(id),
         task_id           TEXT REFERENCES specialist_tasks(id),
@@ -19,21 +22,21 @@ registerMigration({
         started_at        TEXT NOT NULL,
         ended_at          TEXT
       );
-      CREATE INDEX idx_invocations_session ON invocations(session_id);
+      CREATE INDEX IF NOT EXISTS idx_invocations_session ON invocations(session_id);
 
-      CREATE TABLE ipc_out_mounts (
+      CREATE TABLE IF NOT EXISTS ipc_out_mounts (
         id            TEXT PRIMARY KEY,
         invocation_id TEXT NOT NULL REFERENCES invocations(id),
         status        TEXT NOT NULL DEFAULT 'active'
       );
 
-      CREATE TABLE ipc_in_mounts (
+      CREATE TABLE IF NOT EXISTS ipc_in_mounts (
         id            TEXT PRIMARY KEY,
         invocation_id TEXT NOT NULL REFERENCES invocations(id),
         status        TEXT NOT NULL DEFAULT 'active'
       );
 
-      CREATE TABLE container_transfers (
+      CREATE TABLE IF NOT EXISTS container_transfers (
         id                    TEXT PRIMARY KEY,
         task_id               TEXT NOT NULL REFERENCES specialist_tasks(id),
         sender_invocation_id  TEXT NOT NULL REFERENCES invocations(id),
@@ -44,10 +47,10 @@ registerMigration({
         status                TEXT NOT NULL DEFAULT 'pending',
         recipient_session_id  TEXT REFERENCES sessions(id)
       );
-      CREATE INDEX idx_container_transfers_task ON container_transfers(task_id);
-      CREATE INDEX idx_container_transfers_recipient ON container_transfers(recipient_session_id);
+      CREATE INDEX IF NOT EXISTS idx_container_transfers_task ON container_transfers(task_id);
+      CREATE INDEX IF NOT EXISTS idx_container_transfers_recipient ON container_transfers(recipient_session_id);
 
-      CREATE TABLE transfer_files (
+      CREATE TABLE IF NOT EXISTS transfer_files (
         id            TEXT PRIMARY KEY,
         transfer_id   TEXT NOT NULL REFERENCES container_transfers(id),
         original_name TEXT NOT NULL,
@@ -55,7 +58,7 @@ registerMigration({
         status        TEXT NOT NULL DEFAULT 'owned',
         memory_path   TEXT
       );
-      CREATE INDEX idx_transfer_files_transfer ON transfer_files(transfer_id);
+      CREATE INDEX IF NOT EXISTS idx_transfer_files_transfer ON transfer_files(transfer_id);
     `);
   },
 });

@@ -115,7 +115,13 @@ const appleFixtures: DialectFixtures = {
             [LABELS.role]: 'agent',
           },
         },
-        status: { state: appleState(r.phase) },
+        // A container that ever ran carries startedDate; one that was only
+        // created does not. That absence is how this runtime distinguishes
+        // prepared-not-started from dead — see normalizedState.
+        status:
+          r.phase === 'terminal'
+            ? { state: appleState(r.phase), startedDate: '2026-01-01T00:00:00Z' }
+            : { state: appleState(r.phase) },
       })),
     ),
   }),
@@ -133,7 +139,7 @@ const appleFixtures: DialectFixtures = {
             [LABELS.role]: 'agent',
           },
         },
-        status: { state: 'running' },
+        status: { state: 'running', startedDate: '2026-01-01T00:00:00Z' },
       },
     ]),
   }),

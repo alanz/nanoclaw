@@ -65,8 +65,8 @@ beforeEach(async () => {
   });
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 // ── Config defaults  [config-default.*] ───────────────────────────────────────

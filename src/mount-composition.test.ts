@@ -220,6 +220,22 @@ describe('buildMounts against the policy the drivers enforce', () => {
     }
   });
 
+  it('mounts the group folder read-only when a contributor asks, and the spec still validates', async () => {
+    // A specialist's folder is a template its concurrent tasks share; writable,
+    // one task could change what the next one starts from.
+    const writable = (await composedMounts()).find((m) => m.containerPath === '/workspace/agent');
+    expect(writable?.readonly).toBe(false);
+
+    const mounts = await buildMounts(agentGroup, session, containerConfig, 'claude', {}, undefined, [], true);
+    expect(mounts.find((m) => m.containerPath === '/workspace/agent')).toMatchObject({
+      hostPath: groupDir,
+      readonly: true,
+    });
+    // The session workspace beside it stays writable: per-task state lives there.
+    expect(mounts.find((m) => m.containerPath === '/workspace')?.readonly).toBe(false);
+    expect(() => validateSpec(specFrom(mounts), mountPolicy())).not.toThrow();
+  });
+
   it('refuses the central DB dressed up as a release surface', async () => {
     const spec = specFrom(await composedMounts());
     spec.containers[0].mounts.push({

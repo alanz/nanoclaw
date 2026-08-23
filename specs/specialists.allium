@@ -7,7 +7,10 @@
 -- Includes: SpecialistTask lifecycle, delegation from main group, sub-task dispatch,
 --           chain limit enforcement (depth/count/same-type/cycle), memory provider
 --           bypass, result routing back to requester, overall task timeout,
---           per-task session provisioning, container crash/restart recovery.
+--           per-task session provisioning, container crash/restart recovery,
+--           the root requester a task's progress messages and questions reach.
+--           (Relaying those messages is null-channel.allium; results still
+--           travel only by result routing below.)
 -- Excludes: AgentGroup / Specialist registration (identity.allium), session lifecycle
 --           (sessions.allium), agent-to-agent messaging infra (agent-to-agent.allium).
 
@@ -110,7 +113,9 @@ config {
     ipc_in_container_path: String = "/workspace/ipc-in"
     -- Path inside a group's workspace where committed memory files are placed.
     -- Resolved against requester_group.folder when commit_to_memory is true.
-    memory_reports_subpath: String = "memory/reports"
+    -- The requester's Zettelkasten (see memory-graph.allium): reports are the
+    -- sources its notes are written from.
+    memory_reports_subpath: String = "zettel/reports"
 }
 
 ------------------------------------------------------------
@@ -155,6 +160,14 @@ entity SpecialistTask {
     -- Empty when the specialist delivered text only or staged files to ipc-in.
     committed_files: List<String>? when status = completed
     failure: TaskFailure when status = failed
+
+    -- The session that dispatched the root of this task's chain: the
+    -- main-agent session the user is talking to. Progress messages and
+    -- questions from any task in the chain are relayed to this session's
+    -- chat (null-channel.allium SpecialistProgressRelayed,
+    -- SpecialistCardRelayed).
+    root_requester_session: if requester_task = null: requester_session
+                            else: requester_task.root_requester_session
 
     has_cycle: specialist_group in ancestor_groups
     is_overdue: status in {queued, running, awaiting_sub_task, awaiting_restart}
@@ -1031,7 +1044,9 @@ rule SpecialistFailureRoutedToRequester {
 -- Overall task timeout. A task that has been live (queued, running, or
 -- awaiting_sub_task) longer than max_task_duration is marked failed with
 -- a timeout failure and the result-ready event is emitted so the requester
--- can be notified.
+-- can be notified. Time a specialist spends waiting on a question to the
+-- user (null-channel.allium SpecialistCardRelayed) counts towards this
+-- duration: the clock does not pause while the user is asked.
 
 rule SpecialistTaskTimedOut {
     when: task: SpecialistTask.is_overdue

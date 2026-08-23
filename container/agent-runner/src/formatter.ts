@@ -269,8 +269,25 @@ function formatSingleChat(msg: MessageInRow): string {
   const appContextSuffix = formatAppContext(content.app_context);
 
   const fromAttr = originAttr(msg);
+  const taskAttrs = specialistTaskAttrs(content);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}${taskAttrs}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+}
+
+/**
+ * Specialist task ids carried by host messages. A result names the task it
+ * answers (`completed_task`), so a requester with more than one dispatch in
+ * flight can match it to the id it was given on dispatch; a specialist's own
+ * task prompt names its task (`task`). Without these the ids reached the
+ * container only to be dropped here.
+ */
+function specialistTaskAttrs(content: Record<string, unknown>): string {
+  const own = typeof content.specialistTaskId === 'string' ? ` task="${escapeXml(content.specialistTaskId)}"` : '';
+  const done =
+    typeof content.completedSpecialistTaskId === 'string'
+      ? ` completed_task="${escapeXml(content.completedSpecialistTaskId)}"`
+      : '';
+  return own + done;
 }
 
 /**

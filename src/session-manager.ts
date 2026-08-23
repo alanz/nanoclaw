@@ -445,6 +445,16 @@ export function withExistingMailboxSession<T>(
   return runMailboxSession(agentGroupId, sessionId, action, false);
 }
 
+/**
+ * Run `fn` outside every open mailbox session. For work that starts inside one
+ * but is not part of it — a session-exit hook fired by a kill issued from the
+ * sweep's own session opens that session's mailbox itself, and must queue
+ * behind the sweep rather than count as nested.
+ */
+export function outsideMailboxSessions<T>(fn: () => T): T {
+  return activeMailboxKeys.exit(fn);
+}
+
 async function runMailboxSession<T>(
   agentGroupId: string,
   sessionId: string,

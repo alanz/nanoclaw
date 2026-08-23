@@ -66,8 +66,9 @@ export interface RuntimeDialect {
   /**
    * Mount flags for this runtime.
    *
-   * Not every runtime can bind a single FILE. Docker can; Apple's `container`
-   * only binds directories, and passing it a file mount fails the spawn. A
+   * Not every runtime binds every mount the same way. Docker binds single
+   * files cleanly; Apple's `container` binds them by sharing the parent
+   * directory, which collides with a directory mount of that same parent. A
    * dialect that cannot honor a mount has to be the thing that decides what
    * to do about it — the composer states what the session needs, and only the
    * realization knows what this runtime can express.

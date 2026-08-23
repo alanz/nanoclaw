@@ -30,7 +30,8 @@
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live": "vitest run src/drivers/runtime.live.test.ts"
+    "test:live": "vitest run src/drivers/runtime.live.test.ts",
+    "check-migrations": "tsx scripts/check-migrations.ts"
   },
   "dependencies": {
     "@clack/core": "^1.2.0",

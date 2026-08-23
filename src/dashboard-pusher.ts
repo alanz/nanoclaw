@@ -145,9 +145,9 @@ async function collectAgentGroups() {
   const groups = await getAllAgentGroups();
   return Promise.all(
     groups.map(async (g) => {
-    const sessions = await getSessionsByAgentGroup(g.id);
-    const running = sessions.filter((s) => s.container_status === 'running' || s.container_status === 'idle');
-    const destinations = await getDestinations(g.id);
+      const sessions = await getSessionsByAgentGroup(g.id);
+      const running = sessions.filter((s) => s.container_status === 'running' || s.container_status === 'idle');
+      const destinations = await getDestinations(g.id);
       const members = await Promise.all(
         (await getMembers(g.id)).map(async (m) => {
           const user = await getUser(m.user_id);
@@ -161,26 +161,29 @@ async function collectAgentGroups() {
         }),
       );
 
-    // Wirings
-    const db = getDb();
-    const wirings = await db.all(`SELECT mga.*, mg.channel_type, mg.platform_id, mg.name as mg_name, mg.is_group, mg.unknown_sender_policy
+      // Wirings
+      const db = getDb();
+      const wirings = (await db.all(
+        `SELECT mga.*, mg.channel_type, mg.platform_id, mg.name as mg_name, mg.is_group, mg.unknown_sender_policy
          FROM messaging_group_agents mga
          JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
-         WHERE mga.agent_group_id = ?`, g.id) as Array<Record<string, unknown>>;
+         WHERE mga.agent_group_id = ?`,
+        g.id,
+      )) as Array<Record<string, unknown>>;
 
-    return {
-      id: g.id,
-      name: g.name,
-      folder: g.folder,
-      agent_provider: g.agent_provider,
-      container_config: null,
-      sessionCount: sessions.length,
-      runningSessions: running.length,
-      wirings,
-      destinations,
-      members,
-      admins,
-      created_at: g.created_at,
+      return {
+        id: g.id,
+        name: g.name,
+        folder: g.folder,
+        agent_provider: g.agent_provider,
+        container_config: null,
+        sessionCount: sessions.length,
+        runningSessions: running.length,
+        wirings,
+        destinations,
+        members,
+        admins,
+        created_at: g.created_at,
       };
     }),
   );
@@ -188,12 +191,12 @@ async function collectAgentGroups() {
 
 async function collectSessions() {
   const db = getDb();
-  return await db.all(`SELECT s.*, ag.name as agent_group_name, ag.folder as agent_group_folder,
+  return (await db.all(`SELECT s.*, ag.name as agent_group_name, ag.folder as agent_group_folder,
               mg.channel_type, mg.platform_id, mg.name as messaging_group_name
        FROM sessions s
        LEFT JOIN agent_groups ag ON ag.id = s.agent_group_id
        LEFT JOIN messaging_groups mg ON mg.id = s.messaging_group_id
-       ORDER BY s.last_active DESC NULLS LAST`) as Array<Record<string, unknown>>;
+       ORDER BY s.last_active DESC NULLS LAST`)) as Array<Record<string, unknown>>;
 }
 
 async function collectChannels() {
@@ -249,25 +252,28 @@ async function collectUsers() {
       const roles = await getUserRoles(u.id);
       const dms = await getUserDmsForUser(u.id);
 
-    const db = getDb();
-    const memberships = await db.all(`SELECT agm.agent_group_id, ag.name as agent_group_name
+      const db = getDb();
+      const memberships = (await db.all(
+        `SELECT agm.agent_group_id, ag.name as agent_group_name
          FROM agent_group_members agm
          JOIN agent_groups ag ON ag.id = agm.agent_group_id
-         WHERE agm.user_id = ?`, u.id) as Array<Record<string, unknown>>;
+         WHERE agm.user_id = ?`,
+        u.id,
+      )) as Array<Record<string, unknown>>;
 
-    let privilege = 'none';
-    if (roles.some((r) => r.role === 'owner')) privilege = 'owner';
-    else if (roles.some((r) => r.role === 'admin' && !r.agent_group_id)) privilege = 'global_admin';
-    else if (roles.some((r) => r.role === 'admin')) privilege = 'admin';
-    else if (memberships.length > 0) privilege = 'member';
+      let privilege = 'none';
+      if (roles.some((r) => r.role === 'owner')) privilege = 'owner';
+      else if (roles.some((r) => r.role === 'admin' && !r.agent_group_id)) privilege = 'global_admin';
+      else if (roles.some((r) => r.role === 'admin')) privilege = 'admin';
+      else if (memberships.length > 0) privilege = 'member';
 
-    return {
-      id: u.id,
-      kind: u.kind,
-      display_name: u.display_name,
-      privilege,
-      roles,
-      memberships,
+      return {
+        id: u.id,
+        kind: u.kind,
+        display_name: u.display_name,
+        privilege,
+        roles,
+        memberships,
         dmChannels: dms.map((d) => ({ channel_type: d.channel_type })),
         created_at: u.created_at,
       };

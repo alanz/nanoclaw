@@ -27,3 +27,4 @@ import './self-mod/index.js';
 import './concurrency/index.js';
 import './boot-crash/index.js';
 import './memory/index.js';
+import './specialists/index.js';

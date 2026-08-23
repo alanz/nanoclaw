@@ -36,6 +36,7 @@
     "@clack/prompts": "^1.2.0",
     "@deltachat/jsonrpc-client": "^2.53.0",
     "@deltachat/stdio-rpc-server": "^2.53.0",
+    "@nanoco/nanoclaw-dashboard": "0.3.0",
     "@onecli-sh/sdk": "2.2.1",
     "@parcel/watcher": "2.5.6",
     "better-sqlite3": "13.0.3",

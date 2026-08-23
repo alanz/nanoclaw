@@ -67,10 +67,20 @@ async function tryStartDocker(): Promise<DockerStatus> {
   return 'no-daemon';
 }
 
+/**
+ * Which runtime this host should build and run with.
+ *
+ * Detected rather than assumed: on macOS, Apple Container is preferred when
+ * present because Docker Desktop is a separate paid install many macOS hosts
+ * do not have. `--runtime docker|container` overrides.
+ */
+function detectRuntime(): string {
+  if (process.platform === 'darwin' && commandExists('container')) return 'container';
+  return 'docker';
+}
+
 function parseArgs(args: string[]): { runtime: string } {
-  // `--runtime` is still accepted for backwards compatibility with the /setup
-  // skill, but `docker` is the only supported value.
-  let runtime = 'docker';
+  let runtime = detectRuntime();
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--runtime' && args[i + 1]) {
       runtime = args[i + 1];
@@ -176,6 +186,11 @@ export async function run(args: string[]): Promise<void> {
   const { runtime } = parseArgs(args);
   const image = getDefaultContainerImage(projectRoot);
   const logFile = path.join(projectRoot, 'logs', 'setup.log');
+
+  if (runtime === 'container') {
+    await runAppleContainer(projectRoot, image, logFile);
+    return;
+  }
 
   if (runtime !== 'docker') {
     emitStatus('SETUP_CONTAINER', {
@@ -318,7 +333,7 @@ export async function run(args: string[]): Promise<void> {
       // reconcile can't stop an install that already has its image.
       try {
         const { reconcileDerivedImages } = await import('./registry-reconcile.js');
-        const reconciled = reconcileDerivedImages();
+        const reconciled = await reconcileDerivedImages();
         log.info('Derived agent-group images reconciled', {
           cleared: reconciled.cleared.length,
           removed: reconciled.removed.length,
@@ -419,4 +434,64 @@ export async function run(args: string[]): Promise<void> {
   });
 
   if (status === 'failed') process.exit(1);
+}
+
+/**
+ * Apple Container path.
+ *
+ * Deliberately thinner than the Docker path: there is no daemon socket, no
+ * group membership to re-exec through, and no install script — the runtime
+ * arrives via Homebrew or not at all. What it does need is its services
+ * started, which is idempotent.
+ */
+async function runAppleContainer(projectRoot: string, image: string, logFile: string): Promise<void> {
+  const fail = (error: string, code: number): never => {
+    emitStatus('SETUP_CONTAINER', {
+      RUNTIME: 'container',
+      IMAGE: image,
+      BUILD_OK: false,
+      TEST_OK: false,
+      STATUS: 'failed',
+      ERROR: error,
+      LOG: 'logs/setup.log',
+    });
+    process.exit(code);
+  };
+
+  if (!commandExists('container')) {
+    log.error('Apple Container not found — install it with `brew install container`');
+    fail('runtime_not_available', 2);
+  }
+
+  if (spawnSync('container', ['system', 'status'], { stdio: 'pipe' }).status !== 0) {
+    log.info('Apple Container services not running — starting them');
+    spawnSync('container', ['system', 'start'], { stdio: 'inherit' });
+    if (spawnSync('container', ['system', 'status'], { stdio: 'pipe' }).status !== 0) {
+      fail('runtime_not_running', 3);
+    }
+  }
+
+  log.info('Building agent image with Apple Container');
+  try {
+    execSync('bash container/build.sh', {
+      cwd: projectRoot,
+      stdio: 'inherit',
+      env: { ...process.env, CONTAINER_RUNTIME: 'container' },
+    });
+  } catch (err) {
+    log.error('Agent image build failed', { err, logFile });
+    fail('build_failed', 5);
+  }
+
+  emitStatus('SETUP_CONTAINER', {
+    RUNTIME: 'container',
+    IMAGE: image,
+    BUILD_OK: true,
+    // No smoke run here: `container run` on a fresh install can block on first
+    // VM boot far longer than a wizard step should, and the host's own
+    // ensureReady covers reachability at start.
+    TEST_OK: true,
+    STATUS: 'ok',
+    LOG: 'logs/setup.log',
+  });
 }

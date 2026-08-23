@@ -44,6 +44,8 @@ import {
   runInitialChannel,
   type ChannelChoice,
 } from './channels/initial-setup.js';
+import { runDeltachatChannel } from './channels/deltachat.js';
+import { readEnvFile } from '../src/env.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
 import { logFirstChat, pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
@@ -326,7 +328,12 @@ async function main(): Promise<void> {
   }
 
   let gatewayKind = process.env.NANOCLAW_GATEWAY_PROVIDER?.trim().toLowerCase();
-  if (!skip.has('gateway')) {
+  if (useNativeProxy()) {
+    // Built into core, not a gateway skill: nothing to install, and the
+    // credential is read from .env by the host-side proxy.
+    gatewayKind = 'native-proxy';
+    p.log.success('Native credential proxy selected (built in; credentials from .env).');
+  } else if (!skip.has('gateway')) {
     p.log.message(
       brandBody(
         dimWrap(
@@ -448,7 +455,20 @@ async function main(): Promise<void> {
       }
     } else {
       if (!gatewayKind) throw new Error('No gateway is selected for agent authentication');
-      runGatewayAuth(gatewayKind, agentProvider);
+      if (gatewayKind === 'native-proxy') {
+        // No gateway-side auth: the proxy injects ANTHROPIC_API_KEY or
+        // CLAUDE_CODE_OAUTH_TOKEN from .env into proxied requests.
+        const creds = readEnvFile(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']);
+        if (!creds.ANTHROPIC_API_KEY && !creds.CLAUDE_CODE_OAUTH_TOKEN) {
+          await fail(
+            'auth',
+            'The native credential proxy has no credential to inject.',
+            'Add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN to .env, then re-run setup.',
+          );
+        }
+      } else {
+        runGatewayAuth(gatewayKind, agentProvider);
+      }
     }
     // Persist the pick as the instance-wide default so every future group
     // (channel-approved, ncl-created) is created on this provider. Read from
@@ -681,7 +701,12 @@ async function main(): Promise<void> {
         await resolveDisplayName();
       }
       let result: void | typeof BACK_TO_CHANNEL_SELECTION;
-      if (channelChoice === 'other') {
+      // DeltaChat is fork-owned and keeps its dedicated helper: it provisions
+      // its own account against a chatmail relay, so there is no token to
+      // collect and the wizard instead waits for the invite and first contact.
+      if (channelChoice === 'deltachat') {
+        result = await runDeltachatChannel(displayName!);
+      } else if (channelChoice === 'other') {
         result = await askOtherChannelName();
       } else if (channelChoice === 'skip') {
         p.log.info(
@@ -1773,3 +1798,17 @@ withSetupLock(async () => {
   p.cancel('Setup aborted.');
   process.exit(1);
 });
+
+/**
+ * Whether this install supplies Anthropic credentials itself rather than
+ * through the OneCLI vault.
+ *
+ * Set by choosing the native credential proxy: the host holds the credential
+ * and containers reach it over ANTHROPIC_BASE_URL, so the vault step has
+ * nothing to install and no agent to register.
+ */
+function useNativeProxy(): boolean {
+  const env = readEnvFile(['NANOCLAW_GATEWAY_PROVIDER']);
+  const configured = process.env.NANOCLAW_GATEWAY_PROVIDER ?? env.NANOCLAW_GATEWAY_PROVIDER ?? '';
+  return configured.trim().toLowerCase() === 'native-proxy';
+}

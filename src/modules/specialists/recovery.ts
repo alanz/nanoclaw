@@ -1,0 +1,401 @@
+/**
+ * Specialist recovery sweep — called from host-sweep.ts once per tick.
+ *
+ * Handles five lifecycle events (see specialists.allium "three failure paths"):
+ *
+ *   1. Global timeout: any live task older than max_task_duration → failed
+ *      with kind=timeout. Cancels any pending child subtree.
+ *
+ *   2. Sub-task await timeout: a task in awaiting_sub_task whose pending
+ *      child's dispatched_at is older than max_sub_task_await — restart the
+ *      parent (SubTaskAwaitTimedOut) or fail it (SubTaskAwaitExhausted).
+ *      The parent's container is intentionally stopped in awaiting_sub_task
+ *      (it exited after calling dispatch_sub_task), so crash detection does
+ *      not apply here; this is a distinct detection path.
+ *
+ *   3. Container started: a queued or awaiting_restart task whose container
+ *      became alive → advance to running (SpecialistTaskStarted).
+ *
+ *   4. Crash detection: a task in running or queued whose container is stopped
+ *      — increment restart_attempt_count, transition to awaiting_restart
+ *      (SpecialistContainerCrashed) or failed with kind=host_restart
+ *      (SpecialistRestartExhausted). When crashing from awaiting_sub_task the
+ *      child subtree is cancelled (ChildSubtreeCancelledOnParentCrash).
+ *      Note: awaiting_sub_task is excluded — the parent container is expected
+ *      to be stopped in that state; path 2 above handles liveness detection.
+ *
+ *   5. Re-spawn: a task in awaiting_restart with no running container → re-wake.
+ */
+import { log } from '../../log.js';
+import { isContainerRunning } from '../../container-runner.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
+import { clearBootCrashState, getBootCrashState } from '../boot-crash/index.js';
+import { SPECIALISTS_CONFIG } from './config.js';
+import { getLiveTasksWithSessions, getTask, updateTaskStatus } from './db.js';
+import { routeResult } from './routing.js';
+import type { SpecialistTask } from './types.js';
+
+const LIVE_STATUSES = new Set(['queued', 'running', 'awaiting_sub_task', 'awaiting_restart']);
+
+/**
+ * Consecutive boot crashes before a `queued` task is declared unstartable.
+ * Deliberately not maxRestartRetries: those are retries of work that began,
+ * whereas these are attempts that never got off the ground and will fail
+ * identically forever. Three costs ~3 minutes at the 60s sweep cadence,
+ * against the 4 hours the global timeout would otherwise take.
+ */
+const BOOT_CRASH_THRESHOLD = 3;
+
+/**
+ * A `running` task with no container is not necessarily a crash. Since
+ * specialists exit on dispatch_sub_task and deliver_specialist_result, a task
+ * is legitimately between containers when its sub-task's result has been
+ * routed back (the parent is set `running` before its wake, which may wait in
+ * the concurrency queue or take seconds to spawn), or when a rejected dispatch
+ * left a notice for it. Each leaves a due message nobody has claimed — the
+ * host's due-message wake owes that session a container. Treating it as a
+ * crash instead re-sends the task's prompt into a fresh conversation, losing
+ * everything the parent had done.
+ *
+ * A container that died mid-turn leaves its message claimed, so it still
+ * reads as a crash and spends the restart budget as before.
+ */
+async function owedAWake(task: SpecialistTask & { session_id: string }): Promise<boolean> {
+  const owed = await withExistingMailboxSession(
+    task.specialist_group_id,
+    task.session_id,
+    (mailbox) => mailbox.countDueMessages() > 0 && mailbox.getProcessingClaims().length === 0,
+  );
+  return owed === true;
+}
+
+/**
+ * Recursively cancel a sub-task subtree rooted at taskId.
+ * Implements SubtreeCancellationApplied from specialists.allium.
+ */
+async function cancelSubtree(taskId: string): Promise<void> {
+  const task = await getTask(taskId);
+  if (!task) return;
+  if (task.status === 'completed' || task.status === 'failed') return;
+
+  const ts = new Date().toISOString();
+  const failure = {
+    failure_kind: 'execution_error',
+    failure_detail: 'cancelled: ancestor specialist container crashed',
+    closed_at: ts,
+    pending_sub_task_id: null,
+  };
+  await updateTaskStatus(task.id, 'failed', failure);
+  log.info('specialists: sub-task cancelled due to ancestor crash', { taskId: task.id });
+
+  // A cancelled task is terminal like any other (the spec's
+  // SpecialistResultReady), so it goes through routeResult: that ends its
+  // invocation and closes its session, killing a container that would
+  // otherwise run on, holding a concurrency slot, for work nobody will read.
+  // The result itself is dropped — every caller has already moved the parent
+  // out of awaiting_sub_task, so routing finds no one waiting for it.
+  await routeResult({ ...task, status: 'failed', ...failure });
+
+  if (task.pending_sub_task_id) {
+    await cancelSubtree(task.pending_sub_task_id);
+  }
+}
+
+export async function sweepSpecialistTasks(): Promise<void> {
+  let tasks: Array<SpecialistTask & { session_id: string; container_status: string }>;
+  try {
+    tasks = await getLiveTasksWithSessions();
+  } catch (err) {
+    // Table may not exist if the migration hasn't run yet (e.g. fresh install
+    // where the module hasn't been wired in yet).
+    log.debug('specialists: sweep skipped (table not ready)', { err });
+    return;
+  }
+
+  const now = Date.now();
+
+  for (const task of tasks) {
+    try {
+      await sweepTask(task, now);
+    } catch (err) {
+      log.error('specialists: sweep error for task', { taskId: task.id, err });
+    }
+  }
+}
+
+async function sweepTask(
+  task: SpecialistTask & { session_id: string; container_status: string },
+  now: number,
+): Promise<void> {
+  // Re-fetch to skip tasks already transitioned by an earlier step in this tick
+  // (e.g. a sibling's processing called cancelSubtree on this task).
+  const fresh = await getTask(task.id);
+  if (!fresh || fresh.status === 'completed' || fresh.status === 'failed') return;
+
+  // ── 1. Global timeout ─────────────────────────────────────────────────────
+  const age = now - Date.parse(task.dispatched_at);
+  if (age > SPECIALISTS_CONFIG.maxTaskDurationMs && LIVE_STATUSES.has(task.status)) {
+    const ts = new Date().toISOString();
+    const pendingChildId = task.pending_sub_task_id;
+    await updateTaskStatus(task.id, 'failed', {
+      failure_kind: 'timeout',
+      failure_detail: 'task exceeded maximum duration',
+      closed_at: ts,
+      pending_sub_task_id: null,
+    });
+    // ChildSubtreeCancelledOnSubTaskAwaitExhausted: cancel any pending child
+    // when failing with kind=timeout (fires for both SpecialistTaskTimedOut
+    // and SubTaskAwaitExhausted paths per specialists.allium:1607-1613).
+    if (pendingChildId) await cancelSubtree(pendingChildId);
+    const failed = {
+      ...task,
+      status: 'failed' as const,
+      failure_kind: 'timeout',
+      failure_detail: 'task exceeded maximum duration',
+      closed_at: ts,
+      pending_sub_task_id: null,
+    };
+    await routeResult(failed);
+    log.warn('specialists: task timed out', { taskId: task.id });
+    return;
+  }
+
+  // ── 2. Sub-task await timeout ─────────────────────────────────────────────
+  // The parent is in awaiting_sub_task and its container is intentionally
+  // stopped (it exited after calling dispatch_sub_task). Detection uses the
+  // child's dispatched_at, not the parent's container status.
+  // spec: sub_task_await_overdue = status = awaiting_sub_task
+  //         and pending_sub_task != null
+  //         and (pending_sub_task.dispatched_at + max_sub_task_await) <= now
+  if (task.status === 'awaiting_sub_task' && task.pending_sub_task_id) {
+    const child = await getTask(task.pending_sub_task_id);
+    if (child) {
+      const childAge = now - Date.parse(child.dispatched_at);
+      if (childAge > SPECIALISTS_CONFIG.maxSubTaskAwaitMs) {
+        const pendingChildId = task.pending_sub_task_id;
+        if (task.restart_attempt_count < SPECIALISTS_CONFIG.maxRestartRetries) {
+          // SubTaskAwaitTimedOut: retries remain → awaiting_restart.
+          // ChildSubtreeCancelledOnParentCrash fires on awaiting_restart transitions.
+          await updateTaskStatus(task.id, 'awaiting_restart', {
+            restart_attempt_count: task.restart_attempt_count + 1,
+            pending_sub_task_id: null,
+          });
+          await cancelSubtree(pendingChildId);
+          log.warn('specialists: sub-task await timed out, queuing parent for restart', {
+            taskId: task.id,
+            pendingChildId,
+            attempt: task.restart_attempt_count + 1,
+          });
+        } else {
+          // SubTaskAwaitExhausted: retries exhausted → failed with timeout.
+          const ts = new Date().toISOString();
+          await updateTaskStatus(task.id, 'failed', {
+            failure_kind: 'timeout',
+            failure_detail: 'sub-task did not complete within the await window after exhausting restart retries',
+            closed_at: ts,
+            pending_sub_task_id: null,
+          });
+          // ChildSubtreeCancelledOnSubTaskAwaitExhausted
+          await cancelSubtree(pendingChildId);
+          const failed = {
+            ...task,
+            status: 'failed' as const,
+            failure_kind: 'timeout',
+            failure_detail: 'sub-task did not complete within the await window after exhausting restart retries',
+            closed_at: ts,
+            pending_sub_task_id: null,
+          };
+          await routeResult(failed);
+          log.warn('specialists: sub-task await exhausted — parent task failed', {
+            taskId: task.id,
+            pendingChildId,
+          });
+        }
+        return;
+      }
+    }
+  }
+
+  const containerAlive = isContainerRunning(task.session_id);
+
+  // ── 2b. Container cannot start at all ────────────────────────────────────
+  // Every path below keys off `containerAlive`, an instantaneous sample — and
+  // that sample is unreliable for exactly the failure it most needs to catch.
+  // The host sweep runs sweepSession() (which wakes and SPAWNS the container)
+  // before sweepSpecialistTasks(), so a container is always observed alive by
+  // the very tick that started it. One that dies ~800ms into boot is therefore
+  // never seen dead: `queued` is advanced to `running` by path 3, and `running`
+  // never trips path 4. The task sits live until the 4h global timeout.
+  //
+  // That is the real shape of the incident this guard exists for: 241 respawns
+  // across 4 hours with restart_attempt_count still 0. Liveness sampling cannot
+  // fix it — the boot-crash counter can, because it is evidence accumulated
+  // across spawns rather than a snapshot. So this runs BEFORE the liveness
+  // paths and deliberately ignores `containerAlive`.
+  //
+  // awaiting_sub_task is excluded: its container is legitimately stopped and
+  // path 2 owns that state.
+  const bootCrash = getBootCrashState(task.session_id);
+  if (bootCrash.count >= BOOT_CRASH_THRESHOLD && task.status !== 'awaiting_sub_task') {
+    const ts = new Date().toISOString();
+    // The stderr tail is the only place the reason exists — carry it to the
+    // requester instead of a generic "container crashed".
+    const detail = `container failed to start (${bootCrash.count} consecutive boot crashes): ${
+      bootCrash.stderrTail.slice(-3).join(' | ') || 'no stderr captured'
+    }`;
+    await updateTaskStatus(task.id, 'failed', {
+      failure_kind: 'host_restart',
+      failure_detail: detail,
+      closed_at: ts,
+      restart_attempt_count: bootCrash.count,
+      pending_sub_task_id: null,
+    });
+    if (task.pending_sub_task_id) await cancelSubtree(task.pending_sub_task_id);
+    clearBootCrashState(task.session_id);
+    await routeResult({
+      ...task,
+      status: 'failed' as const,
+      failure_kind: 'host_restart',
+      failure_detail: detail,
+      closed_at: ts,
+      pending_sub_task_id: null,
+    });
+    log.error('specialists: task failed — container never started', {
+      taskId: task.id,
+      sessionId: task.session_id,
+      status: task.status,
+      crashes: bootCrash.count,
+      stderrTail: bootCrash.stderrTail,
+    });
+    return;
+  }
+
+  // ── 3. Container started → advance to running ─────────────────────────────
+  // A queued or awaiting_restart task whose container became alive transitions
+  // to running. This covers both first starts (queued → running) and restarts
+  // (awaiting_restart → running), matching SpecialistTaskStarted in the spec.
+  if ((task.status === 'queued' || task.status === 'awaiting_restart') && containerAlive) {
+    await updateTaskStatus(task.id, 'running');
+    log.info('specialists: task advanced to running', { taskId: task.id, from: task.status });
+    return;
+  }
+
+  // ── 4. Crash detection ───────────────────────────────────────────────────
+  // Only running tasks are crash-detected. queued tasks are intentionally
+  // excluded: a queued task with no container is either (a) legitimately
+  // waiting in wakeContainer's in-memory concurrency queue for a slot to open,
+  // or (b) freshly dispatched before the container has started. Treating
+  // either as a crash would burn through restart_attempt_count while the
+  // task is merely waiting, exhausting retries before the container ever
+  // gets a chance to start. This matches v1 behaviour (specialists.ts only
+  // crash-detected running tasks). awaiting_sub_task is also excluded: the
+  // parent container exits cleanly after dispatch_sub_task; path 2 handles
+  // liveness detection for that state.
+  //
+  // A container that never starts at all is NOT handled here — see 2b above,
+  // which catches it before this point using accumulated boot-crash evidence
+  // rather than a liveness sample this path cannot trust.
+  if (!containerAlive && task.status === 'running') {
+    if (await owedAWake(task)) {
+      log.debug('specialists: running task has no container but is owed a wake — not a crash', {
+        taskId: task.id,
+      });
+      return;
+    }
+    const newRetryCount = task.restart_attempt_count + 1;
+    const pendingChildId = task.pending_sub_task_id;
+
+    if (newRetryCount > SPECIALISTS_CONFIG.maxRestartRetries) {
+      // SpecialistRestartExhausted: retries exhausted → fail with host_restart.
+      const ts = new Date().toISOString();
+      await updateTaskStatus(task.id, 'failed', {
+        failure_kind: 'host_restart',
+        failure_detail: `container crashed after ${task.restart_attempt_count} restart attempts`,
+        closed_at: ts,
+        restart_attempt_count: newRetryCount,
+        pending_sub_task_id: null,
+      });
+      // ChildSubtreeCancelledOnRestartExhausted
+      if (pendingChildId) await cancelSubtree(pendingChildId);
+      const failed = {
+        ...task,
+        status: 'failed' as const,
+        failure_kind: 'host_restart',
+        failure_detail: `container crashed after ${task.restart_attempt_count} restart attempts`,
+        closed_at: ts,
+        pending_sub_task_id: null,
+      };
+      await routeResult(failed);
+      log.warn('specialists: task failed — restart limit exceeded', {
+        taskId: task.id,
+        retries: task.restart_attempt_count,
+      });
+    } else {
+      // SpecialistContainerCrashed: retries remain → awaiting_restart.
+      await updateTaskStatus(task.id, 'awaiting_restart', {
+        restart_attempt_count: newRetryCount,
+        pending_sub_task_id: null,
+      });
+      // ChildSubtreeCancelledOnParentCrash
+      if (pendingChildId) await cancelSubtree(pendingChildId);
+      log.info('specialists: task crash detected, queued for restart', {
+        taskId: task.id,
+        attempt: newRetryCount,
+        maxRetries: SPECIALISTS_CONFIG.maxRestartRetries,
+      });
+    }
+    return;
+  }
+
+  // ── 5. awaiting_restart → make sure the restart happens ─────────────────
+  // A task in awaiting_restart with no container needs its container (re)woken
+  // and its prompt re-sent. This runs on every sweep until the container is
+  // seen alive (path 3 then advances it to running), so it must be idempotent
+  // and must not spend restart budget: only the transitions INTO
+  // awaiting_restart count (a crash, path 4; a sub-task await timeout, path 2),
+  // as SpecialistContainerCrashed / SubTaskAwaitTimedOut in specialists.allium.
+  // Counting here too spent two retries per restart, and a restart waiting
+  // for a concurrency slot burned one — and wrote another prompt — every
+  // minute. A container that cannot start at all is bounded by the
+  // boot-crash check (2b); everything else by the task timeout (1).
+  if (task.status === 'awaiting_restart' && !containerAlive) {
+    const { findSessionByAgentGroupAndThread } = await import('./session-helpers.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+    const { getSession } = await import('../../db/sessions.js');
+    const { writeSessionMessage } = await import('../../session-manager.js');
+    const session = await findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
+    if (!session) return;
+    const fresh = await getSession(session.id);
+    if (!fresh) return;
+
+    // The original trigger was already acked; the restarted container needs a
+    // new one. One per attempt: the id carries the attempt number, so a later
+    // sweep finds it already written.
+    try {
+      await writeSessionMessage(fresh.agent_group_id, fresh.id, {
+        id: `restart-${task.id}-${task.restart_attempt_count}`,
+        kind: 'chat',
+        timestamp: new Date().toISOString(),
+        content: JSON.stringify({
+          text: task.prompt,
+          sender: 'system',
+          senderId: 'system',
+          specialistTaskId: task.id,
+        }),
+        trigger: true,
+      });
+      log.info('specialists: restart prompt written for awaiting_restart task', {
+        taskId: task.id,
+        attempt: task.restart_attempt_count,
+        maxRetries: SPECIALISTS_CONFIG.maxRestartRetries,
+      });
+    } catch (err) {
+      if (!/UNIQUE constraint failed/.test(String((err as Error)?.message))) {
+        log.error('specialists: failed to write restart prompt', { err, taskId: task.id });
+      }
+    }
+    await wakeContainer(fresh).catch((err) =>
+      log.error('specialists: failed to wake container for restart', { err, taskId: task.id }),
+    );
+  }
+}

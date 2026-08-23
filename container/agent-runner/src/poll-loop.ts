@@ -10,6 +10,13 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
+import {
+  armHandoffExit,
+  clearShutdownRequest,
+  disarmHandoffExit,
+  isShutdownRequested,
+  isSpecialistContainer,
+} from './shutdown.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
@@ -307,6 +314,25 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // A specialist that dispatched a sub-task or delivered its result is done
+    // with this container: return so the runner exits and its concurrency
+    // slot frees. The conversation was persisted above, so a sub-task's result
+    // resumes it in the next container.
+    if (isShutdownRequested()) {
+      // Same rule at the last moment: a message that landed after the final
+      // turn (a rejected dispatch, say) is answered here rather than by a
+      // respawned container.
+      if (getPendingMessages(false).some((m) => m.kind !== 'system' && m.trigger === 1)) {
+        log('New message after a shutdown request — staying');
+        clearShutdownRequest();
+        disarmHandoffExit();
+        continue;
+      }
+      log('Shutdown requested by a specialist tool — exiting after this turn');
+      disarmHandoffExit();
+      return;
+    }
   }
 }
 
@@ -530,6 +556,13 @@ export async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         query.push(prompt);
+        // A message after a specialist asked to exit means the host has more
+        // to say — typically that the dispatch it exited for was rejected. Stay
+        // and answer it; a later dispatch or delivery asks again.
+        if (isShutdownRequested()) {
+          log('New message after a shutdown request — staying');
+          clearShutdownRequest();
+        }
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
           routing: extractRouting(keep),
@@ -648,7 +681,14 @@ export async function processQuery(
           // was delivered this turn — hasUnwrapped already folds in the
           // turn's mid-turn sent count. If a reply already went out as a
           // mid-turn block, the unwrapped tail stays in the scratchpad log.
-          const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged;
+          //
+          // Never in a specialist container. A specialist has no destinations
+          // and reports through deliver_specialist_result / dispatch_sub_task,
+          // so its plain text is not a reply anyone is owed. Live, a Researcher
+          // read the nudge — "your destinations: (none)" — as an injected
+          // instruction and said so, and the retry turn kept its container,
+          // and its concurrency slot, up through the whole sub-task.
+          const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged && !isSpecialistContainer();
           notifyExchangeComplete(onExchangeComplete, {
             prompt: archivePrompts[0] ?? initialPrompt,
             result: archivedResult,
@@ -692,6 +732,23 @@ export async function processQuery(
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
+        // The stream stays open between turns for follow-ups; a specialist
+        // that asked to exit must not sit here waiting for one. Only once no
+        // turn (queued or a nudge retry) is still owed an answer.
+        if (!answering && isShutdownRequested()) {
+          // Stop claiming follow-ups first: anything that lands from here on
+          // stays pending for the next container (the host treats a running
+          // task with an unclaimed due message as owed a wake, not crashed).
+          done = true;
+          clearInterval(pollHandle);
+          query.abort();
+          // Leaving this loop waits for the provider's event stream to end,
+          // and a provider need not end it promptly on abort. Everything
+          // durable (continuation, acks) is already written, so exit anyway
+          // if it hangs.
+          armHandoffExit();
+          break;
+        }
       }
     }
   } catch (err) {

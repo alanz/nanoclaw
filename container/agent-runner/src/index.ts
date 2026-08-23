@@ -24,8 +24,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
+import { clearShutdownRequest } from './shutdown.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
+import { clearContinuation, migrateLegacyContinuation } from './db/session-state.js';
 import { ensureMemoryScaffold } from './memory/scaffold.js';
 import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
@@ -58,10 +60,27 @@ async function main(): Promise<void> {
   await mailbox.start(await readMailboxContext());
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
+  clearShutdownRequest();
+
+  // A session the host starts clean (a specialist task's first start or a
+  // restart, today) must not resume an earlier container's conversation: a
+  // restarted task is sent its prompt again, and resuming as well would hand
+  // it the task twice. A specialist returning from a sub-task is not started
+  // clean — it resumes, so the result lands in the conversation that asked.
+  if (process.env.NANOCLAW_FRESH_CONVERSATION === '1') {
+    // Fold any legacy-keyed continuation in first, so the poll loop's own
+    // migration cannot bring it back after the clear.
+    migrateLegacyContinuation(providerName);
+    clearContinuation(providerName);
+    log('Fresh conversation requested — continuation cleared');
+  }
 
   // Every provider shares one persistent memory tree. Legacy imports are an
   // operator-run migration and never happen in this normal startup path.
-  ensureMemoryScaffold();
+  // Not into a read-only workspace (a shared template folder): the scaffold
+  // would fail with EROFS and kill the runner before it ever polls — the
+  // container then dies silently on every respawn and its task hangs.
+  if (process.env.NANOCLAW_WORKSPACE_READONLY !== '1') ensureMemoryScaffold();
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module
@@ -138,7 +157,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// The poll loop only returns when a specialist tool asked the container to
+// exit after its turn (see shutdown.ts). Exit explicitly: the provider's MCP
+// child and timers would otherwise keep the process alive.
+main().then(
+  () => process.exit(0),
+  (err) => {
+    log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  },
+);

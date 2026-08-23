@@ -20,6 +20,7 @@ vi.mock('./config.js', async () => {
 import {
   destroySessionMailbox,
   initSessionFolder,
+  outsideMailboxSessions,
   sessionContextPath,
   sessionDir,
   withMailboxSession,
@@ -69,6 +70,22 @@ describe('withMailboxSession', () => {
     await expect(
       withMailboxSession(AG, SESS, () => withMailboxSession(AG, `${SESS}-other`, () => undefined)),
     ).resolves.toBeUndefined();
+  });
+
+  // A session-exit hook fired by a kill issued from inside the sweep's own
+  // session (the idle reap) opens that session's mailbox again. Started
+  // plainly it is "nested" and fails; started outside, it runs once the sweep
+  // lets go. Seen live: ERROR "Nested mailbox session" on an idle reap.
+  it('runs work begun inside a session outside it, as a later session rather than a nested one', async () => {
+    let nested!: Promise<unknown>;
+    let detached!: Promise<unknown>;
+    await withMailboxSession(AG, SESS, () => {
+      nested = withMailboxSession(AG, SESS, () => 'ran');
+      detached = outsideMailboxSessions(() => withMailboxSession(AG, SESS, () => 'ran'));
+    });
+
+    await expect(nested).rejects.toThrow(`Nested mailbox session for ${AG}/${SESS}`);
+    await expect(detached).resolves.toBe('ran');
   });
 
   it('destroys only mailbox-owned files', async () => {

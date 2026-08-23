@@ -9,3 +9,6 @@ import '../mailbox/compose.js';
 if (process.env.NANOCLAW_MEMORY_ENABLED) {
   await import('../mcp-tools/memory.js');
 }
+
+// Specialist dispatch and result handover.
+import '../mcp-tools/specialists.js';

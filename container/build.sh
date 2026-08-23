@@ -60,6 +60,21 @@ done
 TAG="${1:-latest}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 
+# Apple Container needs its builder VM up before any `container build`, and
+# the builder's DEFAULT allocation is too small for this image — it dies with
+# a bare "Killed" partway through, which reads like a build error rather than
+# an OOM. Size it explicitly and stop it again afterwards.
+#
+# Only on paths that actually build: the pull path never invokes the builder.
+BUILDER_MEMORY="${NANOCLAW_BUILDER_MEMORY:-8g}"
+start_apple_builder() {
+    if container builder status 2>/dev/null | grep -q "running"; then
+        return
+    fi
+    echo "Starting Apple Container builder (memory: $BUILDER_MEMORY)"
+    container builder start --memory "$BUILDER_MEMORY"
+}
+
 # No explicit subcommand, on an install that pulls its image. Skills that add a
 # runtime dependency land here — they append to cli-tools.json (or edit the
 # Dockerfile) and then call this script bare, expecting a rebuild.
@@ -165,7 +180,12 @@ elif [ "$OVERLAY" = "true" ]; then
     # otherwise would be as wrong as the inverse. What changes is that some
     # tools on top were not part of that, which is what the new label records.
     OVERLAY_DOCKERFILE="$(mktemp)"
-    trap 'rm -f "$OVERLAY_DOCKERFILE"' EXIT
+    if [ "$CONTAINER_RUNTIME" = "container" ]; then
+        start_apple_builder
+        trap 'rm -f "$OVERLAY_DOCKERFILE"; container builder stop' EXIT
+    else
+        trap 'rm -f "$OVERLAY_DOCKERFILE"' EXIT
+    fi
     {
         echo "FROM ${IMAGE_NAME}:${TAG}"
         echo "USER root"
@@ -180,6 +200,11 @@ elif [ "$OVERLAY" = "true" ]; then
 else
     echo "Building NanoClaw agent container image..."
     echo "Image: ${IMAGE_NAME}:${TAG}"
+
+    if [ "$CONTAINER_RUNTIME" = "container" ]; then
+        start_apple_builder
+        trap 'container builder stop' EXIT
+    fi
 
     ${CONTAINER_RUNTIME} build "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
 fi

@@ -37,6 +37,8 @@ import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
 import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
+import { runDeltachatChannel } from './channels/deltachat.js';
+import { readEnvFile } from '../src/env.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
@@ -111,6 +113,7 @@ const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
 const LOGIN_EXIT_SKIPPED = 2;
 
 type ChannelChoice =
+  | 'deltachat'
   | 'telegram'
   | 'discord'
   | 'whatsapp'
@@ -314,7 +317,7 @@ async function main(): Promise<void> {
     maybeReexecUnderSg();
   }
 
-  if (!skip.has('onecli')) {
+  if (!skip.has('onecli') && !useNativeProxy()) {
     p.log.message(
       brandBody(
         dimWrap(
@@ -691,7 +694,13 @@ async function main(): Promise<void> {
       let result: void | typeof BACK_TO_CHANNEL_SELECTION;
       // Every channel now runs through the SKILL.md-driven flow — the whole
       // connect+wire procedure lives in each add-<channel>/SKILL.md.
-      if (channelChoice === 'telegram') {
+      // Most channels run through the SKILL.md-driven flow. DeltaChat is
+      // fork-owned and keeps its dedicated helper: it provisions its own
+      // account against a chatmail relay, so there is no token to collect and
+      // the wizard instead waits for the invite and the first contact.
+      if (channelChoice === 'deltachat') {
+        result = await runDeltachatChannel(displayName!);
+      } else if (channelChoice === 'telegram') {
         result = await runChannelSkillWithPreStep('telegram', displayName!, { offerBack: true });
       } else if (channelChoice === 'discord') {
         result = await runChannelSkillWithPreStep('discord', displayName!, { offerBack: true });
@@ -837,6 +846,8 @@ async function main(): Promise<void> {
 
 function channelDmLabel(choice: ChannelChoice): string | null {
   switch (choice) {
+    case 'deltachat':
+      return 'DeltaChat';
     case 'telegram':
       return 'Telegram';
     case 'discord':
@@ -1883,6 +1894,11 @@ async function askChannelChoice(): Promise<ChannelChoice> {
     await brightSelect<ChannelChoice>({
       message: 'Want to chat with your assistant from your phone?',
       options: [
+        {
+          value: 'deltachat',
+          label: 'Yes, connect DeltaChat',
+          hint: 'zero-config — provisions its own account, no token needed',
+        },
         { value: 'slack', label: 'Yes, connect Slack', hint: 'NEW!! one-click install' },
         { value: 'teams', label: 'Yes, connect Microsoft Teams' },
         { value: 'telegram', label: 'Yes, connect Telegram' },
@@ -2096,3 +2112,17 @@ main().catch((err) => {
   p.cancel('Setup aborted.');
   process.exit(1);
 });
+
+/**
+ * Whether this install supplies Anthropic credentials itself rather than
+ * through the OneCLI vault.
+ *
+ * Set by choosing the native credential proxy: the host holds the credential
+ * and containers reach it over ANTHROPIC_BASE_URL, so the vault step has
+ * nothing to install and no agent to register.
+ */
+function useNativeProxy(): boolean {
+  const env = readEnvFile(['NANOCLAW_GATEWAY_PROVIDER']);
+  const configured = process.env.NANOCLAW_GATEWAY_PROVIDER ?? env.NANOCLAW_GATEWAY_PROVIDER ?? '';
+  return configured.trim().toLowerCase() === 'native-proxy';
+}

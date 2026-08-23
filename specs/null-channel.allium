@@ -12,15 +12,25 @@
 -- MessagingGroup. Per-task isolation comes from thread_id = task.id, not
 -- from a per-task JID.
 --
--- Scope: NullChannel registration, the singleton null MessagingGroup, and
---        the constraint that no inbound traffic ever flows from this channel.
+-- Scope: NullChannel registration, the singleton null MessagingGroup, the
+--        constraint that no inbound traffic ever flows from this channel,
+--        and what happens to outbound traffic from specialist sessions.
 -- Includes: channel-type label, singleton MessagingGroup ensure-on-startup,
---           silently-discarded outbound delivery, NoInboundFromNullChannel
---           invariant.
+--           the `requester` destination, relay of specialist progress
+--           messages and cards to the root requester's chat, discard of
+--           all other outbound, NoInboundFromNullChannel invariant.
 -- Excludes:
---   - Specialist task lifecycle (see specialists.allium).
+--   - Specialist task lifecycle and the root requester (see specialists.allium).
 --   - Session lifecycle (see sessions.allium).
+--   - Question records and answers (see agent-to-agent.allium).
 --   - Channel-adapter mechanics for real channels.
+--
+-- Specialists talk to the user the way v1 did: a specialist's send_message
+-- to its `requester` destination, and any question or card it sends, is
+-- delivered to the chat of the task chain's root requester, shown as
+-- coming from the specialist (e.g. "Researcher"). The main agent gets a
+-- non-waking copy so it knows what the user has seen. Results still travel
+-- only through deliver_specialist_result (specialists.allium).
 --
 -- The singleton MessagingGroup pattern. There is exactly one MessagingGroup
 -- with channel_type = "null_channel". All per-task specialist sessions
@@ -31,6 +41,8 @@
 
 use "./routing.allium" as routing
 use "./sessions.allium" as sessions
+use "./specialists.allium" as specialists
+use "./agent-to-agent.allium" as a2a
 
 ------------------------------------------------------------
 -- Config
@@ -51,6 +63,12 @@ config {
     -- Display name for the singleton MessagingGroup. Surfaced only in
     -- operator-facing listings; never seen by end users.
     singleton_name: String = "Specialist Tasks (null channel)"
+
+    -- Name of the one destination every specialist session is given. It
+    -- targets the session's own chat (the singleton MessagingGroup), so a
+    -- message to it passes delivery like any reply to the origin chat and
+    -- is then relayed.
+    requester_destination: String = "requester"
 }
 
 ------------------------------------------------------------
@@ -91,6 +109,157 @@ rule NullMessagingGroupEnsured {
         -- adapter.
 }
 
+-- ---- Specialist outbound ----
+
+-- A specialist's progress message: send_message to its `requester`
+-- destination. Delivered to the root requester's chat as coming from the
+-- specialist, and copied, without waking it, into the root requester's
+-- session.
+rule SpecialistProgressRelayed {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type = config.channel_type
+    requires: outbound.kind = "chat"
+    requires: not is_failure_notice(outbound)
+    let task = specialists/SpecialistTask{id: outbound.session.thread_id}
+    let root = task.root_requester_session
+    requires: root.messaging_group != null
+    ensures: SpecialistMessageRelayed(
+        outbound: outbound,
+        messaging_group: root.messaging_group,
+        thread_id: root.thread_id,
+        sender: task.specialist_group.name
+    )
+    ensures: sessions/InboundMessage.created(
+        session: root,
+        seq: next_inbound_seq(root),
+        kind: "chat",
+        status: pending,
+        trigger: false,
+        content: encode_relayed_copy(task.specialist_group.name, outbound.content),
+        process_after: null,
+        tries: 0,
+        created_at: now
+    )
+
+    @guidance
+        -- The `requester` destination is written into every specialist
+        -- session's destination map by the host when the session starts,
+        -- replacing whatever AgentDestination rows the group has: a
+        -- specialist cannot name any other destination. It targets the
+        -- session's own chat, so the delivery permission check passes as for
+        -- any origin-chat reply; the null adapter's deliver() is a no-op and
+        -- the relay follows delivery.
+        --
+        -- In v2 a turn's plain text is never delivered (only <message to>
+        -- blocks and send_message are), so every chat message on the null
+        -- channel is a deliberate message to `requester` — except the
+        -- runner's failure notices, which is_failure_notice excludes.
+        --
+        -- sender is the specialist group's name. The host sets it; nothing
+        -- the container writes can choose it. Adapters that can show a
+        -- per-message sender name use it (DeltaChat: overrideSenderName, as
+        -- in v1); others prefix the text with "[<sender>] ".
+        --
+        -- The copy uses trigger = false: the main agent reads it as context
+        -- on its next turn and is not woken for it.
+        --
+        -- No cap on the number of relayed messages (owner decision
+        -- 2026-10-11; revisit if a specialist turns out chatty).
+        --
+        -- A root requester session without a messaging group (e.g. a task
+        -- dispatched from a scheduled-task session) has no chat to relay
+        -- to: NullChannelOutputDiscarded drops the message and the host
+        -- logs it.
+}
+
+-- A question or card from a specialist (ask_user_question, send_card).
+-- Delivered to the root requester's chat as coming from the specialist.
+-- The question stays the specialist's: its InteractiveQuestion belongs to
+-- the specialist session, so the user's answer goes back to the specialist
+-- (agent-to-agent.allium InteractiveQuestionAnswered).
+rule SpecialistCardRelayed {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type = config.channel_type
+    requires: outbound.kind = "chat-sdk"
+    let task = specialists/SpecialistTask{id: outbound.session.thread_id}
+    let root = task.root_requester_session
+    requires: root.messaging_group != null
+    ensures: SpecialistMessageRelayed(
+        outbound: outbound,
+        messaging_group: root.messaging_group,
+        thread_id: root.thread_id,
+        sender: task.specialist_group.name
+    )
+    ensures: sessions/InboundMessage.created(
+        session: root,
+        seq: next_inbound_seq(root),
+        kind: "chat",
+        status: pending,
+        trigger: false,
+        content: encode_relayed_copy(task.specialist_group.name, outbound.content),
+        process_after: null,
+        tries: 0,
+        created_at: now
+    )
+
+    @guidance
+        -- A card is relayed whichever destination the specialist named:
+        -- ask_user_question and send_card address the session's own route.
+        --
+        -- The InteractiveQuestion is recorded with delivered_to =
+        -- root.messaging_group, so a reply in that chat can answer it
+        -- (agent-to-agent.allium QuestionAnsweredByReply).
+        --
+        -- The specialist's container blocks while it waits. The wait counts
+        -- towards the task's max_task_duration, and the question's own
+        -- timeout (default_question_timeout, 300 s) is unchanged: on timeout
+        -- the specialist carries on with the safer choice and puts the
+        -- question in its result.
+}
+
+-- The user answers a relayed question: the main agent gets a non-waking
+-- copy of the answer, as it did of the question.
+-- allium-ignore allium.rule.unreachableTrigger
+rule SpecialistAnswerCopied {
+    when: UserSelectsQuestionOption(question_id, selected_option, user)
+    let q = a2a/InteractiveQuestion{question_id: question_id}
+    requires: exists q
+    requires: q.session.messaging_group != null
+    requires: q.session.messaging_group.channel_type = config.channel_type
+    let task = specialists/SpecialistTask{id: q.session.thread_id}
+    let root = task.root_requester_session
+    ensures: sessions/InboundMessage.created(
+        session: root,
+        seq: next_inbound_seq(root),
+        kind: "chat",
+        status: pending,
+        trigger: false,
+        content: encode_relayed_answer(task.specialist_group.name, q.title, selected_option),
+        process_after: null,
+        tries: 0,
+        created_at: now
+    )
+}
+
+-- Everything else a specialist session emits on the null channel — a
+-- failure notice, or a relay whose root requester has no chat — has no
+-- platform to go to and is discarded. Results reach the requester through
+-- specialists.allium result routing, not through outbound messages.
+rule NullChannelOutputDiscarded {
+    when: outbound: sessions/OutboundMessage.created
+    requires: outbound.channel_type = config.channel_type
+    let task = specialists/SpecialistTask{id: outbound.session.thread_id}
+    let relayable = (outbound.kind = "chat" and not is_failure_notice(outbound))
+                    or outbound.kind = "chat-sdk"
+    requires: not (relayable and task.root_requester_session.messaging_group != null)
+    ensures: NullChannelOutputDropped(outbound: outbound)
+
+    @guidance
+        -- The no-op deliver() of the null-channel adapter is this rule's
+        -- realisation. A dropped relay (root requester without a chat) is
+        -- logged; a failure notice is dropped silently, as before.
+}
+
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
@@ -101,17 +270,6 @@ rule NullMessagingGroupEnsured {
 invariant NoInboundFromNullChannel {
     for r in routing/RoutedMessages:
         r.wiring.messaging_group.channel_type != config.channel_type
-}
-
--- The null channel never produces outbound traffic either. Specialist
--- results travel back to the requester via a fresh InboundMessage on the
--- requester's session (see specialists/SpecialistResultRoutedToMain and
--- SpecialistResultRoutedToParent), not as an OutboundMessage on a channel.
--- An OutboundMessage carrying channel_type = "null_channel" would represent
--- an attempt to send to a non-existent platform; this invariant flags it.
-invariant NoOutboundOnNullChannel {
-    for o in sessions/OutboundMessages:
-        o.channel_type != config.channel_type
 }
 
 -- At most one MessagingGroup exists for the null channel. The

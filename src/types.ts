@@ -162,6 +162,19 @@ export interface MessagingGroupAgent {
   created_at: string;
 }
 
+/**
+ * The container's work lifecycle, distinct from whether a container exists.
+ *
+ * `container_status` answers "is something running"; this answers "is it
+ * getting anywhere". A container can be running and stuck, and a session can
+ * be idle with a container still winding down — collapsing the two loses the
+ * distinction a stall detector needs. See sessions.allium ProcessingState.
+ *
+ * Optional on the type because the column is added by a module migration:
+ * an install without that module has rows that simply do not carry it.
+ */
+export type ProcessingState = 'idle' | 'processing' | 'stuck';
+
 export interface Session {
   id: string;
   agent_group_id: string;
@@ -170,6 +183,7 @@ export interface Session {
   agent_provider: string | null;
   status: 'active' | 'closed';
   container_status: 'running' | 'idle' | 'stopped';
+  processing_state?: ProcessingState;
   last_active: string | null;
   created_at: string;
 }

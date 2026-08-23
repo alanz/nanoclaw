@@ -16,12 +16,15 @@
 import type Database from 'better-sqlite3';
 
 import { registerMigration } from './index.js';
+import { addColumnIfMissing } from './legacy-names.js';
 
 registerMigration({
   version: 14,
   name: 'module:specialists:processing-state',
   sqliteOnly: true,
   up(db: Database.Database) {
-    db.exec(`ALTER TABLE sessions ADD COLUMN processing_state TEXT NOT NULL DEFAULT 'idle'`);
+    // Guarded: an install that ran this under its pre-`module:` name
+    // ('session-processing-state') already has the column. See legacy-names.ts.
+    addColumnIfMissing(db, 'sessions', 'processing_state', "TEXT NOT NULL DEFAULT 'idle'");
   },
 });

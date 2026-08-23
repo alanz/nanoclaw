@@ -48,6 +48,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         curl \
         git \
+        poppler-utils \
         tini \
         unzip \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
@@ -137,6 +138,16 @@ WORKDIR /workspace/group
 # Only applies to a bare `docker run` — the host spawn overrides ENTRYPOINT and
 # passes --init instead (see hardeningArgs in src/container-runner.ts).
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
+
+# ---- Host-installed agent tools ----
+# Baked in so every agent group has them without per-group setup.
+COPY tools/ /app/tools/
+
+# ---- Shared container CLAUDE.md ----
+# Also mounted at /app/CLAUDE.md by drivers that can bind a single file.
+# Apple Container cannot (directories only), so the baked copy is what that
+# runtime uses — see mountArgs in src/drivers/apple-driver.ts.
+COPY CLAUDE.md /app/CLAUDE.md
 
 # ---- Provenance labels -------------------------------------------------------
 # LAST on purpose. An ARG invalidates every layer below it, so declaring these

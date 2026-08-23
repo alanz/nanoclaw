@@ -1647,7 +1647,7 @@ async function getDbTableData(
   const exists = await db.get(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, tableName);
   if (!exists) return { columns: [], rows: [], total: 0 };
 
-  const cols = (await db.all(`PRAGMA table_info("${tableName}")`) as Array<{ name: string }>).map((c) => c.name);
+  const cols = ((await db.all(`PRAGMA table_info("${tableName}")`)) as Array<{ name: string }>).map((c) => c.name);
   if (!cols.length) return { columns: [], rows: [], total: 0 };
 
   let where = '';
@@ -1659,8 +1659,13 @@ async function getDbTableData(
     params.push(...cols.map(() => like));
   }
 
-  const total = (await db.get(`SELECT COUNT(*) AS n FROM "${tableName}"${where}`, ...params) as { n: number }).n;
-  const rows = await db.all(`SELECT * FROM "${tableName}"${where} LIMIT ? OFFSET ?`, ...params, limit, offset) as Record<string, unknown>[];
+  const total = ((await db.get(`SELECT COUNT(*) AS n FROM "${tableName}"${where}`, ...params)) as { n: number }).n;
+  const rows = (await db.all(
+    `SELECT * FROM "${tableName}"${where} LIMIT ? OFFSET ?`,
+    ...params,
+    limit,
+    offset,
+  )) as Record<string, unknown>[];
 
   return { columns: cols, rows, total };
 }
@@ -1805,7 +1810,9 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         for (const s of allSessions)
           sessionCountByGroup[s.agent_group_id] = (sessionCountByGroup[s.agent_group_id] || 0) + 1;
         const db = getDb();
-        const mgCounts = await db.all('SELECT agent_group_id, COUNT(*) AS n FROM messaging_group_agents GROUP BY agent_group_id') as Array<{ agent_group_id: string; n: number }>;
+        const mgCounts = (await db.all(
+          'SELECT agent_group_id, COUNT(*) AS n FROM messaging_group_agents GROUP BY agent_group_id',
+        )) as Array<{ agent_group_id: string; n: number }>;
         const mgCountByGroup = new Map(mgCounts.map((r) => [r.agent_group_id, r.n]));
         const result = groups.map((g) => ({
           id: g.id,
@@ -2050,7 +2057,8 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         const db = getDb();
         const messagingGroups = await Promise.all(
           allMgs.map(async (mg) => {
-            const wiredAgents = (await db.all('SELECT ag.name FROM messaging_group_agents mga JOIN agent_groups ag ON ag.id = mga.agent_group_id WHERE mga.messaging_group_id = ?',
+            const wiredAgents = (await db.all(
+              'SELECT ag.name FROM messaging_group_agents mga JOIN agent_groups ag ON ag.id = mga.agent_group_id WHERE mga.messaging_group_id = ?',
               mg.id,
             )) as Array<{ name: string }>;
             return { ...mg, agent_groups: wiredAgents.map((a) => a.name) };

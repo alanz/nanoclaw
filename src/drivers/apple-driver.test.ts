@@ -7,6 +7,9 @@
  * client-side label filtering, residue classification, readiness, and the
  * polling subscription that stands in for `docker events`.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { appleDialect, appleStatePhase } from './apple-driver.js';
@@ -195,5 +198,44 @@ describe('appleDialect.subscribe', () => {
     stop();
     vi.advanceTimersByTime(10_000);
     expect(cli.calls.length).toBe(before);
+  });
+});
+
+describe('appleDialect.mountArgs', () => {
+  it('emits directory mounts with their mode', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-mount-'));
+    expect(
+      appleDialect.mountArgs([
+        { class: 'session', hostPath: dir, containerPath: '/workspace', mode: 'rw' },
+        { class: 'surface', hostPath: dir, containerPath: '/app/src', mode: 'ro' },
+      ] as never),
+    ).toEqual(['-v', `${dir}:/workspace`, '-v', `${dir}:/app/src:ro`]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('drops a file mount, which this runtime cannot bind at all', () => {
+    // `container` binds directories only; passing it a file fails the spawn.
+    // The one file trunk composes (/app/CLAUDE.md) is baked into the image.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-mount-'));
+    const file = path.join(dir, 'CLAUDE.md');
+    fs.writeFileSync(file, '# shared');
+
+    expect(
+      appleDialect.mountArgs([
+        { class: 'surface', hostPath: file, containerPath: '/app/CLAUDE.md', mode: 'ro' },
+        { class: 'session', hostPath: dir, containerPath: '/workspace', mode: 'rw' },
+      ] as never),
+    ).toEqual(['-v', `${dir}:/workspace`]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps a mount whose source does not exist yet', () => {
+    // Composition already gated on existence; guessing "file" for a missing
+    // path would drop a mount the runtime could have made.
+    expect(
+      appleDialect.mountArgs([
+        { class: 'session', hostPath: '/nope/not/here', containerPath: '/workspace', mode: 'rw' },
+      ] as never),
+    ).toEqual(['-v', '/nope/not/here:/workspace']);
   });
 });

@@ -158,7 +158,7 @@ export class DockerSessionDriver implements SessionDriver {
     // contributed lane overrides composed literals (see ContainerSpec).
     args.push(...envArgs(agent.env));
     args.push(...envArgs(agent.contributedEnv ?? {}));
-    args.push(...mountArgs(agent.mounts));
+    args.push(...this.#dialect.mountArgs(agent.mounts));
     // Network topology is driver-private: injected at registration (see
     // `drivers/index.ts`), never carried on the spec. Argv-shaped input has no
     // remaining channel through composition.
@@ -706,6 +706,8 @@ export const dockerDialect: RuntimeDialect = {
   hardeningArgs,
 
   statePhase: dockerStatePhase,
+
+  mountArgs,
 
   listAgents(cli, installSlug) {
     const out = cli.run([

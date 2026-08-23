@@ -23,6 +23,7 @@ vi.mock('../log.js', () => ({
 interface DocOpts {
   name: string;
   state: string;
+  startedDate?: string;
   install?: string;
   group?: string;
   session?: string;
@@ -30,12 +31,19 @@ interface DocOpts {
 }
 
 function doc(o: DocOpts): unknown {
+  // `startedDate` is what separates a prepared container from a dead one;
+  // a fixture in a post-run state must carry it.
+  const started = o.startedDate ?? (o.state === 'running' ? '2026-01-01T00:00:00Z' : undefined);
   const labels: Record<string, string> = {};
   if (o.install !== undefined) labels[LABELS.install] = o.install;
   if (o.group !== undefined) labels[LABELS.group] = o.group;
   if (o.session !== undefined) labels[LABELS.session] = o.session;
   if (o.role !== undefined) labels[LABELS.role] = o.role;
-  return { id: o.name, configuration: { id: o.name, labels }, status: { state: o.state } };
+  return {
+    id: o.name,
+    configuration: { id: o.name, labels },
+    status: started ? { state: o.state, startedDate: started } : { state: o.state },
+  };
 }
 
 function cliListing(docs: unknown[]): FakeCli {
@@ -84,10 +92,18 @@ describe('appleDialect.listResidue', () => {
   it('separates corpses from pre-seam containers', () => {
     const cli = cliListing([
       doc({ name: 'ncl-spike-s1', state: 'running', ...AGENT }),
-      doc({ name: 'ncl-spike-s2', state: 'stopped', install: 'spike', group: 'g2', session: 's2', role: 'agent' }),
+      doc({
+        name: 'ncl-spike-s2',
+        state: 'stopped',
+        startedDate: '2026-01-01T00:00:00Z',
+        install: 'spike',
+        group: 'g2',
+        session: 's2',
+        role: 'agent',
+      }),
       // Running, install-labeled, but no session label: spawned before the seam.
       doc({ name: 'nanoclaw-v2-old-123', state: 'running', install: 'spike' }),
-      doc({ name: 'ncl-other-s1', state: 'stopped', install: 'other' }),
+      doc({ name: 'ncl-other-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', install: 'other' }),
     ]);
 
     expect(appleDialect.listResidue(cli, 'spike')).toEqual({
@@ -149,7 +165,9 @@ describe('appleDialect.subscribe', () => {
   it('emits nothing for the state it finds on the first poll', () => {
     // Otherwise every host start would hint a terminal for every corpse the
     // runtime still lists.
-    const cli = cliListing([doc({ name: 'ncl-spike-s1', state: 'stopped', ...AGENT })]);
+    const cli = cliListing([
+      doc({ name: 'ncl-spike-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', ...AGENT }),
+    ]);
     const { events } = collect(cli);
     vi.advanceTimersByTime(5_000);
     expect(events).toEqual([]);
@@ -159,7 +177,12 @@ describe('appleDialect.subscribe', () => {
     const cli = cliListing([doc({ name: 'ncl-spike-s1', state: 'running', ...AGENT })]);
     const { events } = collect(cli);
     cli.responses = [
-      { match: /^ls --all/, output: JSON.stringify([doc({ name: 'ncl-spike-s1', state: 'stopped', ...AGENT })]) },
+      {
+        match: /^ls --all/,
+        output: JSON.stringify([
+          doc({ name: 'ncl-spike-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', ...AGENT }),
+        ]),
+      },
     ];
     vi.advanceTimersByTime(2_000);
     expect(events).toEqual([{ key: { installSlug: 'spike', agentGroupId: 'g1', sessionId: 's1' }, kind: 'terminal' }]);
@@ -237,5 +260,44 @@ describe('appleDialect.mountArgs', () => {
         { class: 'session', hostPath: '/nope/not/here', containerPath: '/workspace', mode: 'rw' },
       ] as never),
     ).toEqual(['-v', '/nope/not/here:/workspace']);
+  });
+});
+
+describe('prepared-vs-dead discrimination', () => {
+  // Found against the real runtime, not the fake: `container create` leaves a
+  // container in state `stopped`, exactly like one that ran and exited. The
+  // only difference is `startedDate`, which appears when it actually runs.
+  //
+  // This matters between prepare() and start(): a residue sweep that read
+  // `stopped` as terminal would remove the container it had just prepared,
+  // and the start would fail on something that no longer exists.
+
+  it('reads a created-but-never-started container as starting, not terminal', () => {
+    const cli = cliListing([doc({ name: 'ncl-spike-s1', state: 'stopped', ...AGENT })]);
+    expect(appleDialect.listAgents(cli, 'spike')[0].state).toBe('created');
+    expect(appleDialect.statePhase(appleDialect.listAgents(cli, 'spike')[0].state)).toBe('starting');
+  });
+
+  it('reads a container that ran and exited as terminal', () => {
+    const cli = cliListing([
+      doc({ name: 'ncl-spike-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', ...AGENT }),
+    ]);
+    expect(appleDialect.statePhase(appleDialect.listAgents(cli, 'spike')[0].state)).toBe('terminal');
+  });
+
+  it('never reaps a container between prepare and start', () => {
+    const cli = cliListing([
+      doc({ name: 'ncl-prepared', state: 'stopped', ...AGENT }),
+      doc({
+        name: 'ncl-corpse',
+        state: 'stopped',
+        startedDate: '2026-01-01T00:00:00Z',
+        install: 'spike',
+        group: 'g2',
+        session: 's2',
+        role: 'agent',
+      }),
+    ]);
+    expect(appleDialect.listResidue(cli, 'spike').stale).toEqual(['ncl-corpse']);
   });
 });

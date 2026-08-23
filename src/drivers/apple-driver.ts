@@ -48,7 +48,8 @@ const POLL_INTERVAL_MS = 2_000;
 interface AppleContainerDoc {
   id?: string;
   configuration?: { id?: string; labels?: Record<string, string> };
-  status?: { state?: string };
+  /** `startedDate` appears only once the container has actually run. */
+  status?: { state?: string; startedDate?: string };
 }
 
 function parseDocs(out: string): AppleContainerDoc[] {
@@ -93,11 +94,31 @@ function listInstallDocs(cli: Cli, installSlug: string): AppleContainerDoc[] {
   return docs.filter((doc) => docLabels(doc)[LABELS.install] === installSlug);
 }
 
+/**
+ * Apple's `state` alone cannot tell a prepared container from a dead one:
+ * `create` leaves it `stopped`, and so does exiting. The discriminator is
+ * `startedDate`, which appears only once the container has run.
+ *
+ * That distinction is load-bearing, not cosmetic. `prepare()` creates the
+ * container and returns before `start()`; in that window a residue sweep that
+ * read `stopped` as terminal would REMOVE the container it just prepared, and
+ * the start would fail on a container that no longer exists. Docker gets this
+ * for free by reporting `created`; here it has to be reconstructed.
+ *
+ * Normalized in row decoding rather than in `statePhase` so the phase mapping
+ * stays a pure function of a state name, the same shape every dialect has.
+ */
+function normalizedState(doc: AppleContainerDoc): string {
+  const state = doc.status?.state ?? '';
+  if (state === 'stopped' && !doc.status?.startedDate) return 'created';
+  return state;
+}
+
 function toRow(doc: AppleContainerDoc): RuntimeRow {
   const labels = docLabels(doc);
   return {
     name: docName(doc),
-    state: doc.status?.state ?? '',
+    state: normalizedState(doc),
     agentGroupId: labels[LABELS.group] ?? '',
     sessionId: labels[LABELS.session] ?? '',
   };
@@ -202,8 +223,10 @@ export const appleDialect: RuntimeDialect = {
   listResidue(cli, installSlug): RuntimeResidue {
     const docs = listInstallDocs(cli, installSlug);
     return {
+      // Uses the normalized state, so a container between prepare and start is
+      // never reaped out from under its own spawn.
       stale: docs
-        .filter((doc) => appleStatePhase(doc.status?.state ?? '') === 'terminal')
+        .filter((doc) => appleStatePhase(normalizedState(doc)) === 'terminal')
         .map(docName)
         .filter(Boolean),
       preSeam: docs

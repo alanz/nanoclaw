@@ -347,6 +347,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | Doc | Purpose |
 |-----|---------|
 | [specs/](specs/) | Allium behaviour specs — the intent of record. Consult before changing behaviour (see [Behaviour Specs](#behaviour-specs-specsallium)) |
+| [docs/rebuild-onto-upstream.md](docs/rebuild-onto-upstream.md) | **Current work**: this fork rebuilt as a patch series on upstream v2.2 — status, cutover plan, rollback, and the traps worth knowing |
 | [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
 | [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
 | [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |

@@ -8,7 +8,7 @@ registerMigration({
   sqliteOnly: true,
   up(db: Database.Database) {
     db.exec(`
-      CREATE TABLE zotero_sync_state (
+      CREATE TABLE IF NOT EXISTS zotero_sync_state (
         id              INTEGER PRIMARY KEY CHECK (id = 1),
         agent_group_id  TEXT NOT NULL REFERENCES agent_groups(id),
         last_version    INTEGER NOT NULL DEFAULT 0,

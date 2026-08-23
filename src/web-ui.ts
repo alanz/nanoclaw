@@ -25,7 +25,7 @@ import { log } from './log.js';
 // HTML dashboard
 // ---------------------------------------------------------------------------
 
-const DASHBOARD_HTML = `<!DOCTYPE html>
+export const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -645,6 +645,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── Frontmatter / markdown helpers (identical to v1) ───────────────────────
 
+  ${resolveWorkspaceLink.toString()}
+
   function parseFrontMatter(text) {
     if (!text.startsWith('---')) return null;
     var nl = text.indexOf('\\n');
@@ -662,7 +664,7 @@ document.addEventListener('DOMContentLoaded', function() {
   function renderFrontMatter(meta, filePath) {
     var div = document.createElement('div');
     div.className = 'fm-card';
-    var isNote = filePath && (filePath.indexOf('/memory/notes/MEM-') !== -1 || filePath.indexOf('/memory/notes/SYN-') !== -1);
+    var isNote = filePath && (filePath.indexOf('/zettel/notes/MEM-') !== -1 || filePath.indexOf('/zettel/notes/SYN-') !== -1);
     Object.entries(meta).forEach(function(kv) {
       var k = kv[0], v = kv[1];
       var kEl = document.createElement('div'); kEl.className = 'fm-key'; kEl.textContent = k; div.appendChild(kEl);
@@ -716,7 +718,7 @@ document.addEventListener('DOMContentLoaded', function() {
       var r = await fetch('/api/file?path='+encodeURIComponent(filePath));
       if (!r.ok) { view.innerHTML = '<div class="empty">Could not read file</div>'; return; }
       var text = await r.text();
-      var isNote = filePath.indexOf('/memory/notes/MEM-') !== -1 || filePath.indexOf('/memory/notes/SYN-') !== -1;
+      var isNote = filePath.indexOf('/zettel/notes/MEM-') !== -1 || filePath.indexOf('/zettel/notes/SYN-') !== -1;
       var noteIdMatch = filePath.match(/((MEM|SYN)-[^/]+)\\.md$/);
       var graphBtnHash = (currentGroup && noteIdMatch ? '#groups/'+currentGroup.folder+'/notes/'+noteIdMatch[1] : currentGroup ? '#groups/'+currentGroup.folder+'/notes' : '#');
       var graphBtn = isNote ? ' <a href="'+graphBtnHash+'" class="graph-file-btn" data-path="'+esc(filePath)+'" style="color:#58a6ff;font-size:11px;margin-left:8px;text-decoration:none">&#x29BF; Show in Graph</a>' : '';
@@ -731,6 +733,11 @@ document.addEventListener('DOMContentLoaded', function() {
         parsedDiv.innerHTML = window.marked.parse(fm ? fm.body : text);
         parsedDiv.querySelectorAll('a').forEach(function(a) {
           var href = a.getAttribute('href') || '';
+          var rel = resolveWorkspaceLink(filePath, href);
+          if (rel) {
+            href = '#groups/' + rel.folder + '/files/' + rel.path;
+            a.setAttribute('href', href);
+          }
           var isInternal = href.charAt(0) === '#' || (href.indexOf(location.origin) === 0 && href.indexOf('#groups/') !== -1);
           a.classList.add(isInternal ? 'link-internal' : 'link-external');
         });
@@ -1493,6 +1500,56 @@ function safeReadFile(relPath: string): string | null {
 // Note frontmatter parser (identical logic to v1)
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve a relative link found in a workspace Markdown file to the file it
+ * names, as `{ folder, path }` (group folder, path inside it), or null when the
+ * link is not a relative file link (a scheme, a fragment, an absolute path) or
+ * would leave the group's folder. `filePath` is the viewed file as the file
+ * API names it, `<folder>/<path>`.
+ *
+ * Notes link to each other and to their reports relatively (`../reports/x.md`)
+ * so a link survives a change of host, port or folder. The file viewer turns
+ * them into dashboard links with this; the same source runs in the browser
+ * (embedded below), so the tests exercise the code the page runs.
+ */
+export function resolveWorkspaceLink(filePath: string, href: string): { folder: string; path: string } | null {
+  if (!href || href.charAt(0) === '#' || href.charAt(0) === '/' || /^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
+  var target = href.split('#')[0].split('?')[0];
+  if (!target) return null;
+  try {
+    target = decodeURIComponent(target);
+  } catch (e) {
+    return null;
+  }
+  var parts = filePath.split('/');
+  parts.pop();
+  var segs = target.split('/');
+  for (var i = 0; i < segs.length; i++) {
+    var seg = segs[i];
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (parts.length <= 1) return null;
+      parts.pop();
+    } else {
+      parts.push(seg);
+    }
+  }
+  if (parts.length < 2) return null;
+  return { folder: parts[0], path: parts.slice(1).join('/') };
+}
+
+/**
+ * The key a note's source report is matched on against
+ * `specialist_tasks.committed_files`: `reports/<file>`. Committed paths were
+ * `memory/reports/…` before the Zettelkasten moved to `zettel/`, and are
+ * `zettel/reports/…` since; a note's `sources` path names the report the
+ * same way. Null for a path that is not a report.
+ */
+export function reportLookupKey(sourcePath: string): string | null {
+  var m = /^(?:memory|zettel)\/reports\/([^/]+)$/.exec(sourcePath.trim());
+  return m ? 'reports/' + m[1] : null;
+}
+
 function parseNoteFrontmatter(text: string): {
   id: string;
   created: string;
@@ -1530,7 +1587,7 @@ function parseNoteFrontmatter(text: string): {
     const m = line.match(/^\s+path:\s+(.+)$/);
     if (m) {
       const p = m[1].trim();
-      if (p.startsWith('memory/reports/')) {
+      if (reportLookupKey(p)) {
         source_report_path = p;
         break;
       }
@@ -1647,7 +1704,7 @@ async function getDbTableData(
   const exists = await db.get(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, tableName);
   if (!exists) return { columns: [], rows: [], total: 0 };
 
-  const cols = (await db.all(`PRAGMA table_info("${tableName}")`) as Array<{ name: string }>).map((c) => c.name);
+  const cols = ((await db.all(`PRAGMA table_info("${tableName}")`)) as Array<{ name: string }>).map((c) => c.name);
   if (!cols.length) return { columns: [], rows: [], total: 0 };
 
   let where = '';
@@ -1659,8 +1716,13 @@ async function getDbTableData(
     params.push(...cols.map(() => like));
   }
 
-  const total = (await db.get(`SELECT COUNT(*) AS n FROM "${tableName}"${where}`, ...params) as { n: number }).n;
-  const rows = await db.all(`SELECT * FROM "${tableName}"${where} LIMIT ? OFFSET ?`, ...params, limit, offset) as Record<string, unknown>[];
+  const total = ((await db.get(`SELECT COUNT(*) AS n FROM "${tableName}"${where}`, ...params)) as { n: number }).n;
+  const rows = (await db.all(
+    `SELECT * FROM "${tableName}"${where} LIMIT ? OFFSET ?`,
+    ...params,
+    limit,
+    offset,
+  )) as Record<string, unknown>[];
 
   return { columns: cols, rows, total };
 }
@@ -1805,7 +1867,9 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         for (const s of allSessions)
           sessionCountByGroup[s.agent_group_id] = (sessionCountByGroup[s.agent_group_id] || 0) + 1;
         const db = getDb();
-        const mgCounts = await db.all('SELECT agent_group_id, COUNT(*) AS n FROM messaging_group_agents GROUP BY agent_group_id') as Array<{ agent_group_id: string; n: number }>;
+        const mgCounts = (await db.all(
+          'SELECT agent_group_id, COUNT(*) AS n FROM messaging_group_agents GROUP BY agent_group_id',
+        )) as Array<{ agent_group_id: string; n: number }>;
         const mgCountByGroup = new Map(mgCounts.map((r) => [r.agent_group_id, r.n]));
         const result = groups.map((g) => ({
           id: g.id,
@@ -1908,7 +1972,7 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
           sendJson(res, { error: 'group required' }, 400);
           return;
         }
-        const notesDir = path.resolve(GROUPS_DIR, folder, 'memory', 'notes');
+        const notesDir = path.resolve(GROUPS_DIR, folder, 'zettel', 'notes');
         if (!notesDir.startsWith(path.resolve(GROUPS_DIR) + path.sep)) {
           sendJson(res, { error: 'invalid group' }, 400);
           return;
@@ -1949,8 +2013,9 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
           if (!fm) continue;
           fmMap.set(file, fm);
           let source_task_id: string | null = null;
-          if (fm.source_report_path) {
-            const row = await db.get<{ id: string }>(TASK_BY_REPORT_PATH, fm.source_report_path);
+          const reportKey = fm.source_report_path ? reportLookupKey(fm.source_report_path) : null;
+          if (reportKey) {
+            const row = await db.get<{ id: string }>(TASK_BY_REPORT_PATH, reportKey);
             if (row) source_task_id = row.id;
           }
           nodes.push({
@@ -1959,7 +2024,7 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
             tags: fm.tags,
             keywords: fm.keywords,
             created: fm.created,
-            path: folder + '/memory/notes/' + file,
+            path: folder + '/zettel/notes/' + file,
             source_task_id,
             isSynthesis: fm.id.startsWith('SYN-'),
           });
@@ -2050,7 +2115,8 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         const db = getDb();
         const messagingGroups = await Promise.all(
           allMgs.map(async (mg) => {
-            const wiredAgents = (await db.all('SELECT ag.name FROM messaging_group_agents mga JOIN agent_groups ag ON ag.id = mga.agent_group_id WHERE mga.messaging_group_id = ?',
+            const wiredAgents = (await db.all(
+              'SELECT ag.name FROM messaging_group_agents mga JOIN agent_groups ag ON ag.id = mga.agent_group_id WHERE mga.messaging_group_id = ?',
               mg.id,
             )) as Array<{ name: string }>;
             return { ...mg, agent_groups: wiredAgents.map((a) => a.name) };

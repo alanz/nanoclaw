@@ -12,3 +12,8 @@ if (process.env.NANOCLAW_MEMORY_ENABLED) {
 
 // Specialist dispatch and result handover.
 import '../mcp-tools/specialists.js';
+
+// Web search (Brave) and workspace file helpers. Both no-op without their
+// backing configuration, so importing them unconditionally is safe.
+import '../mcp-tools/search.js';
+import '../mcp-tools/workspace.js';

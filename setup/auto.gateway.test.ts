@@ -98,7 +98,24 @@ describe('Advanced gateway selection through the real wizard', () => {
     expect(fixture.runSkill).toHaveBeenCalledWith('/skills/iron-proxy', expect.anything());
   });
 
-  it('Done keeps the default for a fresh install', async () => {
+  // This fork's default is the built-in native credential proxy: nothing to
+  // install, and written down because the host refuses to start without a
+  // gateway named.
+  it('Done keeps the default for a fresh install: the native proxy, recorded', async () => {
+    await runWizard();
+    expect(fixture.runSkill).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(root, '.env'), 'utf8')).toContain('NANOCLAW_GATEWAY_PROVIDER=native-proxy');
+  });
+
+  it('Standard setup on a fresh install also lands on the native proxy', async () => {
+    fixture.select.mockReset().mockResolvedValueOnce('default');
+    await runWizard();
+    expect(fixture.runSkill).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(root, '.env'), 'utf8')).toContain('NANOCLAW_GATEWAY_PROVIDER=native-proxy');
+  });
+
+  it('a catalog gateway already installed keeps its place over the default', async () => {
+    fixture.detected = 'onecli';
     await runWizard();
     expect(fixture.runSkill).toHaveBeenCalledWith('/skills/onecli', expect.anything());
   });

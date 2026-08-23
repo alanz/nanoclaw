@@ -1,6 +1,7 @@
 import type { BACK_TO_CHANNEL_SELECTION } from '../lib/back-nav.js';
 
 export type ChannelChoice =
+  | 'deltachat'
   | 'telegram'
   | 'discord'
   | 'whatsapp'
@@ -13,7 +14,8 @@ export type ChannelChoice =
   | 'other'
   | 'skip';
 
-type InstallableChannel = Exclude<ChannelChoice, 'other' | 'skip'>;
+/** DeltaChat is fork-owned and runs its own helper, not a channel skill. */
+type InstallableChannel = Exclude<ChannelChoice, 'deltachat' | 'other' | 'skip'>;
 type ChannelRunOptions = { offerBack: true; wireIfResolved?: true };
 type ChannelRunner = (
   channel: string,
@@ -23,6 +25,11 @@ type ChannelRunner = (
 
 export function initialChannelOptions(): { value: ChannelChoice; label: string; hint?: string }[] {
   return [
+    {
+      value: 'deltachat',
+      label: 'Yes, connect DeltaChat',
+      hint: 'zero-config — provisions its own account, no token needed',
+    },
     { value: 'slack', label: 'Yes, connect Slack', hint: 'NEW!! one-click install' },
     {
       value: 'mattermost',
@@ -61,6 +68,8 @@ export function runInitialChannel(
 
 export function channelDmLabel(choice: ChannelChoice): string | null {
   switch (choice) {
+    case 'deltachat':
+      return 'DeltaChat';
     case 'telegram':
       return 'Telegram';
     case 'discord':

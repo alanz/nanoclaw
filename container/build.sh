@@ -60,6 +60,30 @@ done
 TAG="${1:-latest}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 
+# Apple Container needs its builder VM up before any `container build`, and
+# the builder's DEFAULT allocation is too small for this image — it dies with
+# a bare "Killed" partway through, which reads like a build error rather than
+# an OOM. Size it explicitly and stop it again afterwards.
+#
+# Only on paths that actually build: the pull path never invokes the builder.
+#
+# `container build` sizes the builder itself: without its own --memory/--cpus
+# it puts the builder back to the defaults (2 GB, 2 CPUs), replacing one
+# started bigger. So the size goes on every build, not just on the start.
+# Inside a build step the 2 GB default shows as MemTotal ~2 GB with no swap,
+# and installing claude-code (2.1.296) is killed there. Measured 2026-10-11:
+# the full image builds at 4g (builder peak ~3.7 GiB incl. cache); 6g leaves
+# headroom without crowding a 16 GB host. The builder is stopped afterwards.
+BUILDER_MEMORY="${NANOCLAW_BUILDER_MEMORY:-6g}"
+BUILDER_CPUS="${NANOCLAW_BUILDER_CPUS:-4}"
+start_apple_builder() {
+    if container builder status 2>/dev/null | grep -q "running"; then
+        return
+    fi
+    echo "Starting Apple Container builder (memory: $BUILDER_MEMORY, cpus: $BUILDER_CPUS)"
+    container builder start --memory "$BUILDER_MEMORY" --cpus "$BUILDER_CPUS"
+}
+
 # No explicit subcommand, on an install that pulls its image. Skills that add a
 # runtime dependency land here — they append to cli-tools.json (or edit the
 # Dockerfile) and then call this script bare, expecting a rebuild.
@@ -162,7 +186,11 @@ build_image() {
     while :; do
         # No pipefail in this script, so the pipeline's status is tee's and
         # `set -e` stays quiet; docker's own status is read from PIPESTATUS.
-        "${CONTAINER_RUNTIME}" build "$@" 2>&1 | tee "$log" >&2
+        if [ "$CONTAINER_RUNTIME" = "container" ]; then
+            container build --memory "$BUILDER_MEMORY" --cpus "$BUILDER_CPUS" "$@" 2>&1 | tee "$log" >&2
+        else
+            "${CONTAINER_RUNTIME}" build "$@" 2>&1 | tee "$log" >&2
+        fi
         status=${PIPESTATUS[0]}
         if [ "$status" -eq 0 ]; then
             rm -f "$log"
@@ -200,7 +228,12 @@ elif [ "$OVERLAY" = "true" ]; then
     # otherwise would be as wrong as the inverse. What changes is that some
     # tools on top were not part of that, which is what the new label records.
     OVERLAY_DOCKERFILE="$(mktemp)"
-    trap 'rm -f "$OVERLAY_DOCKERFILE"' EXIT
+    if [ "$CONTAINER_RUNTIME" = "container" ]; then
+        start_apple_builder
+        trap 'rm -f "$OVERLAY_DOCKERFILE"; container builder stop' EXIT
+    else
+        trap 'rm -f "$OVERLAY_DOCKERFILE"' EXIT
+    fi
     {
         echo "FROM ${IMAGE_NAME}:${TAG}"
         echo "USER root"
@@ -215,6 +248,11 @@ elif [ "$OVERLAY" = "true" ]; then
 else
     echo "Building NanoClaw agent container image..."
     echo "Image: ${IMAGE_NAME}:${TAG}"
+
+    if [ "$CONTAINER_RUNTIME" = "container" ]; then
+        start_apple_builder
+        trap 'container builder stop' EXIT
+    fi
 
     build_image "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
 fi

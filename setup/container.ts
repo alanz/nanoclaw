@@ -202,6 +202,55 @@ const SMOKE_SCRIPT = [
   'echo "Container OK"',
 ].join('\n');
 
+/**
+ * Run the image contract check inside a real container.
+ *
+ * Shared by both runtimes: the assertions are about the IMAGE, not the daemon,
+ * so a runtime-specific copy would be a second thing to keep true. `runCmd` is
+ * the only difference — both spell `run --rm -v --user -e --entrypoint` alike.
+ */
+function runImageSmokeTest(runCmd: string, projectRoot: string, image: string): boolean {
+  log.info('Testing container', { runtime: runCmd });
+  mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
+  const workspace = mkdtempSync(path.join(projectRoot, 'data', 'container-smoke-'));
+  // 0777 because the mount has to be writable by the container's effective
+  // uid, which is only the host's on the path where --user is pushed.
+  chmodSync(workspace, 0o777);
+  // Pre-create the image's WORKDIR on the host rather than letting the daemon
+  // materialize it inside the mount. Production does exactly this — the host
+  // owns the session dir and its `group/` before the container ever starts —
+  // and runtimes disagree about who owns a WORKDIR auto-created inside a bind
+  // mount, so relying on that would make this stricter than what it models.
+  mkdirSync(path.join(workspace, 'group'), { recursive: true });
+  chmodSync(path.join(workspace, 'group'), 0o777);
+  try {
+    const testArgs = ['run', '--rm', '-v', `${workspace}:/workspace`];
+    const hostUid = process.getuid?.();
+    const hostGid = process.getgid?.();
+    if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+      testArgs.push('--user', `${hostUid}:${hostGid}`, '-e', 'HOME=/home/node');
+    }
+    testArgs.push('--entrypoint', 'bash', image, '-c', SMOKE_SCRIPT);
+    const testRes = spawnSync(runCmd, testArgs, { encoding: 'utf-8' });
+    const ok = testRes.status === 0 && (testRes.stdout ?? '').includes('Container OK');
+    if (ok) {
+      log.info('Container test result', { testOk: ok });
+    } else {
+      log.error('Container test failed', {
+        exitCode: testRes.status,
+        stderr: (testRes.stderr ?? '').trim().slice(-500),
+      });
+    }
+    return ok;
+  } finally {
+    try {
+      rmSync(workspace, { recursive: true, force: true });
+    } catch (err) {
+      log.warn('Could not remove the smoke-test workspace', { workspace, err });
+    }
+  }
+}
+
 export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const { runtime, driver } = chooseRuntime(args, readSetting(projectRoot, 'NANOCLAW_RUNTIME_DRIVER'), detectRuntime);
@@ -400,45 +449,7 @@ export async function run(args: string[]): Promise<void> {
   // Scratch dir under data/ because that is where real session dirs live.
   let testOk = false;
   if (buildOk) {
-    log.info('Testing container');
-    mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
-    const workspace = mkdtempSync(path.join(projectRoot, 'data', 'container-smoke-'));
-    // 0777 because the mount has to be writable by the container's effective
-    // uid, which is only the host's on the path where --user is pushed.
-    chmodSync(workspace, 0o777);
-    // Pre-create the image's WORKDIR on the host rather than letting the daemon
-    // materialize it inside the mount. Production does exactly this — the host
-    // owns the session dir and its `group/` before the container ever starts
-    // (buildMounts in src/container-runner.ts) — and daemons disagree about who
-    // owns a WORKDIR auto-created inside a bind mount, so relying on that would
-    // make the smoke test stricter than the thing it is meant to model.
-    mkdirSync(path.join(workspace, 'group'), { recursive: true });
-    chmodSync(path.join(workspace, 'group'), 0o777);
-    try {
-      const testArgs = ['run', '--rm', '-v', `${workspace}:/workspace`];
-      const hostUid = process.getuid?.();
-      const hostGid = process.getgid?.();
-      if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-        testArgs.push('--user', `${hostUid}:${hostGid}`, '-e', 'HOME=/home/node');
-      }
-      testArgs.push('--entrypoint', 'bash', image, '-c', SMOKE_SCRIPT);
-      const testRes = spawnSync(runCmd, testArgs, { encoding: 'utf-8' });
-      testOk = testRes.status === 0 && (testRes.stdout ?? '').includes('Container OK');
-      if (testOk) {
-        log.info('Container test result', { testOk });
-      } else {
-        log.error('Container test failed', {
-          exitCode: testRes.status,
-          stderr: (testRes.stderr ?? '').trim().slice(-500),
-        });
-      }
-    } finally {
-      try {
-        rmSync(workspace, { recursive: true, force: true });
-      } catch (err) {
-        log.warn('Could not remove the smoke-test workspace', { workspace, err });
-      }
-    }
+    testOk = runImageSmokeTest(runCmd, projectRoot, image);
   }
 
   const status = buildOk && testOk ? 'success' : 'failed';
@@ -505,15 +516,20 @@ async function runAppleContainer(projectRoot: string, image: string, logFile: st
     fail('build_failed', 5);
   }
 
+  // Same image contract check the Docker path runs. An earlier version of
+  // this skipped it on the theory that first VM boot would be too slow for a
+  // wizard step; measured, it is about a second, and skipping meant the Apple
+  // path never verified the image at all.
+  const testOk = runImageSmokeTest('container', projectRoot, image);
+
   emitStatus('SETUP_CONTAINER', {
     RUNTIME: 'container',
     IMAGE: image,
     BUILD_OK: true,
-    // No smoke run here: `container run` on a fresh install can block on first
-    // VM boot far longer than a wizard step should, and the host's own
-    // ensureReady covers reachability at start.
-    TEST_OK: true,
-    STATUS: 'ok',
+    TEST_OK: testOk,
+    STATUS: testOk ? 'ok' : 'failed',
+    ...(testOk ? {} : { ERROR: 'container_test_failed' }),
     LOG: 'logs/setup.log',
   });
+  if (!testOk) process.exit(6);
 }

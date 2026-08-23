@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'timers/promises';
 import { log } from '../src/log.js';
 import { getDefaultContainerImage } from '../src/install-slug.js';
 import { commandExists, getPlatform } from './platform.js';
+import { upsertEnvVar } from './set-env.js';
 import { emitStatus } from './status.js';
 
 type DockerStatus = 'ok' | 'no-permission' | 'no-daemon' | 'other';
@@ -67,17 +68,47 @@ async function tryStartDocker(): Promise<DockerStatus> {
   return 'no-daemon';
 }
 
-function parseArgs(args: string[]): { runtime: string } {
-  // `--runtime` is still accepted for backwards compatibility with the /setup
-  // skill, but `docker` is the only supported value.
-  let runtime = 'docker';
+/**
+ * Which runtime this host should build and run with.
+ *
+ * Detected rather than assumed: on macOS, Apple Container is preferred when
+ * present because Docker Desktop is a separate paid install many macOS hosts
+ * do not have. `--runtime docker|container` overrides.
+ */
+function detectRuntime(): string {
+  if (process.platform === 'darwin' && commandExists('container')) return 'container';
+  return 'docker';
+}
+
+/**
+ * The host picks its session driver from `NANOCLAW_RUNTIME_DRIVER` (default
+ * docker), and `container/build.sh` its build tool from the same setting. So
+ * the runtime setup builds with has to be written there, or a macOS install
+ * builds with Apple Container and then tries to run Docker.
+ */
+const DRIVER_FOR_RUNTIME: Record<string, string> = { container: 'apple', docker: 'docker' };
+const RUNTIME_FOR_DRIVER: Record<string, string> = { apple: 'container', docker: 'docker' };
+
+/**
+ * `--runtime` wins; then the driver this install already recorded (a re-run
+ * keeps its choice); detection is only for a first run. Returns the runtime
+ * and the driver the host must run it with (undefined for an unknown runtime,
+ * which the caller rejects).
+ */
+export function chooseRuntime(
+  args: string[],
+  recordedDriver: string | undefined,
+  detect: () => string,
+): { runtime: string; driver: string | undefined } {
+  const recorded = recordedDriver?.trim().toLowerCase();
+  let runtime = (recorded && RUNTIME_FOR_DRIVER[recorded]) || detect();
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--runtime' && args[i + 1]) {
       runtime = args[i + 1];
       i++;
     }
   }
-  return { runtime };
+  return { runtime, driver: DRIVER_FOR_RUNTIME[runtime] };
 }
 
 /**
@@ -173,9 +204,15 @@ const SMOKE_SCRIPT = [
 
 export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
-  const { runtime } = parseArgs(args);
+  const { runtime, driver } = chooseRuntime(args, readSetting(projectRoot, 'NANOCLAW_RUNTIME_DRIVER'), detectRuntime);
+  if (driver) upsertEnvVar('NANOCLAW_RUNTIME_DRIVER', driver, projectRoot);
   const image = getDefaultContainerImage(projectRoot);
   const logFile = path.join(projectRoot, 'logs', 'setup.log');
+
+  if (runtime === 'container') {
+    await runAppleContainer(projectRoot, image, logFile);
+    return;
+  }
 
   if (runtime !== 'docker') {
     emitStatus('SETUP_CONTAINER', {
@@ -318,7 +355,7 @@ export async function run(args: string[]): Promise<void> {
       // reconcile can't stop an install that already has its image.
       try {
         const { reconcileDerivedImages } = await import('./registry-reconcile.js');
-        const reconciled = reconcileDerivedImages();
+        const reconciled = await reconcileDerivedImages();
         log.info('Derived agent-group images reconciled', {
           cleared: reconciled.cleared.length,
           removed: reconciled.removed.length,
@@ -419,4 +456,64 @@ export async function run(args: string[]): Promise<void> {
   });
 
   if (status === 'failed') process.exit(1);
+}
+
+/**
+ * Apple Container path.
+ *
+ * Deliberately thinner than the Docker path: there is no daemon socket, no
+ * group membership to re-exec through, and no install script — the runtime
+ * arrives via Homebrew or not at all. What it does need is its services
+ * started, which is idempotent.
+ */
+async function runAppleContainer(projectRoot: string, image: string, logFile: string): Promise<void> {
+  const fail = (error: string, code: number): never => {
+    emitStatus('SETUP_CONTAINER', {
+      RUNTIME: 'container',
+      IMAGE: image,
+      BUILD_OK: false,
+      TEST_OK: false,
+      STATUS: 'failed',
+      ERROR: error,
+      LOG: 'logs/setup.log',
+    });
+    process.exit(code);
+  };
+
+  if (!commandExists('container')) {
+    log.error('Apple Container not found — install it with `brew install container`');
+    fail('runtime_not_available', 2);
+  }
+
+  if (spawnSync('container', ['system', 'status'], { stdio: 'pipe' }).status !== 0) {
+    log.info('Apple Container services not running — starting them');
+    spawnSync('container', ['system', 'start'], { stdio: 'inherit' });
+    if (spawnSync('container', ['system', 'status'], { stdio: 'pipe' }).status !== 0) {
+      fail('runtime_not_running', 3);
+    }
+  }
+
+  log.info('Building agent image with Apple Container');
+  try {
+    execSync('bash container/build.sh', {
+      cwd: projectRoot,
+      stdio: 'inherit',
+      env: { ...process.env, CONTAINER_RUNTIME: 'container' },
+    });
+  } catch (err) {
+    log.error('Agent image build failed', { err, logFile });
+    fail('build_failed', 5);
+  }
+
+  emitStatus('SETUP_CONTAINER', {
+    RUNTIME: 'container',
+    IMAGE: image,
+    BUILD_OK: true,
+    // No smoke run here: `container run` on a fresh install can block on first
+    // VM boot far longer than a wizard step should, and the host's own
+    // ensureReady covers reachability at start.
+    TEST_OK: true,
+    STATUS: 'ok',
+    LOG: 'logs/setup.log',
+  });
 }

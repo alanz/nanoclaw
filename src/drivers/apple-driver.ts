@@ -25,6 +25,8 @@
  *
  * Selection: `NANOCLAW_RUNTIME_DRIVER=apple` in `.env` (or the environment).
  */
+import { statSync } from 'node:fs';
+
 import { log } from '../log.js';
 
 import type { Cli } from './cli.js';
@@ -60,6 +62,20 @@ function parseDocs(out: string): AppleContainerDoc[] {
     // cannot enumerate; treating that as "no containers" would reap nothing
     // and adopt nothing, which is the safe direction.
     return [];
+  }
+}
+
+/**
+ * A path that exists and is not a directory. A source that does not exist yet
+ * is treated as a directory: composition already gated on existence, and
+ * guessing "file" for a missing path would drop a mount the runtime could
+ * have made.
+ */
+function isFileMount(hostPath: string): boolean {
+  try {
+    return !statSync(hostPath).isDirectory();
+  } catch {
+    return false;
   }
 }
 
@@ -148,6 +164,34 @@ export const appleDialect: RuntimeDialect = {
   },
 
   statePhase: appleStatePhase,
+
+  /**
+   * Directory mounts only.
+   *
+   * `container` cannot bind a single file — passing it one fails the spawn
+   * outright, so a file mount is dropped here rather than allowed to kill the
+   * session. The one file mount trunk composes is `container/CLAUDE.md` at
+   * /app/CLAUDE.md, which the image already carries (see the COPY in
+   * container/Dockerfile); dropping the mount leaves the baked copy in place.
+   *
+   * Logged, not silent: a mount that was asked for and not made is exactly
+   * the kind of difference that should be visible when a session behaves
+   * unexpectedly.
+   */
+  mountArgs(mounts) {
+    const args: string[] = [];
+    for (const m of mounts) {
+      if (isFileMount(m.hostPath)) {
+        log.debug('Apple Container: dropping file mount (directories only)', {
+          hostPath: m.hostPath,
+          containerPath: m.containerPath,
+        });
+        continue;
+      }
+      args.push('-v', m.mode === 'ro' ? `${m.hostPath}:${m.containerPath}:ro` : `${m.hostPath}:${m.containerPath}`);
+    }
+    return args;
+  },
 
   listAgents(cli, installSlug): RuntimeRow[] {
     return listInstallDocs(cli, installSlug)

@@ -23,6 +23,7 @@ vi.mock('../log.js', () => ({
 interface DocOpts {
   name: string;
   state: string;
+  startedDate?: string;
   install?: string;
   group?: string;
   session?: string;
@@ -30,12 +31,19 @@ interface DocOpts {
 }
 
 function doc(o: DocOpts): unknown {
+  // `startedDate` is what separates a prepared container from a dead one;
+  // a fixture in a post-run state must carry it.
+  const started = o.startedDate ?? (o.state === 'running' ? '2026-01-01T00:00:00Z' : undefined);
   const labels: Record<string, string> = {};
   if (o.install !== undefined) labels[LABELS.install] = o.install;
   if (o.group !== undefined) labels[LABELS.group] = o.group;
   if (o.session !== undefined) labels[LABELS.session] = o.session;
   if (o.role !== undefined) labels[LABELS.role] = o.role;
-  return { id: o.name, configuration: { id: o.name, labels }, status: { state: o.state } };
+  return {
+    id: o.name,
+    configuration: { id: o.name, labels },
+    status: started ? { state: o.state, startedDate: started } : { state: o.state },
+  };
 }
 
 function cliListing(docs: unknown[]): FakeCli {
@@ -84,10 +92,18 @@ describe('appleDialect.listResidue', () => {
   it('separates corpses from pre-seam containers', () => {
     const cli = cliListing([
       doc({ name: 'ncl-spike-s1', state: 'running', ...AGENT }),
-      doc({ name: 'ncl-spike-s2', state: 'stopped', install: 'spike', group: 'g2', session: 's2', role: 'agent' }),
+      doc({
+        name: 'ncl-spike-s2',
+        state: 'stopped',
+        startedDate: '2026-01-01T00:00:00Z',
+        install: 'spike',
+        group: 'g2',
+        session: 's2',
+        role: 'agent',
+      }),
       // Running, install-labeled, but no session label: spawned before the seam.
       doc({ name: 'nanoclaw-v2-old-123', state: 'running', install: 'spike' }),
-      doc({ name: 'ncl-other-s1', state: 'stopped', install: 'other' }),
+      doc({ name: 'ncl-other-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', install: 'other' }),
     ]);
 
     expect(appleDialect.listResidue(cli, 'spike')).toEqual({
@@ -149,7 +165,9 @@ describe('appleDialect.subscribe', () => {
   it('emits nothing for the state it finds on the first poll', () => {
     // Otherwise every host start would hint a terminal for every corpse the
     // runtime still lists.
-    const cli = cliListing([doc({ name: 'ncl-spike-s1', state: 'stopped', ...AGENT })]);
+    const cli = cliListing([
+      doc({ name: 'ncl-spike-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', ...AGENT }),
+    ]);
     const { events } = collect(cli);
     vi.advanceTimersByTime(5_000);
     expect(events).toEqual([]);
@@ -159,7 +177,12 @@ describe('appleDialect.subscribe', () => {
     const cli = cliListing([doc({ name: 'ncl-spike-s1', state: 'running', ...AGENT })]);
     const { events } = collect(cli);
     cli.responses = [
-      { match: /^ls --all/, output: JSON.stringify([doc({ name: 'ncl-spike-s1', state: 'stopped', ...AGENT })]) },
+      {
+        match: /^ls --all/,
+        output: JSON.stringify([
+          doc({ name: 'ncl-spike-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', ...AGENT }),
+        ]),
+      },
     ];
     vi.advanceTimersByTime(2_000);
     expect(events).toEqual([{ key: { installSlug: 'spike', agentGroupId: 'g1', sessionId: 's1' }, kind: 'terminal' }]);
@@ -213,19 +236,54 @@ describe('appleDialect.mountArgs', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('drops a file mount, which this runtime cannot bind at all', () => {
-    // `container` binds directories only; passing it a file fails the spawn.
-    // The one file trunk composes (/app/CLAUDE.md) is baked into the image.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-mount-'));
-    const file = path.join(dir, 'CLAUDE.md');
-    fs.writeFileSync(file, '# shared');
+  it('passes a file mount through when its parent is not otherwise mounted', () => {
+    // The runner's session context lives in a host-owned dir that is never
+    // mounted whole, so the single file can be bound directly.
+    const ctx = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-ctx-'));
+    const sess = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-sess-'));
+    const file = path.join(ctx, 'sess-1.json');
+    fs.writeFileSync(file, '{}');
 
     expect(
       appleDialect.mountArgs([
-        { class: 'surface', hostPath: file, containerPath: '/app/CLAUDE.md', mode: 'ro' },
-        { class: 'session', hostPath: dir, containerPath: '/workspace', mode: 'rw' },
+        { class: 'session', hostPath: sess, containerPath: '/workspace', mode: 'rw' },
+        { class: 'session', hostPath: file, containerPath: '/app/.nanoclaw-session.json', mode: 'ro' },
       ] as never),
-    ).toEqual(['-v', `${dir}:/workspace`]);
+    ).toEqual(['-v', `${sess}:/workspace`, '-v', `${file}:/app/.nanoclaw-session.json:ro`]);
+    fs.rmSync(ctx, { recursive: true, force: true });
+    fs.rmSync(sess, { recursive: true, force: true });
+  });
+
+  it('drops a file mount whose parent is also a directory mount, keeping the directory', () => {
+    // container.json nested read-only over the group folder: binding both
+    // makes the runtime lose the directory mount (measured, 1.4.1), so the
+    // file goes and the workspace stays.
+    const group = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-group-'));
+    const file = path.join(group, 'container.json');
+    fs.writeFileSync(file, '{}');
+
+    expect(
+      appleDialect.mountArgs([
+        { class: 'session', hostPath: group, containerPath: '/workspace/agent', mode: 'rw' },
+        { class: 'session', hostPath: file, containerPath: '/workspace/agent/container.json', mode: 'ro' },
+      ] as never),
+    ).toEqual(['-v', `${group}:/workspace/agent`]);
+    fs.rmSync(group, { recursive: true, force: true });
+  });
+
+  it('keeps two file mounts that share a parent nobody mounts', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-files-'));
+    const a = path.join(dir, 'a.json');
+    const b = path.join(dir, 'b.json');
+    fs.writeFileSync(a, '{}');
+    fs.writeFileSync(b, '{}');
+
+    expect(
+      appleDialect.mountArgs([
+        { class: 'session', hostPath: a, containerPath: '/app/a.json', mode: 'ro' },
+        { class: 'session', hostPath: b, containerPath: '/app/b.json', mode: 'ro' },
+      ] as never),
+    ).toEqual(['-v', `${a}:/app/a.json:ro`, '-v', `${b}:/app/b.json:ro`]);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -237,5 +295,44 @@ describe('appleDialect.mountArgs', () => {
         { class: 'session', hostPath: '/nope/not/here', containerPath: '/workspace', mode: 'rw' },
       ] as never),
     ).toEqual(['-v', '/nope/not/here:/workspace']);
+  });
+});
+
+describe('prepared-vs-dead discrimination', () => {
+  // Found against the real runtime, not the fake: `container create` leaves a
+  // container in state `stopped`, exactly like one that ran and exited. The
+  // only difference is `startedDate`, which appears when it actually runs.
+  //
+  // This matters between prepare() and start(): a residue sweep that read
+  // `stopped` as terminal would remove the container it had just prepared,
+  // and the start would fail on something that no longer exists.
+
+  it('reads a created-but-never-started container as starting, not terminal', () => {
+    const cli = cliListing([doc({ name: 'ncl-spike-s1', state: 'stopped', ...AGENT })]);
+    expect(appleDialect.listAgents(cli, 'spike')[0].state).toBe('created');
+    expect(appleDialect.statePhase(appleDialect.listAgents(cli, 'spike')[0].state)).toBe('starting');
+  });
+
+  it('reads a container that ran and exited as terminal', () => {
+    const cli = cliListing([
+      doc({ name: 'ncl-spike-s1', state: 'stopped', startedDate: '2026-01-01T00:00:00Z', ...AGENT }),
+    ]);
+    expect(appleDialect.statePhase(appleDialect.listAgents(cli, 'spike')[0].state)).toBe('terminal');
+  });
+
+  it('never reaps a container between prepare and start', () => {
+    const cli = cliListing([
+      doc({ name: 'ncl-prepared', state: 'stopped', ...AGENT }),
+      doc({
+        name: 'ncl-corpse',
+        state: 'stopped',
+        startedDate: '2026-01-01T00:00:00Z',
+        install: 'spike',
+        group: 'g2',
+        session: 's2',
+        role: 'agent',
+      }),
+    ]);
+    expect(appleDialect.listResidue(cli, 'spike').stale).toEqual(['ncl-corpse']);
   });
 });

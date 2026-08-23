@@ -289,6 +289,13 @@ pnpm test             # Host tests (vitest)
 # Agent-runner (Bun — separate package tree under container/agent-runner/)
 cd container/agent-runner && bun install   # After editing agent-runner deps
 cd container/agent-runner && bun test      # Container tests (bun:test)
+
+# Live-runtime driver tests. Skipped unless both vars are set, so they are
+# inert in CI. They spawn real containers (named ncl-live-*, throwaway install
+# label) and prove what a scripted fake cannot: that the runtime accepts the
+# argv the driver emits, and that the fields the dialect reads back mean what
+# it assumes.
+NANOCLAW_LIVE_RUNTIME=apple NANOCLAW_LIVE_IMAGE=<image:tag> pnpm run test:live
 ```
 
 Container typecheck is a separate tsconfig — if you edit `container/agent-runner/src/`, run `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` from root (or `bun run typecheck` from `container/agent-runner/`).

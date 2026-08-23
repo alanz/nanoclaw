@@ -732,7 +732,8 @@ function containerCreateArgs(
   args.push(...userArgs(spec));
   args.push(...envArgs(container.env));
   args.push(...envArgs(container.contributedEnv ?? {}));
-  args.push(...mountArgs(container.mounts));
+  // The dialect decides what this runtime can bind (see RuntimeDialect.mountArgs).
+  args.push(...dialect.mountArgs(container.mounts));
   args.push(...networkArgs);
   if (container.command && container.command.length > 0) {
     args.push('--entrypoint', container.command[0]);
@@ -869,6 +870,8 @@ export const dockerDialect: RuntimeDialect = {
   hardeningArgs,
 
   statePhase: dockerStatePhase,
+
+  mountArgs,
 
   listAgents(cli, installSlug) {
     const out = cli.run([

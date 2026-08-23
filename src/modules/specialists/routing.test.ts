@@ -23,10 +23,10 @@ vi.mock('../../container-runner.js', () => ({
 
 vi.mock('../../session-manager.js', () => ({
   writeSessionMessage: vi.fn(),
-  // Return a path that doesn't exist on disk — closeSpecialistSession's
-  // existsSync guard skips the inbound.db cleanup, which is fine here.
-  inboundDbPath: vi.fn().mockReturnValue('/nonexistent/test/inbound.db'),
-  openInboundDb: vi.fn(),
+  // closeSpecialistSession goes through the mailbox seam now. Resolving to
+  // undefined is what an unprovisioned session looks like, which is the case
+  // this file cares about: cleanup must not throw when there is no mailbox.
+  withExistingMailboxSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('./invocation.js', () => ({
@@ -147,7 +147,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  closeDb();
+  await closeDb();
 });
 
 // ── session cleanup on terminal state ────────────────────────────────────────
@@ -186,9 +186,9 @@ describe('specialist session cleanup on terminal task', () => {
     expect((await getSession(requesterSessionId))?.status).toBe('active');
   });
 
-  it('does not throw when the specialist session has no inbound.db on disk', async () => {
-    // existsSync returns false for the mocked path — closeSpecialistSession
-    // must handle this gracefully without crashing.
+  it('does not throw when the specialist session was never provisioned', async () => {
+    // withExistingMailboxSession resolves undefined for a session with no
+    // mailbox on disk; cleanup must handle that without crashing.
     const { task } = await makeFailedRootTask();
     await expect(routeResult(task)).resolves.not.toThrow();
   });

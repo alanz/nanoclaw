@@ -29,3 +29,4 @@ import './boot-crash/index.js';
 import './memory/index.js';
 import './specialists/index.js';
 import './zotero/index.js';
+import './web-ui/index.js';

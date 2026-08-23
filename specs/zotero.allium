@@ -13,7 +13,7 @@
 --   - Message delivery mechanics and channel routing (see routing.allium, sessions.allium)
 --   - Container execution details (container-level concern)
 --   - Zotero API wire format, HTTP pagination, authentication headers (implementation)
---   - Abstract enrichment rate limiting and retry strategy (implementation)
+--   - Per-request rate limiting and backoff during abstract lookups (implementation)
 
 use "./identity.allium" as identity
 use "./scheduling.allium" as scheduling
@@ -27,6 +27,14 @@ enum AbstractSource {
     s2_doi | s2_arxiv | s2_url_doi | s2_title |
     cr_doi | cr_url_doi | cr_title |
     pdf_extraction
+}
+
+-- The outcome of an abstract lookup that did not produce an abstract.
+--   not_found    -- every applicable source answered and none had a usable abstract
+--   inconclusive -- at least one source could not be asked (network error, rate
+--                   limit retries exhausted, run budget reached mid-item)
+enum AbstractLookupResult {
+    not_found | inconclusive
 }
 
 ------------------------------------------------------------
@@ -98,6 +106,8 @@ entity ItemFile {
     title: String
     abstract: String?
     abstract_source: AbstractSource?    -- set when abstract was obtained via enrichment or extraction
+    abstract_lookup_at: Timestamp?      -- last lookup that ended without an abstract
+    abstract_lookup_result: AbstractLookupResult?
     -- allium-ignore allium.field.unused
     last_synced_at: Timestamp
 
@@ -113,8 +123,15 @@ entity ItemFile {
         --   - abstract       -> body text after the heading and author/year line
         --                       (added/updated in place by zotero-enrich.mjs and
         --                        zotero-extract-abstracts.mjs as a body section)
-        --   - abstract_source, last_synced_at -> not persisted in the file;
-        --                       host-derived from sync/enrichment events
+        --   - abstract_source -> abstract_source: in YAML frontmatter, written
+        --                       with the abstract
+        --   - abstract_lookup_at, abstract_lookup_result
+        --                     -> one frontmatter line,
+        --                       abstract_lookup: <ISO timestamp> <result>,
+        --                       written by the lookup run; removed when an
+        --                       abstract is inserted
+        --   - last_synced_at -> not persisted in the file; host-derived from
+        --                       sync events
         --
         -- Uniqueness: the UniqueItemFilesPerGroup invariant is enforced by the
         -- filesystem itself — one file per item_key per group directory, by
@@ -166,6 +183,8 @@ config {
     max_pdf_size: Integer = 15_000_000       -- bytes; PDFs larger than this are skipped
     min_abstract_length: Integer = 80        -- chars; shorter extracted text is rejected
     max_abstract_length: Integer = 3000      -- chars; longer extracted text is rejected
+    abstract_retry_interval: Duration = 180.days  -- a not_found item is not looked up again sooner
+    enrichment_run_budget: Duration = 25.seconds  -- wall-clock per lookup run
 }
 
 ------------------------------------------------------------
@@ -263,6 +282,8 @@ rule LibrarySynced {
                 title: item.title,
                 abstract: item.abstract,
                 abstract_source: null,
+                abstract_lookup_at: null,
+                abstract_lookup_result: null,
                 last_synced_at: now
             )
 
@@ -326,25 +347,38 @@ rule ChangesNotified {
 
 -- ---- Enrichment Triggers ----
 
--- After a sync that added new items, automatically trigger abstract enrichment
--- for every new item file that has no abstract.
+-- An item file is in the enrichment backlog while it has no abstract, unless its
+-- last lookup found nothing within abstract_retry_interval. Inconclusive lookups
+-- stay in the backlog.
+
+-- On every due sync check, whatever the pre-check finds, run one bounded lookup
+-- pass over the backlog. This drains a large backlog slowly in the background.
+rule EnrichmentBacklogScheduled {
+    when: state: SyncState.is_due
+
+    let backlog = ItemFiles where group = state.group and abstract = null
+        and not (abstract_lookup_result = not_found
+                 and abstract_lookup_at + config.abstract_retry_interval > now)
+
+    requires: backlog.count > 0
+
+    ensures: EnrichmentRunRequested(group: state.group)
+}
+
+-- After a sync that added new items, run a lookup pass straight away rather than
+-- waiting for the next check. New items have no lookup record, so they come first.
 rule EnrichmentTriggeredAfterSync {
     when: LibrarySyncCompleted(state, added, deleted_keys)
 
     requires: added.count > 0
+    requires: exists f in ItemFiles where item_key in added.keys and abstract = null
 
-    let pending = ItemFiles where item_key in added.keys and abstract = null
-
-    ensures:
-        for item_file in pending:
-            EnrichAbstractRequested(item_file: item_file)
-    ensures:
-        for item_file in pending:
-            ExtractPdfAbstractRequested(item_file: item_file)
+    ensures: EnrichmentRunRequested(group: state.group)
 }
 
--- The user can also request enrichment of all items without abstracts at any time
--- by asking the agent. Covers both newly added items and older ones never enriched.
+-- The user can also ask for enrichment at any time. This forgets earlier
+-- not_found results, so every item without an abstract is looked up again,
+-- in bounded runs as usual.
 -- allium-ignore allium.rule.unreachableTrigger
 rule EnrichmentTriggeredOnRequest {
     when: UserRequestedEnrichment(group)
@@ -353,10 +387,66 @@ rule EnrichmentTriggeredOnRequest {
 
     ensures:
         for item_file in pending:
-            EnrichAbstractRequested(item_file: item_file)
+            item_file.abstract_lookup_at = null
     ensures:
         for item_file in pending:
+            item_file.abstract_lookup_result = null
+    ensures: EnrichmentRunRequested(group: group)
+}
+
+-- One lookup run: take backlog items in priority order and, for each, try the
+-- external sources, then the attached PDF, then record the outcome if neither
+-- produced an abstract. The run stops at enrichment_run_budget.
+rule EnrichmentRun {
+    when: EnrichmentRunRequested(group)
+
+    let backlog = ItemFiles where group = group and abstract = null
+        and not (abstract_lookup_result = not_found
+                 and abstract_lookup_at + config.abstract_retry_interval > now)
+    let batch = take_within_budget(prioritise_backlog(backlog), config.enrichment_run_budget)
+
+    ensures:
+        for item_file in batch:
+            EnrichAbstractRequested(item_file: item_file)
+    ensures:
+        for item_file in batch:
             ExtractPdfAbstractRequested(item_file: item_file)
+    ensures:
+        for item_file in batch:
+            AbstractLookupFinished(item_file: item_file)
+
+    @guidance
+        -- prioritise_backlog orders by: never looked up first, then inconclusive,
+        -- then expired not_found, each by oldest abstract_lookup_at. Ties (all
+        -- never-looked-up items) put items with a DOI, an arXiv ID or a DOI in the
+        -- URL before title-only items, since identifier lookups are cheap and
+        -- usually succeed.
+        -- The run is a pre-task script (no agent turn), so it costs no model tokens;
+        -- the budget keeps it inside the script timeout. Each item's outcome is
+        -- written to its file as soon as the item is done, so a run that is cut
+        -- short keeps the work already finished. An item interrupted mid-lookup is
+        -- left unmarked and comes round again.
+        -- A backoff that would overrun the budget ends the item as inconclusive
+        -- rather than waiting.
+}
+
+-- When a lookup ends without an abstract, record when and why, so the backlog
+-- moves on instead of retrying the same items on every run.
+rule AbstractLookupRecorded {
+    when: AbstractLookupFinished(item_file)
+
+    requires: item_file.abstract = null
+
+    let result = lookup_outcome(item_file)
+
+    ensures: item_file.abstract_lookup_at = now
+    ensures: item_file.abstract_lookup_result = result
+
+    @guidance
+        -- lookup_outcome is not_found only when every applicable external source
+        -- answered (found nothing, or text outside the length bounds) and PDF
+        -- extraction found nothing or did not apply (no PDF, PDF too large).
+        -- Anything that leaves a source unasked makes it inconclusive.
 }
 
 -- ---- Abstract Enrichment ----
@@ -391,8 +481,10 @@ rule AbstractEnriched {
         -- (DOI) is fully exhausted across both sources before falling back to weaker
         -- identifiers (arXiv, url-DOI, title). This avoids burning fuzzy S2 title
         -- searches before trying a precise CrossRef DOI lookup.
-        -- If no source yields a usable abstract, item_file is left unchanged.
-        -- Rate limiting and retry strategy are implementation details of zotero-enrich.mjs.
+        -- If no source yields a usable abstract, the abstract is left unset; the
+        -- outcome is recorded by AbstractLookupRecorded.
+        -- Per-request rate limiting and backoff are implementation details of
+        -- zotero-enrich.mjs.
 }
 
 -- ---- PDF Abstract Extraction ----
@@ -425,7 +517,8 @@ rule PdfAbstractExtracted {
         -- delimited by "Abstract" as a start marker and section headers such as
         -- "Introduction" or "Keywords" as end markers.
         -- Dehyphenation joins line-broken words before length validation.
-        -- If extraction fails or yields nothing, item_file is left unchanged.
+        -- If extraction fails or yields nothing, the abstract is left unset; the
+        -- outcome is recorded by AbstractLookupRecorded.
 }
 
 ------------------------------------------------------------
@@ -450,6 +543,12 @@ invariant AbstractSourceImpliesAbstract {
         f.abstract_source != null implies f.abstract != null
 }
 
+-- A lookup record is all or nothing.
+invariant AbstractLookupRecordComplete {
+    for f in ItemFiles:
+        (f.abstract_lookup_at = null) = (f.abstract_lookup_result = null)
+}
+
 -- An active SyncState always has a next_check scheduled.
 -- (next_check = null is transient and immediately resolved by SyncStateInitialised.)
 invariant ActiveSyncStateHasNextCheck {
@@ -464,6 +563,9 @@ invariant ActiveSyncStateHasNextCheck {
 -- resolved: one Zotero group only; SyncState is a singleton (see SyncStateIsSingleton invariant)
 -- resolved: enrichment runs automatically after sync for new items without abstracts (EnrichmentTriggeredAfterSync),
 --           and can also be requested ad hoc by the user (EnrichmentTriggeredOnRequest)
+-- resolved (2026-10-11): unbounded enrichment runs died with their container and, recording nothing,
+--           restarted on the same items; runs are now budgeted, drain the backlog on every sync check
+--           (EnrichmentBacklogScheduled), and record not_found / inconclusive per item (AbstractLookupRecorded)
 -- resolved: pre-check failure skips the sync and advances the schedule (fail-closed, no container spawn);
 --           current code (hasNewZoteroItems) diverges — it is fail-open and should be fixed
 -- resolved: deleted item files are removed permanently; recovery via Borg backups if needed

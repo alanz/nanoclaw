@@ -168,7 +168,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  closeDb();
+  await closeDb();
 });
 
 // ── SubTaskAwaitTimedOut ──────────────────────────────────────────────────────

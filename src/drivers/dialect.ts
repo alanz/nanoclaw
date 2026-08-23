@@ -19,7 +19,7 @@
  * Out-of-tree dialects (Apple `container`, podman, …) ship as overlays.
  */
 import type { Cli } from './cli.js';
-import type { SessionEvent, SessionKey, SessionPhase, SessionSpec } from './types.js';
+import type { MountSpec, SessionEvent, SessionKey, SessionPhase, SessionSpec } from './types.js';
 
 /** One agent container, as the runtime reports it. Identity is labels, always. */
 export interface RuntimeRow {
@@ -70,6 +70,17 @@ export interface RuntimeDialect {
 
   /** Runtime-native container state → seam phase. */
   statePhase(state: string): SessionPhase;
+
+  /**
+   * Mount flags for this runtime.
+   *
+   * Not every runtime can bind a single FILE. Docker can; Apple's `container`
+   * only binds directories, and passing it a file mount fails the spawn. A
+   * dialect that cannot honor a mount has to be the thing that decides what
+   * to do about it — the composer states what the session needs, and only the
+   * realization knows what this runtime can express.
+   */
+  mountArgs(mounts: readonly MountSpec[]): string[];
 
   /** Agent containers of this install, running or not (the adoption contract). */
   listAgents(cli: Cli, installSlug: string): RuntimeRow[];

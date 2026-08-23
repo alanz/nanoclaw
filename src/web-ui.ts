@@ -25,7 +25,7 @@ import { log } from './log.js';
 // HTML dashboard
 // ---------------------------------------------------------------------------
 
-const DASHBOARD_HTML = `<!DOCTYPE html>
+export const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -358,6 +358,23 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!state.folder) { showGroupListInternal(); return; }
       var data = await fetch('/api/groups').then(function(r) { return r.json(); });
       var g = data.find(function(x) { return x.folder === state.folder; });
+      // A link from before a move (v1's group "main", memory/notes/ before
+      // zettel/): ask for the current place and show that address instead.
+      if (!g || state.filePath) {
+        var q = '/api/resolve-link?folder=' + encodeURIComponent(state.folder) +
+          (state.filePath ? '&path=' + encodeURIComponent(state.filePath) : '');
+        var rr = await fetch(q).catch(function() { return null; });
+        if (rr && rr.ok) {
+          var cur = await rr.json();
+          if (cur.folder !== state.folder || (cur.path || null) !== state.filePath) {
+            state.folder = cur.folder;
+            state.filePath = cur.path || null;
+            var rest = state.filePath ? '/files/' + state.filePath : state.noteId ? '/notes/' + state.noteId : '/' + (state.tab || 'messages');
+            history.replaceState(null, '', '#groups/' + state.folder + rest);
+            g = data.find(function(x) { return x.folder === state.folder; });
+          }
+        }
+      }
       if (!g) { showGroupListInternal(); return; }
       currentGroup = g;
       document.getElementById('groups-list').style.display = 'none';
@@ -645,6 +662,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── Frontmatter / markdown helpers (identical to v1) ───────────────────────
 
+  ${resolveWorkspaceLink.toString()}
+
   function parseFrontMatter(text) {
     if (!text.startsWith('---')) return null;
     var nl = text.indexOf('\\n');
@@ -662,7 +681,7 @@ document.addEventListener('DOMContentLoaded', function() {
   function renderFrontMatter(meta, filePath) {
     var div = document.createElement('div');
     div.className = 'fm-card';
-    var isNote = filePath && (filePath.indexOf('/memory/notes/MEM-') !== -1 || filePath.indexOf('/memory/notes/SYN-') !== -1);
+    var isNote = filePath && (filePath.indexOf('/zettel/notes/MEM-') !== -1 || filePath.indexOf('/zettel/notes/SYN-') !== -1);
     Object.entries(meta).forEach(function(kv) {
       var k = kv[0], v = kv[1];
       var kEl = document.createElement('div'); kEl.className = 'fm-key'; kEl.textContent = k; div.appendChild(kEl);
@@ -716,7 +735,7 @@ document.addEventListener('DOMContentLoaded', function() {
       var r = await fetch('/api/file?path='+encodeURIComponent(filePath));
       if (!r.ok) { view.innerHTML = '<div class="empty">Could not read file</div>'; return; }
       var text = await r.text();
-      var isNote = filePath.indexOf('/memory/notes/MEM-') !== -1 || filePath.indexOf('/memory/notes/SYN-') !== -1;
+      var isNote = filePath.indexOf('/zettel/notes/MEM-') !== -1 || filePath.indexOf('/zettel/notes/SYN-') !== -1;
       var noteIdMatch = filePath.match(/((MEM|SYN)-[^/]+)\\.md$/);
       var graphBtnHash = (currentGroup && noteIdMatch ? '#groups/'+currentGroup.folder+'/notes/'+noteIdMatch[1] : currentGroup ? '#groups/'+currentGroup.folder+'/notes' : '#');
       var graphBtn = isNote ? ' <a href="'+graphBtnHash+'" class="graph-file-btn" data-path="'+esc(filePath)+'" style="color:#58a6ff;font-size:11px;margin-left:8px;text-decoration:none">&#x29BF; Show in Graph</a>' : '';
@@ -731,6 +750,11 @@ document.addEventListener('DOMContentLoaded', function() {
         parsedDiv.innerHTML = window.marked.parse(fm ? fm.body : text);
         parsedDiv.querySelectorAll('a').forEach(function(a) {
           var href = a.getAttribute('href') || '';
+          var rel = resolveWorkspaceLink(filePath, href);
+          if (rel) {
+            href = '#groups/' + rel.folder + '/files/' + rel.path;
+            a.setAttribute('href', href);
+          }
           var isInternal = href.charAt(0) === '#' || (href.indexOf(location.origin) === 0 && href.indexOf('#groups/') !== -1);
           a.classList.add(isInternal ? 'link-internal' : 'link-external');
         });
@@ -1493,6 +1517,122 @@ function safeReadFile(relPath: string): string | null {
 // Note frontmatter parser (identical logic to v1)
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve a relative link found in a workspace Markdown file to the file it
+ * names, as `{ folder, path }` (group folder, path inside it), or null when the
+ * link is not a relative file link (a scheme, a fragment, an absolute path) or
+ * would leave the group's folder. `filePath` is the viewed file as the file
+ * API names it, `<folder>/<path>`.
+ *
+ * Notes link to each other and to their reports relatively (`../reports/x.md`)
+ * so a link survives a change of host, port or folder. The file viewer turns
+ * them into dashboard links with this; the same source runs in the browser
+ * (embedded below), so the tests exercise the code the page runs.
+ */
+export function resolveWorkspaceLink(filePath: string, href: string): { folder: string; path: string } | null {
+  if (!href || href.charAt(0) === '#' || href.charAt(0) === '/' || /^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
+  var target = href.split('#')[0].split('?')[0];
+  if (!target) return null;
+  try {
+    target = decodeURIComponent(target);
+  } catch (e) {
+    return null;
+  }
+  var parts = filePath.split('/');
+  parts.pop();
+  var segs = target.split('/');
+  for (var i = 0; i < segs.length; i++) {
+    var seg = segs[i];
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (parts.length <= 1) return null;
+      parts.pop();
+    } else {
+      parts.push(seg);
+    }
+  }
+  if (parts.length < 2) return null;
+  return { folder: parts[0], path: parts.slice(1).join('/') };
+}
+
+/**
+ * Dashboard links sent in chat before a file moved still name its old place:
+ * v1 links say group `main` (v1's main group folder), and links from before
+ * the Zettelkasten moved to `zettel/` (2026-10-04) say `memory/notes/…`,
+ * `memory/reports/…` and so on. Chat history cannot be rewritten, so the
+ * dashboard maps such a link to the file's current place.
+ *
+ * Renames are tried only when the path as given does not exist, so a link
+ * that works today never changes. `memory/digests/` maps to `zettel/digests/`
+ * only for the digests that moved (the rest stayed in memory/digests/).
+ */
+const LEGACY_PATH_RENAMES: ReadonlyArray<readonly [string, string]> = [
+  ['memory/notes/', 'zettel/notes/'],
+  ['memory/reports/', 'zettel/reports/'],
+  ['memory/drafts/', 'zettel/drafts/'],
+  ['memory/digests/', 'zettel/digests/'],
+  ['memory/research-topics.md', 'zettel/research-topics.md'],
+  ['agents/researcher/reports/', 'zettel/reports/'],
+];
+const LEGACY_MAIN_FOLDER = 'main';
+
+/**
+ * The current `{ folder, path }` for a dashboard link's group folder and file
+ * path (path null for a group-level link), or null when nothing matches.
+ * `mainFolder` is the current main agent group's folder.
+ */
+export function resolveLegacyLink(
+  folder: string,
+  filePath: string | null,
+  ctx: { groupsDir: string; folders: readonly string[]; mainFolder: string | null },
+): { folder: string; path: string | null } | null {
+  const current = ctx.folders.includes(folder)
+    ? folder
+    : folder === LEGACY_MAIN_FOLDER && ctx.mainFolder
+      ? ctx.mainFolder
+      : null;
+  if (!current) return null;
+  if (!filePath) return { folder: current, path: null };
+
+  const root = path.resolve(ctx.groupsDir, current);
+  const exists = (p: string): boolean => {
+    const abs = path.resolve(root, p);
+    return abs.startsWith(root + path.sep) && fs.existsSync(abs) && fs.statSync(abs).isFile();
+  };
+  let decoded = filePath;
+  try {
+    decoded = decodeURIComponent(filePath);
+  } catch {
+    // keep as given
+  }
+  for (const given of new Set([filePath, decoded])) {
+    // A container path leaked into some links: agent/memory/… for memory/….
+    const candidates = [given, given.startsWith('agent/') ? given.slice('agent/'.length) : null];
+    for (const p of candidates) {
+      if (!p) continue;
+      if (exists(p)) return { folder: current, path: p };
+      for (const [from, to] of LEGACY_PATH_RENAMES) {
+        if (!p.startsWith(from)) continue;
+        const renamed = to + p.slice(from.length);
+        if (exists(renamed)) return { folder: current, path: renamed };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The key a note's source report is matched on against
+ * `specialist_tasks.committed_files`: `reports/<file>`. Committed paths were
+ * `memory/reports/…` before the Zettelkasten moved to `zettel/`, and are
+ * `zettel/reports/…` since; a note's `sources` path names the report the
+ * same way. Null for a path that is not a report.
+ */
+export function reportLookupKey(sourcePath: string): string | null {
+  var m = /^(?:memory|zettel)\/reports\/([^/]+)$/.exec(sourcePath.trim());
+  return m ? 'reports/' + m[1] : null;
+}
+
 function parseNoteFrontmatter(text: string): {
   id: string;
   created: string;
@@ -1530,7 +1670,7 @@ function parseNoteFrontmatter(text: string): {
     const m = line.match(/^\s+path:\s+(.+)$/);
     if (m) {
       const p = m[1].trim();
-      if (p.startsWith('memory/reports/')) {
+      if (reportLookupKey(p)) {
         source_report_path = p;
         break;
       }
@@ -1647,7 +1787,7 @@ async function getDbTableData(
   const exists = await db.get(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, tableName);
   if (!exists) return { columns: [], rows: [], total: 0 };
 
-  const cols = (await db.all(`PRAGMA table_info("${tableName}")`) as Array<{ name: string }>).map((c) => c.name);
+  const cols = ((await db.all(`PRAGMA table_info("${tableName}")`)) as Array<{ name: string }>).map((c) => c.name);
   if (!cols.length) return { columns: [], rows: [], total: 0 };
 
   let where = '';
@@ -1659,8 +1799,13 @@ async function getDbTableData(
     params.push(...cols.map(() => like));
   }
 
-  const total = (await db.get(`SELECT COUNT(*) AS n FROM "${tableName}"${where}`, ...params) as { n: number }).n;
-  const rows = await db.all(`SELECT * FROM "${tableName}"${where} LIMIT ? OFFSET ?`, ...params, limit, offset) as Record<string, unknown>[];
+  const total = ((await db.get(`SELECT COUNT(*) AS n FROM "${tableName}"${where}`, ...params)) as { n: number }).n;
+  const rows = (await db.all(
+    `SELECT * FROM "${tableName}"${where} LIMIT ? OFFSET ?`,
+    ...params,
+    limit,
+    offset,
+  )) as Record<string, unknown>[];
 
   return { columns: cols, rows, total };
 }
@@ -1805,7 +1950,9 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         for (const s of allSessions)
           sessionCountByGroup[s.agent_group_id] = (sessionCountByGroup[s.agent_group_id] || 0) + 1;
         const db = getDb();
-        const mgCounts = await db.all('SELECT agent_group_id, COUNT(*) AS n FROM messaging_group_agents GROUP BY agent_group_id') as Array<{ agent_group_id: string; n: number }>;
+        const mgCounts = (await db.all(
+          'SELECT agent_group_id, COUNT(*) AS n FROM messaging_group_agents GROUP BY agent_group_id',
+        )) as Array<{ agent_group_id: string; n: number }>;
         const mgCountByGroup = new Map(mgCounts.map((r) => [r.agent_group_id, r.n]));
         const result = groups.map((g) => ({
           id: g.id,
@@ -1883,6 +2030,37 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         return;
       }
 
+      // GET /api/resolve-link?folder=&path= — current place of a dashboard
+      // link that may predate a move (resolveLegacyLink)
+      if (req.method === 'GET' && pathname === '/api/resolve-link') {
+        const folder = url.searchParams.get('folder');
+        if (!folder) {
+          sendJson(res, { error: 'folder required' }, 400);
+          return;
+        }
+        const groups = await getAllAgentGroups();
+        let mainFolder: string | null = null;
+        try {
+          const row = (await getDb().get('SELECT folder FROM agent_groups WHERE is_main = 1 LIMIT 1')) as
+            | { folder: string }
+            | undefined;
+          mainFolder = row?.folder ?? null;
+        } catch {
+          // no is_main column without the concurrency module
+        }
+        const resolved = resolveLegacyLink(folder, url.searchParams.get('path'), {
+          groupsDir: GROUPS_DIR,
+          folders: groups.map((g) => g.folder),
+          mainFolder,
+        });
+        if (!resolved) {
+          sendJson(res, { error: 'not found' }, 404);
+          return;
+        }
+        sendJson(res, resolved);
+        return;
+      }
+
       // GET /api/file?path=
       if (req.method === 'GET' && pathname === '/api/file') {
         const relPath = url.searchParams.get('path');
@@ -1908,7 +2086,7 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
           sendJson(res, { error: 'group required' }, 400);
           return;
         }
-        const notesDir = path.resolve(GROUPS_DIR, folder, 'memory', 'notes');
+        const notesDir = path.resolve(GROUPS_DIR, folder, 'zettel', 'notes');
         if (!notesDir.startsWith(path.resolve(GROUPS_DIR) + path.sep)) {
           sendJson(res, { error: 'invalid group' }, 400);
           return;
@@ -1949,8 +2127,9 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
           if (!fm) continue;
           fmMap.set(file, fm);
           let source_task_id: string | null = null;
-          if (fm.source_report_path) {
-            const row = await db.get<{ id: string }>(TASK_BY_REPORT_PATH, fm.source_report_path);
+          const reportKey = fm.source_report_path ? reportLookupKey(fm.source_report_path) : null;
+          if (reportKey) {
+            const row = await db.get<{ id: string }>(TASK_BY_REPORT_PATH, reportKey);
             if (row) source_task_id = row.id;
           }
           nodes.push({
@@ -1959,7 +2138,7 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
             tags: fm.tags,
             keywords: fm.keywords,
             created: fm.created,
-            path: folder + '/memory/notes/' + file,
+            path: folder + '/zettel/notes/' + file,
             source_task_id,
             isSynthesis: fm.id.startsWith('SYN-'),
           });
@@ -2050,7 +2229,8 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
         const db = getDb();
         const messagingGroups = await Promise.all(
           allMgs.map(async (mg) => {
-            const wiredAgents = (await db.all('SELECT ag.name FROM messaging_group_agents mga JOIN agent_groups ag ON ag.id = mga.agent_group_id WHERE mga.messaging_group_id = ?',
+            const wiredAgents = (await db.all(
+              'SELECT ag.name FROM messaging_group_agents mga JOIN agent_groups ag ON ag.id = mga.agent_group_id WHERE mga.messaging_group_id = ?',
               mg.id,
             )) as Array<{ name: string }>;
             return { ...mg, agent_groups: wiredAgents.map((a) => a.name) };

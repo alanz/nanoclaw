@@ -128,6 +128,32 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
   // Per-checkout service label so multiple NanoClaw installs can coexist
   // without clobbering each other's plist.
   const label = getLaunchdLabel(projectRoot);
+/**
+ * PATH for the launchd job.
+ *
+ * launchd does not inherit a login shell's PATH, so anything not spelled out
+ * here is simply absent at runtime — and the failure is remote from the
+ * cause: the host starts fine and then cannot spawn a container, because the
+ * runtime binary "does not exist".
+ *
+ * The node bin dir is derived from the running binary rather than assumed, so
+ * this holds for nvm, a brew keg, or a system install. /opt/homebrew/bin is
+ * included because that is where Apple Container's `container` lives on Apple
+ * Silicon, along with most brew-installed tooling the agent shells out to.
+ */
+function buildLaunchdPath(nodePath: string, homeDir: string): string {
+  const parts: string[] = [];
+  const nodeBinDir = path.dirname(nodePath);
+  if (nodeBinDir && nodeBinDir !== '/usr/bin' && nodeBinDir !== '/usr/local/bin') {
+    parts.push(nodeBinDir);
+  }
+  for (const dir of ['/opt/homebrew/bin', '/usr/local/bin']) {
+    if (fs.existsSync(dir)) parts.push(dir);
+  }
+  parts.push('/usr/bin', '/bin', '/usr/sbin', '/sbin', path.join(homeDir, '.local', 'bin'));
+  return [...new Set(parts)].join(':');
+}
+
   const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
 
@@ -151,7 +177,7 @@ function setupLaunchd(projectRoot: string, nodePath: string, homeDir: string): v
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <string>${buildLaunchdPath(nodePath, homeDir)}</string>
         <key>HOME</key>
         <string>${homeDir}</string>
     </dict>

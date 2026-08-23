@@ -202,6 +202,62 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 | `/add-onecli`, `/add-iron-proxy` | Install or refresh this copy's credential gateway |
 | `/migrate-memory` | Carry a group's agent memory across a provider switch (operator-run, both directions) |
 
+## Behaviour Specs (`specs/*.allium`)
+
+`specs/` holds 12 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. They are the intent of record; the code is one realisation of it.
+
+> **Read them; do not edit them.** Consult the relevant spec before changing behaviour in the areas it covers. **Never modify a `.allium` file without the repo owner's explicit approval** — not to "keep it in sync" after a code change, not to silence a checker warning, not as part of a larger task. If your change makes the code diverge from a spec, say so and propose the spec edit; the owner decides. This applies to the `/allium` skills too: `tend` and `weed` both write to specs, so ask before running them in write mode.
+
+| Spec | Covers |
+|------|--------|
+| `sessions.allium` | Session lifecycle, inbound/outbound messages, wake, stuck detection, retry |
+| `specialists.allium` | Per-task specialist dispatch, sub-tasks, recovery/timeouts, **ipc-out/ipc-in file handover** |
+| `agent-to-agent.allium` | Long-lived named agents, `create_agent`, scheduling, interactive questions |
+| `routing.allium` | Channel routing, messaging groups, sender/channel approval |
+| `identity.allium` | Users, roles, agent groups |
+| `approvals.allium` | Human approval flow |
+| `memory.allium` / `memory-graph.allium` | Memory index and knowledge graph |
+| `self-mod.allium` / `scheduling.allium` / `zotero.allium` / `null-channel.allium` | As named |
+
+Two traps worth knowing:
+
+- **Scope boundaries are deliberate and stated in each header.** `agent-to-agent.allium` explicitly *excludes* specialists (they live in `specialists.allium`), so searching the wrong file yields a confident wrong answer.
+- **Specialist results reach the caller via a directory, not just text.** The specialist writes to `/workspace/ipc-out`, then `deliver_specialist_result(file_paths, commit_to_memory)` hands ownership to the host, which either commits the files into the *requester's* workspace under `memory/reports/` (recorded as `committed_files` on the task) or stages them into the requester's `/workspace/ipc-in`. Files land in the **requester's** group folder — not the specialist's. See `specialists.allium:195-303`.
+
+```bash
+allium check specs/            # currently 0 errors; 4 warnings in routing.allium
+```
+
+`allium check` is read-only and always safe to run. The `/allium` skill family (`tend`, `weed`, `distill`, `propagate`) can *write* to specs — use it to report drift, and get approval before letting it edit anything under `specs/`.
+
+## This install's local modules
+
+Modules this fork adds on top of trunk. All self-register through
+`src/modules/index.ts`; none patches `src/index.ts` or `src/host-sweep.ts`.
+
+| Module | What it adds |
+|--------|--------------|
+| `src/modules/concurrency/` | Container cap + FIFO queue via `setWakeGate`; owns `agent_groups.is_main` |
+| `src/modules/boot-crash/` | Bounds a container that cannot start, using the session-exit hook |
+| `src/modules/specialists/` | Per-task specialist dispatch and file handover |
+| `src/modules/memory/` + `src/memory/` | Semantic index over `memory/`, hybrid search |
+| `src/modules/zotero/` | Zotero library sync into an agent group's folder |
+| `src/modules/web-ui/` + `src/web-ui.ts` | Read-only dashboard, memory graph |
+| `src/drivers/apple-driver.ts` | Apple Container as a runtime dialect |
+| `src/gateway-providers/native-proxy.ts` | `.env` credentials instead of the OneCLI vault |
+| `src/channels/deltachat.ts`, `null-channel.ts` | Fork-owned channel adapters |
+
+Two runtime facts that are easy to trip over:
+
+- **Apple Container (1.4+) binds single files, but by sharing the parent
+  directory.** If that parent is also mounted as a directory in the same
+  session, the directory mount silently loses. The Apple dialect drops such a
+  file mount and keeps the directory (today: `container.json` and the composed
+  `CLAUDE.md` nested over the group folder). A new file mount whose parent is
+  not itself mounted arrives normally.
+- **launchd inherits no shell PATH.** The plist must name `/opt/homebrew/bin`
+  or the host starts fine and then cannot find `container` at spawn.
+
 ## Contributing
 
 Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the skill types and their guidelines, `SKILL.md` format rules, and the pre-submission checklist.
@@ -238,9 +294,10 @@ Container typecheck is a separate tsconfig — if you edit `container/agent-runn
 Service management:
 ```bash
 # macOS (launchd)
-launchctl load   ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+# macOS (launchd) — this install's label carries the v2 suffix
+launchctl load   ~/Library/LaunchAgents/com.nanoclaw.v2.plist
+launchctl unload ~/Library/LaunchAgents/com.nanoclaw.v2.plist
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v2  # restart
 
 # Linux (systemd)
 systemctl --user start|stop|restart nanoclaw
@@ -280,6 +337,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 
 | Doc | Purpose |
 |-----|---------|
+| [specs/](specs/) | Allium behaviour specs — the intent of record. Consult before changing behaviour (see [Behaviour Specs](#behaviour-specs-specsallium)) |
 | [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
 | [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
 | [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |
@@ -330,7 +388,7 @@ grep -q '^INSTALL_CJK_FONTS=' .env && sed -i.bak 's/^INSTALL_CJK_FONTS=.*/INSTAL
 
 # Rebuild and restart so new sessions pick up the new image
 ./container/build.sh
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw.v2   # macOS
 # systemctl --user restart nanoclaw                # Linux
 ```
 

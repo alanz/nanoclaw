@@ -181,4 +181,34 @@ describe('at the threshold', () => {
     await settled();
     expect(mockFailPending).not.toHaveBeenCalled();
   });
+
+  it('leaves nothing for the next tick to wake on', async () => {
+    // The bound works by ending the pending work, not by suppressing spawns:
+    // with no due messages the sweep has nothing to wake for, so the respawn
+    // loop stops as a consequence rather than as a separate mechanism.
+    exit();
+    exit();
+    exit();
+    await settled();
+
+    expect(mockFailPending).toHaveBeenCalledTimes(1);
+  });
+
+  it('survives a session with no messaging group', async () => {
+    // A task or specialist lane has no chat on the other end. Ending the work
+    // still has to happen; there is simply no one to tell.
+    mockSession.mockImplementation(async () => ({
+      id: 's1',
+      agent_group_id: 'g1',
+      messaging_group_id: null,
+      thread_id: null,
+    }));
+    exit();
+    exit();
+    exit();
+    await settled();
+
+    expect(mockFailPending).toHaveBeenCalled();
+    expect(mockDeliver).not.toHaveBeenCalled();
+  });
 });

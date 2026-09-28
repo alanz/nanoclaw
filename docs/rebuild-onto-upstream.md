@@ -2,8 +2,9 @@
 
 Handover document. Written so a fresh session can pick this up cold.
 
-**Status: Phases 0–2 complete and green. Phase 3 (cutover) not started.**
-The live install is untouched and running the old version throughout.
+**Status: cut over 2026-09-28. The live install runs the rebuilt series on
+`main`.** Phases 0–4 done; one gap found after cutover and fixed (§6, Phase 4).
+Next: rebase the series onto the current `upstream/main`.
 
 ---
 
@@ -34,10 +35,12 @@ module. See §5.
 
 | Thing | Location |
 |---|---|
-| Live install (old version, running) | `/Users/alanz/nanoclaw-v2`, branch `main` @ `25edc781` |
-| Rebuild worktree | `/Users/alanz/nanoclaw-rebuild`, branch `rebuild/v2.2-series` |
+| Live install | `/Users/alanz/nanoclaw-v2`, branch `main` (the rebuilt series; `main` was hard-reset onto it at cutover) |
+| Rebuild worktree | removed at cutover; `rebuild/v2.2-series` deleted |
+| Cutover backup of `data/`, `groups/`, `.env`, plist | `~/nanoclaw-backups/cutover-20260928-184833` |
+| Pre-cutover agent image | `nanoclaw-agent-v2-f3156ec2:pre-rebuild` |
 | Upstream base | `upstream/main` @ `2fb88a78` (remote is `qwibitai/nanoclaw`) |
-| Pre-rebuild history archive | tag `archive/pre-rebuild-v2.2` → `25edc781` |
+| Pre-rebuild history archive | tag `archive/pre-rebuild-v2.2` → `25edc781` (also pushed to `origin`) |
 | Same history, also | `origin/main`, and `backup/pre-update-25edc781-*` branch+tag |
 | Live agent image | `nanoclaw-agent-v2-f3156ec2:latest` |
 | Rebuild agent image | `nanoclaw-agent-v2-c4cc12ae:latest` (built, tested) |
@@ -134,7 +137,7 @@ The point of the exercise. Core files carrying fork patches:
 | `src/index.ts` | **none** |
 | `src/host-sweep.ts` | **none** |
 | `src/router.ts` | **none** |
-| `src/container-runner.ts` | two seams: `setWakeGate`, `registerSessionExitHook` |
+| `src/container-runner.ts` | three seams: `setWakeGate`, `registerSessionExitHook`, `registerSessionContributor` |
 | `src/types.ts` | `Session.processing_state` + `ProcessingState` |
 | `src/drivers/*` | the dialect refactor (upstreamable) |
 | `src/mailbox/*` | `failPendingMessages()` on `InboundMailbox` |
@@ -204,7 +207,14 @@ step 8 below.
 
 To repeat this phase, see §7.
 
-### Phase 3 — cutover ⬜ NOT STARTED
+### Phase 3 — cutover ✅ DONE 2026-09-28
+
+As planned below, with three deviations: `main` was hard-reset onto the
+series rather than checking out the branch (the worktree held it); the plist
+was kept, not regenerated — it already had `/opt/homebrew/bin`, and the
+generator derives the label from the checkout path, which is not this
+install's `com.nanoclaw.v2`; and the hourly `com.nanoclaw.v2.backup` job was
+unloaded for the window, since it reads `data/` on the hour.
 
 Downtime starts here. Budget 15–30 minutes.
 
@@ -245,7 +255,20 @@ pnpm exec tsx scripts/upgrade-state.ts set "" rebuild-onto-upstream
 #    then load and start
 ```
 
-### Phase 4 — post-cutover verification ⬜
+### Phase 4 — post-cutover verification ✅ DONE
+
+All six passed — after one fix. The port had dropped every per-session
+addition the old runner patched into spawn: the memory index mount (+
+`NANOCLAW_MEMORY_ENABLED`), `BRAVE_API_KEY`, the Zotero keys, and the
+specialist invocation (ipc mounts + `invocations` row). Nothing failed
+loudly: the tools just never registered, and a specialist's report file was
+dropped with only a WARN. Restored through a new `registerSessionContributor`
+seam (commit `fix(sessions): restore the per-session container wiring…`).
+The rehearsal missed it because memory was off and "the agent replied" does
+not check which tools the agent has — a future rehearsal should ask the agent
+to list its MCP tools and run a specialist dispatch that returns a file.
+
+Original checklist:
 
 In order; stop at the first failure and go to Phase 5.
 
@@ -257,7 +280,7 @@ In order; stop at the first failure and go to Phase 5.
 5. Memory search returns results (needs `MEMORY_SEARCH_GEMINI_API_KEY`)
 6. Web UI loads on `WEB_UI_PORT`
 
-### Phase 5 — rollback ⬜
+### Phase 5 — rollback (not needed)
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.nanoclaw.v2.plist
@@ -365,15 +388,21 @@ is reintroduced.
 - **The builder VM needs `--memory 8g`.** `container/build.sh` now sets it; the
   default dies with a bare "Killed" that reads like a build error.
 - **`specs/*.allium` are read-only** without the owner's explicit approval.
+- **A module that needs something inside the agent container** (a mount, an
+  env var) registers a `registerSessionContributor`. Upstream's runner has no
+  other way in, and a feature wired any other way silently vanishes on the
+  next rebase.
 
 ---
 
-## 11. Open decisions
+## 11. Decisions (settled 2026-09-28)
 
-- **Keep `main` where it is** and merge `rebuild/v2.2-series` later, or move
-  `main` at cutover? Keeping it makes rollback a `git checkout`.
-- **Upstream the four PR-ready commits?** Each one that lands leaves the fork.
-- **`via` string for the upgrade marker.** Currently `rebuild-onto-upstream`,
-  which is honest. Upstream's own tooling expects `update-nanoclaw` /
-  `migrate-nanoclaw`; nothing appears to validate the value, but it has not been
-  checked against `/update-nanoclaw`'s own tripwire logic.
+- **`main` moved onto the series.** It is now a patch stack on upstream:
+  update by `git rebase upstream/main` + force-push, never by merging
+  upstream in. New work belongs folded into its subsystem commit
+  (`--fixup` + autosquash) so the stack stays curated. Rollback target is
+  the `archive/pre-rebuild-v2.2` tag.
+- **The four PR-ready commits stay in the fork**; not sent upstream.
+- **Upgrade marker `via` stays `rebuild-onto-upstream`.**
+- **Follow-up:** move `BRAVE_API_KEY` and the Zotero keys out of container env
+  and behind the native credential proxy.

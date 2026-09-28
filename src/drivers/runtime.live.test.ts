@@ -132,6 +132,51 @@ maybe(`live runtime: ${KIND || 'none'}`, () => {
     expect(() => cli.run(args)).not.toThrow();
   });
 
+  it('delivers the file and directory mounts the dialect emits, all of them intact', () => {
+    // The shapes a real session composes: a lone file from a dir nobody mounts
+    // (the runner's session context), plus a file nested read-only over its
+    // own mounted parent (container.json over the group folder). On Apple the
+    // second shape makes the runtime lose the directory mount, so the dialect
+    // drops that file; what must survive is the whole group folder.
+    const ctx = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-live-ctx-'));
+    const context = path.join(ctx, 'sess.json');
+    fs.writeFileSync(context, '{"ctx":"LIVE_CTX"}');
+    fs.chmodSync(context, 0o600);
+    const group = path.join(workspace, 'group');
+    fs.writeFileSync(path.join(group, 'marker.txt'), 'LIVE_GROUP');
+    fs.writeFileSync(path.join(group, 'container.json'), '{"cfg":"LIVE_CFG"}');
+
+    const out = cli.run([
+      'run',
+      '--rm',
+      '--name',
+      name('mounts'),
+      ...labels('mounts'),
+      '--user',
+      `${process.getuid?.()}:${process.getgid?.()}`,
+      ...dialect.mountArgs([
+        { class: 'session', hostPath: group, containerPath: '/workspace/agent', mode: 'rw' },
+        {
+          class: 'session',
+          hostPath: path.join(group, 'container.json'),
+          containerPath: '/workspace/agent/container.json',
+          mode: 'ro',
+        },
+        { class: 'session', hostPath: context, containerPath: '/app/.nanoclaw-session.json', mode: 'ro' },
+      ] as never),
+      '--entrypoint',
+      'sh',
+      IMAGE,
+      '-c',
+      'cat /app/.nanoclaw-session.json; echo; cat /workspace/agent/marker.txt; echo; cat /workspace/agent/container.json',
+    ]);
+    fs.rmSync(ctx, { recursive: true, force: true });
+
+    expect(out).toContain('LIVE_CTX');
+    expect(out).toContain('LIVE_GROUP');
+    expect(out).toContain('LIVE_CFG');
+  });
+
   it('reads back the canonical labels it stamped', () => {
     // The adoption contract: identity comes from labels alone. If the runtime
     // stores or reports them differently, adoption silently finds nothing.

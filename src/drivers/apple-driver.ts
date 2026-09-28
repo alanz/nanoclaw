@@ -26,6 +26,7 @@
  * Selection: `NANOCLAW_RUNTIME_DRIVER=apple` in `.env` (or the environment).
  */
 import { statSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import { log } from '../log.js';
 
@@ -187,23 +188,33 @@ export const appleDialect: RuntimeDialect = {
   statePhase: appleStatePhase,
 
   /**
-   * Directory mounts only.
+   * File mounts, with one exception the runtime does not report.
    *
-   * `container` cannot bind a single file — passing it one fails the spawn
-   * outright, so a file mount is dropped here rather than allowed to kill the
-   * session. The one file mount trunk composes is `container/CLAUDE.md` at
-   * /app/CLAUDE.md, which the image already carries (see the COPY in
-   * container/Dockerfile); dropping the mount leaves the baked copy in place.
+   * `container` 1.4 binds single files (earlier releases failed the spawn on
+   * one, which is why this used to drop them all). It does so by sharing the
+   * file's parent directory, and when that same directory is ALSO a directory
+   * mount in the session, the directory mount silently loses: the target
+   * shows the image's own contents, or only the one file. Measured against
+   * 1.4.1 on macOS 27.0.1.
+   *
+   * Trunk composes exactly that shape: `groups/<folder>/container.json` and
+   * the composed `groups/<folder>/CLAUDE.md` are nested read-only over the
+   * group folder, which is itself mounted at /workspace/agent. Passing them
+   * through would cost the agent its workspace, so a file whose parent is a
+   * directory-mount source is dropped and the directory kept — the file is
+   * still visible through it, just not read-only. Every other file mount
+   * (the runner's session context, /app/CLAUDE.md) goes through.
    *
    * Logged, not silent: a mount that was asked for and not made is exactly
    * the kind of difference that should be visible when a session behaves
    * unexpectedly.
    */
   mountArgs(mounts) {
+    const dirSources = new Set(mounts.filter((m) => !isFileMount(m.hostPath)).map((m) => m.hostPath));
     const args: string[] = [];
     for (const m of mounts) {
-      if (isFileMount(m.hostPath)) {
-        log.debug('Apple Container: dropping file mount (directories only)', {
+      if (isFileMount(m.hostPath) && dirSources.has(dirname(m.hostPath))) {
+        log.debug('Apple Container: dropping file mount whose parent is also mounted', {
           hostPath: m.hostPath,
           containerPath: m.containerPath,
         });

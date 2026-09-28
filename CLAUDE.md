@@ -251,9 +251,12 @@ Modules this fork adds on top of trunk. All self-register through
 
 Two runtime facts that are easy to trip over:
 
-- **Apple Container binds directories only.** Trunk composes one file mount
-  (`container/CLAUDE.md`); the Apple dialect drops it and the image carries a
-  baked copy instead. Adding a new file-level mount will silently not arrive.
+- **Apple Container (1.4+) binds single files, but by sharing the parent
+  directory.** If that parent is also mounted as a directory in the same
+  session, the directory mount silently loses. The Apple dialect drops such a
+  file mount and keeps the directory (today: `container.json` and the composed
+  `CLAUDE.md` nested over the group folder). A new file mount whose parent is
+  not itself mounted arrives normally.
 - **launchd inherits no shell PATH.** The plist must name `/opt/homebrew/bin`
   or the host starts fine and then cannot find `container` at spawn.
 

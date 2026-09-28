@@ -371,8 +371,10 @@ is reintroduced.
 
 ## 10. Facts a fresh session will otherwise rediscover the hard way
 
-- **Apple Container binds directories only.** A new file-level mount will be
-  silently dropped by the Apple dialect. Bake it into the image instead.
+- **Apple Container binds single files since 1.4** (upgraded 2026-09-28), by
+  sharing the file's parent directory — which collides with a directory
+  mount of that same parent (the directory mount loses). The dialect drops
+  only that shape; `runtime.live.test.ts` pins it against the real runtime.
 - **`container create` reports state `stopped`**, identical to a container that
   ran and exited. `status.startedDate` is the discriminator — absent until it
   runs. Getting this wrong makes the residue sweep reap containers between

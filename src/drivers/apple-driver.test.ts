@@ -236,19 +236,54 @@ describe('appleDialect.mountArgs', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('drops a file mount, which this runtime cannot bind at all', () => {
-    // `container` binds directories only; passing it a file fails the spawn.
-    // The one file trunk composes (/app/CLAUDE.md) is baked into the image.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-mount-'));
-    const file = path.join(dir, 'CLAUDE.md');
-    fs.writeFileSync(file, '# shared');
+  it('passes a file mount through when its parent is not otherwise mounted', () => {
+    // The runner's session context lives in a host-owned dir that is never
+    // mounted whole, so the single file can be bound directly.
+    const ctx = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-ctx-'));
+    const sess = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-sess-'));
+    const file = path.join(ctx, 'sess-1.json');
+    fs.writeFileSync(file, '{}');
 
     expect(
       appleDialect.mountArgs([
-        { class: 'surface', hostPath: file, containerPath: '/app/CLAUDE.md', mode: 'ro' },
-        { class: 'session', hostPath: dir, containerPath: '/workspace', mode: 'rw' },
+        { class: 'session', hostPath: sess, containerPath: '/workspace', mode: 'rw' },
+        { class: 'session', hostPath: file, containerPath: '/app/.nanoclaw-session.json', mode: 'ro' },
       ] as never),
-    ).toEqual(['-v', `${dir}:/workspace`]);
+    ).toEqual(['-v', `${sess}:/workspace`, '-v', `${file}:/app/.nanoclaw-session.json:ro`]);
+    fs.rmSync(ctx, { recursive: true, force: true });
+    fs.rmSync(sess, { recursive: true, force: true });
+  });
+
+  it('drops a file mount whose parent is also a directory mount, keeping the directory', () => {
+    // container.json nested read-only over the group folder: binding both
+    // makes the runtime lose the directory mount (measured, 1.4.1), so the
+    // file goes and the workspace stays.
+    const group = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-group-'));
+    const file = path.join(group, 'container.json');
+    fs.writeFileSync(file, '{}');
+
+    expect(
+      appleDialect.mountArgs([
+        { class: 'session', hostPath: group, containerPath: '/workspace/agent', mode: 'rw' },
+        { class: 'session', hostPath: file, containerPath: '/workspace/agent/container.json', mode: 'ro' },
+      ] as never),
+    ).toEqual(['-v', `${group}:/workspace/agent`]);
+    fs.rmSync(group, { recursive: true, force: true });
+  });
+
+  it('keeps two file mounts that share a parent nobody mounts', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-files-'));
+    const a = path.join(dir, 'a.json');
+    const b = path.join(dir, 'b.json');
+    fs.writeFileSync(a, '{}');
+    fs.writeFileSync(b, '{}');
+
+    expect(
+      appleDialect.mountArgs([
+        { class: 'session', hostPath: a, containerPath: '/app/a.json', mode: 'ro' },
+        { class: 'session', hostPath: b, containerPath: '/app/b.json', mode: 'ro' },
+      ] as never),
+    ).toEqual(['-v', `${a}:/app/a.json:ro`, '-v', `${b}:/app/b.json:ro`]);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

@@ -513,7 +513,13 @@ export class ClaudeProvider implements AgentProvider {
 
   maybeRotateContinuation(continuation: string): string | null {
     const transcriptPath = findTranscriptPath(continuation);
-    if (!transcriptPath) return null;
+    // A continuation whose transcript is gone can only fail: the SDK answers
+    // "No conversation found" and the turn is lost. Claude Code's own
+    // transcript cleanup (cleanupPeriodDays, default 30) deletes any .jsonl
+    // untouched that long, and every session in a group shares one projects
+    // dir — so a rarely-run background session (Zotero sync) has its
+    // transcript swept by the busy one. Start fresh instead of trying.
+    if (!transcriptPath) return 'transcript not found (cleaned up or never written)';
 
     let size: number;
     try {

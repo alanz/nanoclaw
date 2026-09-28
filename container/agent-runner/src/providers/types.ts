@@ -50,8 +50,8 @@ export interface AgentProvider {
 
   /**
    * Optional pre-resume maintenance. Given the stored continuation token,
-   * decide whether its backing transcript has grown too large or too old to
-   * resume cheaply. Return a non-null reason string to tell the caller to drop
+   * decide whether its backing transcript is missing, or has grown too large
+   * or too old to resume cheaply. Return a non-null reason string to tell the caller to drop
    * the continuation and start a fresh session (the provider archives any
    * recoverable summary first); return null to keep resuming.
    *

@@ -27,12 +27,13 @@ import os from 'os';
 import path from 'path';
 
 import { DATA_DIR } from '../config.js';
-import { detectAuthMode, startCredentialProxy } from '../credential-proxy.js';
+import { detectAuthMode, PROXIED_SERVICES, SERVICE_ROUTE_PREFIX, startCredentialProxy } from '../credential-proxy.js';
 import { readEnvFile } from '../env.js';
 import { onHostShutdown } from '../host-lifecycle.js';
 import { log } from '../log.js';
 
 import { registerGatewayProvider, type GatewayContribution } from './gateway-provider-registry.js';
+import { configuredGatewayProviderKind } from './index.js';
 
 export const NATIVE_PROXY_GATEWAY_KIND = 'native-proxy';
 
@@ -129,6 +130,31 @@ async function ensureProxyRunning(): Promise<void> {
 export function resetCredentialProxy(): void {
   server = null;
   starting = null;
+}
+
+/**
+ * How a container reaches a proxied service (see "Service routes" in
+ * `credential-proxy.ts`): the base URL to call in place of the service's own,
+ * and the token to present in the service's key header. The token is the
+ * install secret — the real key never leaves the host.
+ *
+ * Undefined when this install's gateway is not the native proxy, or the
+ * service's key is not in `.env`; the caller then leaves the tool unwired
+ * rather than handing the container a key directly.
+ */
+export function proxiedService(
+  name: string,
+  dataDir: string = DATA_DIR,
+): { baseUrl: string; token: string } | undefined {
+  if (configuredGatewayProviderKind() !== NATIVE_PROXY_GATEWAY_KIND) return undefined;
+  const service = PROXIED_SERVICES.find((svc) => svc.name === name);
+  if (!service) return undefined;
+  // `.env` only, matching what the proxy itself reads at start.
+  if (!readEnvFile([service.envKey])[service.envKey]) return undefined;
+  return {
+    baseUrl: `http://${containerFacingHost()}:${proxyPort()}${SERVICE_ROUTE_PREFIX}${service.name}`,
+    token: proxySecret(dataDir),
+  };
 }
 
 registerGatewayProvider(NATIVE_PROXY_GATEWAY_KIND, () => ({

@@ -404,5 +404,10 @@ is reintroduced.
   the `archive/pre-rebuild-v2.2` tag.
 - **The four PR-ready commits stay in the fork**; not sent upstream.
 - **Upgrade marker `via` stays `rebuild-onto-upstream`.**
-- **Follow-up:** move `BRAVE_API_KEY` and the Zotero keys out of container env
-  and behind the native credential proxy.
+- **Done 2026-09-28:** `BRAVE_API_KEY` and the Zotero key moved out of
+  container env and behind the native credential proxy (`/_svc/<name>/`
+  routes; see `src/credential-proxy.ts`). Containers hold only the install
+  placeholder; a request without it gets 403.
+- **Every commit to `main` needs an upgrade-marker re-stamp before the next
+  restart** — upstream's tripwire pins the exact commit and tree:
+  `pnpm exec tsx scripts/upgrade-state.ts set "" local-customization`.

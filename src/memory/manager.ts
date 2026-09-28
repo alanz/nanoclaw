@@ -35,7 +35,7 @@ export function registerMemoryGroupExclusion(check: GroupExclusion): void {
   exclusions.push(check);
 }
 
-function isExcluded(groupId: string): boolean {
+export function isMemoryGroupExcluded(groupId: string): boolean {
   for (const check of exclusions) {
     try {
       if (check(groupId)) return true;
@@ -555,7 +555,7 @@ export async function initMemoryManagers(params: {
   }
 
   for (const group of params.groups) {
-    if (isExcluded(group.id)) continue;
+    if (isMemoryGroupExcluded(group.id)) continue;
     if (params.allowedFolders && !params.allowedFolders.has(group.folder)) continue;
     const memoryDir = path.join(params.groupsDir, group.folder, 'memory');
     const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
@@ -590,7 +590,7 @@ export async function initMemoryManagerForGroup(params: {
   allowedFolders?: Set<string>;
 }): Promise<void> {
   if (!params.apiKey) return;
-  if (isExcluded(params.group.id)) return;
+  if (isMemoryGroupExcluded(params.group.id)) return;
   if (params.allowedFolders && !params.allowedFolders.has(params.group.folder)) return;
 
   const { group } = params;

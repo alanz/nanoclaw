@@ -10,6 +10,7 @@
  *
  * Also exports sweepSpecialistTasks() for use by host-sweep.ts.
  */
+import { registerSessionContributor, registerSessionExitHook } from '../../container-runner.js';
 import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
@@ -19,6 +20,7 @@ import { registerMemoryGroupExclusion } from '../../memory/manager.js';
 import { getSpecialist } from './db.js';
 import { handleDispatchSpecialist, handleDispatchSubTask } from './dispatch.js';
 import { handleDeliverSpecialistResult } from './delivery.js';
+import { buildInvocationForSession, endInvocationById } from './invocation.js';
 import { sweepSpecialistTasks } from './recovery.js';
 
 // Internal specialist orchestration between the operator's own agent groups —
@@ -94,6 +96,36 @@ registerBootCrashExemption(async (sessionId) => {
   const session = await getSession(sessionId);
   if (!session) return false;
   return (await getSpecialist(session.agent_group_id)) !== undefined;
+});
+
+/**
+ * File handover rides a per-container "invocation": fresh ipc-out (rw) and
+ * ipc-in (ro) dirs mounted into every session, and an `invocations` row that
+ * `deliver_specialist_result` resolves them through. Every session, not only
+ * specialists — a requester receives staged files through its own ipc-in.
+ * Without the row, a specialist's result arrives as text and its files are
+ * silently dropped.
+ *
+ * Ended by id when the container exits, so an exit cannot close a later
+ * container's invocation. `buildInvocationForSession` also ends any orphan
+ * it finds, as a backstop for an exit that never reported.
+ */
+const activeInvocations = new Map<string, string>();
+
+registerSessionContributor(async ({ session }) => {
+  const built = await buildInvocationForSession(session);
+  if (!built) return undefined;
+  activeInvocations.set(session.id, built.invocationId);
+  return { mounts: built.mounts };
+});
+
+registerSessionExitHook(({ sessionId }) => {
+  const invocationId = activeInvocations.get(sessionId);
+  if (!invocationId) return;
+  activeInvocations.delete(sessionId);
+  void endInvocationById(invocationId).catch((err) =>
+    log.warn('specialists: invocation cleanup failed', { sessionId, invocationId, err }),
+  );
 });
 
 export { sweepSpecialistTasks };

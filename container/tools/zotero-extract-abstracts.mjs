@@ -47,7 +47,8 @@ const MAX_MB  = parseFloat(args['max-mb']);
 
 const API_KEY  = process.env.ZOTERO_API_KEY || '';
 const USER_ID  = process.env.ZOTERO_USER_ID || '';
-const BASE_URL = `https://api.zotero.org/users/${USER_ID}`;
+const API_BASE = process.env.ZOTERO_API_BASE || 'https://api.zotero.org';
+const BASE_URL = `${API_BASE}/users/${USER_ID}`;
 const PAUSE_MS = 1000;
 
 if (!API_KEY || !USER_ID) {

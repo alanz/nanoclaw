@@ -28,7 +28,7 @@ import os from 'os';
 import path from 'path';
 
 import { DATA_DIR } from '../config.js';
-import { detectAuthMode, startCredentialProxy } from '../credential-proxy.js';
+import { detectAuthMode, PROXIED_SERVICES, SERVICE_ROUTE_PREFIX, startCredentialProxy } from '../credential-proxy.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
@@ -37,6 +37,7 @@ import {
   type GatewaySessionInput,
   type GatewaySessionLease,
 } from './gateway-provider-registry.js';
+import { configuredGatewayProviderKind } from './index.js';
 
 export const NATIVE_PROXY_GATEWAY_KIND = 'native-proxy';
 
@@ -136,6 +137,31 @@ export function resetCredentialProxy(): void {
   starting = null;
 }
 
+/**
+ * How a container reaches a proxied service (see "Service routes" in
+ * `credential-proxy.ts`): the base URL to call in place of the service's own,
+ * and the token to present in the service's key header. The token is the
+ * install secret — the real key never leaves the host.
+ *
+ * Undefined when this install's gateway is not the native proxy, or the
+ * service's key is not in `.env`; the caller then leaves the tool unwired
+ * rather than handing the container a key directly.
+ */
+export function proxiedService(
+  name: string,
+  dataDir: string = DATA_DIR,
+): { baseUrl: string; token: string } | undefined {
+  if (configuredGatewayProviderKind() !== NATIVE_PROXY_GATEWAY_KIND) return undefined;
+  const service = PROXIED_SERVICES.find((svc) => svc.name === name);
+  if (!service) return undefined;
+  // `.env` only, matching what the proxy itself reads at start.
+  if (!readEnvFile([service.envKey])[service.envKey]) return undefined;
+  return {
+    baseUrl: `http://${containerFacingHost()}:${proxyPort()}${SERVICE_ROUTE_PREFIX}${service.name}`,
+    token: proxySecret(dataDir),
+  };
+}
+
 async function ensureSession(input: GatewaySessionInput): Promise<GatewaySessionLease> {
   // Fail-closed like every gateway: a session whose proxy did not come up
   // would reach Anthropic with a placeholder and get 401s it cannot explain.
@@ -183,9 +209,29 @@ async function subscribeApprovals(_decide: unknown, signal: AbortSignal): Promis
   await closeProxy();
 }
 
+/**
+ * There is no connection flow: a service is reachable only once the operator
+ * adds it to the proxy. Say so specifically — the generic "does not implement
+ * account connection handoff" leaves an agent no wiser about what to tell the
+ * user.
+ */
+async function connect({ host }: { agentGroupId: string; host: string }) {
+  const covered = PROXIED_SERVICES.map((svc) => svc.name).join(', ');
+  return {
+    status: 'unsupported' as const,
+    message:
+      `This install's credential proxy has no connection flow, and ${host} is not connected. ` +
+      `It authenticates only the model API and its built-in services (${covered}). ` +
+      `Another service needs the operator to add it to the host's credential proxy.`,
+  };
+}
+
 registerGatewayProvider({
   kind: NATIVE_PROXY_GATEWAY_KIND,
-  agentSkills: [],
+  // Tells agents what this gateway does and does not authenticate, in place of
+  // the vault-gateway guidance (placeholders, connect links) that is false here.
+  agentSkills: ['native-proxy-gateway'],
+  connections: { connect },
   sessions: { ensure: ensureSession },
   approvals: { subscribe: subscribeApprovals },
 });

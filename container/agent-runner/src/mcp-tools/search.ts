@@ -2,12 +2,16 @@
  * Web search MCP tool: brave_web_search.
  *
  * Only registered when BRAVE_API_KEY is present in the container environment.
- * The host injects this from .env via container-runner.ts.
+ * Under the native credential proxy that value is the install placeholder and
+ * BRAVE_API_BASE points at the proxy's Brave route, which attaches the real
+ * key on the host (src/modules/web-search). Without BRAVE_API_BASE the tool
+ * calls Brave directly.
  */
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
+const BRAVE_API_BASE = process.env.BRAVE_API_BASE || 'https://api.search.brave.com';
 
 if (BRAVE_API_KEY) {
   const braveWebSearch: McpToolDefinition = {
@@ -45,7 +49,7 @@ if (BRAVE_API_KEY) {
       const country = args.country as string | undefined;
       const freshness = args.freshness as string | undefined;
 
-      const url = new URL('https://api.search.brave.com/res/v1/web/search');
+      const url = new URL(`${BRAVE_API_BASE}/res/v1/web/search`);
       url.searchParams.set('q', query);
       url.searchParams.set('count', String(count));
       if (country) url.searchParams.set('country', country);

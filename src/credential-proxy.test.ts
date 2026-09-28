@@ -49,12 +49,15 @@ describe('credential-proxy', () => {
   let proxyPort: number;
   let upstreamPort: number;
   let lastUpstreamHeaders: http.IncomingHttpHeaders;
+  let lastUpstreamUrl: string | undefined;
 
   beforeEach(async () => {
     lastUpstreamHeaders = {};
 
+    lastUpstreamUrl = undefined;
     upstreamServer = http.createServer((req, res) => {
       lastUpstreamHeaders = { ...req.headers };
+      lastUpstreamUrl = req.url;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -242,5 +245,82 @@ describe('credential-proxy', () => {
     );
 
     expect(lastUpstreamHeaders['x-api-key']).toBe('sk-ant-temp-from-exchange');
+  });
+
+  // ── Service routes ──────────────────────────────────────────────────────
+  //
+  // Brave and Zotero keys stay on the host the same way the Anthropic one
+  // does. The difference pinned here: a service route refuses a caller
+  // without the install secret instead of relaying it.
+
+  async function startServiceProxy(env: Record<string, string>): Promise<number> {
+    Object.assign(mockEnv, env);
+    proxyServer = await startCredentialProxy({
+      port: 0,
+      host: '127.0.0.1',
+      secret: TEST_SECRET,
+      services: [
+        {
+          name: 'brave',
+          upstream: `http://127.0.0.1:${upstreamPort}`,
+          header: 'x-subscription-token',
+          envKey: 'BRAVE_API_KEY',
+        },
+      ],
+    });
+    return (proxyServer.address() as AddressInfo).port;
+  }
+
+  it('swaps the install secret for the real service key and strips the route prefix', async () => {
+    proxyPort = await startServiceProxy({ BRAVE_API_KEY: 'brave-real-key' });
+
+    const res = await makeRequest(proxyPort, {
+      method: 'GET',
+      path: '/_svc/brave/res/v1/web/search?q=nanoclaw',
+      headers: { 'x-subscription-token': TEST_SECRET },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(lastUpstreamUrl).toBe('/res/v1/web/search?q=nanoclaw');
+    expect(lastUpstreamHeaders['x-subscription-token']).toBe('brave-real-key');
+  });
+
+  it('refuses a service request without the install secret and never reaches upstream', async () => {
+    proxyPort = await startServiceProxy({ BRAVE_API_KEY: 'brave-real-key' });
+
+    const res = await makeRequest(proxyPort, {
+      method: 'GET',
+      path: '/_svc/brave/res/v1/web/search?q=x',
+      headers: { 'x-subscription-token': 'someone-elses-key' },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(lastUpstreamUrl).toBeUndefined();
+  });
+
+  it('answers 404 for a service whose key is not configured', async () => {
+    proxyPort = await startServiceProxy({});
+
+    const res = await makeRequest(proxyPort, {
+      method: 'GET',
+      path: '/_svc/brave/res/v1/web/search',
+      headers: { 'x-subscription-token': TEST_SECRET },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(lastUpstreamUrl).toBeUndefined();
+  });
+
+  it('answers 404 for an unknown service', async () => {
+    proxyPort = await startServiceProxy({ BRAVE_API_KEY: 'brave-real-key' });
+
+    const res = await makeRequest(proxyPort, {
+      method: 'GET',
+      path: '/_svc/elsewhere/anything',
+      headers: { 'x-subscription-token': TEST_SECRET },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(lastUpstreamUrl).toBeUndefined();
   });
 });

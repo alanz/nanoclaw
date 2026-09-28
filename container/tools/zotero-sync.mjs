@@ -3,7 +3,8 @@
  * Zotero library sync — fetches items from Zotero API and writes markdown files.
  *
  * Usage: node zotero-sync.mjs --since VERSION --output DIR
- * Env:   ZOTERO_API_KEY, ZOTERO_USER_ID
+ * Env:   ZOTERO_API_KEY, ZOTERO_USER_ID, ZOTERO_API_BASE (optional; the host's
+ *        credential-proxy route, which attaches the real key)
  *
  * Outputs a JSON summary to stdout:
  *   { newCount, deletedCount, newVersion, totalItems, items: [{key, title}] }
@@ -150,7 +151,8 @@ function buildMarkdown(item) {
 async function main() {
   const { since, output } = parseArgs();
   const { apiKey, userId } = getCredentials();
-  const base = `https://api.zotero.org/users/${userId}`;
+  const apiBase = process.env.ZOTERO_API_BASE || 'https://api.zotero.org';
+  const base = `${apiBase}/users/${userId}`;
 
   fs.mkdirSync(output, { recursive: true });
 

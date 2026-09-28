@@ -19,7 +19,7 @@ vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
-import { containerFacingHost, proxyPort, proxySecret } from './native-proxy.js';
+import { containerFacingHost, proxiedService, proxyPort, proxySecret } from './native-proxy.js';
 
 let dataDir: string;
 
@@ -28,6 +28,7 @@ beforeEach(() => {
   for (const key of Object.keys(mockEnv)) delete mockEnv[key];
   delete process.env.CREDENTIAL_PROXY_GATEWAY;
   delete process.env.CREDENTIAL_PROXY_PORT;
+  delete process.env.NANOCLAW_GATEWAY_PROVIDER;
 });
 
 afterEach(() => {
@@ -75,5 +76,27 @@ describe('proxyPort', () => {
     expect(proxyPort()).toBe(3002);
     process.env.CREDENTIAL_PROXY_PORT = '4100';
     expect(proxyPort()).toBe(4100);
+  });
+});
+
+describe('proxiedService', () => {
+  it('hands a container the proxy route and the install secret, never the real key', () => {
+    Object.assign(mockEnv, { NANOCLAW_GATEWAY_PROVIDER: 'native-proxy', BRAVE_API_KEY: 'brave-real-key' });
+    process.env.CREDENTIAL_PROXY_GATEWAY = '10.1.2.3';
+
+    const brave = proxiedService('brave', dataDir);
+
+    expect(brave).toEqual({ baseUrl: 'http://10.1.2.3:3002/_svc/brave', token: proxySecret(dataDir) });
+    expect(JSON.stringify(brave)).not.toContain('brave-real-key');
+  });
+
+  it('is unavailable when the service key is not in .env', () => {
+    Object.assign(mockEnv, { NANOCLAW_GATEWAY_PROVIDER: 'native-proxy' });
+    expect(proxiedService('brave', dataDir)).toBeUndefined();
+  });
+
+  it('is unavailable under another gateway, rather than falling back to a raw key', () => {
+    Object.assign(mockEnv, { NANOCLAW_GATEWAY_PROVIDER: 'onecli', BRAVE_API_KEY: 'brave-real-key' });
+    expect(proxiedService('brave', dataDir)).toBeUndefined();
   });
 });

@@ -18,8 +18,14 @@ fi
 DEST_DIR="${NANOCLAW_V2_BACKUP_DIR:-$HOME/nanoclaw-v2-backups}"
 mkdir -p "$DEST_DIR"
 
+# Wait out a writer instead of failing on "database is locked". The memory
+# indexer holds write locks while it syncs, and this job runs at login —
+# exactly when the host's forced startup sync is writing — so without a busy
+# timeout the first backup after every boot aborted (set -e) before borg.
+SQLITE_BUSY_MS=120000
+
 # Back up central DB via SQLite API (safe against WAL races)
-sqlite3 "$PROJECT_ROOT/data/v2.db" ".backup '$DEST_DIR/v2.db'"
+sqlite3 -cmd ".timeout $SQLITE_BUSY_MS" "$PROJECT_ROOT/data/v2.db" ".backup '$DEST_DIR/v2.db'"
 echo "Central DB backup complete: $DEST_DIR/v2.db"
 
 # Back up each agent group's memory index.db via SQLite API (large embedding DBs)
@@ -27,7 +33,7 @@ for index_db in "$PROJECT_ROOT/data/v2-memory"/*/index.db; do
   [[ -f "$index_db" ]] || continue
   ag_id="$(basename "$(dirname "$index_db")")"
   mkdir -p "$DEST_DIR/v2-memory/$ag_id"
-  sqlite3 "$index_db" ".backup '$DEST_DIR/v2-memory/$ag_id/index.db'"
+  sqlite3 -cmd ".timeout $SQLITE_BUSY_MS" "$index_db" ".backup '$DEST_DIR/v2-memory/$ag_id/index.db'"
   echo "Memory index backup complete: $ag_id/index.db"
 done
 

@@ -127,8 +127,16 @@ describe('claude maybeRotateContinuation', () => {
     expect(provider.maybeRotateContinuation!('sess-old', CWD)).toContain('d');
   });
 
-  it('returns null for an unknown session id', () => {
+  it('rotates a continuation whose transcript is gone, rather than resuming into an error', () => {
+    // Claude Code's cleanupPeriodDays sweep deletes a .jsonl untouched for
+    // 30 days; resuming its id fails with "No conversation found".
+    writeTranscript('sess-other', 2048);
     const provider = createProvider('claude');
-    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBeNull();
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toContain('transcript not found');
+  });
+
+  it('rotates when there is no projects dir at all', () => {
+    const provider = createProvider('claude');
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toContain('transcript not found');
   });
 });

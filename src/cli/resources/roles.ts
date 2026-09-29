@@ -29,11 +29,12 @@ registerResource({
   customOperations: {
     grant: {
       access: 'approval',
-      description: 'Grant a role. Use --user, --role, and optionally --group for scoped admin.',
+      description:
+        'Grant a role. Use --user (or --user-id), --role, and optionally --group (or --agent-group-id) for scoped admin.',
       handler: async (args) => {
-        const userId = args.user as string;
+        const userId = (args.user ?? args.user_id) as string; // --user-id matches the listed field
         const role = args.role as string;
-        const groupId = (args.group as string) ?? null;
+        const groupId = ((args.group ?? args.agent_group_id) as string) ?? null;
         const grantedBy = (args.granted_by as string) ?? null;
         if (!userId) throw new Error('--user is required');
         if (!role || !['owner', 'admin'].includes(role)) throw new Error('--role must be owner or admin');
@@ -53,11 +54,11 @@ registerResource({
     },
     revoke: {
       access: 'approval',
-      description: 'Revoke a role. Use --user, --role, and --group if scoped.',
+      description: 'Revoke a role. Use --user (or --user-id), --role, and --group (or --agent-group-id) if scoped.',
       handler: async (args) => {
-        const userId = args.user as string;
+        const userId = (args.user ?? args.user_id) as string; // --user-id matches the listed field
         const role = args.role as string;
-        const groupId = (args.group as string) ?? null;
+        const groupId = ((args.group ?? args.agent_group_id) as string) ?? null;
         if (!userId) throw new Error('--user is required');
         if (!role) throw new Error('--role is required');
         const result = await getDb().run(

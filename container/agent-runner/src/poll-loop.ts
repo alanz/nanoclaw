@@ -245,12 +245,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
@@ -259,55 +253,89 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // a2a return-path routing. Re-published at every turn boundary inside
     // processQuery as later messages are answered.
     publishReplyRoute(routing);
-    // Forward a loop stop to the ACTIVE query. The stream deliberately stays
-    // open between turns, so the loop can be parked inside processQuery when
-    // config.signal fires; without this, the "stopped" loop's query — and its
-    // 500ms follow-up poller — outlives the stop and keeps polling (and
-    // claiming) messages from whatever inbound DB the process points at. In
-    // tests that leaked one immortal poller per loop-driven test, which could
-    // steal a later test's follow-up message into a dead query.
-    const abortActiveQuery = () => query.abort();
-    if (config.signal?.aborted) abortActiveQuery();
-    else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+    // One retry, only for a stale continuation. The pre-resume check drops a
+    // continuation whose transcript is missing, but the SDK can still reject
+    // one the check could not see as bad; that failure happens at resume,
+    // before any output, so rerunning the same batch on a fresh session is
+    // safe — and without it the batch is acked with only an error to show.
+    // processQuery confirms the "before any output" part itself.
+    let staleRetried = false;
     try {
-      const result = await processQuery(
-        query,
-        routing,
-        processingIds,
-        config.providerName,
-        config.provider.onExchangeComplete?.bind(config.provider),
-        prompt,
-        continuation,
-        midTurnCompleteDelivery,
-        config.signal,
-      );
-      if (result.continuation && result.continuation !== continuation) {
-        continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
+      for (;;) {
+        const query = config.provider.query({
+          prompt,
+          continuation,
+          cwd: config.cwd,
+          systemContext: config.systemContext,
+        });
+        // Forward a loop stop to the ACTIVE query. The stream deliberately stays
+        // open between turns, so the loop can be parked inside processQuery when
+        // config.signal fires; without this, the "stopped" loop's query — and its
+        // 500ms follow-up poller — outlives the stop and keeps polling (and
+        // claiming) messages from whatever inbound DB the process points at. In
+        // tests that leaked one immortal poller per loop-driven test, which could
+        // steal a later test's follow-up message into a dead query.
+        const abortActiveQuery = () => query.abort();
+        if (config.signal?.aborted) abortActiveQuery();
+        else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+        const resumed = continuation;
+        try {
+          const result = await processQuery(
+            query,
+            routing,
+            processingIds,
+            config.providerName,
+            config.provider.onExchangeComplete?.bind(config.provider),
+            prompt,
+            continuation,
+            midTurnCompleteDelivery,
+            config.signal,
+            // Retry only a failed RESUME: a fresh session failing the same way
+            // is not a stale id, and retrying it would just repeat.
+            (err) => !!resumed && !staleRetried && config.provider.isSessionInvalid(err),
+          );
+          if (result.continuation && result.continuation !== continuation) {
+            continuation = result.continuation;
+            setContinuation(config.providerName, continuation);
+          }
+          break;
+        } catch (thrown) {
+          const retry = thrown instanceof RetryQueryError;
+          const err = retry ? thrown.cause : thrown;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log(`Query error: ${errMsg}`);
+
+          // Stale/corrupt continuation recovery: ask the provider whether
+          // this error means the stored continuation is unusable, and clear
+          // it so the next attempt starts fresh. Cleared from the store even
+          // when this attempt was not a resume: processQuery persists a new
+          // session's id at init, so a fresh session that then fails would
+          // otherwise leave its own dead id behind for the next wake.
+          if (config.provider.isSessionInvalid(err)) {
+            log(`Stale session detected (${resumed ?? 'fresh session'}) — clearing`);
+            continuation = undefined;
+            clearContinuation(config.providerName);
+          }
+          if (retry) {
+            staleRetried = true;
+            log(`Retrying ${processingIds.length} message(s) on a fresh session`);
+            continue;
+          }
+
+          // processQuery owns failure notices: it knows which active and queued
+          // turns the failure abandoned. The opening batch may already be done.
+
+          // The batch is still acked completed below (no redelivery). Without
+          // this line the only log trace of the errored turn is "Query error"
+          // followed by a "Completed" line that reads like success.
+          log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
+          break;
+        } finally {
+          config.signal?.removeEventListener('abort', abortActiveQuery);
+        }
       }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
-
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
-        continuation = undefined;
-        clearContinuation(config.providerName);
-      }
-
-      // processQuery owns failure notices: it knows which active and queued
-      // turns the failure abandoned. The opening batch may already be done.
-
-      // The batch is still acked completed below (no redelivery). Without
-      // this line the only log trace of the errored turn is "Query error"
-      // followed by a "Completed" line that reads like success.
-      log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
     } finally {
       clearCurrentReplyRoute();
-      config.signal?.removeEventListener('abort', abortActiveQuery);
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -378,6 +406,13 @@ interface QueryResult {
   continuation?: string;
 }
 
+/** processQuery failed before producing anything, and the caller asked to rerun it. */
+export class RetryQueryError extends Error {
+  constructor(readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+  }
+}
+
 export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
@@ -397,9 +432,18 @@ export async function processQuery(
    */
   midTurnCompleteDelivery = false,
   signal?: AbortSignal,
+  /**
+   * Whether the caller will rerun this batch after a failure like `err`
+   * (a stale continuation). Honoured only while nothing has been delivered
+   * and no follow-up turn is queued; then no failure notice is sent and a
+   * `RetryQueryError` is thrown instead, so the user sees one answer rather
+   * than an error followed by one.
+   */
+  retryable?: (err: unknown) => boolean,
 ): Promise<QueryResult> {
   // adoptTurn mutates routing in place; keep the caller's batch route intact.
   routing = { ...routing };
+  const startSeq = maxOutboundSeq();
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
@@ -763,6 +807,17 @@ export async function processQuery(
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
     });
+    // Decided after the exchange hook, which may itself stop the loop: a
+    // stopping loop never retries, and still owes its notices.
+    if (
+      !cancelled &&
+      !signal?.aborted &&
+      queuedTurns.length === 0 &&
+      maxOutboundSeq() === startSeq &&
+      retryable?.(err)
+    ) {
+      throw new RetryQueryError(err);
+    }
     if (!cancelled) {
       // Completed turns are no longer answering or queued. Preserve partial
       // output from unfinished turns and report that the run did not finish.

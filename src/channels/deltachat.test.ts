@@ -43,6 +43,10 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
+vi.mock('../modules/permissions/db/users.js', () => ({
+  mergeUsersInto: vi.fn().mockResolvedValue([]),
+}));
+
 // --- DeltaChat RPC mock ---
 
 type EventHandler = (...args: unknown[]) => unknown;
@@ -83,6 +87,10 @@ function makeDcMock() {
       getConnectivity: vi.fn().mockResolvedValue(4000),
       getConfig: vi.fn().mockResolvedValue('bot@example.com'),
       getChatSecurejoinQrCode: vi.fn().mockResolvedValue('https://i.delta.chat/#MOCKINVITE'),
+      getContactEncryptionInfo: vi.fn(),
+      getContactIds: vi.fn().mockResolvedValue([]),
+      lookupContactIdByAddr: vi.fn().mockResolvedValue(null),
+      createChatByContactId: vi.fn().mockResolvedValue(77),
     },
     getContextEvents: vi.fn(() => emitterRef.current!),
   };
@@ -103,6 +111,7 @@ vi.mock('@deltachat/stdio-rpc-server', () => ({
 import './deltachat.js'; // triggers registerChannelAdapter side effect
 import type { ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { mergeUsersInto } from '../modules/permissions/db/users.js';
 import fs from 'fs';
 
 // Capture the registered factory once, before beforeEach clears mock call history.
@@ -1144,6 +1153,117 @@ describe('DeltaChat channel adapter', () => {
       });
 
       expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, 88, ['❤️']);
+    });
+  });
+  describe('sender identity', () => {
+    const FP = '0123456789ABCDEF0123456789ABCDEF01234567';
+    const ENC_INFO = [
+      'Messages are end-to-end encrypted.',
+      'Fingerprints:',
+      '',
+      'alice (alice@relay-two.example):',
+      '0123 4567 89AB CDEF 0123',
+      '4567 89AB CDEF 0123 4567',
+      '',
+      'Me (bot@example.com):',
+      'FEDC BA98 7654 3210 FEDC',
+      'BA98 7654 3210 FEDC BA98',
+      '',
+      'Relays:',
+      'alice@relay-two.example',
+      'alice@relay-one.example',
+    ].join('\n');
+
+    function keyContact(address = 'alice@relay-two.example') {
+      return makeContact({ address, isKeyContact: true });
+    }
+
+    it('identifies a key contact by fingerprint and merges its relay-address users', async () => {
+      const { config, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValue(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Single' }));
+      dc.rpc.getContact.mockResolvedValue(keyContact());
+      dc.rpc.getContactEncryptionInfo.mockResolvedValue(ENC_INFO);
+
+      emitIncomingMsg();
+      await flush();
+
+      const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
+      expect((msg.content as Record<string, unknown>).senderId).toBe(`dc:fp:${FP}`);
+      expect(vi.mocked(mergeUsersInto)).toHaveBeenCalledWith(expect.objectContaining({ id: `dc:fp:${FP}` }), [
+        'dc:alice@relay-two.example',
+        'dc:alice@relay-one.example',
+      ]);
+    });
+
+    it('keeps the same sender id when the contact arrives via another relay', async () => {
+      const { config, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValue(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Single' }));
+      dc.rpc.getContact.mockResolvedValue(keyContact('alice@relay-one.example'));
+      dc.rpc.getContactEncryptionInfo.mockResolvedValue(
+        ENC_INFO.replace('alice (alice@relay-two.example):', 'alice (alice@relay-one.example):'),
+      );
+
+      emitIncomingMsg();
+      await flush();
+
+      const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
+      expect((msg.content as Record<string, unknown>).senderId).toBe(`dc:fp:${FP}`);
+    });
+
+    it('falls back to the address for contacts without a key', async () => {
+      const { config, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValue(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Single' }));
+      dc.rpc.getContact.mockResolvedValue(makeContact({ isKeyContact: false }));
+
+      emitIncomingMsg();
+      await flush();
+
+      const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
+      expect((msg.content as Record<string, unknown>).senderId).toBe('dc:alice@example.com');
+      expect(dc.rpc.getContactEncryptionInfo).not.toHaveBeenCalled();
+      expect(vi.mocked(mergeUsersInto)).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the address when the fingerprint cannot be parsed', async () => {
+      const { config, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValue(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Single' }));
+      dc.rpc.getContact.mockResolvedValue(keyContact());
+      dc.rpc.getContactEncryptionInfo.mockResolvedValue('Something unexpected');
+
+      emitIncomingMsg();
+      await flush();
+
+      const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
+      expect((msg.content as Record<string, unknown>).senderId).toBe('dc:alice@relay-two.example');
+    });
+
+    it('openDM finds a fingerprint handle by scanning key contacts', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getContactIds.mockResolvedValue([9, 12]);
+      dc.rpc.getContact.mockImplementation(async (_a: number, id: number) =>
+        id === 9 ? makeContact({ isKeyContact: false }) : keyContact(),
+      );
+      dc.rpc.getContactEncryptionInfo.mockResolvedValue(ENC_INFO);
+
+      await expect(adapter.openDM!(`fp:${FP}`)).resolves.toBe('dc:77');
+      expect(dc.rpc.createChatByContactId).toHaveBeenCalledWith(ACCOUNT_ID, 12);
+    });
+
+    it('openDM resolves an address handle by lookup', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.lookupContactIdByAddr.mockResolvedValue(9);
+
+      await expect(adapter.openDM!('alice@example.com')).resolves.toBe('dc:77');
+      expect(dc.rpc.createChatByContactId).toHaveBeenCalledWith(ACCOUNT_ID, 9);
+    });
+
+    it('openDM throws for an unknown handle', async () => {
+      const { adapter } = await buildSetupAdapter();
+      await expect(adapter.openDM!(`fp:${FP}`)).rejects.toThrow('no known contact');
     });
   });
 });

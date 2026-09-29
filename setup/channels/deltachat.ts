@@ -96,8 +96,10 @@ export async function runDeltachatChannel(displayName: string): Promise<void> {
   s2.stop('First message received.');
   setupLog.step('deltachat-first-contact', 'success', Date.now() - contactStart, {});
 
-  const { addr, chatId, displayName: contactDisplayName } = JSON.parse(firstContactJson) as {
+  // `handle` is the stable sender handle (key fingerprint); older adapters wrote only `addr`.
+  const { addr, handle, chatId, displayName: contactDisplayName } = JSON.parse(firstContactJson) as {
     addr: string;
+    handle?: string;
     chatId: string;
     displayName: string;
   };
@@ -112,7 +114,7 @@ export async function runDeltachatChannel(displayName: string): Promise<void> {
     [
       'exec', 'tsx', 'scripts/init-first-agent.ts',
       '--channel', 'deltachat',
-      '--user-id', `dc:${addr}`,
+      '--user-id', `dc:${handle ?? addr}`,
       '--platform-id', `dc:${chatId}`,
       '--display-name', contactDisplayName || displayName,
       '--agent-name', agentName,

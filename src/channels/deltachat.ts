@@ -4,6 +4,10 @@
  * Bridges NanoClaw with DeltaChat via the stdio-rpc-server.
  * Each DeltaChat chat is a platformId (`dc:{chatId}`), threadId is always null.
  *
+ * Senders are identified by key fingerprint (`dc:fp:{hex}`), not address: with
+ * multi-relay DeltaChat the address is just the latest relay. Contacts without
+ * a key fall back to `dc:{address}`. See deltachat-identity.ts.
+ *
  * Inbound: debounces rapid messages before routing, attaches 👀 on receipt.
  * Outbound: sends text/files, handles edit/reaction operations; sends ✅ on delivery.
  * Typing: sends 💭 on the last incoming message for the platformId.
@@ -21,8 +25,15 @@ import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 import { ASSISTANT_NAME } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import { mergeUsersInto } from '../modules/permissions/db/users.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import {
+  fingerprintFromHandle,
+  fingerprintHandle,
+  parseContactFingerprint,
+  parseRelays,
+} from './deltachat-identity.js';
 
 /** Files larger than this are delivered as placeholders, not base64-embedded. */
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -132,6 +143,64 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   /** Dedup set for IncomingMsg (short window) and edit-detection set (1-hour window). */
   const seenMsgIds = new Set<number>();
   const processedMsgIds = new Set<number>();
+  /** Resolved sender handle per DeltaChat contact id, and fingerprint → contact id for openDM. */
+  const senderByContact = new Map<number, { handle: string; name: string }>();
+  const contactByFingerprint = new Map<string, number>();
+
+  /**
+   * Resolve a contact to its stable sender handle (`fp:<hex>` for key
+   * contacts, else the address). The first time a fingerprint is seen, any
+   * legacy address-keyed users for the key's relays are merged into it.
+   */
+  async function resolveSender(contactId: number): Promise<{ handle: string; name: string }> {
+    const cached = senderByContact.get(contactId);
+    if (cached) return cached;
+
+    const contact = await dc!.rpc.getContact(accountId!, contactId);
+    const address = contact.address ?? String(contactId);
+    const name = contact.displayName ?? address;
+    let handle = address;
+
+    if (contact.isKeyContact) {
+      const encInfo = await dc!.rpc.getContactEncryptionInfo(accountId!, contactId);
+      const fingerprint = parseContactFingerprint(encInfo, address);
+      if (fingerprint) {
+        handle = fingerprintHandle(fingerprint);
+        contactByFingerprint.set(fingerprint, contactId);
+        const legacy = [...new Set([address.toLowerCase(), ...parseRelays(encInfo)])].map((a) => `dc:${a}`);
+        const merged = await mergeUsersInto(
+          { id: `dc:${handle}`, kind: 'deltachat', display_name: name, created_at: new Date().toISOString() },
+          legacy,
+        );
+        if (merged.length > 0) log.info('DeltaChat: merged address users into key identity', { merged, handle });
+      } else {
+        log.warn('DeltaChat: key contact without a parseable fingerprint — using address', { contactId });
+      }
+    }
+
+    const resolved = { handle, name };
+    senderByContact.set(contactId, resolved);
+    return resolved;
+  }
+
+  /** Find the contact id for a sender handle (fingerprint or address), or null. */
+  async function findContact(handle: string): Promise<number | null> {
+    const fingerprint = fingerprintFromHandle(handle);
+    if (!fingerprint) return dc!.rpc.lookupContactIdByAddr(accountId!, handle);
+
+    const known = contactByFingerprint.get(fingerprint);
+    if (known !== undefined) return known;
+    for (const id of await dc!.rpc.getContactIds(accountId!, 0, null)) {
+      const contact = await dc!.rpc.getContact(accountId!, id);
+      if (!contact.isKeyContact) continue;
+      const encInfo = await dc!.rpc.getContactEncryptionInfo(accountId!, id);
+      if (parseContactFingerprint(encInfo, contact.address) === fingerprint) {
+        contactByFingerprint.set(fingerprint, id);
+        return id;
+      }
+    }
+    return null;
+  }
 
   function flushDebounce(platformId: string): void {
     const entry = debounceEntries.get(platformId);
@@ -287,11 +356,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           if (msg.fromId === 1) return;
 
           const chat = await dcRef.rpc.getBasicChatInfo(aid, chatId);
-          const contact = await dcRef.rpc.getContact(aid, msg.fromId);
           const isGroup = chat.chatType !== 'Single';
           const platformId = platformIdForChat(chatId);
-          const sender = contact.address ?? String(msg.fromId);
-          const senderName = contact.displayName ?? sender;
+          const { handle: sender, name: senderName } = await resolveSender(msg.fromId);
 
           // One-shot first-contact record consumed by setup:auto to wire the owner.
           // Only written for DMs, only if the file doesn't already exist.
@@ -301,7 +368,12 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
               try {
                 fs.writeFileSync(
                   firstContactPath,
-                  JSON.stringify({ addr: sender, chatId: String(chatId), displayName: senderName }),
+                  JSON.stringify({
+                    addr: (await dcRef.rpc.getContact(aid, msg.fromId)).address,
+                    handle: sender,
+                    chatId: String(chatId),
+                    displayName: senderName,
+                  }),
                   'utf8',
                 );
               } catch {
@@ -413,9 +485,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           if (msg.isInfo || msg.systemMessageType === 'AutocryptSetupMessage' || msg.fromId === 1) return;
 
           const platformId = platformIdForChat(chatId);
-          const contact = await dcRef.rpc.getContact(aid, msg.fromId);
-          const senderName = contact.displayName ?? contact.address ?? String(msg.fromId);
-          const sender = contact.address ?? String(msg.fromId);
+          const { handle: sender, name: senderName } = await resolveSender(msg.fromId);
           const text = (msg.text as string | undefined) ?? '';
           if (!text) return;
 
@@ -456,9 +526,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
         }) => {
           if (!reaction) return;
           try {
-            const contact = await dc!.rpc.getContact(accountId!, contactId);
-            const sender = contact.address ?? String(contactId);
-            const senderName = contact.displayName ?? sender;
+            const { handle: sender, name: senderName } = await resolveSender(contactId);
             const platformId = platformIdForChat(chatId);
 
             log.debug('DeltaChat: incoming reaction', { platformId, sender, reaction, msgId });
@@ -614,6 +682,14 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       const platformMsgId = await sendText(platformId, text);
       await sendDoneReaction(platformId);
       return platformMsgId ?? undefined;
+    },
+
+    /** Cold-DM target for a sender handle: the 1:1 chat with that contact. */
+    async openDM(userHandle: string): Promise<string> {
+      if (!dc || accountId === null) throw new Error('DeltaChat: not connected');
+      const contactId = await findContact(userHandle);
+      if (contactId === null) throw new Error('DeltaChat: no known contact for handle');
+      return platformIdForChat(await dc.rpc.createChatByContactId(accountId, contactId));
     },
 
     async setTyping(platformId: string, _threadId: string | null): Promise<void> {

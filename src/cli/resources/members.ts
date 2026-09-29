@@ -31,10 +31,11 @@ registerResource({
   customOperations: {
     add: {
       access: 'approval',
-      description: 'Add a user as a member of an agent group. Use --user and --group.',
+      description:
+        'Add a user as a member of an agent group. Use --user (or --user-id) and --group (or --agent-group-id).',
       handler: async (args) => {
-        const userId = args.user as string;
-        const groupId = args.group as string;
+        const userId = (args.user ?? args.user_id) as string; // --user-id matches the listed field
+        const groupId = (args.group ?? args.agent_group_id) as string;
         const addedBy = (args.added_by as string) ?? null;
         if (!userId) throw new Error('--user is required');
         if (!groupId) throw new Error('--group is required');
@@ -52,10 +53,10 @@ registerResource({
     },
     remove: {
       access: 'approval',
-      description: 'Remove a user from an agent group. Use --user and --group.',
+      description: 'Remove a user from an agent group. Use --user (or --user-id) and --group (or --agent-group-id).',
       handler: async (args) => {
-        const userId = args.user as string;
-        const groupId = args.group as string;
+        const userId = (args.user ?? args.user_id) as string; // --user-id matches the listed field
+        const groupId = (args.group ?? args.agent_group_id) as string;
         if (!userId) throw new Error('--user is required');
         if (!groupId) throw new Error('--group is required');
         const result = await getDb().run(

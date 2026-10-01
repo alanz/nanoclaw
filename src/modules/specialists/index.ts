@@ -18,6 +18,7 @@ import { log } from '../../log.js';
 import { registerBootCrashExemption } from '../boot-crash/index.js';
 import { registerMemoryGroupExclusion } from '../../memory/manager.js';
 import { getSpecialist } from './db.js';
+import './group-delete.js';
 import { handleDispatchSpecialist, handleDispatchSubTask } from './dispatch.js';
 import { handleDeliverSpecialistResult } from './delivery.js';
 import { buildInvocationForSession, endInvocationById } from './invocation.js';

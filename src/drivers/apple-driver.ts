@@ -350,6 +350,45 @@ export const appleDialect: RuntimeDialect = {
       },
     };
   },
+
+  images: {
+    /** `container image inspect` has no --format; it prints JSON carrying the id. */
+    inspectId(cli, ref) {
+      try {
+        const parsed: unknown = JSON.parse(cli.run(['image', 'inspect', ref]));
+        const doc = (Array.isArray(parsed) ? parsed[0] : parsed) as { id?: unknown } | undefined;
+        return typeof doc?.id === 'string' && doc.id ? doc.id : null;
+      } catch {
+        return null;
+      }
+    },
+
+    buildArgs: (tag, dockerfile) => ['build', '-t', tag, '-f', dockerfile, '.'],
+
+    /**
+     * The builder is a VM, started on demand. Its default allocation is too
+     * small for this image — a build dies with a bare "Killed" that reads like
+     * a build error rather than an OOM — so size it, the same way
+     * `container/build.sh` does, and stop it again afterwards if we started it.
+     */
+    prepareBuild(cli) {
+      try {
+        if (/\brunning\b/.test(cli.run(['builder', 'status'], { timeoutMs: 10_000 }))) return;
+      } catch {
+        // No status means not running; starting it below is the answer either way.
+      }
+      const memory = process.env.NANOCLAW_BUILDER_MEMORY?.trim() || '8g';
+      log.info('Starting Apple Container builder', { memory });
+      cli.run(['builder', 'start', '--memory', memory], { timeoutMs: 120_000 });
+      return () => {
+        try {
+          cli.run(['builder', 'stop'], { timeoutMs: 60_000 });
+        } catch (err) {
+          log.warn('Could not stop the Apple Container builder after the build', { err });
+        }
+      };
+    },
+  },
 };
 
 registerSessionDriver(

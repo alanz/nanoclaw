@@ -23,7 +23,13 @@ import os from 'os';
 import { log } from '../log.js';
 
 import { realCli, validateRuntimeName, type Cli, type SupervisedProcess } from './cli.js';
-import type { RuntimeDialect, RuntimeResidue, RuntimeRow, RuntimeSubscription } from './dialect.js';
+import {
+  registerRuntimeDialect,
+  type RuntimeDialect,
+  type RuntimeResidue,
+  type RuntimeRow,
+  type RuntimeSubscription,
+} from './dialect.js';
 import { JsonDocumentStream } from './json-stream.js';
 import {
   LABELS,
@@ -94,6 +100,7 @@ export class DockerSessionDriver implements SessionDriver {
     this.#cli = opts.cli ?? realCli(this.#dialect.bin);
     this.#policy = opts;
     this.kind = this.#dialect.kind;
+    registerRuntimeDialect(this.#dialect);
   }
 
   capabilities(): DriverCapabilities {
@@ -107,9 +114,10 @@ export class DockerSessionDriver implements SessionDriver {
       // Auxiliary containers need a per-session private network, which only
       // a dialect that declares it can build (see RuntimeDialect).
       auxiliaryContainers: this.#dialect.auxiliaryContainers ?? false,
-      // The daemon this driver shells for sessions is the same one
-      // buildAgentGroupImage builds against; rebuild-in-place is real here.
-      imageBuild: true,
+      // buildAgentGroupImage builds through the dialect's image operations,
+      // against the same runtime this driver runs sessions on; a dialect
+      // without them cannot rebuild in place.
+      imageBuild: this.#dialect.images !== undefined,
     };
   }
 
@@ -151,7 +159,16 @@ export class DockerSessionDriver implements SessionDriver {
 
     // Idempotency on key: an existing live container for this key is the session.
     if (this.#existingSession(name, spec.key)) {
-      return new DockerHandle(spec.key, name, this.#cli, this.#dialect, null, auxiliaryNames, privateNetwork, this.#emit);
+      return new DockerHandle(
+        spec.key,
+        name,
+        this.#cli,
+        this.#dialect,
+        null,
+        auxiliaryNames,
+        privateNetwork,
+        this.#emit,
+      );
     }
 
     // Composition existsSync-gates mount sources; re-check here so a
@@ -185,7 +202,13 @@ export class DockerSessionDriver implements SessionDriver {
       }
       created.push(name);
       this.#cli.run(
-        containerCreateArgs(this.#dialect, spec, agent, name, privateNetwork ? ['--network', privateNetwork] : networkArgs),
+        containerCreateArgs(
+          this.#dialect,
+          spec,
+          agent,
+          name,
+          privateNetwork ? ['--network', privateNetwork] : networkArgs,
+        ),
       );
     } catch (error) {
       for (const createdName of created.reverse()) {
@@ -992,6 +1015,17 @@ export const dockerDialect: RuntimeDialect = {
     });
     proc.onExit(() => onEnd());
     return { stop: () => proc.kill() };
+  },
+
+  images: {
+    inspectId(cli, ref) {
+      try {
+        return cli.run(['image', 'inspect', '--format', '{{.Id}}', ref]).trim() || null;
+      } catch {
+        return null;
+      }
+    },
+    buildArgs: (tag, dockerfile) => ['build', '-t', tag, '-f', dockerfile, '.'],
   },
 };
 

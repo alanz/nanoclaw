@@ -337,13 +337,25 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
  * learn a new outcome.
  *
  * Null by default: with no gate installed this is exactly the old behavior.
+ *
+ * An admission is handed back exactly once. A wake that registers a runtime
+ * hands it back through the session-exit hook when that runtime ends; one
+ * that never registers a runtime — the spawn threw, or returned before
+ * starting anything — produces no exit event, so it is handed back through
+ * `release` instead. Without that second path a gate that reserves capacity
+ * at admission loses one unit per failed spawn, permanently.
  */
 export type WakeGate = (session: Session) => boolean | Promise<boolean>;
 
-let wakeGate: WakeGate | null = null;
+/** Hands back an admission whose wake never registered a runtime. Must be idempotent. */
+export type WakeGateRelease = (session: Session) => void;
 
-export function setWakeGate(gate: WakeGate | null): void {
+let wakeGate: WakeGate | null = null;
+let wakeGateRelease: WakeGateRelease | null = null;
+
+export function setWakeGate(gate: WakeGate | null, release?: WakeGateRelease): void {
   wakeGate = gate;
+  wakeGateRelease = gate ? (release ?? null) : null;
 }
 
 export function wakeContainer(session: Session): Promise<boolean> {
@@ -375,6 +387,18 @@ export function wakeContainer(session: Session): Promise<boolean> {
     } catch (err) {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
       return false;
+    } finally {
+      // Admitted, but no runtime is registered: nothing will ever fire the
+      // exit hook for this wake, so hand the admission back here. A runtime
+      // that registered and has already exited fired the hook itself; the
+      // release is idempotent, so the second hand-back is a no-op.
+      if (wakeGateRelease && !activeContainers.has(session.id)) {
+        try {
+          wakeGateRelease(session);
+        } catch (err) {
+          log.error('Wake gate release failed', { sessionId: session.id, err });
+        }
+      }
     }
   })().finally(() => {
     wakePromises.delete(session.id);

@@ -14,8 +14,10 @@
  *
  * Two seams carry it, both trunk-owned:
  *   - `setWakeGate` decides, in the one place every wake passes through,
- *     whether this session may start now.
- *   - `registerSessionExitHook` releases the slot and starts the next waiter.
+ *     whether this session may start now — and takes the slot back when an
+ *     admitted wake fails before any container exists.
+ *   - `registerSessionExitHook` releases the slot when a container ends and
+ *     starts the next waiter.
  *
  * Neither the router nor any of the other wake callers knows this module
  * exists. Installing it is one appended import in the modules barrel.
@@ -119,7 +121,16 @@ async function admit(session: Session): Promise<boolean> {
 }
 
 function releaseAndDrain(event: SessionExitEvent): void {
-  if (!activeNonMainSessions.delete(event.sessionId)) return;
+  release(event.sessionId);
+}
+
+/**
+ * Give a slot back and start the next waiter. Idempotent: a session that
+ * holds no slot (main group, already released) is a no-op, which is what lets
+ * the exit hook and the wake gate's release both fire for one wake.
+ */
+function release(sessionId: string): void {
+  if (!activeNonMainSessions.delete(sessionId)) return;
   drainWaiting();
 }
 
@@ -164,5 +175,12 @@ export function resetConcurrencyStateForTesting(): void {
 /** @internal Test seam — the gate, so a suite can drive it without a wake. */
 export const admitForTesting = admit;
 
-setWakeGate(admit);
+/** @internal Test seam — the gate's release, as container-runner calls it for a wake that never started. */
+export function releaseForTesting(session: Session): void {
+  release(session.id);
+}
+
+// Two hand-backs, one per way a wake can end: the exit hook for a wake that
+// registered a runtime, the gate's release for one that never did.
+setWakeGate(admit, (session) => release(session.id));
 registerSessionExitHook(releaseAndDrain);

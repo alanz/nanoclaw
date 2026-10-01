@@ -29,6 +29,7 @@ import {
   MAX_CONCURRENT_CONTAINERS,
   admitForTesting,
   getQueueStatus,
+  releaseForTesting,
   resetConcurrencyStateForTesting,
 } from './index.js';
 import type { Session } from '../../types.js';
@@ -145,6 +146,23 @@ describe('draining on exit', () => {
 
     exit('s0');
     await vi.waitFor(() => expect(getQueueStatus().activeNonMain).toBe(MAX_CONCURRENT_CONTAINERS - 1));
+  });
+
+  it('takes the slot back from an admitted wake that never started, and starts the next waiter', async () => {
+    // container-runner calls the gate's release for a wake that registered no
+    // runtime — that wake will never produce an exit event.
+    for (let i = 0; i < MAX_CONCURRENT_CONTAINERS; i++) await admitForTesting(session(`s${i}`));
+    await admitForTesting(session('waiter'));
+
+    releaseForTesting(session('s0'));
+    await vi.waitFor(() => expect(mockWake).toHaveBeenCalledOnce());
+    expect(mockWake.mock.calls[0][0]).toMatchObject({ id: 'waiter' });
+    expect(getQueueStatus()).toMatchObject({ activeNonMain: MAX_CONCURRENT_CONTAINERS, waiting: 0 });
+
+    // A second hand-back for the same wake (the exit hook, say) changes nothing.
+    releaseForTesting(session('s0'));
+    exit('s0');
+    expect(getQueueStatus().activeNonMain).toBe(MAX_CONCURRENT_CONTAINERS);
   });
 
   it('fills every freed slot, not just one', async () => {

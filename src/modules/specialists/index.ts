@@ -119,6 +119,21 @@ registerSessionContributor(async ({ session }) => {
   return { mounts: built.mounts };
 });
 
+/**
+ * A specialist group's folder is a template every task of that type shares,
+ * concurrently: mounted writable, one task could change the instructions or
+ * files the next task starts from. So it is read-only, and per-task state
+ * lives in the session (and ipc-out) instead.
+ *
+ * Each task also starts from a clean conversation. A restarted task is sent
+ * its prompt again; resuming the crashed attempt's conversation as well would
+ * hand it the task twice, from a state that already failed once.
+ */
+registerSessionContributor(async ({ agentGroup }) => {
+  if (!(await getSpecialist(agentGroup.id))) return undefined;
+  return { readonlyWorkspace: true, env: { NANOCLAW_FRESH_CONVERSATION: '1' } };
+});
+
 registerSessionExitHook(({ sessionId }) => {
   const invocationId = activeInvocations.get(sessionId);
   if (!invocationId) return;

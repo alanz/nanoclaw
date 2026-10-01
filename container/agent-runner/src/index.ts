@@ -26,6 +26,7 @@ import { fileURLToPath } from 'url';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
+import { clearContinuation, migrateLegacyContinuation } from './db/session-state.js';
 import { ensureMemoryScaffold } from './memory/scaffold.js';
 import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
@@ -59,9 +60,23 @@ async function main(): Promise<void> {
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
 
+  // A session the host starts clean (a specialist task, today) must not resume
+  // an earlier container's conversation: a restarted task is sent its prompt
+  // again, and resuming as well would hand it the task twice.
+  if (process.env.NANOCLAW_FRESH_CONVERSATION === '1') {
+    // Fold any legacy-keyed continuation in first, so the poll loop's own
+    // migration cannot bring it back after the clear.
+    migrateLegacyContinuation(providerName);
+    clearContinuation(providerName);
+    log('Fresh conversation requested — continuation cleared');
+  }
+
   // Every provider shares one persistent memory tree. Legacy imports are an
   // operator-run migration and never happen in this normal startup path.
-  ensureMemoryScaffold();
+  // Not into a read-only workspace (a shared template folder): the scaffold
+  // would fail with EROFS and kill the runner before it ever polls — the
+  // container then dies silently on every respawn and its task hangs.
+  if (process.env.NANOCLAW_WORKSPACE_READONLY !== '1') ensureMemoryScaffold();
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module

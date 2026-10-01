@@ -465,6 +465,7 @@ async function spawnContainer(session: Session): Promise<void> {
     contribution,
     surfaces,
     moduleContribution.mounts ?? [],
+    moduleContribution.readonlyWorkspace ?? false,
   );
   const mailboxEnvironment = await mailbox.runnerEnvironment(mailboxKey);
 
@@ -892,6 +893,18 @@ function dispatchSessionExit(event: SessionExitEvent): void {
  * A contributor that throws is logged and skipped: a missing optional tool
  * must not stop the session from starting.
  */
+export interface SessionContribution extends ProviderContainerContribution {
+  /**
+   * Mount the group folder (`/workspace/agent`) read-only for this session.
+   * For a folder that several sessions share as a template — a specialist's —
+   * where one running task must not be able to change what the next one sees.
+   * Any contributor asking for it wins; core then tells the runner too
+   * (`NANOCLAW_WORKSPACE_READONLY`), so the mount and the runner's behaviour
+   * come from the one decision and cannot drift apart.
+   */
+  readonlyWorkspace?: boolean;
+}
+
 export interface SessionContributionContext {
   agentGroup: AgentGroup;
   session: Session;
@@ -899,7 +912,7 @@ export interface SessionContributionContext {
 
 export type SessionContributor = (
   ctx: SessionContributionContext,
-) => ProviderContainerContribution | undefined | Promise<ProviderContainerContribution | undefined>;
+) => SessionContribution | undefined | Promise<SessionContribution | undefined>;
 
 const sessionContributors: SessionContributor[] = [];
 
@@ -910,11 +923,12 @@ export function registerSessionContributor(contributor: SessionContributor): voi
 export async function withSessionContributions(
   base: ProviderContainerContribution,
   ctx: SessionContributionContext,
-): Promise<ProviderContainerContribution> {
+): Promise<SessionContribution> {
   const mounts = [...(base.mounts ?? [])];
   const env = { ...(base.env ?? {}) };
+  let readonlyWorkspace = false;
   for (const contributor of sessionContributors) {
-    let extra: ProviderContainerContribution | undefined;
+    let extra: SessionContribution | undefined;
     try {
       extra = await contributor(ctx);
     } catch (err) {
@@ -924,8 +938,10 @@ export async function withSessionContributions(
     if (!extra) continue;
     mounts.push(...(extra.mounts ?? []));
     Object.assign(env, extra.env ?? {});
+    if (extra.readonlyWorkspace) readonlyWorkspace = true;
   }
-  return { ...base, mounts, env };
+  if (readonlyWorkspace) env.NANOCLAW_WORKSPACE_READONLY = '1';
+  return { ...base, mounts, env, readonlyWorkspace };
 }
 
 /** Kill a container for a session. */
@@ -1203,6 +1219,8 @@ export async function buildMounts(
   providerSurfaces?: ProviderSpawnRealization,
   /** Session-contributor (module) mounts — see `registerSessionContributor`. */
   moduleMounts: readonly VolumeMount[] = [],
+  /** A contributor asked for the group folder read-only — see `SessionContribution`. */
+  readonlyWorkspace = false,
 ): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
 
@@ -1255,11 +1273,12 @@ export async function buildMounts(
     scope,
   });
 
-  // Agent group folder at /workspace/agent (RW for working files + shared memory)
+  // Agent group folder at /workspace/agent: RW for working files and shared
+  // memory, unless a module marked it a shared template for this session.
   mounts.push({
     hostPath: groupDir,
     containerPath: '/workspace/agent',
-    readonly: false,
+    readonly: readonlyWorkspace,
     mountClass: 'group-state',
     scope,
   });

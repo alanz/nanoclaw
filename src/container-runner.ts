@@ -7,7 +7,7 @@
  * here is composition and lifecycle policy: which mounts, which env, restart
  * ordering, exit bookkeeping.
  */
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -27,7 +27,6 @@ import {
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
@@ -43,6 +42,8 @@ import {
 import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
+import { realCli } from './drivers/cli.js';
+import { getRuntimeDialect } from './drivers/dialect.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
@@ -1658,7 +1659,7 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
   return selectGatewayAgentSkills(selected);
 }
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
@@ -1673,24 +1674,25 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     throw new Error('No packages to install. Use install_packages first.');
   }
 
-  // Image building is not on the runtime path (drivers never build) and shells
-  // the local Docker daemon. Both call sites gate on the `imageBuild`
-  // capability; this is the backstop for any future caller that forgets.
-  if (!getSessionDriver().capabilities().imageBuild) {
+  // Image building is not on the runtime path (drivers never build), but it
+  // must run against the same runtime the sessions do, in that runtime's
+  // spelling — so it goes through the selected driver's dialect. Both call
+  // sites gate on the `imageBuild` capability; this is the backstop for any
+  // future caller that forgets.
+  const driver = getSessionDriver();
+  const dialect = getRuntimeDialect(driver.kind);
+  const images = dialect?.images;
+  if (!driver.capabilities().imageBuild || !dialect || !images) {
     throw new Error('Per-agent-group image builds are unavailable on this runtime driver');
   }
+  const cli = realCli(dialect.bin);
 
   // Which bytes this is built on. Recorded on the derived image so an operator
   // can tell which base a group's packages were layered onto — the image id
   // rather than a RepoDigest, because a locally built base has no RepoDigest at
-  // all and an id is unambiguous either way.
-  let baseId = '';
-  try {
-    const { stdout } = await execAsync(`${CONTAINER_RUNTIME_BIN} image inspect --format '{{.Id}}' ${CONTAINER_IMAGE}`);
-    baseId = stdout.trim();
-  } catch {
-    // Non-fatal: the build below fails on its own if the base is really absent.
-  }
+  // all and an id is unambiguous either way. Absent is non-fatal: the build
+  // below fails on its own if the base is really missing.
+  const baseId = images.inspectId(cli, CONTAINER_IMAGE) ?? '';
 
   let dockerfile = `FROM ${CONTAINER_IMAGE}\nUSER root\n`;
   if (aptPackages.length > 0) {
@@ -1723,15 +1725,17 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
 
   const tmpDockerfile = path.join(DATA_DIR, `Dockerfile.${agentGroupId}`);
   fs.writeFileSync(tmpDockerfile, dockerfile);
+  const restoreBuilder = images.prepareBuild?.(cli);
   try {
     // Awaited async exec so the single-threaded host stays responsive during
     // the build (can take minutes) instead of blocking on execSync.
-    await execAsync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
+    await execFileAsync(dialect.bin, images.buildArgs(imageTag, tmpDockerfile), {
       cwd: DATA_DIR,
       timeout: 900_000,
     });
   } finally {
     fs.unlinkSync(tmpDockerfile);
+    restoreBuilder?.();
   }
 
   // Store the image tag in the DB

@@ -126,4 +126,51 @@ export interface RuntimeDialect {
     onEvent: (event: SessionEvent) => void,
     onEnd: () => void,
   ): RuntimeSubscription;
+
+  /**
+   * How this runtime builds and identifies images. Absent means it cannot
+   * rebuild a group's image in place, and the driver reports
+   * `capabilities().imageBuild` false — so install_packages is refused before
+   * an admin is asked, not after.
+   */
+  readonly images?: RuntimeImages;
+}
+
+/**
+ * Image operations for the per-group package layer (`buildAgentGroupImage`).
+ *
+ * That build is not a session, so it does not go through the driver; but it
+ * has to run against the same runtime the sessions do, in that runtime's
+ * spelling. Hard-coding one CLI there is how a host on Apple Container ended
+ * up shelling a `docker` that was not installed.
+ */
+export interface RuntimeImages {
+  /** The image's id, or null when it is absent or the runtime cannot say. */
+  inspectId(cli: Cli, ref: string): string | null;
+  /** Argv after the binary that builds `tag` from `dockerfile`, with the working directory as context. */
+  buildArgs(tag: string, dockerfile: string): string[];
+  /**
+   * Make the builder ready. Returns how to put it back afterwards, when this
+   * call is what brought it up — a runtime whose builder is a VM should not
+   * leave one running for a build nobody is doing.
+   */
+  prepareBuild?(cli: Cli): (() => void) | void;
+}
+
+/**
+ * Dialects of the drivers this process has constructed, by kind.
+ *
+ * Code that runs against the session runtime without being a session — the
+ * image build — needs the dialect, and sees the driver only through the
+ * session-events wrapper. The driver registers what it was built with; a
+ * consumer looks it up by the driver's kind.
+ */
+const dialects = new Map<string, RuntimeDialect>();
+
+export function registerRuntimeDialect(dialect: RuntimeDialect): void {
+  dialects.set(dialect.kind, dialect);
+}
+
+export function getRuntimeDialect(kind: string): RuntimeDialect | undefined {
+  return dialects.get(kind);
 }

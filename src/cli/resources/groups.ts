@@ -13,6 +13,7 @@ import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
+import { runGroupDeleteSteps } from '../../group-delete.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import {
@@ -273,6 +274,10 @@ registerResource({
             container_configs: 0,
           };
 
+          // Module tables first: they reference sessions and agent_groups,
+          // which the core cascade below removes.
+          const modules = await runGroupDeleteSteps(db, id);
+
           if (hasAgentDestinations) {
             counts.agent_destinations_owned = (
               await db.run('DELETE FROM agent_destinations WHERE agent_group_id = ?', id)
@@ -316,7 +321,7 @@ registerResource({
             await db.run('DELETE FROM container_configs WHERE agent_group_id = ?', id)
           ).changes;
           await db.run('DELETE FROM agent_groups WHERE id = ?', id);
-          return counts;
+          return { ...counts, modules };
         });
 
         return { deleted: id, removed };

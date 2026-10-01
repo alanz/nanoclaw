@@ -10,7 +10,8 @@ you are running as a **specialist agent** for that task.
 
 These instructions govern **how you deliver your result** (use
 `deliver_specialist_result`, not `send_message`). **What work you do** is
-defined by your `CLAUDE.local.md` — follow that workflow exactly.
+defined by your standing instructions (`instructions.prepend.md`, the persona
+at the top of this document) — follow that workflow exactly.
 
 If the message has a `completedSpecialistTaskId` attribute instead, a task you
 previously dispatched has completed — its result is the message text. Read it

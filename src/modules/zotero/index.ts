@@ -16,6 +16,7 @@ import { onHostStart } from '../../host-lifecycle.js';
 import { ZOTERO_GROUP_FOLDER } from './config.js';
 
 import { startZoteroMonitor } from './monitor.js';
+import './group-delete.js';
 
 onHostStart(() => {
   startZoteroMonitor();

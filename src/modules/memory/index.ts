@@ -20,6 +20,7 @@ import { readEnvFile } from '../../env.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
 import { closeAllMemoryManagers, initMemoryManagers, isMemoryGroupExcluded } from '../../memory/manager.js';
+import './group-delete.js';
 
 const SETTINGS = ['MEMORY_SEARCH_GEMINI_API_KEY', 'MEMORY_SEARCH_MODEL', 'MEMORY_SEARCH_GROUPS'] as const;
 

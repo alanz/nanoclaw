@@ -58,7 +58,22 @@ while [ $# -gt 0 ]; do
 done
 
 TAG="${1:-latest}"
-CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
+
+# Build with the runtime the host runs sessions on. Callers that shell this
+# bare — provider installs, /update-nanoclaw, skills — pass no runtime, and a
+# hard `docker` default fails outright on a host that only has Apple's
+# `container`. NANOCLAW_RUNTIME_DRIVER (environment first, then .env) is what
+# selects the session driver; an explicit CONTAINER_RUNTIME still wins.
+if [ -z "${CONTAINER_RUNTIME:-}" ]; then
+    RUNTIME_DRIVER="${NANOCLAW_RUNTIME_DRIVER:-}"
+    if [ -z "$RUNTIME_DRIVER" ] && [ -f "$PROJECT_ROOT/.env" ]; then
+        RUNTIME_DRIVER="$(grep '^NANOCLAW_RUNTIME_DRIVER=' "$PROJECT_ROOT/.env" | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    fi
+    case "$RUNTIME_DRIVER" in
+        apple) CONTAINER_RUNTIME="container" ;;
+        *) CONTAINER_RUNTIME="docker" ;;
+    esac
+fi
 
 # Apple Container needs its builder VM up before any `container build`, and
 # the builder's DEFAULT allocation is too small for this image — it dies with

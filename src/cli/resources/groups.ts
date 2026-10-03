@@ -24,6 +24,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { validateMount } from '../../modules/mount-security/index.js';
 import { getProviderHostContract } from '../../provider-contracts/registry.js';
 import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
@@ -604,7 +605,8 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <name> [--ro]; ' +
+        'the mount lands at /workspace/extra/<name>, and --host must be under a mount-allowlist root.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -620,12 +622,35 @@ registerResource({
           containerPath,
           ...(args.ro || args.readonly ? { readonly: true } : {}),
         };
+
+        // Validate against the same allowlist the spawn path enforces
+        // (`validateAdditionalMounts` in container-runner.ts). Without this, a
+        // mount that can never satisfy the allowlist is stored, reported as
+        // added, and then silently rejected on every subsequent spawn — the
+        // operator sees success once and failure never. Reject at write time so
+        // the reason is visible where it can still be acted on.
+        const check = validateMount(mount);
+        if (!check.allowed) {
+          throw new Error(
+            `Mount rejected: ${check.reason}. Additional mounts are confined to /workspace/extra/, so ` +
+              `--container must be a relative name (e.g. "zotero-md", not "/workspace/zotero-md"), and ` +
+              `--host must resolve under a root in the mount allowlist.`,
+          );
+        }
+
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
           existing.push(mount);
           await updateContainerConfigJson(id, 'additional_mounts', existing);
         }
-        return { added: mount, note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.` };
+        return {
+          added: mount,
+          // Where it actually lands — the stored containerPath is a name, not a
+          // path, and the difference is not otherwise discoverable.
+          mountedAt: `/workspace/extra/${check.resolvedContainerPath}`,
+          readonly: check.effectiveReadonly,
+          note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.`,
+        };
       },
     },
     'config remove-mount': {

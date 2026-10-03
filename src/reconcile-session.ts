@@ -67,8 +67,10 @@ export function decideStuckAction(args: {
   containerStartedAtMs?: number; // fallback when heartbeat file absent
   containerState: ContainerState | null;
   claims: Array<{ messageId: string; statusChanged: string }>;
+  /** Due inbound messages, claimed or not. Defaults to none. */
+  dueMessages?: number;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
+  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims, dueMessages = 0 } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
 
   // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
@@ -107,7 +109,13 @@ export function decideStuckAction(args: {
       //
       // Both are killed the same way; they must not read the same way in the
       // logs, or a real hang hides among the routine reaps.
-      const idle = claims.length === 0 && !containerState?.currentTool;
+      //
+      // A due message nobody has claimed is work outstanding too: a live
+      // container's poll loop picks one up within a second, so one still
+      // waiting at the ceiling means the loop has hung. (A message landing in
+      // the very second of this check reads as outstanding — it only changes
+      // the log level of a kill that happens either way.)
+      const idle = claims.length === 0 && !containerState?.currentTool && dueMessages === 0;
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling, idle };
     }
   }
@@ -270,6 +278,7 @@ async function enforceRunningContainerSla(
     containerStartedAtMs: getContainerStartedAtMs(session.id),
     containerState: outDb.getContainerState(),
     claims: gatedClaims,
+    dueMessages: inDb.countDueMessages(),
   });
 
   if (decision.action === 'ok') return;
@@ -291,6 +300,7 @@ async function enforceRunningContainerSla(
       ceilingMs: decision.ceilingMs,
       currentTool: outDb.getContainerState()?.currentTool ?? null,
       claims: gatedClaims.length,
+      dueMessages: inDb.countDueMessages(),
     });
     killContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');

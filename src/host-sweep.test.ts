@@ -66,6 +66,20 @@ describe('decideStuckAction', () => {
     expect(res).toMatchObject({ action: 'kill-ceiling', idle: false });
   });
 
+  // A live poll loop claims a due message within a second; one still waiting
+  // at the ceiling means the loop hung. Logged as a routine idle reap, the
+  // hang never reached the error log (found by the 2026-10-03 recheck).
+  it('marks a ceiling kill not idle when a due message is waiting unclaimed', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [],
+      dueMessages: 1,
+    });
+    expect(res).toMatchObject({ action: 'kill-ceiling', idle: false });
+  });
+
   it('marks a ceiling kill not idle when a tool is in flight', () => {
     const res = decideStuckAction({
       now: BASE,

@@ -39,12 +39,18 @@ export async function buildInvocationForSession(
   const db = getDb();
   if (!(await db.hasTable('invocations'))) return null;
 
-  // Resolve task_id for specialist sessions
+  // Resolve task_id for specialist sessions: a specialist task's session is
+  // the one whose thread_id is that task, in the task's own agent group (the
+  // same identity getLiveTasksWithSessions joins on). Not "no messaging
+  // group": specialist sessions carry the null-channel messaging group, so
+  // that test never matched and task_id was never recorded.
   let taskId: string | null = null;
-  if (!session.messaging_group_id && session.thread_id) {
-    const row = (await db.get('SELECT id FROM specialist_tasks WHERE id = ?', session.thread_id)) as
-      | { id: string }
-      | undefined;
+  if (session.thread_id) {
+    const row = (await db.get(
+      'SELECT id FROM specialist_tasks WHERE id = ? AND specialist_group_id = ?',
+      session.thread_id,
+      session.agent_group_id,
+    )) as { id: string } | undefined;
     if (row) taskId = row.id;
   }
 
@@ -234,11 +240,14 @@ export async function endInvocationById(invocationId: string): Promise<void> {
   //     _populateIpcIn can re-place them from host staging. Expiring here would
   //     lose the files across retries, violating the "files survive task restarts"
   //     invariant.
+  // A specialist task's session: thread_id = task, same agent group (see
+  // buildInvocationForSession). A messaging-group test here never matched, so
+  // in-transit files were expired on every restart instead of kept.
   const taskRow = (await db.get(
     `SELECT st.status
        FROM sessions s
-       JOIN specialist_tasks st ON st.id = s.thread_id
-       WHERE s.id = ? AND s.messaging_group_id IS NULL`,
+       JOIN specialist_tasks st ON st.id = s.thread_id AND st.specialist_group_id = s.agent_group_id
+       WHERE s.id = ?`,
     inv.session_id,
   )) as { status: string } | undefined;
 

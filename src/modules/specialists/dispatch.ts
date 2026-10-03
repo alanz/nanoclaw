@@ -11,7 +11,7 @@ import { requestWake } from '../../request-wake.js';
 import type { Session } from '../../types.js';
 import {
   createTask,
-  getRunningTaskForGroup,
+  getLiveTaskForSession,
   getSpecialist,
   isMainGroup,
   sameTypeDispatchCount,
@@ -164,7 +164,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     return;
   }
 
-  const parentTask = await getRunningTaskForGroup(session.agent_group_id);
+  const parentTask = await getLiveTaskForSession(session);
   if (!parentTask) {
     notifyAgent(session, 'dispatch_sub_task failed: no running task found for this specialist session.');
     return;

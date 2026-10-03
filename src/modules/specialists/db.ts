@@ -60,13 +60,24 @@ export async function getTask(id: string): Promise<SpecialistTask | undefined> {
   return getDb().get<SpecialistTask>('SELECT * FROM specialist_tasks WHERE id = ?', id);
 }
 
-/** Find the live (non-terminal) task for a specialist session identified by thread_id = task.id. */
-export async function getRunningTaskForGroup(agentGroupId: string): Promise<SpecialistTask | undefined> {
+/**
+ * The live (non-terminal) task a specialist session works for. A specialist
+ * task's session is the one whose thread_id is that task, in the task's own
+ * agent group — the identity getLiveTasksWithSessions and the invocation code
+ * use. Not "the newest live task in the group": with two tasks for one
+ * specialist running at once, that answered for the wrong one.
+ */
+export async function getLiveTaskForSession(session: {
+  agent_group_id: string;
+  thread_id: string | null;
+}): Promise<SpecialistTask | undefined> {
+  if (!session.thread_id) return undefined;
   return getDb().get<SpecialistTask>(
     `SELECT * FROM specialist_tasks
-     WHERE specialist_group_id = ? AND status IN ('queued','running','awaiting_sub_task','awaiting_restart')
-     ORDER BY dispatched_at DESC LIMIT 1`,
-    agentGroupId,
+     WHERE id = ? AND specialist_group_id = ?
+       AND status IN ('queued','running','awaiting_sub_task','awaiting_restart')`,
+    session.thread_id,
+    session.agent_group_id,
   );
 }
 

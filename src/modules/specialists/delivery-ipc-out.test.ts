@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const env = vi.hoisted(() => ({ root: '' }));
 
 vi.mock('./db.js', () => ({
-  getRunningTaskForGroup: vi.fn(async () => ({
+  getLiveTaskForSession: vi.fn(async () => ({
     id: 'task-1',
     status: 'running',
     requester_group_id: 'ag-main',

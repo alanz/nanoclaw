@@ -14,7 +14,7 @@ import fs from 'fs';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { getDb } from '../../db/connection.js';
-import { getRunningTaskForGroup, updateTaskStatus } from './db.js';
+import { getLiveTaskForSession, updateTaskStatus } from './db.js';
 import { routeResult } from './routing.js';
 import { getActiveInvocation, hostStagingPath, TRANSFERS_BASE_DIR } from './invocation.js';
 import { SPECIALISTS_CONFIG } from './config.js';
@@ -34,10 +34,12 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
     return;
   }
 
-  const task = await getRunningTaskForGroup(session.agent_group_id);
+  const task = await getLiveTaskForSession(session);
   if (!task) {
-    log.warn('specialists: deliver_specialist_result — no live task for agent group', {
+    log.warn('specialists: deliver_specialist_result — no live task for this session', {
       agentGroupId: session.agent_group_id,
+      sessionId: session.id,
+      threadId: session.thread_id,
     });
     return;
   }

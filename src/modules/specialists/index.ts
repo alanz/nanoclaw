@@ -68,6 +68,9 @@ onHostStart(async () => {
 
   const reclaimed = await sweepTransferStaging();
   if (reclaimed > 0) log.info('specialists: reclaimed staging of finished transfers', { count: reclaimed });
+  // Before the directory sweep, so the invocations ended here lose theirs.
+  const orphaned = await reconcileOpenInvocations();
+  if (orphaned > 0) log.info('specialists: ended invocations left open by a restart', { count: orphaned });
   const removed = await sweepInvocationDirs();
   if (removed > 0) log.info('specialists: removed directories of ended invocations', { count: removed });
 });
@@ -124,6 +127,36 @@ registerBootCrashExemption(async (sessionId) => {
  * it finds, as a backstop for an exit that never reported.
  */
 const activeInvocations = new Map<string, string>();
+
+/**
+ * Reconcile open invocations with what is actually running, once adoption is
+ * done (host-start hooks run after it). The map above is in memory, so a
+ * restart forgot which invocation an adopted container holds: when that
+ * container later exited the hook found nothing to end, and the invocation —
+ * with its ipc directory and any in-transit files — stayed open. For a session
+ * that runs again the next spawn ends it; for a closed one, never (two from
+ * August were still open). Running containers get their invocation back;
+ * every other open invocation is ended now.
+ */
+async function reconcileOpenInvocations(): Promise<number> {
+  const { getDb } = await import('../../db/index.js');
+  const { isContainerRunning } = await import('../../container-runner.js');
+  const db = getDb();
+  if (!(await db.hasTable('invocations'))) return 0;
+  const open = await db.all<{ id: string; session_id: string }>(
+    'SELECT id, session_id FROM invocations WHERE ended_at IS NULL',
+  );
+  let ended = 0;
+  for (const inv of open) {
+    if (isContainerRunning(inv.session_id)) {
+      activeInvocations.set(inv.session_id, inv.id);
+    } else {
+      await endInvocationById(inv.id);
+      ended++;
+    }
+  }
+  return ended;
+}
 
 registerSessionContributor(async ({ session }) => {
   const built = await buildInvocationForSession(session);

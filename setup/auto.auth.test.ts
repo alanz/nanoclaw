@@ -11,6 +11,11 @@ const fixture = vi.hoisted(() => ({
   order: [] as string[],
   opencodeInstalled: true,
 }));
+// The wizard reads the checkout's `.env` — a real install's settings (e.g. a
+// native-proxy gateway) — which steered it down branches these cases never
+// meant to exercise, so they passed or failed by machine. Run as on a checkout
+// with no `.env`: the CI condition.
+vi.mock('../src/env.js', () => ({ readEnvFile: () => ({}), envValue: () => undefined }));
 vi.mock('./providers/index.js', () => ({}));
 vi.mock('./providers/registry.js', () => {
   const entry = {

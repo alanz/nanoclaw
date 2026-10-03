@@ -6,10 +6,12 @@ description: Supply Anthropic credentials from .env instead of the OneCLI vault.
 # Use the native credential proxy
 
 An install has to get an Anthropic credential into every agent session without
-letting the session hold one. NanoClaw's default answer is the OneCLI vault,
-which injects per request. This is the other answer: the credential stays in
-`.env`, the host runs a small proxy in front of `api.anthropic.com`, and
-containers are pointed at the proxy with a placeholder token.
+letting the session hold one. Upstream NanoClaw's default answer is the OneCLI
+vault, which injects per request. This fork's default is the other answer: the
+credential stays in `.env`, the host runs a small proxy in front of
+`api.anthropic.com`, and containers are pointed at the proxy with a placeholder
+token. Setup selects it unless a gateway is already named in `.env` or
+installed.
 
 The container never holds a real credential either way. That property is not
 negotiable — it is what the session spec's admission rules enforce, and this
@@ -40,7 +42,10 @@ the security boundary; the secret is.
 
 ## Enable it
 
-Set the gateway provider in `.env`:
+Setup does this on a fresh install: it writes the selection below and, if
+`.env` has no credential yet, offers a subscription sign-in or a pasted token
+or key. To switch an existing install by hand, set the gateway provider in
+`.env`:
 
 ```bash
 NANOCLAW_GATEWAY_PROVIDER=native-proxy
@@ -77,6 +82,9 @@ container still holding the old placeholder.
 
 ## Going back to the vault
 
-Remove `NANOCLAW_GATEWAY_PROVIDER` from `.env` (or set it to `onecli`) and
-restart. Nothing else is patched, so there is nothing else to undo. Move the
-credential into the vault before you do, or sessions will start without one.
+Set `NANOCLAW_GATEWAY_PROVIDER=onecli` in `.env`, install it with
+`/add-onecli`, and restart. Do not just remove the line: the host has no
+implicit gateway and refuses to start without one named, and a setup re-run
+would select the native proxy again. Nothing else is patched, so there is
+nothing else to undo. Move the credential into the vault before you do, or
+sessions will start without one.

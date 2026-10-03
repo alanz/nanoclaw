@@ -169,6 +169,18 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     notifyAgent(session, 'dispatch_sub_task failed: no running task found for this specialist session.');
     return;
   }
+  // The call itself proves the parent's container is up — the same evidence
+  // the recovery sweep uses to advance queued / awaiting_restart to running,
+  // but the sweep runs once a minute. A specialist that delegates in its first
+  // minute was rejected and had to retry (seen live).
+  if (parentTask.status === 'queued' || parentTask.status === 'awaiting_restart') {
+    log.info('specialists: task advanced to running by its own dispatch', {
+      taskId: parentTask.id,
+      from: parentTask.status,
+    });
+    await updateTaskStatus(parentTask.id, 'running');
+    parentTask.status = 'running';
+  }
   if (parentTask.status !== 'running') {
     notifyAgent(
       session,

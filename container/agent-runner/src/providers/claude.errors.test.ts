@@ -65,7 +65,7 @@ it.each([false, true])('delivers the Claude SDK billing error once, with prior r
 
   await processQuery(
     query,
-    { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1' },
+    { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1', taskRun: false },
     ['m1'],
     'claude',
     (exchange) => exchanges.push(exchange),

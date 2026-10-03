@@ -8,6 +8,15 @@ import { askUserQuestion, LINK_ACTION_SCHEMA, sendCard } from './interactive.js'
 beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
 
+type ToolResult = Awaited<ReturnType<typeof sendCard.handler>>;
+
+/** The text of a tool result's first item — these tools only ever answer in text. */
+function firstText(result: ToolResult): string {
+  const item = result.content[0];
+  if (item?.type !== 'text') throw new Error(`expected text content, got ${item?.type}`);
+  return item.text;
+}
+
 describe('ask_user_question cancellation', () => {
   const args = { title: 'Fixture', question: 'Choose', options: ['yes', 'no'] };
   it('does not publish a question for an already cancelled request', async () => {
@@ -15,7 +24,7 @@ describe('ask_user_question cancellation', () => {
     controller.abort();
     const result = await askUserQuestion.handler(args, { signal: controller.signal });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('cancelled');
+    expect(firstText(result)).toContain('cancelled');
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
@@ -28,7 +37,7 @@ describe('ask_user_question cancellation', () => {
     controller.abort();
     const result = await waiting;
     expect(Date.now() - started).toBeLessThan(250);
-    expect(result.content[0].text).toContain('cancelled');
+    expect(firstText(result)).toContain('cancelled');
     getInboundDb()
       .prepare('INSERT INTO messages_in (id, kind, timestamp, content) VALUES (?, ?, ?, ?)')
       .run(
@@ -55,8 +64,8 @@ describe('send_card', () => {
     });
 
     expect(result.isError).not.toBe(true);
-    expect(result.content[0].text).toContain('2 invalid action(s) were dropped');
-    expect(result.content[0].text).toContain('ask_user_question');
+    expect(firstText(result)).toContain('2 invalid action(s) were dropped');
+    expect(firstText(result)).toContain('ask_user_question');
     // Only renderable actions reach the payload, so the count and the row agree.
     const content = JSON.parse(getUndeliveredMessages()[0].content);
     expect(content.type).toBe('card');
@@ -68,7 +77,7 @@ describe('send_card', () => {
       card: { title: 'Test', actions: [null, { label: 'Docs', url: 'https://example.com' }] },
     });
 
-    expect(result.content[0].text).toContain('1 invalid action(s) were dropped');
+    expect(firstText(result)).toContain('1 invalid action(s) were dropped');
     const content = JSON.parse(getUndeliveredMessages()[0].content);
     expect(content.card.actions).toEqual([{ label: 'Docs', url: 'https://example.com' }]);
   });
@@ -83,7 +92,7 @@ describe('send_card', () => {
         card: { title: 'Test', actions: [{ label: 'Docs', url: 'https://example.com', style }] },
       });
 
-      expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+      expect(firstText(result)).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
       const content = JSON.parse(getUndeliveredMessages()[0].content);
       expect(content.card.actions).toEqual([{ label: 'Docs', url: 'https://example.com', style }]);
     },
@@ -94,7 +103,7 @@ describe('send_card', () => {
       card: { title: 'Test', actions: [{ label: '', url: 'https://example.com' }] },
     });
 
-    expect(result.content[0].text).toContain('1 invalid action(s) were dropped');
+    expect(firstText(result)).toContain('1 invalid action(s) were dropped');
     const content = JSON.parse(getUndeliveredMessages()[0].content);
     expect(content.card.actions).toEqual([]);
   });
@@ -109,7 +118,7 @@ describe('send_card', () => {
   });
 
   it('advertises the same action schema it enforces', () => {
-    const cardSchema = sendCard.tool.inputSchema.properties.card as {
+    const cardSchema = sendCard.tool.inputSchema.properties?.card as {
       properties: { actions: { items: unknown } };
     };
 
@@ -121,8 +130,8 @@ describe('send_card', () => {
       card: { title: 'Test', actions: [{ url: 'https://example.com' }] },
     });
 
-    expect(result.content[0].text).toContain('1 invalid action(s) were dropped');
-    expect(result.content[0].text).toContain('web link (http or https)');
+    expect(firstText(result)).toContain('1 invalid action(s) were dropped');
+    expect(firstText(result)).toContain('web link (http or https)');
   });
 
   // A model asked for an approval card cannot make a callback button, so it
@@ -150,7 +159,7 @@ describe('send_card', () => {
       card: { title: 'Test Approval Card', actions: [{ label: 'Approve', url }] },
     });
 
-    expect(result.content[0].text).toContain('1 invalid action(s) were dropped');
+    expect(firstText(result)).toContain('1 invalid action(s) were dropped');
     const content = JSON.parse(getUndeliveredMessages()[0].content);
     expect(content.card.actions).toEqual([]);
   });
@@ -162,7 +171,7 @@ describe('send_card', () => {
     async (url) => {
       const result = await sendCard.handler({ card: { title: 'Test', actions: [{ label: 'Open', url }] } });
 
-      expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+      expect(firstText(result)).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
       const content = JSON.parse(getUndeliveredMessages()[0].content);
       expect(content.card.actions).toEqual([{ label: 'Open', url }]);
     },
@@ -179,7 +188,7 @@ describe('send_card', () => {
       },
     });
 
-    expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+    expect(firstText(result)).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
     const content = JSON.parse(getUndeliveredMessages()[0].content);
     expect(content.card.actions).toEqual([
       { label: 'Wiki', url: 'https://de.wikipedia.org/wiki/M%C3%BCnchen' },
@@ -222,7 +231,7 @@ describe('send_card', () => {
   });
 
   it('constrains children to text instead of promising nested action blocks', () => {
-    const cardSchema = sendCard.tool.inputSchema.properties.card as {
+    const cardSchema = sendCard.tool.inputSchema.properties?.card as {
       properties: { children: { description: string; items: { anyOf: Array<Record<string, unknown>> } } };
     };
 
@@ -235,13 +244,13 @@ describe('send_card', () => {
       card: { title: 'Test', actions: [{ label: 'Docs', url: 'https://example.com' }] },
     });
 
-    expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+    expect(firstText(result)).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
   });
 
   it('stays quiet for display-only cards', async () => {
     const result = await sendCard.handler({ card: { title: 'Test', description: 'No actions' } });
 
-    expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+    expect(firstText(result)).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
   });
 });
 
@@ -311,7 +320,7 @@ async function sendBoth(): Promise<Array<string | null>> {
   while (getUndeliveredMessages().length < 1) await new Promise((r) => setTimeout(r, 10));
   const question = getUndeliveredMessages()[0];
   answerQuestion(JSON.parse(question.content).questionId, question.thread_id);
-  expect((await pending).content[0].text).toBe('yes');
+  expect(firstText(await pending)).toBe('yes');
   await sendCard.handler({ card: { title: 'Info' } });
   return getUndeliveredMessages().map((m) => m.thread_id);
 }

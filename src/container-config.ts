@@ -233,6 +233,13 @@ export interface AdditionalMountConfig {
   hostPath: string;
   containerPath: string;
   readonly?: boolean;
+  /**
+   * Also index this mount's .md/.org files into the group's semantic memory
+   * search (host-side; files are labelled with the mount name and stored as
+   * the container sees them, `extra/<name>/…`). Only for groups that have
+   * memory search at all.
+   */
+  index?: boolean;
 }
 
 /** Shape of the materialized `container.json` file read by the container runner. */

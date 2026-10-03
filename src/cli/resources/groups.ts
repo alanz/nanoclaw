@@ -605,8 +605,10 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <name> [--ro]; ' +
-        'the mount lands at /workspace/extra/<name>, and --host must be under a mount-allowlist root.',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <name> [--ro] [--index]; ' +
+        'the mount lands at /workspace/extra/<name>, and --host must be under a mount-allowlist root. ' +
+        "--index also indexes the mount's .md/.org files into the group's memory search (host restart to apply). " +
+        'Re-running for an existing mount sets its flags to the ones given.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -621,6 +623,7 @@ registerResource({
           hostPath,
           containerPath,
           ...(args.ro || args.readonly ? { readonly: true } : {}),
+          ...(args.index ? { index: true } : {}),
         };
 
         // Validate against the same allowlist the spawn path enforces
@@ -638,13 +641,17 @@ registerResource({
           );
         }
 
+        // Idempotent, and an upsert: re-adding an existing mount sets its flags
+        // to the ones given (how --index is turned on for a mount already
+        // there). A second add with different flags used to be ignored.
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
-        if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
-          existing.push(mount);
-          await updateContainerConfigJson(id, 'additional_mounts', existing);
-        }
+        const at = existing.findIndex((m) => m.hostPath === hostPath && m.containerPath === containerPath);
+        if (at < 0) existing.push(mount);
+        else existing[at] = mount;
+        await updateContainerConfigJson(id, 'additional_mounts', existing);
         return {
           added: mount,
+          ...(mount.index ? { indexed: true, indexNote: 'Restart the host for memory search to index it.' } : {}),
           // Where it actually lands — the stored containerPath is a name, not a
           // path, and the difference is not otherwise discoverable.
           mountedAt: `/workspace/extra/${check.resolvedContainerPath}`,

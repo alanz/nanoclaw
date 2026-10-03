@@ -79,13 +79,22 @@ async function cancelSubtree(taskId: string): Promise<void> {
   if (task.status === 'completed' || task.status === 'failed') return;
 
   const ts = new Date().toISOString();
-  await updateTaskStatus(task.id, 'failed', {
+  const failure = {
     failure_kind: 'execution_error',
     failure_detail: 'cancelled: ancestor specialist container crashed',
     closed_at: ts,
     pending_sub_task_id: null,
-  });
+  };
+  await updateTaskStatus(task.id, 'failed', failure);
   log.info('specialists: sub-task cancelled due to ancestor crash', { taskId: task.id });
+
+  // A cancelled task is terminal like any other (the spec's
+  // SpecialistResultReady), so it goes through routeResult: that ends its
+  // invocation and closes its session, killing a container that would
+  // otherwise run on, holding a concurrency slot, for work nobody will read.
+  // The result itself is dropped — every caller has already moved the parent
+  // out of awaiting_sub_task, so routing finds no one waiting for it.
+  await routeResult({ ...task, status: 'failed', ...failure });
 
   if (task.pending_sub_task_id) {
     await cancelSubtree(task.pending_sub_task_id);

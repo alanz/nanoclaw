@@ -227,6 +227,33 @@ describe('SubTaskAwaitTimedOut rule', () => {
     expect(updatedGrandchild.status).toBe('failed');
   });
 
+  // P2: cancellation only marked the tasks failed; their containers ran on,
+  // holding concurrency slots, and their sessions stayed open. Each cancelled
+  // task is terminal and must go through routeResult, which ends its
+  // invocation and closes its session (killing the container). Its parent is
+  // never still awaiting it, so the result itself is dropped.
+  it('routes every cancelled task, so its session is closed and its container stopped', async () => {
+    const overdueMs = SPECIALISTS_CONFIG.maxSubTaskAwaitMs + 1000;
+    const grandchild = await makeSpecialistTask({ status: 'running', dispatchedAgo: overdueMs });
+    const child = await makeSpecialistTask({
+      status: 'awaiting_sub_task',
+      dispatchedAgo: overdueMs,
+      pendingSubTaskId: grandchild.id,
+    });
+    await makeSpecialistTask({ status: 'awaiting_sub_task', pendingSubTaskId: child.id, restartAttemptCount: 0 });
+    vi.mocked(routeResult).mockClear();
+
+    await sweepSpecialistTasks();
+
+    const routed = vi.mocked(routeResult).mock.calls.map(([t]) => ({ id: t.id, status: t.status }));
+    expect(routed).toEqual(
+      expect.arrayContaining([
+        { id: child.id, status: 'failed' },
+        { id: grandchild.id, status: 'failed' },
+      ]),
+    );
+  });
+
   it('does not fire when the child is not yet overdue', async () => {
     const child = await makeSpecialistTask({ status: 'running', dispatchedAgo: 1000 }); // 1 second ago
     const parent = await makeSpecialistTask({
@@ -301,11 +328,13 @@ describe('SubTaskAwaitExhausted rule', () => {
 
     await sweepSpecialistTasks();
 
-    expect(routeResult).toHaveBeenCalledOnce();
-    const arg = vi.mocked(routeResult).mock.calls[0][0];
-    expect(arg.id).toBe(parent.id);
+    // The parent's own failure, for its requester. (The cancelled child is
+    // routed too, to close its session — see the subtree cancellation tests.)
+    const routed = vi.mocked(routeResult).mock.calls.map(([t]) => t);
+    const arg = routed.find((t) => t.id === parent.id)!;
     expect(arg.status).toBe('failed');
     expect(arg.failure_kind).toBe('timeout');
+    expect(routed.map((t) => t.id).sort()).toEqual([child.id, parent.id].sort());
   });
 });
 

@@ -10,6 +10,7 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
+import { isShutdownRequested } from './shutdown.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
@@ -335,6 +336,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // A specialist that dispatched a sub-task or delivered its result is done
+    // with this container: return so the runner exits and its concurrency
+    // slot frees. The conversation was persisted above, so a sub-task's result
+    // resumes it in the next container.
+    if (isShutdownRequested()) {
+      log('Shutdown requested by a specialist tool — exiting after this turn');
+      return;
+    }
   }
 }
 
@@ -736,6 +746,13 @@ export async function processQuery(
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
+        // The stream stays open between turns for follow-ups; a specialist
+        // that asked to exit must not sit here waiting for one. Only once no
+        // turn (queued or a nudge retry) is still owed an answer.
+        if (!answering && isShutdownRequested()) {
+          query.abort();
+          break;
+        }
       }
     }
   } catch (err) {

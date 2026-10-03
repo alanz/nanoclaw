@@ -64,8 +64,11 @@ dispatch_sub_task(
 )
 ```
 
-After calling this, end your turn immediately. When the sub-task completes,
-its result will be injected into your next invocation and you can continue.
+After calling this, end your turn immediately. Your container exits; when the
+sub-task completes, you are restarted with your conversation intact and its
+result arrives as a new message. `/workspace/ipc-out` starts empty again, so
+anything you left there before dispatching is lost — write files for your own
+result after the sub-task returns.
 
 Chain limits apply: depth, total delegations, and same-specialist-type repeat
 counts are enforced by the host. If a dispatch is rejected, the refusal is

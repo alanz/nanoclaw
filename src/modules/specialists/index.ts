@@ -11,13 +11,14 @@
  * Also exports sweepSpecialistTasks() for use by host-sweep.ts.
  */
 import { registerSessionContributor, registerSessionExitHook } from '../../container-runner.js';
-import { registerDeliveryAction } from '../../delivery.js';
+import { deliverSessionMessages, registerDeliveryAction } from '../../delivery.js';
+import { getSession } from '../../db/sessions.js';
 import { unguarded } from '../../guard/index.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
 import { registerBootCrashExemption } from '../boot-crash/index.js';
 import { registerMemoryGroupExclusion } from '../../memory/manager.js';
-import { getSpecialist } from './db.js';
+import { getSpecialist, getTask } from './db.js';
 import './group-delete.js';
 import { handleDispatchSpecialist, handleDispatchSubTask } from './dispatch.js';
 import { handleDeliverSpecialistResult } from './delivery.js';
@@ -126,22 +127,50 @@ registerSessionContributor(async ({ session }) => {
  * files the next task starts from. So it is read-only, and per-task state
  * lives in the session (and ipc-out) instead.
  *
- * Each task also starts from a clean conversation. A restarted task is sent
- * its prompt again; resuming the crashed attempt's conversation as well would
- * hand it the task twice, from a state that already failed once.
+ * NANOCLAW_SPECIALIST lets the runner honour "exit after this turn" from
+ * dispatch_sub_task and deliver_specialist_result, which frees the container's
+ * concurrency slot instead of holding it while the child runs or after the
+ * task is done.
+ *
+ * A task starts from a clean conversation when it first starts (queued) or is
+ * restarted (awaiting_restart): a restarted task is sent its prompt again, and
+ * resuming the failed attempt's conversation as well would hand it the task
+ * twice. A task woken while running — a sub-task's result routed back, which
+ * sets the parent running before it wakes it — resumes, so the result lands in
+ * the conversation that asked for it.
  */
-registerSessionContributor(async ({ agentGroup }) => {
+registerSessionContributor(async ({ agentGroup, session }) => {
   if (!(await getSpecialist(agentGroup.id))) return undefined;
-  return { readonlyWorkspace: true, env: { NANOCLAW_FRESH_CONVERSATION: '1' } };
+  const task = session.thread_id ? await getTask(session.thread_id) : undefined;
+  const fresh = !task || task.status === 'queued' || task.status === 'awaiting_restart';
+  return {
+    readonlyWorkspace: true,
+    env: { NANOCLAW_SPECIALIST: '1', ...(fresh ? { NANOCLAW_FRESH_CONVERSATION: '1' } : {}) },
+  };
 });
 
+/**
+ * Handle what the container left in outbound.db BEFORE ending its invocation.
+ * A specialist exits right after dispatch_sub_task / deliver_specialist_result,
+ * and the 1s delivery poll only covers sessions with a running container — so
+ * without this its final system action would wait for the 60s sweep. Two
+ * things go wrong in that gap: the task still reads `running` with no
+ * container, which recovery takes for a crash; and ending the invocation
+ * clears ipc-out before deliver_specialist_result has taken its files.
+ */
 registerSessionExitHook(({ sessionId }) => {
   const invocationId = activeInvocations.get(sessionId);
   if (!invocationId) return;
   activeInvocations.delete(sessionId);
-  void endInvocationById(invocationId).catch((err) =>
-    log.warn('specialists: invocation cleanup failed', { sessionId, invocationId, err }),
-  );
+  void (async () => {
+    try {
+      const session = await getSession(sessionId);
+      if (session) await deliverSessionMessages(session);
+    } catch (err) {
+      log.warn('specialists: final outbound drain failed', { sessionId, err });
+    }
+    await endInvocationById(invocationId);
+  })().catch((err) => log.warn('specialists: invocation cleanup failed', { sessionId, invocationId, err }));
 });
 
 export { sweepSpecialistTasks };

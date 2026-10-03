@@ -24,6 +24,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
+import { clearShutdownRequest } from './shutdown.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
 import { clearContinuation, migrateLegacyContinuation } from './db/session-state.js';
@@ -59,10 +60,13 @@ async function main(): Promise<void> {
   await mailbox.start(await readMailboxContext());
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
+  clearShutdownRequest();
 
-  // A session the host starts clean (a specialist task, today) must not resume
-  // an earlier container's conversation: a restarted task is sent its prompt
-  // again, and resuming as well would hand it the task twice.
+  // A session the host starts clean (a specialist task's first start or a
+  // restart, today) must not resume an earlier container's conversation: a
+  // restarted task is sent its prompt again, and resuming as well would hand
+  // it the task twice. A specialist returning from a sub-task is not started
+  // clean — it resumes, so the result lands in the conversation that asked.
   if (process.env.NANOCLAW_FRESH_CONVERSATION === '1') {
     // Fold any legacy-keyed continuation in first, so the poll loop's own
     // migration cannot bring it back after the clear.
@@ -153,7 +157,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// The poll loop only returns when a specialist tool asked the container to
+// exit after its turn (see shutdown.ts). Exit explicitly: the provider's MCP
+// child and timers would otherwise keep the process alive.
+main().then(
+  () => process.exit(0),
+  (err) => {
+    log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  },
+);

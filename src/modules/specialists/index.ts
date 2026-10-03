@@ -23,7 +23,7 @@ import { getSpecialist, getTask } from './db.js';
 import './group-delete.js';
 import { handleDispatchSpecialist, handleDispatchSubTask } from './dispatch.js';
 import { handleDeliverSpecialistResult } from './delivery.js';
-import { buildInvocationForSession, endInvocationById } from './invocation.js';
+import { buildInvocationForSession, endInvocationById, sweepTransferStaging } from './invocation.js';
 import { sweepSpecialistTasks } from './recovery.js';
 
 // Internal specialist orchestration between the operator's own agent groups —
@@ -60,6 +60,9 @@ onHostStart(async () => {
   const { getDb } = await import('../../db/index.js');
   const rows = await getDb().all<{ agent_group_id: string }>('SELECT agent_group_id FROM specialists');
   for (const row of rows) specialistGroups.add(row.agent_group_id);
+
+  const reclaimed = await sweepTransferStaging();
+  if (reclaimed > 0) log.info('specialists: reclaimed staging of finished transfers', { count: reclaimed });
 });
 
 registerMemoryGroupExclusion((groupId) => specialistGroups.has(groupId));

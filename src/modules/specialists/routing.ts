@@ -20,6 +20,7 @@ import {
   endActiveInvocationForSession,
   expireTransfersForTerminalTask,
   placeTransferIntoActiveIpcIn,
+  reclaimTransferStaging,
 } from './invocation.js';
 import type { ContainerTransfer, SpecialistTask, TransferFile } from './types.js';
 
@@ -131,6 +132,9 @@ async function routeResultToMain(task: SpecialistTask, transfer: ContainerTransf
           await db.run("UPDATE container_transfers SET status = 'committed' WHERE id = ?", transfer.id);
           await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", transfer.id);
         });
+        // The spec's commit reclaims the staging copies at once: the memory
+        // copies are what persist, and no ipc-in will ever want them.
+        reclaimTransferStaging(transfer.id);
       } else {
         log.warn('specialists: requester group not found for memory commit', {
           taskId: task.id,

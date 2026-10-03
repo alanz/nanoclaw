@@ -35,6 +35,7 @@ import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { createSession } from '../../db/sessions.js';
 import { createSpecialist, createTask, getTask } from './db.js';
+import { TRANSFERS_BASE_DIR } from './invocation.js';
 import { routeResult } from './routing.js';
 import type { ContainerTransfer, SpecialistTask } from './types.js';
 
@@ -149,8 +150,12 @@ async function rootTaskWithCommittedTransfer(): Promise<{ task: SpecialistTask; 
 describe('committing a root task’s files to memory', () => {
   it('records each file once and expires the transfer, with no file marked placed', async () => {
     const { task, transfer } = await rootTaskWithCommittedTransfer();
+    fs.mkdirSync(path.join(TRANSFERS_BASE_DIR, 'xfer-1'), { recursive: true });
 
     await routeResult(task, transfer);
+
+    // P12: the spec's commit reclaims the staging copies at once.
+    expect(fs.existsSync(path.join(TRANSFERS_BASE_DIR, 'xfer-1'))).toBe(false);
 
     const db = getDb();
     expect(

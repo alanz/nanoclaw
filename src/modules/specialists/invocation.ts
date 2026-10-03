@@ -24,6 +24,43 @@ export function hostStagingPath(transferId: string, filename: string): string {
   return path.join(TRANSFERS_BASE_DIR, transferId, filename);
 }
 
+/**
+ * Delete a transfer's host staging copies. Only once the transfer is
+ * expired: until then (pending, in_transit) a later invocation may need them
+ * to place the files again. Before this nothing reclaimed them except the
+ * all-files-failed delivery path, so data/v2-transfers grew with every
+ * delivery that carried files (P12).
+ */
+export function reclaimTransferStaging(transferId: string): void {
+  try {
+    fs.rmSync(path.join(TRANSFERS_BASE_DIR, transferId), { recursive: true, force: true });
+  } catch (err) {
+    log.warn('specialists: could not reclaim transfer staging', { transferId, err });
+  }
+}
+
+/**
+ * Reclaim the staging of every transfer that can no longer be placed: expired
+ * (or the transient committed), or unknown to the DB. Run at host start, when
+ * no delivery is in flight — it clears what piled up before reclamation
+ * existed and anything a crash left behind.
+ */
+export async function sweepTransferStaging(): Promise<number> {
+  if (!fs.existsSync(TRANSFERS_BASE_DIR)) return 0;
+  const db = getDb();
+  if (!(await db.hasTable('container_transfers'))) return 0;
+  let reclaimed = 0;
+  for (const transferId of fs.readdirSync(TRANSFERS_BASE_DIR)) {
+    const row = (await db.get('SELECT status FROM container_transfers WHERE id = ?', transferId)) as
+      | { status: string }
+      | undefined;
+    if (row && (row.status === 'pending' || row.status === 'in_transit')) continue;
+    reclaimTransferStaging(transferId);
+    reclaimed++;
+  }
+  return reclaimed;
+}
+
 function genId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -267,6 +304,10 @@ export async function endInvocationById(invocationId: string): Promise<void> {
       inv.session_id,
     );
   } else {
+    const expiring = (await db.all(
+      "SELECT id FROM container_transfers WHERE status = 'in_transit' AND recipient_session_id = ?",
+      inv.session_id,
+    )) as { id: string }[];
     await db.run(
       `UPDATE transfer_files SET status = 'expired'
        WHERE transfer_id IN (
@@ -279,6 +320,7 @@ export async function endInvocationById(invocationId: string): Promise<void> {
       "UPDATE container_transfers SET status = 'expired' WHERE status = 'in_transit' AND recipient_session_id = ?",
       inv.session_id,
     );
+    for (const { id } of expiring) reclaimTransferStaging(id);
   }
 
   // Clean up ipc directories
@@ -317,6 +359,7 @@ export async function expireTransfersForTerminalTask(taskId: string): Promise<vo
   for (const { id } of transfersToExpire) {
     await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
     await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
+    reclaimTransferStaging(id);
   }
 
   // Also expire pending transfers for the task itself that haven't been staged for delivery yet.
@@ -330,5 +373,6 @@ export async function expireTransfersForTerminalTask(taskId: string): Promise<vo
   for (const { id } of pendingTransfers) {
     await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
     await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
+    reclaimTransferStaging(id);
   }
 }

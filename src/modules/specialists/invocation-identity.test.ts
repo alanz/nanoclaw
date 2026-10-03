@@ -9,6 +9,7 @@
  * why they never showed it.
  */
 import fs from 'fs';
+import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const TEST_DIR = '/tmp/nanoclaw-test-invocation-identity';
@@ -25,7 +26,12 @@ import { runMigrations } from '../../db/migrations/index.js';
 import { createSession } from '../../db/sessions.js';
 import type { Session } from '../../types.js';
 import { createSpecialist, createTask } from './db.js';
-import { buildInvocationForSession, endInvocationById } from './invocation.js';
+import {
+  buildInvocationForSession,
+  endInvocationById,
+  sweepTransferStaging,
+  TRANSFERS_BASE_DIR,
+} from './invocation.js';
 import type { SpecialistTask } from './types.js';
 
 const now = () => new Date().toISOString();
@@ -173,5 +179,66 @@ describe('specialist session identity in invocations', () => {
     await endInvocationById(built!.invocationId);
 
     expect(await transferState()).toEqual({ transfer: 'expired', file: 'expired' });
+  });
+});
+
+// P12: a transfer's staging copies were never reclaimed (only when every file
+// in a delivery failed to copy), so data/v2-transfers grew with each delivery.
+// They are needed while the transfer can still be placed, and not after.
+describe('transfer staging', () => {
+  const staging = (id: string) => path.join(TRANSFERS_BASE_DIR, id);
+  function stage(id: string): void {
+    fs.mkdirSync(staging(id), { recursive: true });
+    fs.writeFileSync(path.join(staging(id), 'report.md'), 'x');
+  }
+
+  it("is reclaimed when a finished task's in-transit transfer expires", async () => {
+    const session = await parentSession('completed');
+    const built = await buildInvocationForSession(session);
+    await inTransitTo(session.id, built!.invocationId);
+    stage('xfer-1');
+
+    await endInvocationById(built!.invocationId);
+
+    expect(fs.existsSync(staging('xfer-1'))).toBe(false);
+  });
+
+  it("is kept when a live task's transfer goes back to pending", async () => {
+    const session = await parentSession('awaiting_sub_task');
+    const built = await buildInvocationForSession(session);
+    await inTransitTo(session.id, built!.invocationId);
+    stage('xfer-1');
+
+    await endInvocationById(built!.invocationId);
+
+    expect(fs.existsSync(staging('xfer-1'))).toBe(true);
+  });
+
+  it('is swept at host start for expired and unknown transfers, kept for live ones', async () => {
+    const session = await parentSession('awaiting_sub_task');
+    const built = await buildInvocationForSession(session);
+    await inTransitTo(session.id, built!.invocationId); // xfer-1: in_transit
+    const db = getDb();
+    for (const [id, status] of [
+      ['xfer-pending', 'pending'],
+      ['xfer-expired', 'expired'],
+    ]) {
+      await db.run(
+        `INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
+         VALUES (?, 'task-child', ?, 'r', 0, 0, ?, ?, NULL)`,
+        id,
+        built!.invocationId,
+        new Date().toISOString(),
+        status,
+      );
+    }
+    for (const id of ['xfer-1', 'xfer-pending', 'xfer-expired', 'xfer-unknown']) stage(id);
+
+    expect(await sweepTransferStaging()).toBe(2);
+
+    expect(fs.existsSync(staging('xfer-1'))).toBe(true);
+    expect(fs.existsSync(staging('xfer-pending'))).toBe(true);
+    expect(fs.existsSync(staging('xfer-expired'))).toBe(false);
+    expect(fs.existsSync(staging('xfer-unknown'))).toBe(false);
   });
 });

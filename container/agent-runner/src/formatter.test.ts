@@ -254,9 +254,7 @@ describe('stripInternalTags', () => {
   });
 
   it('strips multi-line internal tags', () => {
-    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe(
-      'hello  world',
-    );
+    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe('hello  world');
   });
 
   it('strips multiple internal tag blocks', () => {
@@ -272,9 +270,7 @@ describe('stripInternalTags', () => {
   });
 
   it('preserves content that surrounds internal tags', () => {
-    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
-      'The answer is 42',
-    );
+    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe('The answer is 42');
   });
 });
 
@@ -325,5 +321,39 @@ describe('app_context rendering (Slack agent mode, contract C4)', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('(viewing: channel C1&lt;&amp;&gt;)');
+  });
+});
+
+// P10: host messages carry specialist task ids, but the formatter dropped
+// them, so a requester with several dispatches in flight could not match a
+// result to the id it was told on dispatch (specialists.allium: the child
+// task's id is embedded so the parent can correlate).
+describe('specialist task ids', () => {
+  it('marks a result with the task it completes', () => {
+    insertMessage('r1', 'chat', {
+      text: 'Findings…',
+      sender: 'system',
+      senderId: 'system',
+      completedSpecialistTaskId: 'task-123-abc',
+    });
+    expect(formatMessages(getPendingMessages())).toContain('completed_task="task-123-abc"');
+  });
+
+  it("marks a specialist's own task prompt with its task", () => {
+    insertMessage('t1', 'chat', {
+      text: 'Research X',
+      sender: 'system',
+      senderId: 'system',
+      specialistTaskId: 'task-9',
+    });
+    expect(formatMessages(getPendingMessages())).toContain(' task="task-9"');
+  });
+
+  it('adds nothing to an ordinary message, and escapes what it adds', () => {
+    insertMessage('c1', 'chat', { text: 'hi', sender: 'Alan' });
+    insertMessage('r2', 'chat', { text: 'x', sender: 'system', completedSpecialistTaskId: 'a"b<c' });
+    const out = formatMessages(getPendingMessages());
+    expect(out).not.toMatch(/<message[^>]*sender="Alan"[^>]*task=/);
+    expect(out).toContain('completed_task="a&quot;b&lt;c"');
   });
 });

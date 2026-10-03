@@ -90,5 +90,7 @@ dispatch_specialist(
 
 The specialist runs in its own container session. When it calls
 `deliver_specialist_result`, the host routes the result back to your session
-as a follow-up message. Only the main agent group may call this tool — the
+as a follow-up message, marked `completed_task="<id>"` with the id you were
+given when you dispatched it — use that to tell results apart when several are
+in flight. Only the main agent group may call this tool — the
 host will reject it from any other group.

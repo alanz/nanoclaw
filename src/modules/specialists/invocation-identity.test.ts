@@ -29,6 +29,8 @@ import { createSpecialist, createTask } from './db.js';
 import {
   buildInvocationForSession,
   endInvocationById,
+  IPC_BASE_DIR,
+  sweepInvocationDirs,
   sweepTransferStaging,
   TRANSFERS_BASE_DIR,
 } from './invocation.js';
@@ -240,5 +242,40 @@ describe('transfer staging', () => {
     expect(fs.existsSync(staging('xfer-pending'))).toBe(true);
     expect(fs.existsSync(staging('xfer-expired'))).toBe(false);
     expect(fs.existsSync(staging('xfer-unknown'))).toBe(false);
+  });
+});
+
+// Ending an invocation removed its out/ and in/ but left the directory that
+// held them: 459 empty ones had piled up in data/v2-ipc.
+describe('invocation directories', () => {
+  it('are removed whole when the invocation ends', async () => {
+    const session = await parentSession('running');
+    const built = await buildInvocationForSession(session);
+    expect(fs.existsSync(path.join(IPC_BASE_DIR, built!.invocationId))).toBe(true);
+
+    await endInvocationById(built!.invocationId);
+
+    expect(fs.existsSync(path.join(IPC_BASE_DIR, built!.invocationId))).toBe(false);
+  });
+
+  it('are swept at host start for ended and unknown invocations, kept for active ones', async () => {
+    const session = await parentSession('running');
+    const active = await buildInvocationForSession(session);
+    const ended = path.join(IPC_BASE_DIR, 'inv-ended');
+    const unknown = path.join(IPC_BASE_DIR, 'inv-unknown');
+    for (const dir of [ended, unknown]) fs.mkdirSync(dir, { recursive: true });
+    await getDb().run(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at, ended_at)
+       VALUES ('inv-ended', ?, NULL, '/x/out', '/x/in', ?, ?)`,
+      session.id,
+      new Date().toISOString(),
+      new Date().toISOString(),
+    );
+
+    expect(await sweepInvocationDirs()).toBe(2);
+
+    expect(fs.existsSync(path.join(IPC_BASE_DIR, active!.invocationId))).toBe(true);
+    expect(fs.existsSync(ended)).toBe(false);
+    expect(fs.existsSync(unknown)).toBe(false);
   });
 });

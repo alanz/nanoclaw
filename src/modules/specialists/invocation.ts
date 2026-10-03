@@ -45,6 +45,31 @@ export function reclaimTransferStaging(transferId: string): void {
  * no delivery is in flight — it clears what piled up before reclamation
  * existed and anything a crash left behind.
  */
+/**
+ * Remove the ipc directory of every invocation that has ended, or that the DB
+ * does not know. Run at host start: those still active (a container adopted
+ * across the restart) keep theirs.
+ */
+export async function sweepInvocationDirs(): Promise<number> {
+  if (!fs.existsSync(IPC_BASE_DIR)) return 0;
+  const db = getDb();
+  if (!(await db.hasTable('invocations'))) return 0;
+  let removed = 0;
+  for (const invocationId of fs.readdirSync(IPC_BASE_DIR)) {
+    const row = (await db.get('SELECT ended_at FROM invocations WHERE id = ?', invocationId)) as
+      | { ended_at: string | null }
+      | undefined;
+    if (row && row.ended_at === null) continue;
+    try {
+      fs.rmSync(path.join(IPC_BASE_DIR, invocationId), { recursive: true, force: true });
+      removed++;
+    } catch (err) {
+      log.warn('specialists: could not remove invocation directory', { invocationId, err });
+    }
+  }
+  return removed;
+}
+
 export async function sweepTransferStaging(): Promise<number> {
   if (!fs.existsSync(TRANSFERS_BASE_DIR)) return 0;
   const db = getDb();
@@ -323,12 +348,16 @@ export async function endInvocationById(invocationId: string): Promise<void> {
     for (const { id } of expiring) reclaimTransferStaging(id);
   }
 
-  // Clean up ipc directories
+  // Clean up ipc directories — and the per-invocation directory holding them,
+  // which removing only out/ and in/ left behind (459 empty ones here).
   try {
     fs.rmSync(inv.ipc_out_host_path, { recursive: true, force: true });
   } catch {}
   try {
     fs.rmSync(inv.ipc_in_host_path, { recursive: true, force: true });
+  } catch {}
+  try {
+    fs.rmSync(path.join(IPC_BASE_DIR, invocationId), { recursive: true, force: true });
   } catch {}
 
   log.debug('specialists: invocation ended', { invocationId, sessionId: inv.session_id });

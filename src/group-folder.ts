@@ -12,7 +12,18 @@ import { GROUPS_DIR } from './config.js';
  * are also directory names.
  */
 const GROUP_FOLDER_PATTERN = /^[A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$/;
-const RESERVED_FOLDERS = new Set(['global']);
+/**
+ * Names no group folder may take, and so no agent another agent creates
+ * (`reserved_agent_names` in agent-to-agent.allium). "parent" is the back-link
+ * every created agent gets to its creator; "unnamed" is normalizeName's
+ * fallback for a name with no usable characters, which is rejected rather than
+ * coerced; "global", "system" and "host" are kept for infrastructure.
+ */
+const RESERVED_FOLDERS = new Set(['global', 'parent', 'unnamed', 'system', 'host']);
+
+export function isReservedGroupFolder(folder: string): boolean {
+  return RESERVED_FOLDERS.has(folder.toLowerCase());
+}
 
 export function isValidGroupFolder(folder: string): boolean {
   if (!folder) return false;
@@ -20,7 +31,7 @@ export function isValidGroupFolder(folder: string): boolean {
   if (!GROUP_FOLDER_PATTERN.test(folder)) return false;
   if (folder.includes('/') || folder.includes('\\')) return false;
   if (folder.includes('..')) return false;
-  if (RESERVED_FOLDERS.has(folder.toLowerCase())) return false;
+  if (isReservedGroupFolder(folder)) return false;
   return true;
 }
 
@@ -28,7 +39,8 @@ export function assertValidGroupFolder(folder: string): void {
   if (!isValidGroupFolder(folder)) {
     throw new Error(
       `Invalid group folder "${folder}" — at most 63 characters of [A-Za-z0-9_-], ` +
-        `alphanumeric at both ends (the folder is carried verbatim as a runtime label)`,
+        `alphanumeric at both ends (the folder is carried verbatim as a runtime label), ` +
+        `and not a reserved name (${[...RESERVED_FOLDERS].join(', ')})`,
     );
   }
 }

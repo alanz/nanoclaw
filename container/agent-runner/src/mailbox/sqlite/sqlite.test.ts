@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 
 import { closeSessionDb, initTestSessionDb } from './connection.js';
 import { SqliteAgentMailbox } from './index.js';
+import { parseIsoTimestamp } from '../model.generated.js';
 
 afterEach(() => closeSessionDb());
 
@@ -59,7 +60,7 @@ describe('SQLite runner mailbox canonical serialization', () => {
         id: 'in-1',
         sequence: 2,
         kind: 'chat',
-        timestamp: '2026-01-01T00:00:00.000Z',
+        timestamp: parseIsoTimestamp('2026-01-01T00:00:00.000Z'),
         status: 'pending',
         processAfter: null,
         recurrence: null,
@@ -76,7 +77,7 @@ describe('SQLite runner mailbox canonical serialization', () => {
     ]);
     expect(mailbox.getState('continuation')).toEqual({
       value: 'token',
-      updatedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: parseIsoTimestamp('2026-01-01T00:00:00.000Z'),
     });
     expect(mailbox.getDestinations()).toEqual([
       {
@@ -116,7 +117,7 @@ describe('SQLite runner mailbox canonical serialization', () => {
         sequence: 3,
         inReplyTo: 'in-1',
         timestamp: expect.any(String),
-        deliverAfter: '2026-01-01T00:00:01.000Z',
+        deliverAfter: parseIsoTimestamp('2026-01-01T00:00:01.000Z'),
         recurrence: '0 * * * *',
         kind: 'chat',
         platformId: 'room',

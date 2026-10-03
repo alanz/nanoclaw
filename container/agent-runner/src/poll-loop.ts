@@ -717,7 +717,14 @@ export async function processQuery(
           // was delivered this turn — hasUnwrapped already folds in the
           // turn's mid-turn sent count. If a reply already went out as a
           // mid-turn block, the unwrapped tail stays in the scratchpad log.
-          const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged;
+          //
+          // Nor after a specialist has handed off (dispatch_sub_task /
+          // deliver_specialist_result asked to exit): it reports through those
+          // tools, so its closing line is not a reply anyone is owed. Nudging it
+          // opens another turn that holds the container — and its concurrency
+          // slot — while the sub-task runs (seen live: a 2-minute retry turn,
+          // during which the child's result arrived and kept the parent up).
+          const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged && !isShutdownRequested();
           notifyExchangeComplete(onExchangeComplete, {
             prompt: archivePrompts[0] ?? initialPrompt,
             result: archivedResult,

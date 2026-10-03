@@ -84,6 +84,36 @@ describe('shutdown request', () => {
     expect(getContinuation('mock')).toMatch(/^mock-session-/);
   });
 
+  // Live run 2026-10-03: the Researcher ended its turn with an unwrapped line
+  // after dispatch_sub_task; the wrap-nudge opened a 2-minute retry turn that
+  // kept the container (and its slot) while the sub-task ran.
+  it('does not wrap-nudge a specialist that has asked to exit', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+         VALUES ('m1', 'chat', datetime('now'), 'pending', 'chan-1', 'agent', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'Requester', text: 'research this' }));
+
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt) => {
+      prompts.push(prompt);
+      requestShutdown();
+      return 'Dispatched the code question to the Coder; ending this turn.'; // unwrapped
+    });
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const returned = await runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal: controller.signal }).then(
+      () => !controller.signal.aborted,
+    );
+    clearTimeout(timer);
+
+    expect(returned).toBe(true);
+    expect(prompts).toHaveLength(1);
+    expect(prompts.some((p) => p.includes('was not delivered'))).toBe(false);
+  });
+
   // The request is raised when the tool is called, before the host has looked
   // at the dispatch. If the host rejects it, its notice arrives after the
   // request: exiting then would leave the task `running` with no container.

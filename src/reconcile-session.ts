@@ -53,7 +53,7 @@ const BACKOFF_BASE_MS = 5000;
 
 export type StuckDecision =
   | { action: 'ok' }
-  | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
+  | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number; idle: boolean }
   | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
 
 /**
@@ -92,7 +92,23 @@ export function decideStuckAction(args: {
     const heartbeatAge = now - effectiveHeartbeatMs;
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
-      return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
+      // Two very different situations reach this line, and only one is a fault.
+      //
+      // Idle: the container finished its conversation and the agent-runner is
+      // parked in an open query awaiting the next message (it deliberately
+      // keeps the stream open between turns). Nothing touches the heartbeat
+      // while it is silent, so it ages out. Reaping it is the intended
+      // lifecycle: the next inbound spawns a fresh container that resumes the
+      // session from its persisted continuation.
+      //
+      // Stuck: a claimed message or an in-flight tool is outstanding — work was
+      // owed and the container went silent holding it. That costs someone an
+      // answer.
+      //
+      // Both are killed the same way; they must not read the same way in the
+      // logs, or a real hang hides among the routine reaps.
+      const idle = claims.length === 0 && !containerState?.currentTool;
+      return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling, idle };
     }
   }
 
@@ -259,10 +275,22 @@ async function enforceRunningContainerSla(
   if (decision.action === 'ok') return;
 
   if (decision.action === 'kill-ceiling') {
-    log.warn('Killing container past absolute ceiling', {
+    if (decision.idle) {
+      // Routine: info, so it stays out of the error log.
+      log.info('Reaping idle container', {
+        sessionId: session.id,
+        idleMs: decision.heartbeatAgeMs,
+        ceilingMs: decision.ceilingMs,
+      });
+      killContainer(session.id, 'idle-ceiling');
+      return; // nothing claimed, so nothing to reset
+    }
+    log.warn('Killing container past absolute ceiling — work outstanding', {
       sessionId: session.id,
       heartbeatAgeMs: decision.heartbeatAgeMs,
       ceilingMs: decision.ceilingMs,
+      currentTool: outDb.getContainerState()?.currentTool ?? null,
+      claims: gatedClaims.length,
     });
     killContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');

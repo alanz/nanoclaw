@@ -48,7 +48,36 @@ describe('decideStuckAction', () => {
       action: 'kill-ceiling',
       heartbeatAgeMs: JUST_OVER_CEILING_MS,
       ceilingMs: ABSOLUTE_CEILING_MS,
+      idle: true,
     });
+  });
+
+  // The ceiling fires both for a routine idle reap (the runner parked between
+  // conversations, nothing owed) and for a real hang. Both are killed; only the
+  // hang is a warning, so it is not lost among the reaps (archive eb37dc8f:
+  // 34 of 34 logged ceiling kills had been idle reaps).
+  it('marks a ceiling kill not idle when a claimed message is outstanding', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [{ messageId: 'm1', statusChanged: new Date(BASE - JUST_OVER_CEILING_MS).toISOString() }],
+    });
+    expect(res).toMatchObject({ action: 'kill-ceiling', idle: false });
+  });
+
+  it('marks a ceiling kill not idle when a tool is in flight', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: {
+        currentTool: 'WebFetch',
+        toolDeclaredTimeoutMs: null,
+        toolStartedAt: parseIsoTimestamp(new Date(BASE - JUST_OVER_CEILING_MS).toISOString()),
+      },
+      claims: [],
+    });
+    expect(res).toMatchObject({ action: 'kill-ceiling', idle: false });
   });
 
   it('skips the ceiling check when no heartbeat file exists and no fallback is known', () => {
@@ -91,6 +120,7 @@ describe('decideStuckAction', () => {
       action: 'kill-ceiling',
       heartbeatAgeMs: JUST_OVER_CEILING_MS,
       ceilingMs: ABSOLUTE_CEILING_MS,
+      idle: true,
     });
   });
 

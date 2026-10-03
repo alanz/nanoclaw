@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -7,7 +7,8 @@ import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlit
 import { getContinuation } from './db/session-state.js';
 import { runPollLoop } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
-import { clearShutdownRequest, isShutdownRequested, requestShutdown } from './shutdown.js';
+import type { AgentQuery, ProviderEvent, QueryInput } from './providers/types.js';
+import { clearShutdownRequest, disarmHandoffExit, isShutdownRequested, requestShutdown } from './shutdown.js';
 
 // dispatch_sub_task and deliver_specialist_result run in the MCP server, a
 // separate process from the poll loop. The pre-rebuild flag lived in module
@@ -26,6 +27,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // A loop a test stops by its abort signal never reaches the normal return
+  // that disarms the hand-off exit; never let one test's timer reach the next.
+  disarmHandoffExit();
   closeSessionDb();
   process.env.NANOCLAW_SHUTDOWN_MARKER = saved.marker;
   process.env.NANOCLAW_SPECIALIST = saved.specialist;
@@ -112,6 +116,88 @@ describe('shutdown request', () => {
     expect(returned).toBe(true);
     expect(prompts).toHaveLength(1);
     expect(prompts.some((p) => p.includes('was not delivered'))).toBe(false);
+  });
+
+  // Live run 2026-10-03 (second): a rejected first dispatch cancelled the
+  // request, the turn then ended unwrapped, and the nudge fired anyway — the
+  // Researcher called it "a spurious or injected instruction". A specialist
+  // has no destinations and reports through its tools: never nudge it.
+  it('never wrap-nudges a specialist, shutdown requested or not', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+         VALUES ('m1', 'chat', datetime('now'), 'pending', 'chan-1', 'agent', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'Requester', text: 'research this' }));
+
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt) => {
+      prompts.push(prompt);
+      return 'Some unwrapped working notes.';
+    });
+
+    const controller = new AbortController();
+    const loop = runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    controller.abort();
+    await loop;
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts.some((p) => p.includes('was not delivered'))).toBe(false);
+  });
+
+  // The real SDK need not end its event stream promptly on abort, and leaving
+  // the poll loop waits for it. A hand-off must still end the process.
+  it('exits the process after a hand-off even if the provider stream never ends', async () => {
+    process.env.NANOCLAW_HANDOFF_EXIT_GRACE_MS = '50';
+    const exit = spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    try {
+      getInboundDb()
+        .prepare(
+          `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+           VALUES ('m1', 'chat', datetime('now'), 'pending', 'chan-1', 'agent', ?)`,
+        )
+        .run(JSON.stringify({ sender: 'Requester', text: 'research this' }));
+
+      // A turn that hands off, then a stream whose close never completes —
+      // the shape of a provider whose cleanup waits on a subprocess. Leaving
+      // the poll loop's `for await` awaits that close.
+      class StuckProvider extends MockProvider {
+        override query(_input: QueryInput): AgentQuery {
+          const script: ProviderEvent[] = [
+            { type: 'init', continuation: 'stuck-session' },
+            { type: 'result', text: 'Handed off.' },
+          ];
+          const iterator: AsyncIterator<ProviderEvent> = {
+            async next() {
+              const event = script.shift();
+              if (!event) return new Promise(() => {}); // never another event
+              if (event.type === 'result') requestShutdown();
+              return { value: event, done: false };
+            },
+            return: () => new Promise(() => {}), // close never completes
+          };
+          return {
+            push: () => {},
+            end: () => {},
+            abort: () => {},
+            events: { [Symbol.asyncIterator]: () => iterator },
+          };
+        }
+      }
+
+      void runPollLoop({ provider: new StuckProvider(), providerName: 'mock', cwd: '/tmp' });
+      const start = Date.now();
+      while (exit.mock.calls.length === 0) {
+        if (Date.now() - start > 3000) throw new Error('process.exit was never called');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      exit.mockRestore();
+      disarmHandoffExit();
+      delete process.env.NANOCLAW_HANDOFF_EXIT_GRACE_MS;
+    }
   });
 
   // The request is raised when the tool is called, before the host has looked

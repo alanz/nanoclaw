@@ -10,7 +10,13 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
-import { clearShutdownRequest, isShutdownRequested } from './shutdown.js';
+import {
+  armHandoffExit,
+  clearShutdownRequest,
+  disarmHandoffExit,
+  isShutdownRequested,
+  isSpecialistContainer,
+} from './shutdown.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
@@ -348,9 +354,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if (getPendingMessages(false).some((m) => m.kind !== 'system' && m.trigger === 1)) {
         log('New message after a shutdown request — staying');
         clearShutdownRequest();
+        disarmHandoffExit();
         continue;
       }
       log('Shutdown requested by a specialist tool — exiting after this turn');
+      disarmHandoffExit();
       return;
     }
   }
@@ -718,13 +726,13 @@ export async function processQuery(
           // turn's mid-turn sent count. If a reply already went out as a
           // mid-turn block, the unwrapped tail stays in the scratchpad log.
           //
-          // Nor after a specialist has handed off (dispatch_sub_task /
-          // deliver_specialist_result asked to exit): it reports through those
-          // tools, so its closing line is not a reply anyone is owed. Nudging it
-          // opens another turn that holds the container — and its concurrency
-          // slot — while the sub-task runs (seen live: a 2-minute retry turn,
-          // during which the child's result arrived and kept the parent up).
-          const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged && !isShutdownRequested();
+          // Never in a specialist container. A specialist has no destinations
+          // and reports through deliver_specialist_result / dispatch_sub_task,
+          // so its plain text is not a reply anyone is owed. Live, a Researcher
+          // read the nudge — "your destinations: (none)" — as an injected
+          // instruction and said so, and the retry turn kept its container,
+          // and its concurrency slot, up through the whole sub-task.
+          const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged && !isSpecialistContainer();
           notifyExchangeComplete(onExchangeComplete, {
             prompt: archivePrompts[0] ?? initialPrompt,
             result: archivedResult,
@@ -772,7 +780,17 @@ export async function processQuery(
         // that asked to exit must not sit here waiting for one. Only once no
         // turn (queued or a nudge retry) is still owed an answer.
         if (!answering && isShutdownRequested()) {
+          // Stop claiming follow-ups first: anything that lands from here on
+          // stays pending for the next container (the host treats a running
+          // task with an unclaimed due message as owed a wake, not crashed).
+          done = true;
+          clearInterval(pollHandle);
           query.abort();
+          // Leaving this loop waits for the provider's event stream to end,
+          // and a provider need not end it promptly on abort. Everything
+          // durable (continuation, acks) is already written, so exit anyway
+          // if it hangs.
+          armHandoffExit();
           break;
         }
       }

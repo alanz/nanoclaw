@@ -14,13 +14,18 @@ function marker(): string {
   return process.env.NANOCLAW_SHUTDOWN_MARKER || '/tmp/nanoclaw-shutdown-requested';
 }
 
+/** Set by the host for a specialist task's container (specialists module). */
+export function isSpecialistContainer(): boolean {
+  return process.env.NANOCLAW_SPECIALIST === '1';
+}
+
 /**
  * Ask the poll loop to exit cleanly once the current turn completes. Only a
  * specialist container honours it: the tools that call this are registered in
  * every container, and a main agent that called one by mistake must not stop.
  */
 export function requestShutdown(): void {
-  if (process.env.NANOCLAW_SPECIALIST !== '1') return;
+  if (!isSpecialistContainer()) return;
   fs.writeFileSync(marker(), new Date().toISOString());
 }
 
@@ -30,4 +35,28 @@ export function isShutdownRequested(): boolean {
 
 export function clearShutdownRequest(): void {
   fs.rmSync(marker(), { force: true });
+}
+
+/**
+ * Safety net for the exit itself. After a hand-off the poll loop aborts its
+ * query and leaves the event loop, which waits for the provider's stream to
+ * end — and a provider need not end it promptly on abort. Armed when the loop
+ * decides to exit, cancelled when it returns normally; if it fires, the
+ * process exits regardless. Unref'd, so it never keeps a process alive.
+ */
+let handoffExit: ReturnType<typeof setTimeout> | null = null;
+
+export function armHandoffExit(): void {
+  if (handoffExit) return;
+  const graceMs = Number(process.env.NANOCLAW_HANDOFF_EXIT_GRACE_MS) || 10_000;
+  handoffExit = setTimeout(() => {
+    console.error('[shutdown] Poll loop did not finish after a hand-off — exiting anyway');
+    process.exit(0);
+  }, graceMs);
+  handoffExit.unref?.();
+}
+
+export function disarmHandoffExit(): void {
+  if (handoffExit) clearTimeout(handoffExit);
+  handoffExit = null;
 }

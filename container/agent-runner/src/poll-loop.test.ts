@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
-import { formatMessages, extractRouting, isClearCommand, isRunnerCommand } from './formatter.js';
+import { formatMessages, extractRouting, isClearCommand, isRunnerCommand, type RoutingContext } from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
@@ -294,7 +294,7 @@ describe('mock provider', () => {
       cwd: '/tmp',
     });
 
-    const events: Array<{ type: string }> = [];
+    const events: ProviderEvent[] = [];
     setTimeout(() => query.end(), 50);
 
     for await (const event of query.events) {
@@ -307,7 +307,8 @@ describe('mock provider', () => {
     // The mock streams text before the result repeats it.
     expect(typed[1].type).toBe('text');
     expect(typed[2].type).toBe('result');
-    expect((typed[2] as { text: string }).text).toBe('Echo: Hello');
+    const result = typed[2];
+    expect(result.type === 'result' ? result.text : undefined).toBe('Echo: Hello');
   });
 
   it('should handle push() during active query', async () => {
@@ -317,7 +318,7 @@ describe('mock provider', () => {
       cwd: '/tmp',
     });
 
-    const events: Array<{ type: string; text?: string }> = [];
+    const events: ProviderEvent[] = [];
 
     setTimeout(() => query.push('Second'), 30);
     setTimeout(() => query.end(), 60);
@@ -326,7 +327,7 @@ describe('mock provider', () => {
       events.push(event);
     }
 
-    const results = events.filter((e) => e.type === 'result');
+    const results = events.filter((e): e is Extract<ProviderEvent, { type: 'result' }> => e.type === 'result');
     expect(results).toHaveLength(2);
     expect(results[0].text).toBe('Re: First');
     expect(results[1].text).toBe('Re: Second');
@@ -412,14 +413,21 @@ function makeResultQuery(result: ProviderEvent): { query: AgentQuery; pushes: st
   };
 }
 
-const ERR_ROUTING = {
+const ERR_ROUTING: RoutingContext = {
   platformId: 'chan-1',
   channelType: 'discord',
   threadId: null,
   inReplyTo: 'm1',
+  taskRun: false,
 };
 
-const AGENT_ROUTING = { platformId: 'ag-a', channelType: 'agent', threadId: null, inReplyTo: 'm1' };
+const AGENT_ROUTING: RoutingContext = {
+  platformId: 'ag-a',
+  channelType: 'agent',
+  threadId: null,
+  inReplyTo: 'm1',
+  taskRun: false,
+};
 
 it('does not push accumulated-only follow-ups into an active query', async () => {
   const pushes: string[] = [];

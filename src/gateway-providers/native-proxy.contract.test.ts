@@ -67,9 +67,11 @@ describe('native-proxy gateway contract', () => {
   it('keeps the approval subscription open until aborted, then closes the proxy', async () => {
     const controller = new AbortController();
     let settled = false;
-    const subscription = provider.approvals.subscribe(async () => 'deny', controller.signal).then(() => {
-      settled = true;
-    });
+    const subscription = provider.approvals
+      .subscribe(async () => 'deny', controller.signal)
+      .then(() => {
+        settled = true;
+      });
     await new Promise((r) => setTimeout(r, 10));
     expect(start).toHaveBeenCalledTimes(1);
     expect(settled).toBe(false);

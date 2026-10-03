@@ -22,8 +22,16 @@
  * Neither the router nor any of the other wake callers knows this module
  * exists. Installing it is one appended import in the modules barrel.
  */
-import { registerSessionExitHook, setWakeGate, wakeContainer, type SessionExitEvent } from '../../container-runner.js';
+import {
+  isContainerRunning,
+  registerSessionExitHook,
+  setWakeGate,
+  wakeContainer,
+  type SessionExitEvent,
+} from '../../container-runner.js';
 import { getDb } from '../../db/index.js';
+import { getRunningSessions } from '../../db/sessions.js';
+import { onHostStart } from '../../host-lifecycle.js';
 import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
@@ -180,7 +188,41 @@ export function releaseForTesting(session: Session): void {
   release(session.id);
 }
 
+/**
+ * Count in the containers a host restart adopted.
+ *
+ * Containers that survive a restart are re-attached by adoptRunningSessions
+ * without passing the wake gate, so the slot set started empty and the cap
+ * admitted a full set of new containers on top of them — five adopted plus
+ * five new against a cap of five. Adopted non-main sessions take their slots
+ * here; their exit releases them like any other. If more were adopted than
+ * the cap allows, new wakes queue until enough have exited.
+ *
+ * A host-start hook: those run after adoption (src/index.ts).
+ */
+export async function countAdoptedContainers(): Promise<number> {
+  let counted = 0;
+  for (const session of await getRunningSessions()) {
+    if (!isContainerRunning(session.id)) continue;
+    if (await isMainGroup(session.agent_group_id)) continue;
+    if (activeNonMainSessions.has(session.id)) continue;
+    activeNonMainSessions.add(session.id);
+    counted++;
+  }
+  if (counted > 0) {
+    log.info('Adopted containers counted against the concurrency cap', {
+      counted,
+      activeNonMain: activeNonMainSessions.size,
+      cap: MAX_CONCURRENT_CONTAINERS,
+    });
+  }
+  return counted;
+}
+
 // Two hand-backs, one per way a wake can end: the exit hook for a wake that
 // registered a runtime, the gate's release for one that never did.
 setWakeGate(admit, (session) => release(session.id));
 registerSessionExitHook(releaseAndDrain);
+onHostStart(async () => {
+  await countAdoptedContainers();
+});

@@ -7,17 +7,21 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { hooks, mockWake, mockDbGet } = vi.hoisted(() => ({
+const { hooks, mockWake, mockDbGet, adopted } = vi.hoisted(() => ({
   hooks: [] as Array<(e: { sessionId: string }) => void>,
   mockWake: vi.fn(async (_session: { id: string; agent_group_id: string }) => true),
   mockDbGet: vi.fn(async (_sql: string, _params: unknown[]) => undefined as unknown),
+  // Sessions whose containers survived a host restart and were adopted.
+  adopted: [] as Array<{ id: string; agent_group_id: string }>,
 }));
 
 vi.mock('../../container-runner.js', () => ({
   setWakeGate: vi.fn(),
   registerSessionExitHook: (hook: (e: { sessionId: string }) => void) => hooks.push(hook),
   wakeContainer: mockWake,
+  isContainerRunning: (id: string) => adopted.some((s) => s.id === id),
 }));
+vi.mock('../../db/sessions.js', () => ({ getRunningSessions: async () => adopted }));
 vi.mock('../../db/index.js', () => ({ getDb: () => ({ get: mockDbGet }) }));
 vi.mock('../../env.js', () => ({ readEnvFile: () => ({}) }));
 vi.mock('../../log.js', () => ({
@@ -28,6 +32,7 @@ vi.mock('./migration.js', () => ({}));
 import {
   MAX_CONCURRENT_CONTAINERS,
   admitForTesting,
+  countAdoptedContainers,
   getQueueStatus,
   releaseForTesting,
   resetConcurrencyStateForTesting,
@@ -45,6 +50,7 @@ function exit(sessionId: string): void {
 
 beforeEach(() => {
   resetConcurrencyStateForTesting();
+  adopted.length = 0;
   mockWake.mockClear();
   mockWake.mockImplementation(async () => true);
   mockDbGet.mockClear();
@@ -192,5 +198,27 @@ describe('is_main lookup', () => {
     await admitForTesting(session('s2', 'g-worker'));
     await admitForTesting(session('s3', 'g-worker'));
     expect(mockDbGet).toHaveBeenCalledTimes(1);
+  });
+});
+
+// S20: containers that survive a host restart are adopted without passing the
+// gate, so the slot set started empty and a full set of new containers was
+// admitted on top of them.
+describe('containers adopted at host restart', () => {
+  it('take their slots, so new wakes queue rather than overcommit', async () => {
+    // The main group is exempt from the cap, so its adopted container is not counted.
+    mockDbGet.mockImplementation(async (_sql: string, params: unknown) =>
+      (Array.isArray(params) ? params[0] : params) === 'g-main' ? { is_main: 1 } : { is_main: 0 },
+    );
+    for (let i = 0; i < MAX_CONCURRENT_CONTAINERS; i++) adopted.push(session(`adopted-${i}`));
+    adopted.push(session('adopted-main', 'g-main'));
+
+    expect(await countAdoptedContainers()).toBe(MAX_CONCURRENT_CONTAINERS);
+    expect(await admitForTesting(session('new-wake'))).toBe(false);
+    expect(getQueueStatus().waiting).toBe(1);
+
+    // An adopted container's exit hands its slot to the waiter.
+    exit('adopted-0');
+    await vi.waitFor(() => expect(mockWake).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-wake' })));
   });
 });

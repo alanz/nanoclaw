@@ -209,9 +209,29 @@ async function subscribeApprovals(_decide: unknown, signal: AbortSignal): Promis
   await closeProxy();
 }
 
+/**
+ * There is no connection flow: a service is reachable only once the operator
+ * adds it to the proxy. Say so specifically — the generic "does not implement
+ * account connection handoff" leaves an agent no wiser about what to tell the
+ * user.
+ */
+async function connect({ host }: { agentGroupId: string; host: string }) {
+  const covered = PROXIED_SERVICES.map((svc) => svc.name).join(', ');
+  return {
+    status: 'unsupported' as const,
+    message:
+      `This install's credential proxy has no connection flow, and ${host} is not connected. ` +
+      `It authenticates only the model API and its built-in services (${covered}). ` +
+      `Another service needs the operator to add it to the host's credential proxy.`,
+  };
+}
+
 registerGatewayProvider({
   kind: NATIVE_PROXY_GATEWAY_KIND,
-  agentSkills: [],
+  // Tells agents what this gateway does and does not authenticate, in place of
+  // the vault-gateway guidance (placeholders, connect links) that is false here.
+  agentSkills: ['native-proxy-gateway'],
+  connections: { connect },
   sessions: { ensure: ensureSession },
   approvals: { subscribe: subscribeApprovals },
 });

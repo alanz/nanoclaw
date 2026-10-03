@@ -25,7 +25,11 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
-vi.mock('../credential-proxy.js', () => ({ startCredentialProxy: start, detectAuthMode: () => 'oauth' }));
+vi.mock('../credential-proxy.js', () => ({
+  startCredentialProxy: start,
+  detectAuthMode: () => 'oauth',
+  PROXIED_SERVICES: [{ name: 'brave' }, { name: 'zotero' }],
+}));
 
 import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
 import { NATIVE_PROXY_GATEWAY_KIND, proxySecret, resetCredentialProxy } from './native-proxy.js';
@@ -50,8 +54,24 @@ beforeEach(() => {
 });
 
 describe('native-proxy gateway contract', () => {
-  it('registers with no agent skills', () => {
-    expect(provider.agentSkills).toEqual([]);
+  // Without its own skill an agent behind this gateway is left with the
+  // generic vault-gateway guidance (placeholders, connect links), which is
+  // false here. Registered and present: a name with no skill on disk would
+  // silently tell the agent nothing.
+  it('registers its agent skill, and the skill ships with resident instructions', () => {
+    expect(provider.agentSkills).toEqual(['native-proxy-gateway']);
+    for (const skill of provider.agentSkills) {
+      const dir = path.join(process.cwd(), 'container', 'skills', skill);
+      expect(fs.existsSync(path.join(dir, 'SKILL.md'))).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'instructions.md'), 'utf-8')).toMatch(/no general credential gateway/);
+    }
+  });
+
+  it('answers a connection request as unsupported, naming what is covered', async () => {
+    const result = await provider.connections!.connect({ agentGroupId: 'g', host: 'api.github.com' });
+    expect(result.status).toBe('unsupported');
+    expect(result.message).toContain('api.github.com is not connected');
+    expect(result.message).toContain('brave, zotero');
   });
 
   it('leases a placeholder env and a host network target, starting the proxy', async () => {

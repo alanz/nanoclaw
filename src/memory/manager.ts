@@ -121,6 +121,41 @@ const ALLOWED_EXTENSIONS = new Set(['.md', '.org']);
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'venv', '__pycache__', '.venv']);
 const WATCH_DEBOUNCE_MS = 3000;
 const BATCH_SIZE = 100;
+
+/** The rate limiter's estimate: a token per four characters. */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Split chunks to embed into batches the rate limiter can grant: at most
+ * BATCH_SIZE chunks, and at most the per-minute token limit. Batches were cut
+ * by count alone, so a file with many uncached chunks (~37+ at 400 tokens)
+ * asked for more tokens than the bucket can ever hold and the sync waited
+ * forever — the first large org file stalled the whole index.
+ */
+export function batchEmbeddings<T>(
+  items: T[],
+  tokensOf: (item: T) => number,
+  maxCount = BATCH_SIZE,
+  maxTokens = MEMORY_CONFIG.embedding_tpm_limit,
+): T[][] {
+  const batches: T[][] = [];
+  let current: T[] = [];
+  let tokens = 0;
+  for (const item of items) {
+    const t = tokensOf(item);
+    if (current.length > 0 && (current.length >= maxCount || tokens + t > maxTokens)) {
+      batches.push(current);
+      current = [];
+      tokens = 0;
+    }
+    current.push(item);
+    tokens += t;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
 const CANDIDATES_MULTIPLIER = 4;
 const VECTOR_WEIGHT = 0.7;
 const TEXT_WEIGHT = 0.3;
@@ -368,11 +403,10 @@ export class MemoryIndexManager {
       const toEmbedFiltered = toEmbed.filter((e) => e.chunk.text.trim().length > 0);
 
       if (toEmbedFiltered.length > 0) {
-        for (let b = 0; b < toEmbedFiltered.length; b += BATCH_SIZE) {
+        for (const batch of batchEmbeddings(toEmbedFiltered, (e) => estimateTokens(e.chunk.text))) {
           if (this.closed) break;
-          const batch = toEmbedFiltered.slice(b, b + BATCH_SIZE);
           const texts = batch.map((e) => e.chunk.text);
-          const estimatedTokens = Math.ceil(texts.reduce((s, t) => s + t.length, 0) / 4);
+          const estimatedTokens = texts.reduce((s, t) => s + estimateTokens(t), 0);
           try {
             await this.rateLimiter.acquirePermit(1, 600_000, estimatedTokens);
             const vecs = await this.provider.embedBatch(texts);

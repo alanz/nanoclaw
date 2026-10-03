@@ -57,6 +57,22 @@ export class TokenBucketRateLimiter {
       throw new EmbeddingRateLimitError('RPD quota exhausted for this session.', 'rpd', null);
     }
 
+    // A request bigger than a bucket's whole capacity can never be granted:
+    // the bucket refills only to its limit, so the loop below would sleep and
+    // re-check forever (each wait shorter than maxWaitMs, so that guard never
+    // fires). Seen live: a 22k-token embedding batch against a 15k TPM bucket
+    // stalled a memory sync indefinitely. Refuse it so the caller splits it.
+    if (this.tpmLimit !== undefined && tokenCount > this.tpmLimit) {
+      throw new Error(
+        `Request of ${tokenCount} tokens exceeds the ${this.tpmLimit} tokens-per-minute limit and can never be granted; split it.`,
+      );
+    }
+    if (this.rpmLimit !== undefined && requestCount > this.rpmLimit) {
+      throw new Error(
+        `Request of ${requestCount} requests exceeds the ${this.rpmLimit} requests-per-minute limit and can never be granted; split it.`,
+      );
+    }
+
     const LOG_THROTTLE_MS = 30_000;
     let lastCoolDownLogAt = 0;
     let lastQuotaLogAt = 0;

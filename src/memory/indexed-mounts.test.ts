@@ -41,7 +41,8 @@ import { createAgentGroup } from '../db/agent-groups.js';
 import { closeDb, initTestDb } from '../db/connection.js';
 import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
 import { runMigrations } from '../db/migrations/index.js';
-import { indexedMountDirs, MemoryIndexManager } from './manager.js';
+import { batchEmbeddings, indexedMountDirs, MemoryIndexManager } from './manager.js';
+import { TokenBucketRateLimiter } from './rate-limiter.js';
 
 let root: string;
 let org: string;
@@ -104,5 +105,24 @@ describe('indexing a mount', () => {
       { path: 'extra/org/projects/nanoclaw.org', source: 'org' },
     ]);
     await manager.close();
+  });
+});
+
+// Live, 2026-10-03: the first org file with many uncached chunks asked the
+// rate limiter for ~22k tokens in one batch against a 15k tokens-per-minute
+// bucket, which can never hold that much — the sync slept and re-checked
+// forever. Batches are now cut by tokens as well as count, and the limiter
+// refuses a request it could never grant.
+describe('embedding batches the rate limiter can grant', () => {
+  it('cut by the token limit as well as the count', () => {
+    const sizes = (bs: number[][]) => bs.map((b) => b.length);
+    expect(sizes(batchEmbeddings(new Array(60).fill(400), (t) => t, 100, 15_000))).toEqual([37, 23]);
+    expect(sizes(batchEmbeddings(new Array(150).fill(10), (t) => t, 100, 15_000))).toEqual([100, 50]);
+    expect(sizes(batchEmbeddings([20_000, 10], (t) => t, 100, 15_000))).toEqual([1, 1]);
+  });
+
+  it('a request larger than the bucket fails at once rather than waiting forever', async () => {
+    const limiter = new TokenBucketRateLimiter({ accountKey: 'k', tpmLimit: 15_000 });
+    await expect(limiter.acquirePermit(1, 600_000, 22_000)).rejects.toThrow(/can never be granted/);
   });
 });

@@ -7,12 +7,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { hooks, mockWake, mockDbGet, adopted } = vi.hoisted(() => ({
+const { hooks, mockWake, mockDbGet, adopted, closed } = vi.hoisted(() => ({
   hooks: [] as Array<(e: { sessionId: string }) => void>,
   mockWake: vi.fn(async (_session: { id: string; agent_group_id: string }) => true),
   mockDbGet: vi.fn(async (_sql: string, _params: unknown[]) => undefined as unknown),
   // Sessions whose containers survived a host restart and were adopted.
   adopted: [] as Array<{ id: string; agent_group_id: string }>,
+  // Sessions closed while they waited in the queue.
+  closed: new Set<string>(),
 }));
 
 vi.mock('../../container-runner.js', () => ({
@@ -21,7 +23,10 @@ vi.mock('../../container-runner.js', () => ({
   wakeContainer: mockWake,
   isContainerRunning: (id: string) => adopted.some((s) => s.id === id),
 }));
-vi.mock('../../db/sessions.js', () => ({ getRunningSessions: async () => adopted }));
+vi.mock('../../db/sessions.js', () => ({
+  getRunningSessions: async () => adopted,
+  getSession: async (id: string) => ({ id, agent_group_id: 'g-worker', status: closed.has(id) ? 'closed' : 'active' }),
+}));
 vi.mock('../../db/index.js', () => ({ getDb: () => ({ get: mockDbGet }) }));
 vi.mock('../../env.js', () => ({ readEnvFile: () => ({}) }));
 vi.mock('../../log.js', () => ({
@@ -51,6 +56,7 @@ function exit(sessionId: string): void {
 beforeEach(() => {
   resetConcurrencyStateForTesting();
   adopted.length = 0;
+  closed.clear();
   mockWake.mockClear();
   mockWake.mockImplementation(async () => true);
   mockDbGet.mockClear();
@@ -220,5 +226,23 @@ describe('containers adopted at host restart', () => {
     // An adopted container's exit hands its slot to the waiter.
     exit('adopted-0');
     await vi.waitFor(() => expect(mockWake).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-wake' })));
+  });
+});
+
+// S21: the queue held each Session as it was when queued, and nothing re-read
+// its status before spawning, so a session closed while it waited (a finished
+// specialist task, a closed thread) still got a container and held the slot.
+describe('a session closed while it waited', () => {
+  it('is not woken; its slot goes to the next waiter', async () => {
+    for (let i = 0; i < MAX_CONCURRENT_CONTAINERS; i++) await admitForTesting(session(`busy-${i}`));
+    await admitForTesting(session('closed-meanwhile'));
+    await admitForTesting(session('still-wanted'));
+    closed.add('closed-meanwhile');
+
+    exit('busy-0');
+
+    await vi.waitFor(() => expect(mockWake).toHaveBeenCalledWith(expect.objectContaining({ id: 'still-wanted' })));
+    expect(mockWake).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'closed-meanwhile' }));
+    expect(getQueueStatus()).toMatchObject({ activeNonMain: MAX_CONCURRENT_CONTAINERS, waiting: 0 });
   });
 });

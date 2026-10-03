@@ -30,7 +30,7 @@ import {
   type SessionExitEvent,
 } from '../../container-runner.js';
 import { getDb } from '../../db/index.js';
-import { getRunningSessions } from '../../db/sessions.js';
+import { getRunningSessions, getSession } from '../../db/sessions.js';
 import { onHostStart } from '../../host-lifecycle.js';
 import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
@@ -153,19 +153,30 @@ function drainWaiting(): void {
     });
     // A wake that fails to spawn must not hold the slot it was given, or the
     // cap leaks a slot per failure until nothing can start at all.
-    void wakeContainer(next.session).then(
-      (ok) => {
-        if (!ok) {
-          activeNonMainSessions.delete(next.session.id);
-          drainWaiting();
-        }
-      },
-      () => {
-        activeNonMainSessions.delete(next.session.id);
-        drainWaiting();
-      },
-    );
+    const handBack = (): void => {
+      activeNonMainSessions.delete(next.session.id);
+      drainWaiting();
+    };
+    void wakeIfStillActive(next.session).then((ok) => {
+      if (!ok) handBack();
+    }, handBack);
   }
+}
+
+/**
+ * Wake a dequeued session — unless it was closed while it waited (a finished
+ * specialist task, a closed thread). The queue holds the Session as it was
+ * when queued, and nothing on the way to a container re-reads its status, so
+ * a closed session was spawned anyway and held the slot until the idle reap.
+ * Wakes the fresh row, not the stale copy.
+ */
+async function wakeIfStillActive(queued: Session): Promise<boolean> {
+  const fresh = await getSession(queued.id);
+  if (!fresh || fresh.status !== 'active') {
+    log.info('Dropping a queued session closed while it waited', { sessionId: queued.id });
+    return false;
+  }
+  return wakeContainer(fresh);
 }
 
 /** Current cap state, for observability. */

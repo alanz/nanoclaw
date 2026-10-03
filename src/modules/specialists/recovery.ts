@@ -347,73 +347,55 @@ async function sweepTask(
     return;
   }
 
-  // ── 5. awaiting_restart → re-spawn (or exhaust) ──────────────────────────
-  // A task in awaiting_restart with no container running needs to be re-spawned.
-  // Increment restart_attempt_count on each re-wake attempt so that a container
-  // that crashes immediately (before the sweep can observe it in running state)
-  // still makes progress toward the retry limit and doesn't loop forever.
+  // ── 5. awaiting_restart → make sure the restart happens ─────────────────
+  // A task in awaiting_restart with no container needs its container (re)woken
+  // and its prompt re-sent. This runs on every sweep until the container is
+  // seen alive (path 3 then advances it to running), so it must be idempotent
+  // and must not spend restart budget: only the transitions INTO
+  // awaiting_restart count (a crash, path 4; a sub-task await timeout, path 2),
+  // as SpecialistContainerCrashed / SubTaskAwaitTimedOut in specialists.allium.
+  // Counting here too spent two retries per restart, and a restart waiting
+  // for a concurrency slot burned one — and wrote another prompt — every
+  // minute. A container that cannot start at all is bounded by the
+  // boot-crash check (2b); everything else by the task timeout (1).
   if (task.status === 'awaiting_restart' && !containerAlive) {
-    const newRetryCount = task.restart_attempt_count + 1;
-
-    if (newRetryCount > SPECIALISTS_CONFIG.maxRestartRetries) {
-      const ts = new Date().toISOString();
-      await updateTaskStatus(task.id, 'failed', {
-        failure_kind: 'host_restart',
-        failure_detail: `container failed to start after ${task.restart_attempt_count} restart attempts`,
-        closed_at: ts,
-        restart_attempt_count: newRetryCount,
-        pending_sub_task_id: null,
-      });
-      if (task.pending_sub_task_id) await cancelSubtree(task.pending_sub_task_id);
-      const failed = {
-        ...task,
-        status: 'failed' as const,
-        failure_kind: 'host_restart',
-        failure_detail: `container failed to start after ${task.restart_attempt_count} restart attempts`,
-        closed_at: ts,
-        pending_sub_task_id: null,
-      };
-      await routeResult(failed);
-      log.warn('specialists: task failed — restart limit exceeded', {
-        taskId: task.id,
-        retries: task.restart_attempt_count,
-      });
-      return;
-    }
-
-    await updateTaskStatus(task.id, 'awaiting_restart', { restart_attempt_count: newRetryCount });
-
     const { findSessionByAgentGroupAndThread } = await import('./session-helpers.js');
     const { wakeContainer } = await import('../../container-runner.js');
     const { getSession } = await import('../../db/sessions.js');
     const { writeSessionMessage } = await import('../../session-manager.js');
     const session = await findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
-    if (session) {
-      const fresh = await getSession(session.id);
-      if (fresh) {
-        // Write a fresh trigger so the restarted container has a message to process.
-        // The original trigger was already acked; the container needs a new one.
-        writeSessionMessage(fresh.agent_group_id, fresh.id, {
-          id: `restart-${task.id}-${newRetryCount}`,
-          kind: 'chat',
-          timestamp: new Date().toISOString(),
-          content: JSON.stringify({
-            text: task.prompt,
-            sender: 'system',
-            senderId: 'system',
-            specialistTaskId: task.id,
-          }),
-          trigger: true,
-        });
-        await wakeContainer(fresh).catch((err) =>
-          log.error('specialists: failed to wake container for restart', { err, taskId: task.id }),
-        );
-        log.info('specialists: re-waking container for awaiting_restart task', {
-          taskId: task.id,
-          attempt: newRetryCount,
-          maxRetries: SPECIALISTS_CONFIG.maxRestartRetries,
-        });
+    if (!session) return;
+    const fresh = await getSession(session.id);
+    if (!fresh) return;
+
+    // The original trigger was already acked; the restarted container needs a
+    // new one. One per attempt: the id carries the attempt number, so a later
+    // sweep finds it already written.
+    try {
+      await writeSessionMessage(fresh.agent_group_id, fresh.id, {
+        id: `restart-${task.id}-${task.restart_attempt_count}`,
+        kind: 'chat',
+        timestamp: new Date().toISOString(),
+        content: JSON.stringify({
+          text: task.prompt,
+          sender: 'system',
+          senderId: 'system',
+          specialistTaskId: task.id,
+        }),
+        trigger: true,
+      });
+      log.info('specialists: restart prompt written for awaiting_restart task', {
+        taskId: task.id,
+        attempt: task.restart_attempt_count,
+        maxRetries: SPECIALISTS_CONFIG.maxRestartRetries,
+      });
+    } catch (err) {
+      if (!/UNIQUE constraint failed/.test(String((err as Error)?.message))) {
+        log.error('specialists: failed to write restart prompt', { err, taskId: task.id });
       }
     }
+    await wakeContainer(fresh).catch((err) =>
+      log.error('specialists: failed to wake container for restart', { err, taskId: task.id }),
+    );
   }
 }

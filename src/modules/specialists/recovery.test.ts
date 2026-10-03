@@ -42,7 +42,14 @@ vi.mock('./routing.js', () => ({
 const mailboxState = vi.hoisted(() => ({
   current: undefined as { due: number; claims: number } | undefined,
 }));
+// Restart prompts written by the awaiting_restart path, with the real
+// insert's behaviour on a duplicate id.
+const writtenIds = vi.hoisted(() => [] as string[]);
 vi.mock('../../session-manager.js', () => ({
+  writeSessionMessage: vi.fn(async (_ag: string, _sess: string, msg: { id: string }) => {
+    if (writtenIds.includes(msg.id)) throw new Error('UNIQUE constraint failed: messages_in.id');
+    writtenIds.push(msg.id);
+  }),
   withExistingMailboxSession: vi.fn(async (_ag: string, _sess: string, action: (m: unknown) => unknown) => {
     const state = mailboxState.current;
     if (!state) return undefined;
@@ -477,6 +484,32 @@ describe('crash detection — queued tasks excluded', () => {
     } finally {
       mailboxState.current = undefined;
     }
+  });
+});
+
+// P6: only the transition into awaiting_restart spends restart budget
+// (SpecialistContainerCrashed / SubTaskAwaitTimedOut). The re-spawn path,
+// which runs every sweep until the container is seen alive, counted too: one
+// crash spent two retries, and a restart waiting for a concurrency slot
+// burned one — and wrote another copy of the prompt — every minute.
+describe('restart budget', () => {
+  it('spends one retry per crash, however many sweeps the restart waits', async () => {
+    const task = await makeSpecialistTask({ status: 'running', restartAttemptCount: 0 });
+
+    for (let i = 0; i < 4; i++) await sweepSpecialistTasks(); // crash, then waiting for a slot
+
+    const after = (await getTask(task.id))!;
+    expect(after.status).toBe('awaiting_restart');
+    expect(after.restart_attempt_count).toBe(1);
+  });
+
+  it('writes the restart prompt once per attempt', async () => {
+    writtenIds.length = 0;
+    const task = await makeSpecialistTask({ status: 'running', restartAttemptCount: 0 });
+
+    for (let i = 0; i < 4; i++) await sweepSpecialistTasks();
+
+    expect(writtenIds).toEqual([`restart-${task.id}-1`]);
   });
 });
 

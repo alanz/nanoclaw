@@ -69,11 +69,13 @@ vi.mock('../../group-init.js', () => ({
 vi.mock('./write-destinations.js', () => ({
   writeDestinations: (...a: unknown[]) => mockWriteDestinations(...a),
 }));
-vi.mock('./db/agent-destinations.js', () => ({
+vi.mock('./db/agent-destinations.js', async (importOriginal) => ({
   getDestinationByName: () => undefined,
   createDestination: vi.fn(),
   hasDestination: () => true,
-  normalizeName: (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+  // The real one: reserved-name checks depend on its trimming and its
+  // "unnamed" fallback.
+  normalizeName: (await importOriginal<typeof import('./db/agent-destinations.js')>()).normalizeName,
 }));
 // notifyAgent writes to the session inbound.db + wakes the container; stub both.
 // delivery.ts and agent-route.ts pull more session-manager exports at import time.
@@ -217,6 +219,45 @@ describe('create_agent — guard-based authorization (wrapped delivery action)',
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
+  // reserved_agent_names (agent-to-agent.allium), matched after normalisation.
+  // Checked in the precheck, so even a group-scope request never puts an
+  // approval card in front of an admin for a name creation would refuse.
+  it.each([
+    ['parent', 'the back-link every created agent has to its creator'],
+    ['  System ', 'case and surrounding space normalise away'],
+    ['HOST', 'infrastructure name'],
+    ['global', 'shared-instructions folder'],
+    ['!!!', 'no usable characters — normalises to "unnamed"'],
+  ])('reserved name %j (%s): neither creates nor requests approval', async (name) => {
+    for (const cli_scope of ['global', 'group']) {
+      mockGetContainerConfig.mockReturnValue({ cli_scope });
+      await runCreateAgent({ name });
+    }
+
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockNotifyWrite.mock.calls.at(-1))).toContain('reserved name');
+  });
+
+  it('a name too long to be a folder: neither creates nor requests approval', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    await runCreateAgent({ name: 'a'.repeat(64) });
+
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockNotifyWrite.mock.calls.at(-1))).toContain('too long');
+  });
+
+  it('a name merely containing a reserved word is fine', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runCreateAgent({ name: 'Parent Helper' });
+
+    expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+    expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({ folder: 'parent-helper' });
   });
 
   it('skips deleted-group residue on disk when minting the folder (A4)', async () => {

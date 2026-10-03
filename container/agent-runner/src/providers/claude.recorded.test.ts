@@ -7,7 +7,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb } from '../mailbox/sqli
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { processQuery } from '../poll-loop.js';
 
-import recordings from './__fixtures__/sdk-midturn-recordings.json';
+import recordings from './__fixtures__/sdk-midturn-recordings.json' with { type: 'json' };
 
 // Replays of REAL SDK message streams, captured live against
 // @anthropic-ai/claude-agent-sdk 0.3.197 (scripts/sdk-capture/run-battery.ts,

@@ -400,6 +400,27 @@ describe('groups config (host-only)', () => {
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 
+  // Re-adding an existing mount sets its flags to the ones given — how
+  // --index is turned on for a mount already there. It used to be ignored.
+  it('re-adding a mount with --index marks the existing entry for indexing', async () => {
+    writeAllowlist();
+    const GID = 'ag-mount-index';
+    await createAgentGroup({ id: GID, name: 'i', folder: 'i', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+    const base = { id: GID, host: MOUNT_ROOT, container: 'org', ro: true };
+
+    await dispatch({ id: 'i1', command: 'groups-config-add-mount', args: base }, { caller: 'host' });
+    const again = await dispatch(
+      { id: 'i2', command: 'groups-config-add-mount', args: { ...base, index: true } },
+      { caller: 'host' },
+    );
+
+    expect(again.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
+      { hostPath: MOUNT_ROOT, containerPath: 'org', readonly: true, index: true },
+    ]);
+  });
+
   // remove-mount must NOT validate — the entries most in need of removal are
   // exactly the invalid ones already stored before add-mount validated.
   it('removes an already-stored invalid mount', async () => {

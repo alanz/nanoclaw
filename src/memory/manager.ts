@@ -15,8 +15,10 @@ import path from 'node:path';
 import parcelWatcher from '@parcel/watcher';
 
 import { log } from '../log.js';
-import { readFileSync } from 'node:fs';
 
+import type { AdditionalMountConfig } from '../container-config.js';
+import { getContainerConfig } from '../db/container-configs.js';
+import { validateMount } from '../modules/mount-security/index.js';
 import { MEMORY_CONFIG } from './config.js';
 
 /**
@@ -47,23 +49,71 @@ export function isMemoryGroupExcluded(groupId: string): boolean {
 }
 
 /**
- * Extra directories to index for a group, from its materialized container
- * config. Read from the file rather than the DB because `memoryIndexDirs` is
- * an install-local field: it is materialized to `container.json` at spawn and
- * carries no column of its own.
+ * A directory indexed alongside a group's own memory/: its Zettelkasten
+ * folder, or one of its mounts marked `index`. A mount's files are stored
+ * under `pathPrefix` — the path the container sees them at,
+ * `extra/<mount>/…` — so a search hit maps straight to
+ * /workspace/extra/<mount>/… and each file has one stable path, whatever the
+ * host layout. (A path that changed between syncs would leave the old rows
+ * until the next full sync removed them.) A folder inside the group's
+ * workspace has no prefix: it is stored repo-relative, like memory/.
  */
-function memoryIndexDirs(groupsDir: string, folder: string): Array<{ path: string; source: string }> {
+/** In the repo, as the central DB's workspace-file tracking means it — not an indexed mount, not outside. */
+function isRepoPath(p: string): boolean {
+  return !p.startsWith('..') && !p.startsWith('extra/');
+}
+
+export interface IndexedDir {
+  dir: string;
+  source: string;
+  pathPrefix?: string;
+}
+
+/**
+ * The group's Zettelkasten: `groups/<folder>/zettel/`, kept apart from the
+ * OKF memory/ tree because its rules are the opposite — notes are permanent
+ * and never edited, where memory/ is updated and pruned in place. Indexed as
+ * source `zettel` when the folder exists.
+ */
+export const ZETTEL_DIR = 'zettel';
+
+export function zettelDirs(groupDir: string): IndexedDir[] {
+  const dir = path.join(groupDir, ZETTEL_DIR);
+  return fsSync.existsSync(dir) ? [{ dir, source: ZETTEL_DIR }] : [];
+}
+
+/**
+ * The group's mounts marked for indexing, read from its container config in
+ * the DB. (This replaces `memoryIndexDirs`, read from container.json — a file
+ * regenerated from the DB at every spawn, which never carried the field, so
+ * extra directories were never indexed.) Only mounts the allowlist accepts:
+ * the indexer reads nothing the container could not.
+ */
+export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
+  const row = await getContainerConfig(groupId);
+  if (!row) return [];
+  let mounts: AdditionalMountConfig[];
   try {
-    const raw = readFileSync(path.join(groupsDir, folder, 'container.json'), 'utf8');
-    const parsed = JSON.parse(raw) as { memoryIndexDirs?: Array<{ path: string; source?: string }> };
-    // `source` labels where an indexed hit came from; a declared dir without
-    // one is labelled by its path, which is better than an unlabelled result.
-    return (parsed.memoryIndexDirs ?? []).map((entry) => ({ path: entry.path, source: entry.source ?? entry.path }));
+    mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
   } catch {
-    // No config, or nothing extra declared — the group's own memory/ dir is
-    // still indexed; only the additions are absent.
     return [];
   }
+  const dirs: IndexedDir[] = [];
+  for (const mount of mounts) {
+    if (!mount.index) continue;
+    const check = validateMount(mount);
+    if (!check.allowed) {
+      log.warn('Indexed mount not indexed — rejected by the mount allowlist', {
+        groupId,
+        hostPath: mount.hostPath,
+        reason: check.reason,
+      });
+      continue;
+    }
+    const name = check.resolvedContainerPath!;
+    dirs.push({ dir: check.realHostPath!, source: name, pathPrefix: `extra/${name}` });
+  }
+  return dirs;
 }
 import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
 import { chunkFile, type MemoryChunk } from './chunking.js';
@@ -216,7 +266,7 @@ export class MemoryIndexManager {
     private readonly dbPath: string,
     private readonly apiKey: string,
     private readonly model: string,
-    private readonly additionalDirs: Array<{ dir: string; source: string }> = [],
+    private readonly additionalDirs: IndexedDir[] = [],
   ) {}
 
   async init(): Promise<void> {
@@ -302,13 +352,16 @@ export class MemoryIndexManager {
     this.dirty = false;
     this._syncing = true;
 
-    const allSources = [{ dir: this.memoryDir, source: 'memory' }, ...this.additionalDirs];
+    const allSources: Array<{ dir: string; source: string; pathPrefix?: string }> = [
+      { dir: this.memoryDir, source: 'memory' },
+      ...this.additionalDirs,
+    ];
 
     // Collect all files across all source dirs
-    const fileEntries: Array<{ absPath: string; source: string }> = [];
-    for (const { dir, source } of allSources) {
+    const fileEntries: Array<{ absPath: string; source: string; dir: string; pathPrefix?: string }> = [];
+    for (const { dir, source, pathPrefix } of allSources) {
       const files = await listMemoryFiles(dir);
-      for (const absPath of files) fileEntries.push({ absPath, source });
+      for (const absPath of files) fileEntries.push({ absPath, source, dir, pathPrefix });
     }
 
     log.info('Memory sync: starting', { groupId: this.groupId, count: fileEntries.length, force });
@@ -320,7 +373,7 @@ export class MemoryIndexManager {
     const MAX_CONSECUTIVE_RL = 3;
     const seenPaths = new Set<string>();
 
-    for (const { absPath, source: fileSource } of fileEntries) {
+    for (const { absPath, source: fileSource, dir, pathPrefix } of fileEntries) {
       if (this.closed) break;
 
       let content: string;
@@ -332,14 +385,17 @@ export class MemoryIndexManager {
         continue;
       }
 
-      // Repo-relative path (may use ".." for dirs outside the repo)
-      const repoPath = path.relative(path.resolve('.'), absPath).replace(/\\/g, '/');
+      // The group's own memory: repo-relative. An indexed mount: the path the
+      // container sees it at (see IndexedDir).
+      const repoPath = pathPrefix
+        ? `${pathPrefix}/${path.relative(dir, absPath).split(path.sep).join('/')}`
+        : path.relative(path.resolve('.'), absPath).replace(/\\/g, '/');
       seenPaths.add(repoPath);
 
       const contentHash = hashFile(content);
 
       // Update central DB (spec compliance) — only for in-repo paths
-      if (!repoPath.startsWith('..')) {
+      if (isRepoPath(repoPath)) {
         handleWorkspaceFileChanged({ group_id: this.groupId, path: repoPath, content_hash: contentHash });
       }
 
@@ -466,7 +522,7 @@ export class MemoryIndexManager {
       if (!seenPaths.has(p)) {
         deleteFileChunks(this.index.db, p, this.index.vecAvailable);
         this.index.db.prepare('DELETE FROM files WHERE path = ?').run(p);
-        handleWorkspaceFileRemoved({ group_id: this.groupId, path: p });
+        if (isRepoPath(p)) handleWorkspaceFileRemoved({ group_id: this.groupId, path: p });
         removed++;
       }
     }
@@ -570,7 +626,7 @@ export async function ensureMemoryManager(params: {
   dbPath: string;
   apiKey: string;
   model?: string;
-  additionalDirs?: Array<{ dir: string; source: string }>;
+  additionalDirs?: IndexedDir[];
 }): Promise<MemoryIndexManager> {
   const existing = managers.get(params.groupId);
   if (existing) return existing;
@@ -615,10 +671,10 @@ export async function initMemoryManagers(params: {
     const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
     const dbPath = path.join(dbDir, 'index.db');
 
-    const additionalDirs = memoryIndexDirs(params.groupsDir, group.folder).map(({ path: p, source }) => ({
-      dir: path.resolve(process.cwd(), p),
-      source,
-    }));
+    const additionalDirs = [
+      ...zettelDirs(path.join(params.groupsDir, group.folder)),
+      ...(await indexedMountDirs(group.id)),
+    ];
 
     await ensureMemoryManager({
       groupId: group.id,
@@ -658,6 +714,7 @@ export async function initMemoryManagerForGroup(params: {
     dbPath,
     apiKey: params.apiKey,
     model: params.model,
+    additionalDirs: zettelDirs(path.join(params.groupsDir, group.folder)),
   }).catch((err) => {
     log.warn('Failed to init memory manager for group', { groupId: group.id, err });
   });

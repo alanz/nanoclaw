@@ -577,6 +577,22 @@ describe('invariant: MemoryFilesWithinWorkspace', () => {
       handleWorkspaceFileChanged({ group_id: GROUP_ID, path: `groups/${GROUP_FOLDER}/CLAUDE.md`, content_hash: 'h' }),
     ).rejects.toThrow();
   });
+
+  it("accepts the group's Zettelkasten folder beside memory/  [invariant.MemoryFilesWithinWorkspace]", async () => {
+    const zettelPath = `groups/${GROUP_FOLDER}/zettel/notes/MEM-2026-01-01-a.md`;
+    await handleWorkspaceFileChanged({ group_id: GROUP_ID, path: zettelPath, content_hash: 'h' });
+    expect((await getAllMemoryFiles()).map((f) => f.path)).toContain(zettelPath);
+  });
+
+  it('rejects a memory/ directory that is not the top of the group workspace  [invariant.MemoryFilesWithinWorkspace]', async () => {
+    await expect(
+      handleWorkspaceFileChanged({
+        group_id: GROUP_ID,
+        path: `groups/${GROUP_FOLDER}/zotero-md/memory/a.md`,
+        content_hash: 'h',
+      }),
+    ).rejects.toThrow();
+  });
 });
 
 // ── Invariant: NoChunksForRemovedFiles ────────────────────────────────────────

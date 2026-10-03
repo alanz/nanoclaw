@@ -196,7 +196,14 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
   // may not fire promptly on all runtimes (e.g. Apple Container).
   const specialistSession = await findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
   if (specialistSession) {
-    endActiveInvocationForSession(specialistSession.id);
+    // Awaited, so the run's cleanup is done before the session closes — and a
+    // failure here is logged rather than escaping as an unhandled rejection,
+    // without stopping the close and routing that follow.
+    try {
+      await endActiveInvocationForSession(specialistSession.id);
+    } catch (err) {
+      log.warn('specialists: ending the invocation failed', { taskId: task.id, sessionId: specialistSession.id, err });
+    }
     await closeSpecialistSession(specialistSession);
   }
 

@@ -12,6 +12,7 @@ import { runMigrations } from '../../db/migrations/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { createSession, getSession } from '../../db/sessions.js';
 import { createSpecialist, createTask } from './db.js';
+import { endActiveInvocationForSession } from './invocation.js';
 import { routeResult } from './routing.js';
 import type { SpecialistTask } from './types.js';
 
@@ -184,6 +185,33 @@ describe('specialist session cleanup on terminal task', () => {
     await routeResult(task);
 
     expect((await getSession(requesterSessionId))?.status).toBe('active');
+  });
+
+  // P13: the invocation end was not awaited — its cleanup raced the session
+  // close, and a failure escaped as an unhandled rejection. Now awaited; a
+  // failure is logged and the close still happens.
+  it('finishes ending the invocation before the session is closed', async () => {
+    const { task, specialistSessionId } = await makeFailedRootTask();
+    let statusWhenEnded: string | undefined;
+    vi.mocked(endActiveInvocationForSession).mockImplementationOnce(async (sessionId: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      statusWhenEnded = (await getSession(sessionId))?.status;
+    });
+
+    await routeResult(task);
+
+    expect(statusWhenEnded).toBe('active');
+    expect((await getSession(specialistSessionId))?.status).toBe('closed');
+  });
+
+  it('still closes the specialist session when ending its invocation fails', async () => {
+    const { task, specialistSessionId } = await makeFailedRootTask();
+    vi.mocked(endActiveInvocationForSession).mockRejectedValueOnce(new Error('ipc cleanup failed'));
+
+    await expect(routeResult(task)).resolves.toBeUndefined();
+
+    expect(endActiveInvocationForSession).toHaveBeenCalledWith(specialistSessionId);
+    expect((await getSession(specialistSessionId))?.status).toBe('closed');
   });
 
   it('does not throw when the specialist session was never provisioned', async () => {

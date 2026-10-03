@@ -13,7 +13,7 @@
 import { describe, expect, it } from 'bun:test';
 
 // TODO: export individual tool definitions from memory.ts so tests can inspect them
-import { memoryGetFileContent, memoryListFiles, memorySearch } from './memory.js';
+import { memoryGetFileContent, memoryListFiles, memorySearch, resolveIndexedPath } from './memory.js';
 
 const EXPECTED_TOOL_NAMES = ['memory_search', 'memory_get_file_content', 'memory_list_files'] as const;
 
@@ -85,3 +85,23 @@ describe('MemoryMcpTools — tool input schemas', () => {
 // For now, the host-side session-group mismatch tests in src/memory/memory.test.ts
 // cover the actor restriction: all three rule handlers throw when
 // session.agent_group_id !== group_id.
+
+// The host stores an indexed mount's files at the path the container sees
+// them (`extra/<mount>/…`), so a hit maps straight to its mount point; the
+// group's own memory keeps its repo-relative form.
+describe('resolveIndexedPath', () => {
+  it('maps an indexed mount file to its mount point', () => {
+    expect(resolveIndexedPath('extra/org/gtd.org')).toBe('/workspace/extra/org/gtd.org');
+    expect(resolveIndexedPath('extra/org/projects/nanoclaw.org')).toBe('/workspace/extra/org/projects/nanoclaw.org');
+  });
+
+  it("maps the group's own memory into its workspace", () => {
+    expect(resolveIndexedPath('groups/dm-with-alanz/memory/notes/x.md')).toBe('/workspace/agent/memory/notes/x.md');
+  });
+
+  it('refuses a path that would leave /workspace/extra, and the old ../ form', () => {
+    expect(resolveIndexedPath('extra/../agent/secrets')).toBeNull();
+    expect(resolveIndexedPath('extra/org/../../../etc/passwd')).toBeNull();
+    expect(resolveIndexedPath('../Sync/org/gtd.org')).toBeNull();
+  });
+});

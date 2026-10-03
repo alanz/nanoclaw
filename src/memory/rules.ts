@@ -14,10 +14,13 @@ type ChunkResult = {
   hash: string;
 };
 
+/** The group's memory/ tree, or its Zettelkasten folder (see ZETTEL_DIR in manager.ts). */
+const MEMORY_PATH_RE = /^groups\/[^/]+\/(memory|zettel)\//;
+
 function assertMemoryPath(path: string): void {
-  if (!path.startsWith('groups/') || !path.includes('/memory/')) {
+  if (!MEMORY_PATH_RE.test(path)) {
     throw new Error(
-      `Path violates MemoryFilesWithinWorkspace invariant — must be under groups/<folder>/memory/: ${path}`,
+      `Path violates MemoryFilesWithinWorkspace invariant — must be under groups/<folder>/memory/ or groups/<folder>/zettel/: ${path}`,
     );
   }
 }

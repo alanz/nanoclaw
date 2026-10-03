@@ -25,14 +25,18 @@ function truncate(text: string, max: number): string {
 }
 
 function buildFtsQuery(raw: string): string | null {
-  const tokens = raw.match(/[\p{L}\p{N}_]+/gu)?.map((t) => t.trim()).filter(Boolean) ?? [];
+  const tokens =
+    raw
+      .match(/[\p{L}\p{N}_]+/gu)
+      ?.map((t) => t.trim())
+      .filter(Boolean) ?? [];
   if (tokens.length === 0) return null;
   return tokens.map((t) => `"${t.replaceAll('"', '')}"`).join(' AND ');
 }
 
 function bm25ToScore(rank: number): number {
   if (!Number.isFinite(rank)) return 1 / (1 + 999);
-  return rank < 0 ? (-rank) / (1 + (-rank)) : 1 / (1 + rank);
+  return rank < 0 ? -rank / (1 + -rank) : 1 / (1 + rank);
 }
 
 function openDb(): Database | null {
@@ -44,50 +48,25 @@ function openDb(): Database | null {
   }
 }
 
-interface RawContainerConfig {
-  memoryIndexDirs?: Array<{ path: string; source: string }>;
-  additionalMounts?: Array<{ hostPath: string; containerPath: string }>;
-}
-
-let _rawContainerConfig: RawContainerConfig | null = null;
-function getRawContainerConfig(): RawContainerConfig {
-  if (_rawContainerConfig) return _rawContainerConfig;
-  try {
-    _rawContainerConfig = JSON.parse(
-      fs.readFileSync('/workspace/agent/container.json', 'utf-8'),
-    ) as RawContainerConfig;
-  } catch {
-    _rawContainerConfig = {};
-  }
-  return _rawContainerConfig;
-}
-
 /**
- * Translate a repo-relative index path to an absolute container path.
+ * Translate an indexed path to an absolute container path.
  *
- * In-repo files:  groups/<folder>/X/Y  →  /workspace/agent/X/Y
- * Extra mounts:   ../SOMETHING/X/Y    →  /workspace/extra/<containerPath>/X/Y
- *                 Matched by aligning memoryIndexDirs[i].path with
- *                 additionalMounts[j].containerPath (same basename).
+ * The group's own memory: groups/<folder>/X/Y  →  /workspace/agent/X/Y
+ * An indexed mount:       extra/<mount>/X/Y    →  /workspace/extra/<mount>/X/Y
+ *
+ * The host stores a mount's files as the container sees them, so the second
+ * is direct; a path that would normalise outside /workspace/extra is refused.
+ * (The older `../…` form, matched against container.json's memoryIndexDirs,
+ * is gone: that field never reached container.json, so it never matched.)
  */
-function resolveIndexedPath(repoPath: string): string | null {
-  if (!repoPath.startsWith('../')) {
-    const stripped = repoPath.replace(/^groups\/[^/]+\//, '');
-    return path.join('/workspace/agent', stripped);
+export function resolveIndexedPath(repoPath: string): string | null {
+  if (repoPath.startsWith('extra/')) {
+    const abs = path.posix.normalize(path.posix.join('/workspace', repoPath));
+    return abs.startsWith('/workspace/extra/') ? abs : null;
   }
-
-  const { memoryIndexDirs = [], additionalMounts = [] } = getRawContainerConfig();
-  for (const dir of memoryIndexDirs) {
-    const prefix = dir.path.endsWith('/') ? dir.path : `${dir.path}/`;
-    if (!repoPath.startsWith(prefix)) continue;
-    const fileRelative = repoPath.slice(prefix.length);
-    const dirBasename = path.basename(dir.path);
-    const mount = additionalMounts.find((m) => m.containerPath === dirBasename);
-    if (!mount) continue;
-    return path.join('/workspace/extra', mount.containerPath, fileRelative);
-  }
-
-  return null;
+  if (repoPath.startsWith('../')) return null;
+  const stripped = repoPath.replace(/^groups\/[^/]+\//, '');
+  return path.join('/workspace/agent', stripped);
 }
 
 function parseFrontmatter(content: string): Record<string, unknown> | undefined {
@@ -101,7 +80,11 @@ function parseFrontmatter(content: string): Record<string, unknown> | undefined 
     const raw = line.slice(colon + 1).trim();
     if (!key) continue;
     if (raw.startsWith('[') && raw.endsWith(']')) {
-      result[key] = raw.slice(1, -1).split(',').map((s) => s.trim()).filter(Boolean);
+      result[key] = raw
+        .slice(1, -1)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
     } else if (raw === 'null' || raw === '') {
       result[key] = null;
     } else if (raw === 'true') {
@@ -126,7 +109,10 @@ export const memorySearch: McpToolDefinition = {
       properties: {
         query: { type: 'string', description: 'What to search for.' },
         top_k: { type: 'number', description: 'Max results (default 6, max 20).' },
-        path_prefix: { type: 'string', description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/memory/notes/".' },
+        path_prefix: {
+          type: 'string',
+          description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/memory/notes/".',
+        },
         source: { type: 'string', description: 'Filter by source: "memory" or "org".' },
         min_score: { type: 'number', description: 'Min relevance score 0–1 (default 0.1).' },
       },
@@ -151,17 +137,25 @@ export const memorySearch: McpToolDefinition = {
 
       const conditions = [`${FTS_TABLE} MATCH ?`];
       const params: (string | number)[] = [ftsQuery];
-      if (source) { conditions.push('source = ?'); params.push(source); }
+      if (source) {
+        conditions.push('source = ?');
+        params.push(source);
+      }
 
-      const rows = db.query<
-        { id: string; path: string; source: string; start_line: number; end_line: number; text: string; rank: number },
-        (string | number)[]
-      >(
-        `SELECT id, path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` +
-        `  FROM ${FTS_TABLE}` +
-        ` WHERE ${conditions.join(' AND ')}` +
-        ` ORDER BY rank ASC LIMIT ?`,
-      ).all(...params, topK * 4);
+      const rows = db
+        .query<
+          {
+            id: string;
+            path: string;
+            source: string;
+            start_line: number;
+            end_line: number;
+            text: string;
+            rank: number;
+          },
+          (string | number)[]
+        >(`SELECT id, path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` + `  FROM ${FTS_TABLE}` + ` WHERE ${conditions.join(' AND ')}` + ` ORDER BY rank ASC LIMIT ?`)
+        .all(...params, topK * 4);
 
       const results = rows
         .map((r) => ({
@@ -189,7 +183,8 @@ export const memorySearch: McpToolDefinition = {
 export const memoryGetFileContent: McpToolDefinition = {
   tool: {
     name: 'memory_get_file_content',
-    description: 'Read the full content of a specific file from your knowledge base. Use the path from memory_search results.',
+    description:
+      'Read the full content of a specific file from your knowledge base. Use the path from memory_search results.',
     inputSchema: {
       type: 'object' as const,
       required: ['path'],
@@ -209,9 +204,9 @@ export const memoryGetFileContent: McpToolDefinition = {
     }
 
     try {
-      const row = db.query<{ path: string; hash: string }, [string]>(
-        'SELECT path, hash FROM files WHERE path = ?',
-      ).get(filePath);
+      const row = db
+        .query<{ path: string; hash: string }, [string]>('SELECT path, hash FROM files WHERE path = ?')
+        .get(filePath);
 
       db.close();
 
@@ -258,7 +253,10 @@ export const memoryListFiles: McpToolDefinition = {
         source: { type: 'string', description: 'Restrict listing to files from a named source.' },
         limit: { type: 'number', description: 'Maximum number of files to return.' },
         order_by: { type: 'string', description: 'Sort order: mtime | path | size.' },
-        parse_frontmatter: { type: 'boolean', description: 'Parse and include YAML frontmatter (limit ≤ 50 when true).' },
+        parse_frontmatter: {
+          type: 'boolean',
+          description: 'Parse and include YAML frontmatter (limit ≤ 50 when true).',
+        },
       },
     },
   },
@@ -278,13 +276,22 @@ export const memoryListFiles: McpToolDefinition = {
       const conditions: string[] = [];
       const params: (string | number)[] = [];
 
-      if (pathPrefix) { conditions.push('path LIKE ?'); params.push(`${pathPrefix}%`); }
-      if (source) { conditions.push('source = ?'); params.push(source); }
+      if (pathPrefix) {
+        conditions.push('path LIKE ?');
+        params.push(`${pathPrefix}%`);
+      }
+      if (source) {
+        conditions.push('source = ?');
+        params.push(source);
+      }
 
       const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-      const rows = db.query<{ path: string; mtime: number; size: number }, (string | number)[]>(
-        `SELECT path, mtime, size FROM files ${where} ORDER BY ${orderCol} ${orderDir} LIMIT ?`,
-      ).all(...params, limit);
+      const rows = db
+        .query<
+          { path: string; mtime: number; size: number },
+          (string | number)[]
+        >(`SELECT path, mtime, size FROM files ${where} ORDER BY ${orderCol} ${orderDir} LIMIT ?`)
+        .all(...params, limit);
 
       db.close();
 

@@ -42,7 +42,10 @@ requester.
      file_paths=["/workspace/ipc-out/report.md", "/workspace/ipc-out/data.csv"]
    )
    ```
-   Files must be written to `/workspace/ipc-out/` before delivery. The host
+   Files must be written to `/workspace/ipc-out/` before delivery — only files
+   there (real files, not symlinks) are taken; anything else is reported back
+   as not delivered. To pass on a file you received in `/workspace/ipc-in/`,
+   copy it into `/workspace/ipc-out/` first. The host
    takes ownership and routes them to the requester's next invocation via
    `/workspace/ipc-in/<transfer_id>/<filename>`. For root tasks only, pass
    `commit_to_memory=True` to copy files into the requester group's

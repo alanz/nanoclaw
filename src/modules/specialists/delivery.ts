@@ -58,30 +58,97 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
   // can commit to memory. Sub-tasks silently degrade to false.
   const effectiveCommit = commitToMemory && task.requester_group_id != null;
 
+  // Build the ContainerTransfer first: a file it refuses is noted in the
+  // result the requester reads, rather than silently missing.
+  let transfer: ContainerTransfer | null = null;
+  let refused: RefusedFile[] = [];
+  if (filePaths.length > 0 && (await getDb().hasTable('invocations'))) {
+    ({ transfer, refused } = await _buildTransfer(session, task.id, resultText, filePaths, effectiveCommit));
+  }
+  const finalText = resultText + refusalNote(refused);
+
   const now = new Date().toISOString();
   await updateTaskStatus(task.id, 'completed', {
-    result: resultText,
+    result: finalText,
     closed_at: now,
   });
 
-  const completed = { ...task, status: 'completed' as const, result: resultText, closed_at: now };
-
-  // Build a ContainerTransfer when files are present and the tables exist
-  let transfer: ContainerTransfer | null = null;
-
-  if (filePaths.length > 0 && (await getDb().hasTable('invocations'))) {
-    transfer = await _buildTransfer(session, completed.id, resultText, filePaths, effectiveCommit);
-  }
+  const completed = { ...task, status: 'completed' as const, result: finalText, closed_at: now };
 
   await routeResult(completed, transfer);
 
   log.info('specialists: task completed', { taskId: task.id, agentGroupId: session.agent_group_id });
 }
 
+interface RefusedFile {
+  path: string;
+  reason: string;
+}
+
+function refusalNote(refused: RefusedFile[]): string {
+  if (refused.length === 0) return '';
+  return `\n\n[Not delivered: ${refused.map((f) => `${f.path} (${f.reason})`).join('; ')}]`;
+}
+
+/**
+ * Resolve a path the specialist listed to a file on the host, or say why not.
+ *
+ * Only files inside the invocation's ipc-out leave the container. The host
+ * copies with its own privileges, so a path that escapes ipc-out (`..`, or an
+ * absolute path elsewhere) or a symlink placed in it would otherwise copy any
+ * host file the host can read into the requester's workspace. The real path
+ * must be exactly the path inside the real ipc-out: any symlink along the way
+ * makes them differ.
+ */
+export function resolveIpcOutFile(
+  ipcOutHostPath: string,
+  containerPath: string,
+): { hostPath: string } | { error: string } {
+  const prefix = SPECIALISTS_CONFIG.ipcOutContainerPath;
+  const normalized = path.posix.normalize(containerPath);
+  let rel: string;
+  if (normalized.startsWith(prefix + '/')) rel = normalized.slice(prefix.length + 1);
+  else if (!path.posix.isAbsolute(normalized)) rel = normalized;
+  else return { error: `not in ${prefix} — copy it there first` };
+  if (!rel || rel === '.' || rel.split('/').includes('..')) return { error: `outside ${prefix}` };
+
+  let root: string;
+  try {
+    root = fs.realpathSync(ipcOutHostPath);
+  } catch {
+    return { error: 'no ipc-out for this run' };
+  }
+  const hostPath = path.join(root, ...rel.split('/'));
+  let real: string;
+  try {
+    real = fs.realpathSync(hostPath);
+  } catch {
+    return { error: 'no such file' };
+  }
+  if (real !== hostPath) return { error: 'is or passes through a symbolic link' };
+  if (!fs.lstatSync(hostPath).isFile()) return { error: 'not a regular file' };
+  return { hostPath };
+}
+
+/**
+ * Copy without following a symlink swapped in after resolveIpcOutFile looked
+ * (the container is still running while this happens).
+ */
+function copyNoFollow(src: string, dest: string): void {
+  const fd = fs.openSync(src, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error('not a regular file');
+    fs.writeFileSync(dest, fs.readFileSync(fd));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /**
  * Copy files from ipc-out to host staging and create ContainerTransfer +
- * TransferFile rows. Returns the ContainerTransfer (status='pending') or
- * null if the invocation or any precondition is missing.
+ * TransferFile rows. Returns the ContainerTransfer (status='pending'), or null
+ * if the invocation is missing or no file could be taken, plus the files it
+ * refused and why.
  */
 async function _buildTransfer(
   session: Session,
@@ -89,8 +156,9 @@ async function _buildTransfer(
   resultText: string,
   filePaths: string[],
   commitToMemory: boolean,
-): Promise<ContainerTransfer | null> {
+): Promise<{ transfer: ContainerTransfer | null; refused: RefusedFile[] }> {
   const db = getDb();
+  const refused: RefusedFile[] = [];
 
   const invocation = await getActiveInvocation(session.id);
   if (!invocation) {
@@ -98,7 +166,7 @@ async function _buildTransfer(
       sessionId: session.id,
       taskId,
     });
-    return null;
+    return { transfer: null, refused: filePaths.map((p) => ({ path: p, reason: 'no ipc-out for this run' })) };
   }
 
   const transferId = genId('xfer');
@@ -112,30 +180,25 @@ async function _buildTransfer(
   fs.mkdirSync(stagingDir, { recursive: true });
 
   for (const containerPath of filePaths) {
-    const basename = path.basename(containerPath);
+    const basename = path.posix.basename(containerPath);
 
-    // Map container path -> host path via ipc-out
-    const ipcOutContainerPath = SPECIALISTS_CONFIG.ipcOutContainerPath;
-    let relPath: string;
-    if (containerPath.startsWith(ipcOutContainerPath + '/')) {
-      relPath = containerPath.slice(ipcOutContainerPath.length + 1);
-    } else if (containerPath.startsWith(ipcOutContainerPath)) {
-      relPath = containerPath.slice(ipcOutContainerPath.length);
-    } else {
-      relPath = basename;
+    const resolved = resolveIpcOutFile(invocation.ipc_out_host_path, containerPath);
+    if ('error' in resolved) {
+      log.warn('specialists: refused a delivered file', { taskId, path: containerPath, reason: resolved.error });
+      refused.push({ path: containerPath, reason: resolved.error });
+      continue;
     }
-    const hostSrcPath = path.join(invocation.ipc_out_host_path, relPath);
     const destPath = hostStagingPath(transferId, basename);
 
     try {
-      fs.copyFileSync(hostSrcPath, destPath);
+      copyNoFollow(resolved.hostPath, destPath);
     } catch (err) {
       log.warn('specialists: failed to copy file from ipc-out to staging', {
-        src: hostSrcPath,
+        src: resolved.hostPath,
         dest: destPath,
         err,
       });
-      // Skip this file
+      refused.push({ path: containerPath, reason: 'could not be read' });
       continue;
     }
 
@@ -157,8 +220,11 @@ async function _buildTransfer(
     try {
       fs.rmSync(stagingDir, { recursive: true, force: true });
     } catch {}
-    return null;
+    return { transfer: null, refused };
   }
+
+  // The requester reads this text; say what did not come through.
+  rewrittenText += refusalNote(refused);
 
   // Insert ContainerTransfer
   const transfer: ContainerTransfer = {
@@ -205,5 +271,5 @@ async function _buildTransfer(
     commitToMemory,
   });
 
-  return transfer;
+  return { transfer, refused };
 }

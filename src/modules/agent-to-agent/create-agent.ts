@@ -14,14 +14,12 @@
  * wrapped action with the approval row as its grant and `createAgent` runs.
  * `performCreateAgent` is the module-private body.
  */
-import path from 'path';
 
-import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
-import { groupFolderExistsOnDisk } from '../../group-folder.js';
+import { groupFolderExistsOnDisk, isReservedGroupFolder, isValidGroupFolder } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -49,6 +47,23 @@ export async function validateCreateAgent(content: Record<string, unknown>, sess
   const name = typeof content.name === 'string' ? content.name : '';
   if (!name) {
     await notifyAgent(session, 'create_agent failed: name is required.');
+    return false;
+  }
+  // Rejected before any approval card: an admin should never be asked to
+  // approve a name the creation would refuse anyway.
+  const localName = normalizeName(name);
+  if (isReservedGroupFolder(localName)) {
+    await notifyAgent(session, `create_agent failed: "${name}" is a reserved name — choose another.`);
+    log.warn('create_agent rejected reserved name', { name, localName });
+    return false;
+  }
+  if (!isValidGroupFolder(localName)) {
+    // normalizeName leaves only [a-z0-9-], so what can still fail is length.
+    await notifyAgent(
+      session,
+      `create_agent failed: "${name}" is too long — an agent name is at most 63 letters, digits and hyphens.`,
+    );
+    log.warn('create_agent rejected invalid name', { name, localName });
     return false;
   }
   if (!(await getAgentGroup(session.agent_group_id))) {
@@ -137,12 +152,13 @@ async function performCreateAgent(
     suffix++;
   }
 
-  const groupPath = path.join(GROUPS_DIR, folder);
-  const resolvedPath = path.resolve(groupPath);
-  const resolvedGroupsDir = path.resolve(GROUPS_DIR);
-  if (!resolvedPath.startsWith(resolvedGroupsDir + path.sep)) {
-    await notify(`Cannot create agent "${name}": invalid folder path.`);
-    log.error('create_agent path traversal attempt', { folder, resolvedPath });
+  // The precheck vetted the name; this vets the folder actually minted (a
+  // dedupe suffix can push a long name past the length limit) and is the
+  // last line for any caller that skipped the precheck. The pattern also
+  // rules out path traversal: no separators, no "..".
+  if (!isValidGroupFolder(folder)) {
+    await notify(`Cannot create agent "${name}": "${folder}" is not a valid or available agent name.`);
+    log.error('create_agent rejected folder', { name, folder });
     return;
   }
 

@@ -1,5 +1,20 @@
-staged=$(git diff --cached --name-only --diff-filter=ACM -- 'src/**/*.ts')
-pnpm run format:fix
-if [ -n "$staged" ]; then
-  echo "$staged" | xargs git add
+# Check-only: never rewrites or re-stages files, so a commit contains exactly
+# what was staged (including partial `git add -p` hunks). Checks the staged
+# blob of each staged src/**/*.ts file, not the working-tree copy.
+# Fix with `pnpm run format:fix` (or `pnpm exec prettier --write <file>`).
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- 'src/*.ts')
+[ -z "$staged" ] && exit 0
+
+bad=""
+for f in $staged; do
+  if ! git show ":$f" | pnpm exec prettier --stdin-filepath "$f" --check >/dev/null 2>&1; then
+    bad="$bad $f"
+  fi
+done
+
+if [ -n "$bad" ]; then
+  echo "pre-commit: staged files are not prettier-formatted:"
+  for f in $bad; do echo "  $f"; done
+  echo "Run: pnpm exec prettier --write$bad && git add$bad"
+  exit 1
 fi

@@ -3,7 +3,8 @@
 --
 -- NanoClaw v2 memory indexing and semantic search.
 -- Each agent group has an embedded memory index built from markdown and org files in its workspace
--- (groups/<group>/memory/). Agents can search memory using natural language queries; results use
+-- (groups/<group>/memory/, and the group's Zettelkasten at groups/<group>/zettel/). Agents can
+-- search memory using natural language queries; results use
 -- hybrid vector + keyword scoring.
 --
 -- Scope: memory indexing and retrieval
@@ -15,7 +16,9 @@
 --
 -- NOTE: This is a ported template from v1. The v2 implementation is not yet written.
 -- Key v2 differences from v1:
---   - Groups are now AgentGroups (identity.allium); the workspace root is groups/<folder>/memory/
+--   - Groups are now AgentGroups (identity.allium); the indexed roots are groups/<folder>/memory/
+--     and groups/<folder>/zettel/ (the Zettelkasten, kept apart from the memory/ tree because its
+--     notes are permanent where memory/ is updated and pruned in place; see memory-graph.allium)
 --   - The v1 IPC query path (HostFulfilled* rules) is replaced by the MemoryMcpTools surface
 --     (see bottom of file); MCP tools are registered in container/agent-runner/src/mcp-tools/
 --   - Write path differs by agent type (see MemoryFilesWithinWorkspace invariant comment):
@@ -123,7 +126,7 @@ value MemoryListParams {
 -- Files are re-indexed whenever their content changes.
 entity MemoryFile {
     group: identity/AgentGroup
-    path: String                        -- repo-relative path, e.g. groups/<folder>/memory/notes/foo.md
+    path: String                        -- repo-relative path, e.g. groups/<folder>/zettel/notes/foo.md
     content_hash: String
     indexed_at: Timestamp?              -- null until first successful index
     -- The triggering rules fire on WorkspaceFileChanged and WorkspaceFileRemoved — file-system
@@ -218,7 +221,7 @@ rule FileDiscovered {
     @guidance
         -- Also fires when a specialist delivers a result with commit_to_memory = true
         -- (see specialists/AgentRequestsDeliverSpecialistResult). The host copies the
-        -- file into the group's memory/ directory before WorkspaceFileChanged is emitted,
+        -- file into the group's zettel/reports/ before WorkspaceFileChanged is emitted,
         -- so this rule fires under the same conditions as any other new file.
 }
 
@@ -376,13 +379,14 @@ rule MemoryListed {
 -- Invariants
 ------------------------------------------------------------
 
--- All indexed files must live within the group's memory/ subdirectory.
+-- All indexed files must live within the group's memory/ subdirectory or its
+-- Zettelkasten, zettel/ — each at the top of the group workspace.
 -- Non-specialist agents write there directly (group dir is mounted RW).
 -- Specialist agents land files there via commit_to_memory on result delivery
 -- (group dir is mounted RO for specialists; the host performs the copy).
 invariant MemoryFilesWithinWorkspace {
     for f in MemoryFiles:
-        startsWith(f.path, "groups/") and contains(f.path, "/memory/")
+        startsWith(f.path, "groups/") and (contains(f.path, "/memory/") or contains(f.path, "/zettel/"))
 }
 
 -- Every chunk belongs to an indexed (or pending) file, never a removed one.

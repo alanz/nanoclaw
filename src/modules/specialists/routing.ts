@@ -79,46 +79,58 @@ async function routeResultToMain(task: SpecialistTask, transfer: ContainerTransf
         const memDir = path.join(GROUPS_DIR, requesterGroup.folder, SPECIALISTS_CONFIG.memoryReportsSubpath);
         fs.mkdirSync(memDir, { recursive: true });
 
-        if (await getDb().hasTable('transfer_files')) {
-          const files = (await getDb().all(
+        const db = getDb();
+        // Copy first; the record of where each file went is written below in
+        // one step with the transfer's status.
+        const outcomes: Array<{ id: string; memoryPath: string | null }> = [];
+        if (await db.hasTable('transfer_files')) {
+          const files = (await db.all(
             "SELECT * FROM transfer_files WHERE transfer_id = ? AND status = 'owned'",
             transfer.id,
           )) as TransferFile[];
-
-          const memoryPaths: string[] = [];
           for (const file of files) {
             const destPath = path.join(memDir, file.original_name);
             try {
               fs.copyFileSync(file.host_path, destPath);
-              const memPath = `${SPECIALISTS_CONFIG.memoryReportsSubpath}/${file.original_name}`;
-              await getDb().run(
-                "UPDATE transfer_files SET status = 'placed', memory_path = ? WHERE id = ?",
-                memPath,
-                file.id,
-              );
-              memoryPaths.push(memPath);
+              outcomes.push({
+                id: file.id,
+                memoryPath: `${SPECIALISTS_CONFIG.memoryReportsSubpath}/${file.original_name}`,
+              });
             } catch (err) {
               log.warn('specialists: failed to copy file to memory area', {
                 transferId: transfer.id,
                 file: file.original_name,
                 err,
               });
+              outcomes.push({ id: file.id, memoryPath: null });
             }
           }
+        }
+        const memoryPaths = outcomes.flatMap((o) => (o.memoryPath ? [o.memoryPath] : []));
 
-          // Set committed_files on task
+        // specialists.allium's commit is one operation: record each file's
+        // memory_path, the task's committed_files, and take the transfer
+        // pending → committed → expired. Two separate writes left a window
+        // where a crash stranded it in the transient `committed`.
+        //
+        // A committed file ends `expired`, not `placed`: it was never placed
+        // into an ipc-in, its staging copy is reclaimed, and memory_path
+        // records the copy that persists. (The spec's file transitions list
+        // no owned → expired — a spec gap, raised separately.)
+        await db.transaction(async () => {
+          for (const { id, memoryPath } of outcomes) {
+            await db.run("UPDATE transfer_files SET status = 'expired', memory_path = ? WHERE id = ?", memoryPath, id);
+          }
           if (memoryPaths.length > 0) {
-            await getDb().run(
+            await db.run(
               'UPDATE specialist_tasks SET committed_files = ? WHERE id = ?',
               JSON.stringify(memoryPaths),
               task.id,
             );
           }
-        }
-
-        // Mark transfer committed then immediately expired (memory copies persist)
-        await getDb().run("UPDATE container_transfers SET status = 'committed' WHERE id = ?", transfer.id);
-        await getDb().run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", transfer.id);
+          await db.run("UPDATE container_transfers SET status = 'committed' WHERE id = ?", transfer.id);
+          await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", transfer.id);
+        });
       } else {
         log.warn('specialists: requester group not found for memory commit', {
           taskId: task.id,

@@ -183,14 +183,24 @@ async function main(): Promise<void> {
   }
   if (startChoice === 'advanced') {
     const gatewayCatalog = loadGatewayCatalog();
+    // The native proxy is built in, so it is not a catalog skill — but it is
+    // this fork's default, and the screen must offer it and start on it, or
+    // "Done" on a fresh install would quietly install the catalog's vault.
     configValues.gatewayProvider ??=
-      configuredGatewayKind(process.cwd()) || detectInstalledGateway(process.cwd()) || gatewayCatalog.default;
+      configuredGatewayKind(process.cwd()) || detectInstalledGateway(process.cwd()) || 'native-proxy';
     configValues = await runAdvancedScreen(configValues, {
-      gatewayProvider: gatewayCatalog.gateways.map(({ kind, label, description }) => ({
-        value: kind,
-        label,
-        hint: description,
-      })),
+      gatewayProvider: [
+        {
+          value: 'native-proxy',
+          label: 'Native credential proxy',
+          hint: 'Built in; the host holds credentials from .env.',
+        },
+        ...gatewayCatalog.gateways.map(({ kind, label, description }) => ({
+          value: kind,
+          label,
+          hint: description,
+        })),
+      ],
     });
     applyToEnv(configValues);
   }
@@ -289,6 +299,13 @@ async function main(): Promise<void> {
     if (!res.ok) {
       const err = res.terminal?.fields.ERROR;
       if (err === 'runtime_not_available') {
+        if (res.terminal?.fields.RUNTIME === 'container') {
+          await fail(
+            'container',
+            "Apple Container isn't available.",
+            'Install it with `brew install container`, then retry.',
+          );
+        }
         await fail(
           'container',
           "Docker isn't available.",
@@ -328,10 +345,13 @@ async function main(): Promise<void> {
   }
 
   let gatewayKind = process.env.NANOCLAW_GATEWAY_PROVIDER?.trim().toLowerCase();
-  if (useNativeProxy()) {
+  if (useNativeProxy({ allowDefault: !skip.has('gateway') })) {
     // Built into core, not a gateway skill: nothing to install, and the
-    // credential is read from .env by the host-side proxy.
+    // credential is read from .env by the host-side proxy. Written down even
+    // when it was only the default: the host has no implicit gateway and
+    // refuses to start without one named.
     gatewayKind = 'native-proxy';
+    if (!skip.has('gateway')) upsertEnvVar('NANOCLAW_GATEWAY_PROVIDER', 'native-proxy');
     p.log.success('Native credential proxy selected (built in; credentials from .env).');
   } else if (!skip.has('gateway')) {
     p.log.message(
@@ -458,14 +478,7 @@ async function main(): Promise<void> {
       if (gatewayKind === 'native-proxy') {
         // No gateway-side auth: the proxy injects ANTHROPIC_API_KEY or
         // CLAUDE_CODE_OAUTH_TOKEN from .env into proxied requests.
-        const creds = readEnvFile(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']);
-        if (!creds.ANTHROPIC_API_KEY && !creds.CLAUDE_CODE_OAUTH_TOKEN) {
-          await fail(
-            'auth',
-            'The native credential proxy has no credential to inject.',
-            'Add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN to .env, then re-run setup.',
-          );
-        }
+        await runNativeProxyAuth();
       } else {
         runGatewayAuth(gatewayKind, agentProvider);
       }
@@ -1801,14 +1814,91 @@ withSetupLock(async () => {
 
 /**
  * Whether this install supplies Anthropic credentials itself rather than
- * through the OneCLI vault.
+ * through a vault gateway.
  *
- * Set by choosing the native credential proxy: the host holds the credential
- * and containers reach it over ANTHROPIC_BASE_URL, so the vault step has
- * nothing to install and no agent to register.
+ * The native credential proxy is this fork's default: the host holds the
+ * credential and containers reach it over ANTHROPIC_BASE_URL, so there is no
+ * vault to install and no agent to register. A gateway named in `.env`, or one
+ * already installed, keeps its place — the default is only for an install that
+ * has not chosen, in a run that is setting up the gateway.
  */
-function useNativeProxy(): boolean {
+function useNativeProxy({ allowDefault }: { allowDefault: boolean }): boolean {
   const env = readEnvFile(['NANOCLAW_GATEWAY_PROVIDER']);
-  const configured = process.env.NANOCLAW_GATEWAY_PROVIDER ?? env.NANOCLAW_GATEWAY_PROVIDER ?? '';
-  return configured.trim().toLowerCase() === 'native-proxy';
+  const configured = (process.env.NANOCLAW_GATEWAY_PROVIDER ?? env.NANOCLAW_GATEWAY_PROVIDER ?? '')
+    .trim()
+    .toLowerCase();
+  if (configured) return configured === 'native-proxy';
+  // A run told to skip the gateway step chooses nothing on the operator's behalf.
+  return allowDefault && !detectInstalledGateway(process.cwd());
+}
+
+/**
+ * Get an Anthropic credential into `.env` for the native proxy, which reads it
+ * there. Nothing to do when one is already present; otherwise the same choices
+ * the vault flow offers, written to `.env` instead of a vault.
+ */
+async function runNativeProxyAuth(): Promise<void> {
+  const creds = readEnvFile(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']);
+  if (creds.ANTHROPIC_API_KEY || creds.CLAUDE_CODE_OAUTH_TOKEN) {
+    p.log.success(brandBody('Your Claude account is already connected.'));
+    setupLog.step('auth', 'skipped', 0, { REASON: 'secret-already-present' });
+    return;
+  }
+
+  const method = ensureAnswer(
+    await brightSelect({
+      message: 'How would you like to connect to Claude?',
+      options: [
+        {
+          value: 'subscription',
+          label: 'Sign in with my Claude subscription',
+          hint: 'recommended if you have Pro or Max',
+        },
+        { value: 'oauth', label: 'Paste an OAuth token I already have', hint: 'sk-ant-oat…' },
+        { value: 'api', label: 'Paste an Anthropic API key', hint: 'pay-per-use via console.anthropic.com' },
+      ],
+    }),
+  ) as 'subscription' | 'oauth' | 'api';
+  setupLog.userInput('auth_method', method);
+
+  if (method === 'subscription') {
+    p.log.step(brandBody('Opening the Claude sign-in flow…'));
+    const start = Date.now();
+    const code = await runInheritScript('bash', ['setup/register-native-token.sh']);
+    if (code !== 0) {
+      setupLog.step('auth', 'failed', Date.now() - start, { EXIT_CODE: code, METHOD: 'subscription' });
+      await fail(
+        'auth',
+        "Couldn't complete the Claude sign-in.",
+        'Re-run setup and try again, or choose a paste option instead.',
+      );
+    }
+    setupLog.step('auth', 'interactive', Date.now() - start, { METHOD: 'subscription' });
+    p.log.success(brandBody('Claude account connected.'));
+    return;
+  }
+
+  const label = method === 'oauth' ? 'OAuth token' : 'API key';
+  const prefix = method === 'oauth' ? 'sk-ant-oat' : 'sk-ant-api';
+  const answer = ensureAnswer(
+    await p.password({
+      message: `Paste your ${label}`,
+      clearOnError: true,
+      validate: (v) => {
+        // A line-wrapped paste can carry whitespace; the token never does.
+        const cleaned = (v ?? '').replace(/\s+/g, '');
+        if (!cleaned) return 'Required';
+        if (!cleaned.startsWith(prefix)) return `Should start with ${prefix}…`;
+        if (method === 'oauth' && !/^sk-ant-oat[A-Za-z0-9_-]{80,500}AA$/.test(cleaned)) {
+          return cleaned.length < 90
+            ? 'Token looks truncated — line breaks in the paste can cut it off. Widen your terminal so it fits on one line, then paste again.'
+            : "Token shape doesn't look right (expected sk-ant-oat…AA).";
+        }
+        return undefined;
+      },
+    }),
+  ) as string;
+  upsertEnvVar(method === 'oauth' ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY', answer.replace(/\s+/g, ''));
+  setupLog.step('auth', 'success', 0, { METHOD: method });
+  p.log.success(brandBody('Claude account connected.'));
 }

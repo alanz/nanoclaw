@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'timers/promises';
 import { log } from '../src/log.js';
 import { getDefaultContainerImage } from '../src/install-slug.js';
 import { commandExists, getPlatform } from './platform.js';
+import { upsertEnvVar } from './set-env.js';
 import { emitStatus } from './status.js';
 
 type DockerStatus = 'ok' | 'no-permission' | 'no-daemon' | 'other';
@@ -79,15 +80,35 @@ function detectRuntime(): string {
   return 'docker';
 }
 
-function parseArgs(args: string[]): { runtime: string } {
-  let runtime = detectRuntime();
+/**
+ * The host picks its session driver from `NANOCLAW_RUNTIME_DRIVER` (default
+ * docker), and `container/build.sh` its build tool from the same setting. So
+ * the runtime setup builds with has to be written there, or a macOS install
+ * builds with Apple Container and then tries to run Docker.
+ */
+const DRIVER_FOR_RUNTIME: Record<string, string> = { container: 'apple', docker: 'docker' };
+const RUNTIME_FOR_DRIVER: Record<string, string> = { apple: 'container', docker: 'docker' };
+
+/**
+ * `--runtime` wins; then the driver this install already recorded (a re-run
+ * keeps its choice); detection is only for a first run. Returns the runtime
+ * and the driver the host must run it with (undefined for an unknown runtime,
+ * which the caller rejects).
+ */
+export function chooseRuntime(
+  args: string[],
+  recordedDriver: string | undefined,
+  detect: () => string,
+): { runtime: string; driver: string | undefined } {
+  const recorded = recordedDriver?.trim().toLowerCase();
+  let runtime = (recorded && RUNTIME_FOR_DRIVER[recorded]) || detect();
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--runtime' && args[i + 1]) {
       runtime = args[i + 1];
       i++;
     }
   }
-  return { runtime };
+  return { runtime, driver: DRIVER_FOR_RUNTIME[runtime] };
 }
 
 /**
@@ -232,7 +253,8 @@ function runImageSmokeTest(runCmd: string, projectRoot: string, image: string): 
 
 export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
-  const { runtime } = parseArgs(args);
+  const { runtime, driver } = chooseRuntime(args, readSetting(projectRoot, 'NANOCLAW_RUNTIME_DRIVER'), detectRuntime);
+  if (driver) upsertEnvVar('NANOCLAW_RUNTIME_DRIVER', driver, projectRoot);
   const image = getDefaultContainerImage(projectRoot);
   const logFile = path.join(projectRoot, 'logs', 'setup.log');
 

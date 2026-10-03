@@ -65,7 +65,7 @@ it.each([false, true])('delivers the Claude SDK billing error once, with prior r
 
   await processQuery(
     query,
-    { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1' },
+    { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1', taskRun: false },
     ['m1'],
     'claude',
     (exchange) => exchanges.push(exchange),
@@ -116,7 +116,7 @@ const OWNER_HINT =
   "Whoever runs this NanoClaw needs to fix this outside the chat. Please don't send keys or passwords here.";
 const AUTH_NOTICE = `${AUTH_ERROR}\n${OWNER_HINT}`;
 
-async function resultEvents(): Promise<Array<{ text: string | null; isError?: boolean; error?: string }>> {
+async function resultEvents(): Promise<Array<{ type: string; text: string | null; isError?: boolean; error?: string }>> {
   const provider = createProvider('claude');
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
   const events: Array<{ type: string; text: string | null; isError?: boolean; error?: string }> = [];
@@ -173,7 +173,7 @@ it('delivers the SDK auth error to the channel instead of the generic notice', a
 
   await processQuery(
     provider.query({ prompt: 'ping', cwd: tmp }),
-    { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1' },
+    { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1', taskRun: false },
     ['m1'],
     'claude',
     (exchange) => exchanges.push(exchange),

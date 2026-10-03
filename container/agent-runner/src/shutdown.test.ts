@@ -83,4 +83,40 @@ describe('shutdown request', () => {
     // Persisted, so the sub-task's result resumes this conversation.
     expect(getContinuation('mock')).toMatch(/^mock-session-/);
   });
+
+  // The request is raised when the tool is called, before the host has looked
+  // at the dispatch. If the host rejects it, its notice arrives after the
+  // request: exiting then would leave the task `running` with no container.
+  it('stays to answer a message that arrives after the request', async () => {
+    const insert = (id: string, text: string) =>
+      getInboundDb()
+        .prepare(
+          `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+           VALUES (?, 'chat', datetime('now'), 'pending', 'chan-1', 'agent', ?)`,
+        )
+        .run(id, JSON.stringify({ sender: 'system', text }));
+    insert('m1', 'research this');
+
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt) => {
+      prompts.push(prompt);
+      if (prompts.length === 1) {
+        requestShutdown(); // dispatch_sub_task
+        insert('m2', 'dispatch_sub_task failed: not a specialist'); // the host's rejection
+      }
+      return 'ok';
+    });
+
+    const controller = new AbortController();
+    const loop = runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal: controller.signal });
+    const start = Date.now();
+    while (!prompts.some((p) => p.includes('dispatch_sub_task failed'))) {
+      if (Date.now() - start > 5000) throw new Error('rejection notice never reached the agent');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    controller.abort();
+    await loop;
+
+    expect(isShutdownRequested()).toBe(false);
+  });
 });

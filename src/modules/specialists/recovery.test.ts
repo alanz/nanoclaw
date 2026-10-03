@@ -37,6 +37,22 @@ vi.mock('./routing.js', () => ({
   routeResult: vi.fn().mockResolvedValue(undefined),
 }));
 
+// The owed-wake check reads the session mailbox. By default there is none (as
+// before this check existed); a test hands in a fake mailbox to say what is due.
+const mailboxState = vi.hoisted(() => ({
+  current: undefined as { due: number; claims: number } | undefined,
+}));
+vi.mock('../../session-manager.js', () => ({
+  withExistingMailboxSession: vi.fn(async (_ag: string, _sess: string, action: (m: unknown) => unknown) => {
+    const state = mailboxState.current;
+    if (!state) return undefined;
+    return action({
+      countDueMessages: () => state.due,
+      getProcessingClaims: () => Array.from({ length: state.claims }, (_, i) => ({ messageId: `m${i}` })),
+    });
+  }),
+}));
+
 import { routeResult } from './routing.js';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -400,6 +416,38 @@ describe('crash detection — queued tasks excluded', () => {
 
     expect((await getTask(task.id))!.status).toBe('awaiting_restart');
     expect((await getTask(task.id))!.restart_attempt_count).toBe(1);
+  });
+
+  // A specialist exits on dispatch_sub_task; when the child's result is routed
+  // back the parent is set `running` before its container exists (the wake may
+  // wait for a concurrency slot). A crash here re-sent the prompt into a fresh
+  // conversation and threw away the parent's work. Same for a rejected
+  // dispatch, whose notice is waiting for the exited parent.
+  it('does not crash-detect a running task owed a wake (a due message nobody has claimed)', async () => {
+    mailboxState.current = { due: 1, claims: 0 };
+    try {
+      const task = await makeSpecialistTask({ status: 'running', restartAttemptCount: 0 });
+
+      await sweepSpecialistTasks();
+
+      expect((await getTask(task.id))!.status).toBe('running');
+      expect((await getTask(task.id))!.restart_attempt_count).toBe(0);
+    } finally {
+      mailboxState.current = undefined;
+    }
+  });
+
+  it('still crash-detects a running task whose container died holding its message', async () => {
+    mailboxState.current = { due: 1, claims: 1 };
+    try {
+      const task = await makeSpecialistTask({ status: 'running', restartAttemptCount: 0 });
+
+      await sweepSpecialistTasks();
+
+      expect((await getTask(task.id))!.status).toBe('awaiting_restart');
+    } finally {
+      mailboxState.current = undefined;
+    }
   });
 });
 

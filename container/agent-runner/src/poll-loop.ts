@@ -10,7 +10,7 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
-import { isShutdownRequested } from './shutdown.js';
+import { clearShutdownRequest, isShutdownRequested } from './shutdown.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
@@ -342,6 +342,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // slot frees. The conversation was persisted above, so a sub-task's result
     // resumes it in the next container.
     if (isShutdownRequested()) {
+      // Same rule at the last moment: a message that landed after the final
+      // turn (a rejected dispatch, say) is answered here rather than by a
+      // respawned container.
+      if (getPendingMessages(false).some((m) => m.kind !== 'system' && m.trigger === 1)) {
+        log('New message after a shutdown request — staying');
+        clearShutdownRequest();
+        continue;
+      }
       log('Shutdown requested by a specialist tool — exiting after this turn');
       return;
     }
@@ -584,6 +592,13 @@ export async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         query.push(prompt);
+        // A message after a specialist asked to exit means the host has more
+        // to say — typically that the dispatch it exited for was rejected. Stay
+        // and answer it; a later dispatch or delivery asks again.
+        if (isShutdownRequested()) {
+          log('New message after a shutdown request — staying');
+          clearShutdownRequest();
+        }
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
           routing: extractRouting(keep),

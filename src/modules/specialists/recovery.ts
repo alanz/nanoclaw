@@ -28,6 +28,7 @@
  */
 import { log } from '../../log.js';
 import { isContainerRunning } from '../../container-runner.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
 import { clearBootCrashState, getBootCrashState } from '../boot-crash/index.js';
 import { SPECIALISTS_CONFIG } from './config.js';
 import { getLiveTasksWithSessions, getTask, updateTaskStatus } from './db.js';
@@ -44,6 +45,29 @@ const LIVE_STATUSES = new Set(['queued', 'running', 'awaiting_sub_task', 'awaiti
  * against the 4 hours the global timeout would otherwise take.
  */
 const BOOT_CRASH_THRESHOLD = 3;
+
+/**
+ * A `running` task with no container is not necessarily a crash. Since
+ * specialists exit on dispatch_sub_task and deliver_specialist_result, a task
+ * is legitimately between containers when its sub-task's result has been
+ * routed back (the parent is set `running` before its wake, which may wait in
+ * the concurrency queue or take seconds to spawn), or when a rejected dispatch
+ * left a notice for it. Each leaves a due message nobody has claimed — the
+ * host's due-message wake owes that session a container. Treating it as a
+ * crash instead re-sends the task's prompt into a fresh conversation, losing
+ * everything the parent had done.
+ *
+ * A container that died mid-turn leaves its message claimed, so it still
+ * reads as a crash and spends the restart budget as before.
+ */
+async function owedAWake(task: SpecialistTask & { session_id: string }): Promise<boolean> {
+  const owed = await withExistingMailboxSession(
+    task.specialist_group_id,
+    task.session_id,
+    (mailbox) => mailbox.countDueMessages() > 0 && mailbox.getProcessingClaims().length === 0,
+  );
+  return owed === true;
+}
 
 /**
  * Recursively cancel a sub-task subtree rooted at taskId.
@@ -263,6 +287,12 @@ async function sweepTask(
   // which catches it before this point using accumulated boot-crash evidence
   // rather than a liveness sample this path cannot trust.
   if (!containerAlive && task.status === 'running') {
+    if (await owedAWake(task)) {
+      log.debug('specialists: running task has no container but is owed a wake — not a crash', {
+        taskId: task.id,
+      });
+      return;
+    }
     const newRetryCount = task.restart_attempt_count + 1;
     const pendingChildId = task.pending_sub_task_id;
 

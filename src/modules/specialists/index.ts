@@ -13,6 +13,7 @@
 import { registerSessionContributor, registerSessionExitHook } from '../../container-runner.js';
 import { deliverSessionMessages, registerDeliveryAction } from '../../delivery.js';
 import { getSession } from '../../db/sessions.js';
+import { outsideMailboxSessions } from '../../session-manager.js';
 import { unguarded } from '../../guard/index.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
@@ -157,21 +158,39 @@ registerSessionContributor(async ({ agentGroup, session }) => {
  * things go wrong in that gap: the task still reads `running` with no
  * container, which recovery takes for a crash; and ending the invocation
  * clears ipc-out before deliver_specialist_result has taken its files.
+ *
+ * Three details matter:
+ * - Only a specialist task's session has a final action to hand over. Every
+ *   session gets an invocation (main sessions receive files through ipc-in),
+ *   but draining an ordinary session here would be pointless work.
+ * - A kill can fire this hook from inside an open mailbox session for the
+ *   same session (the sweep reaps from within one), so the work runs outside
+ *   it: the drain opens that mailbox itself and must queue behind the
+ *   sweep, not count as nested.
+ * - A poll may already be draining the session. Returning early would let
+ *   ipc-out be cleared under that drain's file copy, so this waits for it.
  */
 registerSessionExitHook(({ sessionId }) => {
   const invocationId = activeInvocations.get(sessionId);
   if (!invocationId) return;
   activeInvocations.delete(sessionId);
-  void (async () => {
-    try {
-      const session = await getSession(sessionId);
-      if (session) await deliverSessionMessages(session);
-    } catch (err) {
-      log.warn('specialists: final outbound drain failed', { sessionId, err });
-    }
-    await endInvocationById(invocationId);
-  })().catch((err) => log.warn('specialists: invocation cleanup failed', { sessionId, invocationId, err }));
+  outsideMailboxSessions(() => {
+    void finishInvocation(sessionId, invocationId).catch((err) =>
+      log.warn('specialists: invocation cleanup failed', { sessionId, invocationId, err }),
+    );
+  });
 });
+
+async function finishInvocation(sessionId: string, invocationId: string): Promise<void> {
+  try {
+    const session = await getSession(sessionId);
+    const task = session?.thread_id ? await getTask(session.thread_id) : undefined;
+    if (session && task) await deliverSessionMessages(session, { waitForInflight: true });
+  } catch (err) {
+    log.warn('specialists: final outbound drain failed', { sessionId, err });
+  }
+  await endInvocationById(invocationId);
+}
 
 export { sweepSpecialistTasks };
 export { createSpecialist, setMainGroup } from './db.js';

@@ -6,6 +6,8 @@ import { getAgentGroup } from '../../db/agent-groups.js';
 import { wakeContainer } from '../../container-runner.js';
 import { initSessionFolder, writeSessionMessage } from '../../session-manager.js';
 import { log } from '../../log.js';
+import { getSession } from '../../db/sessions.js';
+import { requestWake } from '../../request-wake.js';
 import type { Session } from '../../types.js';
 import {
   createTask,
@@ -24,14 +26,24 @@ function generateId(): string {
   return `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Tell the calling agent why its dispatch did not happen, and wake it. A
+ * specialist's container exits as soon as it calls dispatch_sub_task, so by
+ * the time a rejection is written there may be nothing running to read it —
+ * left unwoken, the task sits `running` with no container until recovery
+ * mistakes it for a crash.
+ */
 function notifyAgent(session: Session, text: string): void {
-  writeSessionMessage(session.agent_group_id, session.id, {
+  void writeSessionMessage(session.agent_group_id, session.id, {
     id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
     content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
     trigger: true,
-  });
+  })
+    .then(() => getSession(session.id))
+    .then((fresh) => (fresh ? requestWake(fresh, 'inbound-message') : false))
+    .catch((err) => log.warn('specialists: failed to notify agent', { sessionId: session.id, err }));
 }
 
 function formatTaskPrompt(task: SpecialistTask, specialist: Specialist | undefined): string {

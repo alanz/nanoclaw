@@ -41,7 +41,7 @@ import { createAgentGroup } from '../db/agent-groups.js';
 import { closeDb, initTestDb } from '../db/connection.js';
 import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
 import { runMigrations } from '../db/migrations/index.js';
-import { batchEmbeddings, indexedMountDirs, MemoryIndexManager } from './manager.js';
+import { batchEmbeddings, indexedMountDirs, MemoryIndexManager, zettelDirs } from './manager.js';
 import { TokenBucketRateLimiter } from './rate-limiter.js';
 
 let root: string;
@@ -103,6 +103,50 @@ describe('indexing a mount', () => {
     expect(rows).toEqual([
       { path: 'extra/org/gtd.org', source: 'org' },
       { path: 'extra/org/projects/nanoclaw.org', source: 'org' },
+    ]);
+    await manager.close();
+  });
+});
+
+// The Zettelkasten lives beside memory/, not in it: its notes are permanent,
+// where memory/ is updated and pruned in place. It is indexed as its own
+// source, so a search can ask for notes alone.
+describe('indexing the Zettelkasten', () => {
+  it('is found only when the folder exists', () => {
+    const group = path.join(root, 'group');
+    fs.mkdirSync(group);
+    expect(zettelDirs(group)).toEqual([]);
+    fs.mkdirSync(path.join(group, 'zettel'));
+    expect(zettelDirs(group)).toEqual([{ dir: path.join(group, 'zettel'), source: 'zettel' }]);
+  });
+
+  it('is indexed as source zettel beside memory/', async () => {
+    const group = path.join(root, 'group');
+    fs.mkdirSync(path.join(group, 'memory'), { recursive: true });
+    fs.mkdirSync(path.join(group, 'zettel', 'notes'), { recursive: true });
+    fs.writeFileSync(path.join(group, 'memory', 'index.md'), '# Memory Index\n');
+    fs.writeFileSync(
+      path.join(group, 'zettel', 'notes', 'MEM-2026-01-01-a.md'),
+      '---\nid: MEM-2026-01-01-a\n---\nA note.\n',
+    );
+    const manager = new MemoryIndexManager(
+      'ag-main',
+      'main',
+      path.join(group, 'memory'),
+      path.join(root, 'index.db'),
+      'test-key',
+      'gemini-embedding-001',
+      zettelDirs(group),
+    );
+    await manager.init();
+    await manager.sync({ force: true });
+
+    const rows = (manager as unknown as { index: { db: import('better-sqlite3').Database } }).index.db
+      .prepare('SELECT path, source FROM files ORDER BY source')
+      .all() as Array<{ path: string; source: string }>;
+    expect(rows.map((r) => [path.basename(r.path), r.source])).toEqual([
+      ['index.md', 'memory'],
+      ['MEM-2026-01-01-a.md', 'zettel'],
     ]);
     await manager.close();
   });

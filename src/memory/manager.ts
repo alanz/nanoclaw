@@ -49,12 +49,14 @@ export function isMemoryGroupExcluded(groupId: string): boolean {
 }
 
 /**
- * A directory indexed alongside a group's own memory/: one of its mounts
- * marked `index`. Its files are stored under `pathPrefix` — the path the
- * container sees them at, `extra/<mount>/…` — so a search hit maps straight
- * to /workspace/extra/<mount>/… and each file has one stable path, whatever
- * the host layout. (A path that changed between syncs would leave the old
- * rows until the next full sync removed them.)
+ * A directory indexed alongside a group's own memory/: its Zettelkasten
+ * folder, or one of its mounts marked `index`. A mount's files are stored
+ * under `pathPrefix` — the path the container sees them at,
+ * `extra/<mount>/…` — so a search hit maps straight to
+ * /workspace/extra/<mount>/… and each file has one stable path, whatever the
+ * host layout. (A path that changed between syncs would leave the old rows
+ * until the next full sync removed them.) A folder inside the group's
+ * workspace has no prefix: it is stored repo-relative, like memory/.
  */
 /** In the repo, as the central DB's workspace-file tracking means it — not an indexed mount, not outside. */
 function isRepoPath(p: string): boolean {
@@ -64,7 +66,20 @@ function isRepoPath(p: string): boolean {
 export interface IndexedDir {
   dir: string;
   source: string;
-  pathPrefix: string;
+  pathPrefix?: string;
+}
+
+/**
+ * The group's Zettelkasten: `groups/<folder>/zettel/`, kept apart from the
+ * OKF memory/ tree because its rules are the opposite — notes are permanent
+ * and never edited, where memory/ is updated and pruned in place. Indexed as
+ * source `zettel` when the folder exists.
+ */
+export const ZETTEL_DIR = 'zettel';
+
+export function zettelDirs(groupDir: string): IndexedDir[] {
+  const dir = path.join(groupDir, ZETTEL_DIR);
+  return fsSync.existsSync(dir) ? [{ dir, source: ZETTEL_DIR }] : [];
 }
 
 /**
@@ -636,7 +651,10 @@ export async function initMemoryManagers(params: {
     const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
     const dbPath = path.join(dbDir, 'index.db');
 
-    const additionalDirs = await indexedMountDirs(group.id);
+    const additionalDirs = [
+      ...zettelDirs(path.join(params.groupsDir, group.folder)),
+      ...(await indexedMountDirs(group.id)),
+    ];
 
     await ensureMemoryManager({
       groupId: group.id,
@@ -676,6 +694,7 @@ export async function initMemoryManagerForGroup(params: {
     dbPath,
     apiKey: params.apiKey,
     model: params.model,
+    additionalDirs: zettelDirs(path.join(params.groupsDir, group.folder)),
   }).catch((err) => {
     log.warn('Failed to init memory manager for group', { groupId: group.id, err });
   });

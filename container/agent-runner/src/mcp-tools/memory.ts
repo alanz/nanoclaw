@@ -111,9 +111,13 @@ export const memorySearch: McpToolDefinition = {
         top_k: { type: 'number', description: 'Max results (default 6, max 20).' },
         path_prefix: {
           type: 'string',
-          description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/memory/notes/".',
+          description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/zettel/notes/".',
         },
-        source: { type: 'string', description: 'Filter by source: "memory" or "org".' },
+        source: {
+          type: 'string',
+          description:
+            'Filter by source: "memory" (memory/), "zettel" (the Zettelkasten, zettel/), or a mount name such as "org".',
+        },
         min_score: { type: 'number', description: 'Min relevance score 0–1 (default 0.1).' },
       },
     },
@@ -154,7 +158,12 @@ export const memorySearch: McpToolDefinition = {
             rank: number;
           },
           (string | number)[]
-        >(`SELECT id, path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` + `  FROM ${FTS_TABLE}` + ` WHERE ${conditions.join(' AND ')}` + ` ORDER BY rank ASC LIMIT ?`)
+        >(
+          `SELECT id, path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` +
+            `  FROM ${FTS_TABLE}` +
+            ` WHERE ${conditions.join(' AND ')}` +
+            ` ORDER BY rank ASC LIMIT ?`,
+        )
         .all(...params, topK * 4);
 
       const results = rows

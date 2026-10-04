@@ -49,7 +49,15 @@ value NoteSource {
 ------------------------------------------------------------
 
 -- A structured, linked knowledge note in a group's memory graph.
--- Notes are the atomic units of the A-MEM knowledge graph.
+-- Notes are the atomic units of the A-MEM knowledge graph — an agent-era
+-- Zettelkasten. It lives in the group's zettel/ folder (notes in zettel/notes/,
+-- the reports they are written from in zettel/reports/), apart from the
+-- memory/ tree of memory.allium: its notes are permanent, where memory/ is
+-- updated and pruned in place.
+-- In-body references to other workspace files are relative Markdown links
+-- (../reports/x.md), so they survive a change of host, port or folder; the
+-- dashboard resolves them. NoteSource.path stays relative to the group
+-- workspace (zettel/reports/x.md).
 -- Each note captures a single insight with explicit graph edges (links) to
 -- related notes. Notes are created by the main agent after synthesising a
 -- researcher report; they are never created by the researcher itself.
@@ -143,7 +151,7 @@ rule DuplicateCheckPerformed {
     let dup_params = memory/MemorySearchParams{
         limit: config.duplicate_check_limit,
         min_score: config.duplicate_check_score,
-        path_prefix: "memory/notes/",
+        path_prefix: "zettel/notes/",
         source: null,
         include_content: null
     }
@@ -218,12 +226,12 @@ rule SynthesisCandidatesScanned {
 
     let tag_clusters = dense_tag_clusters(
         group,
-        "memory/notes/",
+        "zettel/notes/",
         config.synthesis_dense_tag_min
     )
     let dense_nodes = dense_link_nodes(
         group,
-        "memory/notes/",
+        "zettel/notes/",
         config.synthesis_dense_link_min
     )
 
@@ -241,37 +249,37 @@ rule SynthesisCandidatesScanned {
         -- result as task data. The agent is only woken when at least one dense cluster is found.
         -- The agent reads the task data, samples notes from the top clusters via memory_search,
         -- and surfaces 2-4 candidates as a digest sent to the operator.
-        -- The digest is also written to memory/digests/YYYY-MM-DD-synthesis-scan.md.
+        -- The digest is also written to zettel/digests/YYYY-MM-DD-synthesis-scan.md.
         -- The agent must NOT write drafts or SynthesisNotes during this step. Its job ends
         -- at identifying candidates; the operator decides whether to proceed.
 }
 
 -- When the operator selects a synthesis candidate and requests a draft, the agent
 -- consolidates the source notes into a draft SynthesisNote and shares it for review.
--- Each revision produces a new versioned file in memory/drafts/.
+-- Each revision produces a new versioned file in zettel/drafts/.
 rule SynthesisDraftCreated {
     when: OperatorRequestsSynthesisDraft(group, source_ids, slug)
 
     requires: for id in source_ids: exists MemoryNote{group: group, id: id, status: active}
 
-    let draft_path = "memory/drafts/DRAFT-SYN-" + date_of(now) + "-" + slug + "-v" + draft_version_for_slug(group, slug) + ".md"
+    let draft_path = "zettel/drafts/DRAFT-SYN-" + date_of(now) + "-" + slug + "-v" + draft_version_for_slug(group, slug) + ".md"
 
     ensures: SynthesisDraftWritten(group: group, draft_path: draft_path)
     ensures: DraftSharedWithOperator(group: group, draft_path: draft_path)
 
     @guidance
-        -- The draft is written to memory/drafts/DRAFT-SYN-YYYY-MM-DD-{slug}-vN.md.
+        -- The draft is written to zettel/drafts/DRAFT-SYN-YYYY-MM-DD-{slug}-vN.md.
         -- Each revision cycle produces a new versioned file (-v2.md, -v3.md, ...);
         -- prior versions are preserved as a record of the editing process.
         -- The draft uses the same frontmatter format as a final SynthesisNote,
         -- including a synthesises: field listing the source_ids.
         -- The agent sends the draft content to the operator for review before finalising.
-        -- Known gap: memory/drafts/ is currently indexed by chokidar alongside memory/notes/,
+        -- Known gap: zettel/drafts/ is currently indexed alongside zettel/notes/,
         -- so draft content appears in memory_search results until the indexer excludes that path.
 }
 
 -- Once the operator approves a draft, the agent writes the final SynthesisNote to
--- memory/notes/ and notifies the operator with a link to the new note.
+-- zettel/notes/ and notifies the operator with a link to the new note.
 rule SynthesisNoteFinalised {
     when: OperatorApprovesSynthesisDraft(group, source_ids, slug, approved_content)
 
@@ -295,8 +303,8 @@ rule SynthesisNoteFinalised {
     )
 
     @guidance
-        -- The agent writes the final note to memory/notes/SYN-YYYY-MM-DD-{slug}.md.
-        -- Draft files remain in memory/drafts/ as a record of the editing process.
+        -- The agent writes the final note to zettel/notes/SYN-YYYY-MM-DD-{slug}.md.
+        -- Draft files remain in zettel/drafts/ as a record of the editing process.
         -- synthesises holds the source MemoryNote IDs for directed graph edges; links
         -- holds the same IDs for general graph connectivity.
         -- tags always include "synthesis" by convention.
@@ -307,7 +315,7 @@ rule SynthesisNoteFinalised {
 -- ---- Report and Note Creation ----
 
 -- When the researcher task completes, the host has already committed the report
--- file to memory/reports/ (via the commit_to_memory flag on deliver_specialist_result;
+-- file to zettel/reports/ (via the commit_to_memory flag on deliver_specialist_result;
 -- see specialists/SpecialistResultRoutedToMain). The committed paths are recorded
 -- on the task's committed_files. The main agent creates a linked MemoryNote using
 -- the committed report as its source.
@@ -320,13 +328,13 @@ rule ReportAndNoteCreated {
     requires: task.committed_files.count > 0
 
     let group = task.requester_group
-    let report_path = task.committed_files.first    -- committed path in memory/reports/
+    let report_path = task.committed_files.first    -- committed path in zettel/reports/
     let slug = slug_from_path(report_path)
 
     let link_params = memory/MemorySearchParams{
         limit: config.link_candidates_limit,
         min_score: config.min_link_score,
-        path_prefix: "memory/notes/",
+        path_prefix: "zettel/notes/",
         source: null,
         include_content: null
     }
@@ -352,16 +360,16 @@ rule ReportAndNoteCreated {
     )
 
     @guidance
-        -- The report file is committed to memory/reports/ by the host before this rule fires,
+        -- The report file is committed to zettel/reports/ by the host before this rule fires,
         -- as a result of the researcher calling deliver_specialist_result with commit_to_memory = true.
         -- task.committed_files holds the workspace-relative committed paths (e.g.
-        -- "memory/reports/2026-04-08-slug.md"); the first entry is the primary report.
+        -- "zettel/reports/2026-04-08-slug.md"); the first entry is the primary report.
         -- The main agent does NOT write the report — it reads it from the committed path.
         -- slug_from_path extracts the date-slug portion from the report filename.
         -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result
         -- (the inline summary) or over the report file content if task.result is a brief summary.
         -- date_of formats a Timestamp as a YYYY-MM-DD date string.
-        -- Writing the report to memory/reports/ causes memory.allium's FileDiscovered
+        -- Writing the report to zettel/reports/ causes memory.allium's FileDiscovered
         -- rule to pick it up; it will be chunked and embedded for future searches.
         -- memory_hybrid_search is the same search used by AgentMemorySearch in memory.allium.
         -- UserNotifiedOfResult is fulfilled by the main agent replying to the user with a
@@ -483,7 +491,7 @@ invariant NotesCreatedByMainAgentOnly {
 --
 -- Enforcement: container configuration level in container-runner.ts.
 -- The researcher container MUST NOT be given any group workspace mount
--- (memory/notes/, memory/reports/, CLAUDE.md, conversations/).
+-- (zettel/, memory/, CLAUDE.md, conversations/).
 -- The researcher container MUST mount the Zotero database read-only
 -- (see zotero.allium for canonical mount path).
 -- External internet access (WebSearch, WebFetch, agent-browser) is available.

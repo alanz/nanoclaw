@@ -49,7 +49,7 @@ requester.
    takes ownership and routes them to the requester's next invocation via
    `/workspace/ipc-in/<transfer_id>/<filename>`. For root tasks only, pass
    `commit_to_memory=True` to copy files into the requester group's
-   `memory/reports/` area instead.
+   `zettel/reports/` (its Zettelkasten) instead.
 
 3. **If you cannot complete the task**, still call `deliver_specialist_result`
    with an explanation of what you attempted and why it failed. Never exit

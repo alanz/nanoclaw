@@ -110,7 +110,9 @@ config {
     ipc_in_container_path: String = "/workspace/ipc-in"
     -- Path inside a group's workspace where committed memory files are placed.
     -- Resolved against requester_group.folder when commit_to_memory is true.
-    memory_reports_subpath: String = "memory/reports"
+    -- The requester's Zettelkasten (see memory-graph.allium): reports are the
+    -- sources its notes are written from.
+    memory_reports_subpath: String = "zettel/reports"
 }
 
 ------------------------------------------------------------

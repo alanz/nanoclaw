@@ -1,6 +1,6 @@
 /**
  * A root task's files delivered with commit_to_memory go straight into the
- * requester group's memory/reports/. specialists.allium makes that one
+ * requester group's zettel/reports/. specialists.allium makes that one
  * operation: record each file's memory_path, the task's committed_files, and
  * take the transfer pending → committed → expired. The code marked the files
  * `placed` (they were never placed into any ipc-in) and wrote committed and
@@ -118,7 +118,7 @@ async function rootTaskWithCommittedTransfer(): Promise<{ task: SpecialistTask; 
     id: 'xfer-1',
     task_id: 'task-1',
     sender_invocation_id: 'inv-1',
-    result_text: 'See memory/reports/report.md',
+    result_text: 'See zettel/reports/report.md',
     commit_to_memory: 1,
     file_count: 2,
     sent_at: now(),
@@ -168,10 +168,10 @@ describe('committing a root task’s files to memory', () => {
     }>;
     expect(files).toEqual([
       { id: 'tf-missing', status: 'expired', memory_path: null },
-      { id: 'tf-ok', status: 'expired', memory_path: 'memory/reports/report.md' },
+      { id: 'tf-ok', status: 'expired', memory_path: 'zettel/reports/report.md' },
     ]);
-    expect(JSON.parse((await getTask('task-1'))!.committed_files!)).toEqual(['memory/reports/report.md']);
-    expect(fs.readFileSync(path.join(ROOT, 'groups', 'main', 'memory', 'reports', 'report.md'), 'utf-8')).toBe(
+    expect(JSON.parse((await getTask('task-1'))!.committed_files!)).toEqual(['zettel/reports/report.md']);
+    expect(fs.readFileSync(path.join(ROOT, 'groups', 'main', 'zettel', 'reports', 'report.md'), 'utf-8')).toBe(
       'the report',
     );
   });

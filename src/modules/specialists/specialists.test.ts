@@ -316,8 +316,8 @@ describe('specialists config defaults', () => {
     expect(SPECIALISTS_CONFIG.ipcInContainerPath).toBe('/workspace/ipc-in');
   });
 
-  it('memory_reports_subpath defaults to "memory/reports"', async () => {
-    expect(SPECIALISTS_CONFIG.memoryReportsSubpath).toBe('memory/reports');
+  it('memory_reports_subpath defaults to "zettel/reports" (the requester\'s Zettelkasten)', async () => {
+    expect(SPECIALISTS_CONFIG.memoryReportsSubpath).toBe('zettel/reports');
   });
 });
 

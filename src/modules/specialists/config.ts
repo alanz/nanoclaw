@@ -25,5 +25,5 @@ export const SPECIALISTS_CONFIG: SpecialistsConfig = {
     '[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]',
   ipcOutContainerPath: '/workspace/ipc-out',
   ipcInContainerPath: '/workspace/ipc-in',
-  memoryReportsSubpath: 'memory/reports',
+  memoryReportsSubpath: 'zettel/reports',
 };

@@ -1,0 +1,285 @@
+-- allium: 3
+-- session-reset.allium
+--
+-- Session reset and session summaries: a chat session's conversation is
+-- ended once a day when the chat has gone quiet, archived to the group's
+-- conversations/ folder, and summarised by a one-shot task into
+-- memory/sessions/. The next container start for the session begins a fresh
+-- conversation. Conversations that end any other way (a manual /clear, a
+-- transcript rotation) are archived and summarised the same way.
+--
+-- A Session (sessions.allium) is the mailbox and container lifecycle; it
+-- outlives many conversations. A Conversation is one provider conversation
+-- (for Claude, one SDK session id / transcript) inside a Session. This spec
+-- introduces the Conversation; sessions.allium does not model it.
+--
+-- Scope: conversation observation, the daily reset, the fresh-conversation
+--        hand-off at the next spawn, archiving, summary scheduling, retry and
+--        failure, and the sessions index.
+-- Includes: Conversation, SessionReset, the opt-in group list.
+-- Excludes:
+--   - Session creation, closure and container processing (sessions.allium).
+--   - Scheduled task execution (scheduling.allium): a summary is an ordinary
+--     one-shot task in the session's agent group.
+--   - The memory index (memory.allium): summaries are files under memory/,
+--     indexed like any other.
+--
+-- The host never writes the container's outbound.db. It learns the current
+-- conversation id by reading it, and it ends a conversation only by asking
+-- the NEXT container start for a fresh one. Ending a conversation therefore
+-- never interrupts a running container.
+
+use "./identity.allium" as identity
+use "./sessions.allium" as sessions
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum ConversationStatus { active | ended }
+enum EndReason { reset | cleared | rotated }
+enum SummaryStatus { not_started | scheduled | done | failed }
+enum ResetStatus { pending | applied }
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Agent group folders whose chat sessions are reset. Empty → off.
+    reset_groups: Set<String> = { "dm-with-alanz" }
+    -- Local time of day (the group's timezone) at which the daily reset runs.
+    reset_time_of_day: String = "04:00"
+    -- A session busy more recently than this is skipped for the day.
+    min_idle: Duration = 60.minutes
+    -- Summary attempts before the archive is given a failed placeholder.
+    max_summary_attempts: Integer = 3
+    -- Entries kept in memory/sessions/index.md, newest first.
+    sessions_index_entries: Integer = 7
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity Conversation {
+    session: sessions/Session
+    -- The provider's own id for the conversation (Claude: SDK session id).
+    conversation_id: String
+    status: ConversationStatus
+    end_reason: EndReason?
+    first_seen_at: Timestamp
+    ended_at: Timestamp?
+    -- conversations/<date>-<HHmm>-<reason>.md once archived.
+    archive_path: String?
+    summary_status: SummaryStatus
+    summary_attempts: Integer
+    -- memory/sessions/<date>-<HHmm>.md once summarised (or -failed.md).
+    summary_path: String?
+
+    transitions status {
+        active -> ended
+        terminal: ended
+    }
+
+    transitions summary_status {
+        not_started -> scheduled
+        scheduled -> scheduled
+        scheduled -> done
+        scheduled -> failed
+        terminal: done, failed
+    }
+}
+
+entity SessionReset {
+    session: sessions/Session
+    conversation: Conversation
+    requested_at: Timestamp
+    status: ResetStatus
+    applied_at: Timestamp?
+
+    transitions status {
+        pending -> applied
+        terminal: applied
+    }
+}
+
+------------------------------------------------------------
+-- Rules: observation
+------------------------------------------------------------
+
+-- The host reads each chat session's current conversation id from
+-- outbound.db on every sweep and when the session's container exits. A new
+-- id starts a Conversation; any other active one of the same session has
+-- ended without a reset, so it was cleared or rotated.
+rule ConversationObserved {
+    when: ObserveConversation(session, conversation_id, rotated)
+    requires: not exists Conversation{ session: session, conversation_id: conversation_id }
+    ensures: Conversation.created(
+        session: session,
+        conversation_id: conversation_id,
+        status: active,
+        first_seen_at: now,
+        summary_status: not_started,
+        summary_attempts: 0
+    )
+    ensures:
+        for c in Conversations where session = session and status = active:
+            c.status = ended
+            and c.ended_at = now
+            and c.end_reason = (if rotated: rotated else: cleared)
+
+    @guidance
+        -- rotated is true when the previous id's transcript has been renamed
+        -- to <id>.jsonl.rotated-<ms>; otherwise the agent or the user cleared it.
+        -- An id that appears and is replaced between two observations (two
+        -- clears within one sweep interval) is never seen and so never
+        -- archived. Recorded limitation; the transcript is still on disk.
+}
+
+-- The container ran without a conversation id after /clear: the previous
+-- conversation ended, and no new one has started yet.
+rule ConversationClearedObserved {
+    when: ObserveNoConversation(session)
+    ensures:
+        for c in Conversations where session = session and status = active:
+            c.status = ended
+            and c.ended_at = now
+            and c.end_reason = cleared
+}
+
+------------------------------------------------------------
+-- Rules: daily reset
+------------------------------------------------------------
+
+rule DailyResetRequested {
+    when: DailyResetDue(session, conversation)
+    requires: session.agent_group.folder in config.reset_groups
+    requires: session.messaging_group != null
+    requires: session.status = active
+    requires: conversation.session = session
+    requires: conversation.status = active
+    requires: session.processing_state = idle
+    requires: session.last_active + config.min_idle <= now
+    requires: not exists SessionReset{ session: session, status: pending }
+    ensures: conversation.status = ended
+    ensures: conversation.ended_at = now
+    ensures: conversation.end_reason = reset
+    ensures: SessionReset.created(
+        session: session,
+        conversation: conversation,
+        requested_at: now,
+        status: pending
+    )
+
+    @guidance
+        -- DailyResetDue fires once per session per day, at the first sweep at
+        -- or after reset_time_of_day in the agent group's timezone. A session
+        -- that fails any requirement is skipped until the next day (v1 rule).
+        -- "Idle" counts the newest of: last inbound (last_active), last
+        -- outbound message, and the container heartbeat. A running container
+        -- also blocks the reset, whatever the timestamps say.
+}
+
+-- The next container start for the session asks the runner for a fresh
+-- conversation (NANOCLAW_FRESH_CONVERSATION). The runner itself clears the
+-- stored conversation id, so outbound.db keeps a single writer.
+rule FreshConversationOnSpawn {
+    when: ContainerSpawning(session)
+    requires: exists SessionReset{ session: session, status: pending }
+    ensures:
+        for r in SessionResets where session = session and status = pending:
+            r.status = applied
+            and r.applied_at = now
+}
+
+------------------------------------------------------------
+-- Rules: archive and summary
+------------------------------------------------------------
+
+rule ConversationArchived {
+    when: c: Conversation.status transitions_to ended
+    ensures: c.archive_path = ArchiveTranscript(c)
+
+    @guidance
+        -- The host converts the conversation's transcript (user and assistant
+        -- text, each message capped) to conversations/<date>-<HHmm>-<reason>.md
+        -- with frontmatter: session, conversation_id, archived_at, end_reason.
+        -- The whole conversation goes in one file: with a daily reset there
+        -- is no earlier archive of the same conversation to subtract.
+        -- A missing or empty transcript yields a -missing / -empty
+        -- placeholder archive and the summary is marked failed directly.
+}
+
+rule SummaryScheduled {
+    when: SummarySweep(c)
+    requires: c.archive_path != null
+    requires: c.summary_status in { not_started, scheduled }
+    requires: c.summary_path = null
+    requires: c.summary_attempts < config.max_summary_attempts
+    requires: not SummaryTaskRunning(c)
+    ensures: c.summary_status = scheduled
+    ensures: c.summary_attempts = c.summary_attempts + 1
+    ensures: ScheduleOneShotTask(c.session.agent_group, SummaryPrompt(c))
+
+    @guidance
+        -- The summary runs as an ordinary one-shot task in the session's
+        -- agent group: its own session, a fresh conversation, the group
+        -- folder writable, its final text kept in the task's run log and
+        -- never delivered to the chat. The prompt names the archive and the
+        -- summary file to write (frontmatter: type, session, conversation_id,
+        -- archive, created; then summary, decisions, facts learned, open
+        -- questions, tasks) and asks it to add the entry to
+        -- memory/sessions/index.md, keeping sessions_index_entries.
+}
+
+rule SummaryCompleted {
+    when: SummaryFileWritten(c, path)
+    requires: c.summary_status = scheduled
+    ensures: c.summary_status = done
+    ensures: c.summary_path = path
+}
+
+rule SummaryFailed {
+    when: SummarySweep(c)
+    requires: c.summary_status = scheduled
+    requires: c.summary_path = null
+    requires: c.summary_attempts >= config.max_summary_attempts
+    requires: not SummaryTaskRunning(c)
+    ensures: c.summary_status = failed
+    ensures: c.summary_path = WriteFailedPlaceholder(c)
+
+    @guidance
+        -- The placeholder (memory/sessions/<date>-<HHmm>-failed.md) names the
+        -- archive, so the conversation can still be found and summarised by
+        -- hand. The owner is told once, through the normal delivery path.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant OneActiveConversationPerSession {
+    for a in Conversations:
+        for b in Conversations:
+            (a != b and a.session = b.session and a.status = active)
+                implies b.status = ended
+}
+
+invariant AtMostOnePendingResetPerSession {
+    for a in SessionResets:
+        for b in SessionResets:
+            (a != b and a.session = b.session and a.status = pending)
+                implies b.status = applied
+}
+
+invariant SummaryOnlyAfterArchive {
+    for c in Conversations:
+        c.summary_status != not_started implies c.archive_path != null
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Should the reset also apply to agent-to-agent (agent_shared) sessions of a reset group? This draft limits it to chat sessions (messaging_group != null)."

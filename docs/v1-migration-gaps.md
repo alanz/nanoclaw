@@ -94,7 +94,10 @@ path with `ncl tasks run <id>` before relying on it.
   empty and does not link `USER.md` (last written 2026-05-06), so a profile
   would not reach a session. Needs §2: the profile in Core Memory, or a third
   loaded file.
-- **Session reset + summary — not supported; needs a host mechanism, not a
+- **Session reset + summary — DONE 2026-10-06** by the host module
+  `src/modules/session-reset/` (design: [session-reset-design.md](session-reset-design.md),
+  spec `specs/session-reset.allium`). The analysis below is kept as the record.
+  **Was: not supported; needs a host mechanism, not a
   task.** v1's reset was a host action: skip unless the chat was idle ≥60 min,
   archive the transcript to `conversations/`, have a throwaway agent summarise
   it into `memory/sessions/` (`reset-prompt.md`), clear the session. In v2:
@@ -127,7 +130,11 @@ staleness), recent A-MEM notes by recency, prior-session tail.
 **v2:** SessionStart injects only `memory/index.md` and
 `system/definition.md` (`container/agent-runner/src/memory/context.ts`).
 
-## 3. Session summaries (throwaway sessions) — open
+## 3. Session summaries (throwaway sessions) — done 2026-10-06
+
+Now written by `src/modules/session-reset/` for every ended chat conversation
+(daily reset, `/clear`, rotation): a one-shot task per archive, 3 attempts, then a
+`-failed.md` placeholder. See [session-reset-design.md](session-reset-design.md).
 
 **v1:** `spawnThrowaway()` summarised long or reset sessions into
 `memory/sessions/` with retry (`MAX_THROWAWAY_RETRIES` etc.); tools

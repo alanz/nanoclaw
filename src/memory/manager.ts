@@ -254,6 +254,7 @@ export class MemoryIndexManager {
   private dirty = false;
   private syncLock: Promise<void> = Promise.resolve();
   private periodicTimer: ReturnType<typeof setInterval> | null = null;
+  private rpdResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private _syncing = false;
   private _lastSyncAt: number | null = null;
@@ -325,6 +326,19 @@ export class MemoryIndexManager {
       memoryDir: this.memoryDir,
       additionalDirs: this.additionalDirs.map((d) => d.source),
     });
+  }
+
+  // Pick the interrupted sync back up once the daily quota stop lifts, rather
+  // than waiting for a file change or the 24h periodic pass.
+  private scheduleRpdResume(delayMs: number): void {
+    if (this.closed) return;
+    if (this.rpdResumeTimer) clearTimeout(this.rpdResumeTimer);
+    this.rpdResumeTimer = setTimeout(() => {
+      this.rpdResumeTimer = null;
+      this.dirty = true;
+      void this.sync();
+    }, delayMs + 1000);
+    this.rpdResumeTimer.unref?.();
   }
 
   async sync(opts?: { force?: boolean }): Promise<void> {
@@ -435,10 +449,15 @@ export class MemoryIndexManager {
             consecutiveRlFailures = 0;
           } catch (err) {
             if (isEmbeddingRateLimitError(err) && err.quotaType === 'rpd') {
-              log.warn('Memory sync: RPD exhausted, stopping for this session', { groupId: this.groupId });
               this.rateLimiter.depleteQuotaForType('rpd');
+              const resumeInMs = this.rateLimiter.rpdResumeInMs();
+              log.warn('Memory sync: RPD exhausted, resuming in 24h', {
+                groupId: this.groupId,
+                resumeAt: new Date(Date.now() + resumeInMs).toISOString(),
+              });
               this.dirty = true;
               this._syncing = false;
+              this.scheduleRpdResume(resumeInMs);
               return;
             }
             if (isEmbeddingRateLimitError(err)) {
@@ -581,6 +600,7 @@ export class MemoryIndexManager {
   async close(): Promise<void> {
     this.closed = true;
     if (this.periodicTimer) clearInterval(this.periodicTimer);
+    if (this.rpdResumeTimer) clearTimeout(this.rpdResumeTimer);
     for (const sub of this.watchers) {
       try {
         await sub.unsubscribe();

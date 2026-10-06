@@ -10,6 +10,8 @@ export type RateLimitConfig = {
   coolDownMs?: number;
 };
 
+const DAY_MS = 86_400_000;
+
 export class TokenBucketRateLimiter {
   private readonly accountKey: string;
   private readonly rpmLimit?: number;
@@ -24,9 +26,15 @@ export class TokenBucketRateLimiter {
   private rpdLastRefill: number;
   private tpmTokens: number;
   private tpmLastRefill: number;
+  // The daily request budget is counted over a 24h window that opens with the
+  // first request it counts, so a long-running host gets a fresh budget each
+  // day rather than one per process.
   private rpdSessionUsed = 0;
+  private rpdWindowStart: number | null = null;
   private coolDownUntil = 0;
-  private rpdExhausted = false;
+  // A daily quota stop (a 429 or the budget running out) holds for 24h, then
+  // lifts on its own; before, it held until the host restarted.
+  private rpdExhaustedUntil = 0;
 
   constructor(config: RateLimitConfig) {
     this.accountKey = config.accountKey;
@@ -53,8 +61,13 @@ export class TokenBucketRateLimiter {
   async acquirePermit(requestCount: number, maxWaitMs = 600_000, tokenCount = 0): Promise<void> {
     if (requestCount <= 0 && tokenCount <= 0) return;
 
-    if (this.rpdExhausted) {
-      throw new EmbeddingRateLimitError('RPD quota exhausted for this session.', 'rpd', null);
+    this.rollRpdWindow(Date.now());
+    if (this.rpdExhaustedUntil > 0) {
+      throw new EmbeddingRateLimitError(
+        `RPD quota exhausted until ${new Date(this.rpdExhaustedUntil).toISOString()}.`,
+        'rpd',
+        null,
+      );
     }
 
     // A request bigger than a bucket's whole capacity can never be granted:
@@ -88,7 +101,7 @@ export class TokenBucketRateLimiter {
           rpdSessionUsed: this.rpdSessionUsed,
         });
         throw new EmbeddingRateLimitError(
-          `RPD session budget of ${this.rpdSessionBudget} requests exhausted (${this.rpdSessionUsed} used this run).`,
+          `RPD budget of ${this.rpdSessionBudget} requests exhausted (${this.rpdSessionUsed} used in this 24h window).`,
           'rpd',
           null,
         );
@@ -132,7 +145,10 @@ export class TokenBucketRateLimiter {
         if (this.rpmLimit !== undefined) this.rpmTokens -= requestCount;
         if (this.rpdLimit !== undefined) this.rpdTokens -= requestCount;
         if (this.tpmLimit !== undefined) this.tpmTokens -= tokenCount;
-        if (this.rpdSessionBudget !== undefined) this.rpdSessionUsed += requestCount;
+        if (this.rpdSessionBudget !== undefined) {
+          this.rpdWindowStart ??= now;
+          this.rpdSessionUsed += requestCount;
+        }
         return;
       }
 
@@ -185,8 +201,14 @@ export class TokenBucketRateLimiter {
     if (quotaType === 'rpm' || quotaType === 'unknown') this.rpmTokens = 0;
     if (quotaType === 'rpd') {
       this.rpdTokens = 0;
-      this.rpdExhausted = true;
-      log.warn('Memory rate limiter: RPD exhausted, stopping for this session', { accountKey: this.accountKey });
+      // A sync that runs into a stop already in force gets an 'rpd' refusal
+      // too; that must not push the stop out another day.
+      if (this.rpdExhaustedUntil > Date.now()) return;
+      this.rpdExhaustedUntil = Date.now() + DAY_MS;
+      log.warn('Memory rate limiter: RPD exhausted, stopping for 24h', {
+        accountKey: this.accountKey,
+        resumeAt: new Date(this.rpdExhaustedUntil).toISOString(),
+      });
       return;
     }
     if (quotaType === 'tpm') this.tpmTokens = 0;
@@ -205,6 +227,24 @@ export class TokenBucketRateLimiter {
       quotaType,
       baseCoolDownMs,
     });
+  }
+
+  /** Milliseconds until a daily quota stop lifts; 0 when not stopped. */
+  rpdResumeInMs(now = Date.now()): number {
+    return Math.max(0, this.rpdExhaustedUntil - now);
+  }
+
+  private rollRpdWindow(now: number): void {
+    if (this.rpdWindowStart !== null && now - this.rpdWindowStart >= DAY_MS) {
+      this.rpdWindowStart = null;
+      this.rpdSessionUsed = 0;
+    }
+    if (this.rpdExhaustedUntil > 0 && now >= this.rpdExhaustedUntil) {
+      this.rpdExhaustedUntil = 0;
+      this.rpdWindowStart = null;
+      this.rpdSessionUsed = 0;
+      log.info('Memory rate limiter: RPD stop lifted after 24h', { accountKey: this.accountKey });
+    }
   }
 
   depleteQuota(): void {

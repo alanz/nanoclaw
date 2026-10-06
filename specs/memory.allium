@@ -173,7 +173,7 @@ config {
     embedding_provider: String = "gemini"
     embedding_rpm_limit: Integer = 50   -- requests per minute to embedding provider
     embedding_tpm_limit: Integer = 15_000
-    embedding_rpd_budget: Integer = 900 -- requests per session day; exhausted → defer to next session
+    embedding_rpd_budget: Integer = 900 -- requests per 24h window; exhausted → pause 24h, then resume
     memory_search_enabled: Boolean = true
     memory_search_groups: Set<String> = { "main" } -- folder names of groups with memory active; comma-separated in env
 }
@@ -285,13 +285,16 @@ rule FileSynced {
         --   RPM  (requests per minute)   — causes in-session waiting; transparent to this rule
         --   TPM  (tokens per minute)     — causes in-session waiting; transparent to this rule
         --   RPD  (requests per day)      — aborts the sync; see below
-        -- The per-session RPD budget (config.embedding_rpd_budget) is a process-lifetime cap
-        -- tracked in memory. When it is exhausted — or when the Gemini API returns a 429
-        -- with quotaType "rpd" — the host aborts the current sync immediately. Any files
-        -- not yet processed remain pending. The host sets an internal dirty flag so that
-        -- the next sync() invocation (next process start or next watcher event) retries all
-        -- pending files. No status change is needed: pending already means "not yet indexed,
-        -- will be retried." RPM/TPM cool-down is handled transparently inside acquirePermit.
+        -- The RPD budget (config.embedding_rpd_budget) is tracked in memory and counted over
+        -- a 24h window opened by the first request it counts. When it is exhausted — or when
+        -- the Gemini API returns a 429 with quotaType "rpd" — the host aborts the current sync
+        -- immediately and stops embedding for 24h from that moment; a refusal met while the
+        -- stop is in force does not extend it. Any files not yet processed remain pending.
+        -- The host sets an internal dirty flag and schedules a sync() for when the stop lifts,
+        -- so the pending files are retried without a process restart or a watcher event (a
+        -- restart also retries them, since the stop is not persisted). No status change is
+        -- needed: pending already means "not yet indexed, will be retried." RPM/TPM cool-down
+        -- is handled transparently inside acquirePermit.
         -- Embeddings are cached by chunk hash and reused across groups and models, so a
         -- repeated sync after budget recovery only embeds chunks whose hash is not yet cached.
 }

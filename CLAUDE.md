@@ -204,7 +204,7 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 
 ## Behaviour Specs (`specs/*.allium`)
 
-`specs/` holds 12 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. They are the intent of record; the code is one realisation of it.
+`specs/` holds 13 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. They are the intent of record; the code is one realisation of it.
 
 > **Read them; do not edit them.** Consult the relevant spec before changing behaviour in the areas it covers. **Never modify a `.allium` file without the repo owner's explicit approval** — not to "keep it in sync" after a code change, not to silence a checker warning, not as part of a larger task. If your change makes the code diverge from a spec, say so and propose the spec edit; the owner decides. This applies to the `/allium` skills too: `tend` and `weed` both write to specs, so ask before running them in write mode.
 
@@ -217,6 +217,7 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 | `identity.allium` | Users, roles, agent groups |
 | `approvals.allium` | Human approval flow |
 | `memory.allium` / `memory-graph.allium` | Memory index and knowledge graph |
+| `session-reset.allium` | Daily conversation reset, archive to `conversations/`, summaries into `memory/sessions/` |
 | `self-mod.allium` / `scheduling.allium` / `zotero.allium` / `null-channel.allium` | As named |
 
 Two traps worth knowing:
@@ -240,6 +241,7 @@ Modules this fork adds on top of trunk. All self-register through
 | `src/modules/concurrency/` | Container cap + FIFO queue via `setWakeGate`; owns `agent_groups.is_main` |
 | `src/modules/boot-crash/` | Bounds a container that cannot start, using the session-exit hook |
 | `src/modules/specialists/` | Per-task specialist dispatch and file handover |
+| `src/modules/session-reset/` | Daily conversation reset + archive + session summaries (`SESSION_RESET_GROUPS`) |
 | `src/modules/memory/` + `src/memory/` | Semantic index over `memory/`, hybrid search |
 | `src/modules/zotero/` | Zotero library sync into an agent group's folder |
 | `src/modules/web-ui/` + `src/web-ui.ts` | Read-only dashboard, memory graph |

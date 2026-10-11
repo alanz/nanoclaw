@@ -5,7 +5,7 @@ import { getZoteroSyncState, updateAfterSync, updateNextCheck, upsertZoteroSyncS
 import { notifySyncChanges } from './notify.js';
 import { fetchLibraryVersion } from './pre-check.js';
 import { computeNextZoteroCheck } from './schedule.js';
-import { queueEnrichmentTask, queueSyncTask, readSyncResult } from './sync.js';
+import { enrichmentBacklog, queueEnrichmentTask, queueSyncTask, readSyncResult } from './sync.js';
 
 const MONITOR_POLL_MS = 30_000;
 
@@ -80,9 +80,10 @@ async function runMonitor(): Promise<void> {
     if (result.newCount > 0 || result.deletedCount > 0) {
       await notifySyncChanges(agentGroup.id, folder, result);
 
-      // Trigger abstract enrichment for new items without abstracts
-      if (result.newCount > 0) {
-        queueEnrichmentTask(folder);
+      // EnrichmentTriggeredAfterSync: a run straight away for new items without abstracts
+      const addedKeys = (result.addedItems ?? []).map((i) => i.key);
+      if (result.newCount > 0 && enrichmentBacklog(folder, new Date(), addedKeys).length > 0) {
+        await queueEnrichmentTask(folder);
       }
     }
 
@@ -97,6 +98,10 @@ async function runMonitor(): Promise<void> {
 
   // Step 3: check if sync is due
   if (new Date(state.next_check) > new Date()) return;
+
+  // EnrichmentBacklogScheduled: every due check drains a little of the backlog,
+  // whatever the pre-check finds
+  if (enrichmentBacklog(folder).length > 0) await queueEnrichmentTask(folder);
 
   // Step 4: lightweight pre-check — only spawn container if library changed
   const serverVersion = await fetchLibraryVersion(state.last_version);

@@ -15,8 +15,10 @@
  *    table plus flat-file markdown for item files and the digest.
  *  - Rules are implemented in src/modules/zotero/{monitor,schedule,notify,pre-check,sync}.ts
  *  - The container tools (zotero-enrich.mjs, zotero-extract-abstracts.mjs) implement
- *    AbstractEnriched and PdfAbstractExtracted; those are tested via the frontmatter
- *    helpers in container/tools/zotero-tools.test.mjs (node:test).
+ *    AbstractEnriched and PdfAbstractExtracted; zotero-abstracts.mjs implements
+ *    EnrichmentRun and AbstractLookupRecorded. Those are tested in
+ *    container/tools/zotero-tools.test.mjs (node:test); the backlog triggers and
+ *    run queuing in ./enrichment.test.ts.
  *
  * Test infrastructure:
  *  - Uses await initTestDb() + await runMigrations() for a fresh in-memory SQLite DB per test.
@@ -681,7 +683,8 @@ describe('ChangesNotified rule — buildSyncSummary (SyncNotificationSent conten
 describe('EnrichmentTriggeredAfterSync rule', () => {
   it('success: queues enrichment when added items exist', async () => {
     // The implementation: in monitor.ts after processing sync result,
-    // `if (result.newCount > 0) { queueEnrichmentTask(folder); }`
+    // a run is queued when newCount > 0 and an added item is in the backlog
+    // (enrichmentBacklog over the added keys; see enrichment.test.ts)
     const result = {
       newCount: 3,
       deletedCount: 0,
@@ -720,18 +723,15 @@ describe('EnrichmentTriggeredAfterSync rule', () => {
 // ─── Rule: EnrichmentTriggeredOnRequest ──────────────────────────────────────
 // obligation: rule-success.EnrichmentTriggeredOnRequest
 // Triggered by UserRequestedEnrichment (external trigger — no local emitter in spec).
-// The implementation is queueEnrichmentTask, callable from the container agent.
+// The implementation is `zotero-abstracts.mjs --retry-not-found`, run by the agent.
 // NOTE: allium analyse reports this as an unreachable trigger — there is no local
 // surface that emits UserRequestedEnrichment. The rule is tested here structurally.
 
 describe('EnrichmentTriggeredOnRequest rule', () => {
   it('enrichment can be requested for a group regardless of sync state', async () => {
-    // When UserRequestedEnrichment fires for a group, queueEnrichmentTask is called.
-    // The rule's let: pending = ItemFiles where abstract = null is handled inside
-    // the container tool (zotero-enrich.mjs). From the host's perspective, the
-    // task prompt requests enrichment of ALL items missing abstracts.
-    // TODO: end-to-end test requires a wired background session and in-memory DB.
-    // The structural invariant is that queueEnrichmentTask exists and accepts a folder.
+    // The agent runs zotero-abstracts.mjs --retry-not-found: forgetNotFound clears
+    // the not_found records (tested in zotero-tools.test.mjs), and the hourly
+    // EnrichmentBacklogScheduled runs take those items up again.
     expect(typeof queueEnrichmentTask).toBe('function');
   });
 });

@@ -17,6 +17,9 @@
  *
  * Output (JSON to stdout):
  *   { found, noPdf, tooLarge, skipped, errors, total }
+ *
+ * findPdfAbstract is also imported by zotero-abstracts.mjs, the budgeted
+ * backlog run (zotero.allium EnrichmentRun).
  */
 
 import fs from 'fs';
@@ -26,7 +29,10 @@ import https from 'https';
 import http from 'http';
 import { execFileSync } from 'child_process';
 import { parseArgs } from 'util';
-import { parseFrontMatter, insertAbstract, addFrontMatterField } from './zotero-frontmatter.mjs';
+import { pathToFileURL } from 'url';
+import { parseFrontMatter, applyAbstract, hasAbstract } from './zotero-frontmatter.mjs';
+
+const isMain = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 
 const DEFAULT_MAX_PDF_MB = 15;
 
@@ -50,15 +56,13 @@ const USER_ID  = process.env.ZOTERO_USER_ID || '';
 const API_BASE = process.env.ZOTERO_API_BASE || 'https://api.zotero.org';
 const BASE_URL = `${API_BASE}/users/${USER_ID}`;
 const PAUSE_MS = 1000;
-
-if (!API_KEY || !USER_ID) {
-  process.stderr.write('ERROR: ZOTERO_API_KEY and ZOTERO_USER_ID must be set\n');
-  process.exit(1);
-}
+const API_TIMEOUT_MS = 30000;
+const DOWNLOAD_TIMEOUT_MS = 60000;
+const MIN_DOWNLOAD_MS = 3000;   // don't start a download with less time than this left
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-function httpGetJson(url) {
+function httpGetJson(url, timeoutMs = API_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, {
@@ -76,11 +80,11 @@ function httpGetJson(url) {
       });
     });
     req.on('error', reject);
-    req.setTimeout(30000, () => { req.destroy(new Error('timeout')); });
+    req.setTimeout(timeoutMs, () => { req.destroy(new Error('timeout')); });
   });
 }
 
-function httpDownloadToFile(url, destPath) {
+function httpDownloadToFile(url, destPath, timeoutMs = DOWNLOAD_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
     const file = fs.createWriteStream(destPath);
@@ -103,7 +107,7 @@ function httpDownloadToFile(url, destPath) {
           file2.on('error', reject);
         });
         req2.on('error', reject);
-        req2.setTimeout(60000, () => { req2.destroy(new Error('timeout')); });
+        req2.setTimeout(timeoutMs, () => { req2.destroy(new Error('timeout')); });
         return;
       }
       if (res.statusCode !== 200) {
@@ -116,7 +120,7 @@ function httpDownloadToFile(url, destPath) {
       file.on('error', reject);
     });
     req.on('error', reject);
-    req.setTimeout(60000, () => { req.destroy(new Error('timeout')); });
+    req.setTimeout(timeoutMs, () => { req.destroy(new Error('timeout')); });
   });
 }
 
@@ -126,8 +130,8 @@ function sleep(ms) {
 
 // ── Zotero API ────────────────────────────────────────────────────────────────
 
-async function getPdfAttachment(itemKey) {
-  const children = await httpGetJson(`${BASE_URL}/items/${itemKey}/children`);
+async function getPdfAttachment(itemKey, timeoutMs) {
+  const children = await httpGetJson(`${BASE_URL}/items/${itemKey}/children`, timeoutMs);
   for (const child of children) {
     const d = child.data || {};
     if (
@@ -177,94 +181,129 @@ function extractAbstractFromPdf(pdfPath) {
   }
 }
 
-function hasAbstract(body) {
-  return body.split('\n').filter((l) => l.trim()).length > 2;
+/**
+ * zotero.allium PdfAbstractExtracted for one item. Returns { abstract } on
+ * success, else { abstract: null, inconclusive, reason }. No PDF, a PDF over
+ * the size limit, or a PDF without an abstract section is conclusive; an API
+ * or download failure, missing credentials, or too little time left before
+ * `deadline` (ms since epoch) is not.
+ */
+export async function findPdfAbstract(meta, opts = {}) {
+  const { deadline = Infinity, maxMb = DEFAULT_MAX_PDF_MB, tmpFile = path.join(os.tmpdir(), `zotero-pdf-${process.pid}.pdf`) } = opts;
+  const miss = (inconclusive, reason) => ({ abstract: null, inconclusive, reason });
+  if (!API_KEY || !USER_ID) return miss(true, 'no credentials');
+  if (!meta.zoteroKey) return miss(false, 'no key');
+  const left = () => deadline - Date.now();
+
+  try {
+    if (left() < PAUSE_MS + MIN_DOWNLOAD_MS) return miss(true, 'out of time');
+    await sleep(PAUSE_MS);
+    const att = await getPdfAttachment(meta.zoteroKey, Math.min(API_TIMEOUT_MS, left()));
+    if (!att) return miss(false, 'no PDF');
+    if (att.size > 0 && att.size / 1_000_000 > maxMb) return miss(false, 'too large');
+
+    if (left() < PAUSE_MS + MIN_DOWNLOAD_MS) return miss(true, 'out of time');
+    await sleep(PAUSE_MS);
+    await httpDownloadToFile(`${BASE_URL}/items/${att.key}/file`, tmpFile, Math.min(DOWNLOAD_TIMEOUT_MS, left()));
+    const abstract = extractAbstractFromPdf(tmpFile);
+    return abstract ? { abstract } : miss(false, 'no abstract in PDF');
+  } catch (err) {
+    return miss(true, err.message);
+  } finally {
+    if (fs.existsSync(tmpFile)) try { fs.unlinkSync(tmpFile); } catch {}
+  }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-const files = fs
-  .readdirSync(DIR)
-  .filter((f) => f.endsWith('.md'))
-  .sort()
-  .map((f) => path.join(DIR, f));
-
-const toProcess = files.filter((fp) => {
-  const text = fs.readFileSync(fp, 'utf-8');
-  const parsed = parseFrontMatter(text);
-  return parsed ? !hasAbstract(parsed.body) : false;
-});
-
-process.stderr.write(`Files missing abstracts: ${toProcess.length} / ${files.length}\n`);
-
-const batch = LIMIT ? toProcess.slice(0, LIMIT) : toProcess;
-if (LIMIT) process.stderr.write(`Processing first ${batch.length} (--limit)\n`);
-process.stderr.write(`Skipping PDFs over ${MAX_MB} MB\n\n`);
-
-let found = 0, noPdf = 0, tooLarge = 0, skipped = 0, errors = 0;
-const tmpFile = path.join(os.tmpdir(), `zotero-pdf-${process.pid}.pdf`);
-
-for (const fp of batch) {
-  const text   = fs.readFileSync(fp, 'utf-8');
-  const parsed = parseFrontMatter(text);
-  if (!parsed) { skipped++; continue; }
-  const { meta } = parsed;
-  const itemKey = meta.zoteroKey;
-  const title   = (meta.title || path.basename(fp, '.md')).slice(0, 55);
-
-  if (!itemKey) {
-    process.stderr.write(`  ? no key    ${title}\n`);
-    skipped++;
-    continue;
+async function main() {
+  if (!API_KEY || !USER_ID) {
+    process.stderr.write('ERROR: ZOTERO_API_KEY and ZOTERO_USER_ID must be set\n');
+    process.exit(1);
   }
 
-  try {
-    await sleep(PAUSE_MS);
-    const att = await getPdfAttachment(itemKey);
+  const files = fs
+    .readdirSync(DIR)
+    .filter((f) => f.endsWith('.md'))
+    .sort()
+    .map((f) => path.join(DIR, f));
 
-    if (!att) {
-      process.stderr.write(`  – no PDF    ${title}\n`);
-      noPdf++;
-      continue;
-    }
+  const toProcess = files.filter((fp) => {
+    const text = fs.readFileSync(fp, 'utf-8');
+    const parsed = parseFrontMatter(text);
+    return parsed ? !hasAbstract(parsed.body) : false;
+  });
 
-    const sizeMb = att.size / 1_000_000;
-    if (att.size > 0 && sizeMb > MAX_MB) {
-      process.stderr.write(`  – ${sizeMb.toFixed(0)}MB skip  ${title}\n`);
-      tooLarge++;
-      continue;
-    }
+  process.stderr.write(`Files missing abstracts: ${toProcess.length} / ${files.length}\n`);
 
-    const sizeStr = att.size > 0 ? `${sizeMb.toFixed(1)}MB` : '?MB';
-    process.stderr.write(`  ↓ ${sizeStr.padEnd(7)}  ${title}`);
+  const batch = LIMIT ? toProcess.slice(0, LIMIT) : toProcess;
+  if (LIMIT) process.stderr.write(`Processing first ${batch.length} (--limit)\n`);
+  process.stderr.write(`Skipping PDFs over ${MAX_MB} MB\n\n`);
 
-    await sleep(PAUSE_MS);
-    await httpDownloadToFile(`${BASE_URL}/items/${att.key}/file`, tmpFile);
+  let found = 0, noPdf = 0, tooLarge = 0, skipped = 0, errors = 0;
+  const tmpFile = path.join(os.tmpdir(), `zotero-pdf-${process.pid}.pdf`);
 
-    const abstract = extractAbstractFromPdf(tmpFile);
-    fs.unlinkSync(tmpFile);
+  for (const fp of batch) {
+    const text   = fs.readFileSync(fp, 'utf-8');
+    const parsed = parseFrontMatter(text);
+    if (!parsed) { skipped++; continue; }
+    const { meta } = parsed;
+    const itemKey = meta.zoteroKey;
+    const title   = (meta.title || path.basename(fp, '.md')).slice(0, 55);
 
-    if (abstract) {
-      if (!DRY_RUN) {
-        const withSource = addFrontMatterField(text, 'abstract_source', 'pdf_extraction');
-        fs.writeFileSync(fp, insertAbstract(withSource, abstract), 'utf-8');
-      }
-      process.stderr.write(`  ✓\n`);
-      found++;
-    } else {
-      process.stderr.write(`  – (no abstract found in PDF)\n`);
+    if (!itemKey) {
+      process.stderr.write(`  ? no key    ${title}\n`);
       skipped++;
+      continue;
     }
-  } catch (err) {
-    if (fs.existsSync(tmpFile)) try { fs.unlinkSync(tmpFile); } catch {}
-    process.stderr.write(`  ✗ ${err.message} — ${title}\n`);
-    errors++;
+
+    try {
+      await sleep(PAUSE_MS);
+      const att = await getPdfAttachment(itemKey, API_TIMEOUT_MS);
+
+      if (!att) {
+        process.stderr.write(`  – no PDF    ${title}\n`);
+        noPdf++;
+        continue;
+      }
+
+      const sizeMb = att.size / 1_000_000;
+      if (att.size > 0 && sizeMb > MAX_MB) {
+        process.stderr.write(`  – ${sizeMb.toFixed(0)}MB skip  ${title}\n`);
+        tooLarge++;
+        continue;
+      }
+
+      const sizeStr = att.size > 0 ? `${sizeMb.toFixed(1)}MB` : '?MB';
+      process.stderr.write(`  ↓ ${sizeStr.padEnd(7)}  ${title}`);
+
+      await sleep(PAUSE_MS);
+      await httpDownloadToFile(`${BASE_URL}/items/${att.key}/file`, tmpFile);
+
+      const abstract = extractAbstractFromPdf(tmpFile);
+      fs.unlinkSync(tmpFile);
+
+      if (abstract) {
+        if (!DRY_RUN) fs.writeFileSync(fp, applyAbstract(text, abstract, 'pdf_extraction'), 'utf-8');
+        process.stderr.write(`  ✓\n`);
+        found++;
+      } else {
+        process.stderr.write(`  – (no abstract found in PDF)\n`);
+        skipped++;
+      }
+    } catch (err) {
+      if (fs.existsSync(tmpFile)) try { fs.unlinkSync(tmpFile); } catch {}
+      process.stderr.write(`  ✗ ${err.message} — ${title}\n`);
+      errors++;
+    }
   }
+
+  if (fs.existsSync(tmpFile)) try { fs.unlinkSync(tmpFile); } catch {}
+
+  process.stderr.write(`\n${DRY_RUN ? '[DRY RUN] ' : ''}Done.\n`);
+  process.stderr.write(`  Found: ${found}  |  No PDF: ${noPdf}  |  Too large: ${tooLarge}  |  Not parsed: ${skipped}  |  Errors: ${errors}\n`);
+
+  console.log(JSON.stringify({ found, noPdf, tooLarge, skipped, errors, total: batch.length }));
 }
 
-if (fs.existsSync(tmpFile)) try { fs.unlinkSync(tmpFile); } catch {}
-
-process.stderr.write(`\n${DRY_RUN ? '[DRY RUN] ' : ''}Done.\n`);
-process.stderr.write(`  Found: ${found}  |  No PDF: ${noPdf}  |  Too large: ${tooLarge}  |  Not parsed: ${skipped}  |  Errors: ${errors}\n`);
-
-console.log(JSON.stringify({ found, noPdf, tooLarge, skipped, errors, total: batch.length }));
+if (isMain) await main();

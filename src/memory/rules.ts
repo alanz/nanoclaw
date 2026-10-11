@@ -6,6 +6,7 @@ import {
   updateMemoryFile,
   type MemoryFile,
 } from './db.js';
+import { workspaceIndexSubdirs } from './workspace-dirs.js';
 
 type ChunkResult = {
   start_line: number;
@@ -14,13 +15,13 @@ type ChunkResult = {
   hash: string;
 };
 
-/** The group's memory/ tree, or its Zettelkasten folder (see ZETTEL_DIR in manager.ts). */
-const MEMORY_PATH_RE = /^groups\/[^/]+\/(memory|zettel)\//;
-
+/** The group's memory/ tree, or a workspace folder indexed alongside it (workspace-dirs.ts). */
 function assertMemoryPath(path: string): void {
-  if (!MEMORY_PATH_RE.test(path)) {
+  const [groups, folder, top] = path.split('/');
+  const allowed = ['memory', ...workspaceIndexSubdirs()];
+  if (groups !== 'groups' || !folder || !top || !allowed.includes(top) || path.split('/').length < 4) {
     throw new Error(
-      `Path violates MemoryFilesWithinWorkspace invariant — must be under groups/<folder>/memory/ or groups/<folder>/zettel/: ${path}`,
+      `Path violates MemoryFilesWithinWorkspace invariant — must be under groups/<folder>/{${allowed.join(',')}}/: ${path}`,
     );
   }
 }

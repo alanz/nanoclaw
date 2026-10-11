@@ -70,19 +70,6 @@ export interface IndexedDir {
 }
 
 /**
- * The group's Zettelkasten: `groups/<folder>/zettel/`, kept apart from the
- * OKF memory/ tree because its rules are the opposite — notes are permanent
- * and never edited, where memory/ is updated and pruned in place. Indexed as
- * source `zettel` when the folder exists.
- */
-export const ZETTEL_DIR = 'zettel';
-
-export function zettelDirs(groupDir: string): IndexedDir[] {
-  const dir = path.join(groupDir, ZETTEL_DIR);
-  return fsSync.existsSync(dir) ? [{ dir, source: ZETTEL_DIR }] : [];
-}
-
-/**
  * The group's mounts marked for indexing, read from its container config in
  * the DB. (This replaces `memoryIndexDirs`, read from container.json — a file
  * regenerated from the DB at every spawn, which never carried the field, so
@@ -116,6 +103,7 @@ export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
   return dirs;
 }
 import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
+import { workspaceIndexDirs } from './workspace-dirs.js';
 import { chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
@@ -129,7 +117,7 @@ import {
   upsertFileRecord,
   searchIndex,
   type IndexDb,
-  type SearchResult,
+  type FileSearchResult,
 } from './index-db.js';
 
 const ALLOWED_EXTENSIONS = new Set(['.md', '.org']);
@@ -171,11 +159,12 @@ export function batchEmbeddings<T>(
   if (current.length > 0) batches.push(current);
   return batches;
 }
-const CANDIDATES_MULTIPLIER = 4;
+// Chunk candidates per requested file: grouping by file uses some up.
+const CANDIDATES_MULTIPLIER = 8;
 const VECTOR_WEIGHT = 0.7;
 const TEXT_WEIGHT = 0.3;
 
-export type MemorySearchResult = SearchResult & {
+export type MemorySearchResult = FileSearchResult & {
   content?: string;
   frontmatter?: Record<string, unknown>;
 };
@@ -532,7 +521,12 @@ export class MemoryIndexManager {
     log.info('Memory sync complete', { groupId: this.groupId, indexed, skipped, removed });
   }
 
-  /** Full hybrid search (vector + FTS5). Called by host-side memory_hybrid_search. */
+  /**
+   * Full hybrid search (vector + FTS5). Called by host-side memory_hybrid_search.
+   * Keyword-only when the query cannot be embedded — including when no
+   * embedding permit is granted within `embedWaitMs`: a search does not queue
+   * behind indexing for the rate limiter's cool-down or the daily stop.
+   */
   async search(
     query: string,
     opts?: {
@@ -541,20 +535,22 @@ export class MemoryIndexManager {
       pathPrefix?: string;
       source?: string;
       includeContent?: boolean;
+      embedWaitMs?: number;
     },
-  ): Promise<MemorySearchResult[]> {
-    if (!query.trim() || this.closed) return [];
+  ): Promise<{ mode: 'hybrid' | 'keyword'; results: MemorySearchResult[] }> {
+    if (!query.trim() || this.closed) return { mode: 'keyword', results: [] };
 
     // Trigger background sync if dirty; search on current state immediately.
     if (this.dirty) void this.sync();
 
     let queryVec: number[] = [];
     try {
-      await this.rateLimiter.acquirePermit(1);
+      await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms);
       queryVec = await this.provider.embedQuery(query);
     } catch (err) {
       log.warn('Memory search: query embed failed, falling back to FTS', { groupId: this.groupId, err });
     }
+    const mode = queryVec.length > 0 ? 'hybrid' : 'keyword';
 
     const maxResults = opts?.maxResults ?? MEMORY_CONFIG.search_top_k;
     const minScore = opts?.minScore ?? MEMORY_CONFIG.min_search_score;
@@ -569,11 +565,12 @@ export class MemoryIndexManager {
       vectorWeight: VECTOR_WEIGHT,
       textWeight: TEXT_WEIGHT,
       candidatesMultiplier: CANDIDATES_MULTIPLIER,
+      locationsPerFile: MEMORY_CONFIG.search_locations_per_file,
     });
 
-    if (!includeContent) return results;
+    if (!includeContent) return { mode, results };
 
-    return Promise.all(
+    const withContent = await Promise.all(
       results.map(async (r) => {
         const result: MemorySearchResult = { ...r };
         try {
@@ -585,6 +582,28 @@ export class MemoryIndexManager {
         return result;
       }),
     );
+    return { mode, results: withContent };
+  }
+
+  /**
+   * An embedding permit, or a rejection once `waitMs` has passed. A permit
+   * granted after the deadline is still spent from the budget — one request,
+   * the price of not cancelling inside the limiter.
+   */
+  private async searchPermit(waitMs: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`no embedding permit within ${waitMs}ms`)), waitMs);
+    });
+    const permit = this.rateLimiter.acquirePermit(1, waitMs);
+    // Once the deadline wins nobody awaits the permit; a later rejection
+    // must not surface as an unhandled one.
+    permit.catch(() => {});
+    try {
+      await Promise.race([permit, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   get syncing(): boolean {
@@ -672,7 +691,7 @@ export async function initMemoryManagers(params: {
     const dbPath = path.join(dbDir, 'index.db');
 
     const additionalDirs = [
-      ...zettelDirs(path.join(params.groupsDir, group.folder)),
+      ...workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
       ...(await indexedMountDirs(group.id)),
     ];
 
@@ -714,7 +733,7 @@ export async function initMemoryManagerForGroup(params: {
     dbPath,
     apiKey: params.apiKey,
     model: params.model,
-    additionalDirs: zettelDirs(path.join(params.groupsDir, group.folder)),
+    additionalDirs: workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
   }).catch((err) => {
     log.warn('Failed to init memory manager for group', { groupId: group.id, err });
   });

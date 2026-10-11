@@ -152,6 +152,11 @@ entity InteractiveQuestion {
     options: List<String>
     status: InteractiveQuestionStatus
     selected_option: String? when status = answered
+    -- The chat the card was delivered to, and the platform's id for the
+    -- delivered card. Usually the session's own chat; for a specialist,
+    -- the root requester's chat (null-channel.allium SpecialistCardRelayed).
+    delivered_to: routing/MessagingGroup?
+    delivered_message_id: String?
     created_at: Timestamp
     expires_at: Timestamp
 
@@ -516,7 +521,8 @@ rule AgentChannelMessageRejected {
 ------------------------------------------------------------
 
 -- send_card: deliver a structured display/interactive card to the channel.
--- No host-side state beyond normal OutboundMessage delivery.
+-- No host-side state beyond normal OutboundMessage delivery. A channel
+-- without cards renders it as text (see "Answering by reply").
 rule AgentSentCard {
     when: outbound: sessions/OutboundMessage.created
     requires: outbound.kind = "chat-sdk"
@@ -714,7 +720,7 @@ rule ScheduledTaskRecurrenceCloned {
 -- inbound.db for the question_response.
 
 rule InteractiveQuestionRecorded {
-    when: AgentAsksUserQuestion(session, question_id, title, question, options, timeout?)
+    when: AgentAsksUserQuestion(session, question_id, title, question, options, timeout?, delivered_to?, delivered_message_id?)
     requires: not exists InteractiveQuestion{question_id: question_id}
     let resolved_timeout = if timeout != null: timeout else: config.default_question_timeout
     ensures: InteractiveQuestion.created(
@@ -724,6 +730,8 @@ rule InteractiveQuestionRecorded {
         question: question,
         options: options,
         status: pending,
+        delivered_to: delivered_to,
+        delivered_message_id: delivered_message_id,
         created_at: now,
         expires_at: now + resolved_timeout
     )
@@ -825,6 +833,65 @@ rule InteractiveQuestionTimedOut {
         -- is observed in practice.
 }
 
+-- ---- Answering by reply (channels without buttons) ----
+--
+-- A channel without buttons (DeltaChat) renders a card as text, shown as
+-- coming from the asking agent:
+--
+--     ❓ Researcher: <title>
+--     <question>
+--     1. <option>   2. <option>
+--     Reply with the number or the option.
+--
+-- and the user answers by replying. A reply answers a question when it
+-- quotes that question's card, or, without a quote, when exactly one
+-- actionable question was delivered to that chat; its text must name one
+-- of the options by number or by label. An answering reply is consumed:
+-- it is not routed to the agent as chat.
+
+-- allium-ignore allium.rule.unreachableTrigger
+rule QuestionAnsweredByReply {
+    when: TextReplyReceived(messaging_group, user, text, quoted_message_id?)
+    let q = reply_target(messaging_group, quoted_message_id)
+    requires: q != null
+    let option = option_named_by(q.options, text)
+    requires: option != null
+    ensures: UserSelectsQuestionOption(question_id: q.question_id, selected_option: option, user: user)
+    ensures: ReplyConsumed(messaging_group: messaging_group, text: text)
+
+    @guidance
+        -- reply_target: with a quote, the InteractiveQuestion whose
+        -- delivered_message_id is the quoted message and delivered_to is
+        -- this chat, whatever its status (a late answer is delivered as a
+        -- late click is; see InteractiveQuestionTimedOut). Without a quote,
+        -- the single InteractiveQuestion delivered to this chat that is
+        -- is_actionable; none when there are zero or several.
+        --
+        -- option_named_by matches "<n>" (1-based) or an option label,
+        -- ignoring case and surrounding whitespace and punctuation. Any
+        -- other text is not an answer and is routed as ordinary chat.
+        --
+        -- Approval cards (approvals.allium) are rendered and answered the
+        -- same way: reply_target also resolves an approval card delivered to
+        -- the chat, and the selection reaches the approval flow exactly as
+        -- a button click would (AdminGrantsApproval / AdminRejectsApproval,
+        -- with the replying user as actor, so only the approver can answer).
+}
+
+-- An unquoted reply that names an option while several questions are open
+-- in the chat is ambiguous: it answers none of them, and the user is asked
+-- to quote the card they mean.
+-- allium-ignore allium.rule.unreachableTrigger
+rule QuestionReplyAmbiguous {
+    when: TextReplyReceived(messaging_group, user, text, quoted_message_id?)
+    requires: quoted_message_id = null
+    let open = InteractiveQuestions where delivered_to = messaging_group and is_actionable
+    requires: open.count > 1
+    requires: exists q in open where option_named_by(q.options, text) != null
+    ensures: QuoteToAnswerNoticeSent(messaging_group: messaging_group)
+    ensures: ReplyConsumed(messaging_group: messaging_group, text: text)
+}
+
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
@@ -875,7 +942,7 @@ invariant UniqueQuestionId {
 --     AgentRequestsPauseTask, AgentRequestsResumeTask,
 --     AgentRequestsCancelTask, AgentRequestsUpdateTask,
 --     AgentAsksUserQuestion, RecurrenceTickObserved,
---     UserSelectsQuestionOption) — these are external entry points
+--     TextReplyReceived) — these are external entry points
 --     emitted by the agent container or channel adapter; surfaces
 --     for them belong in a future revision once the agent boundary
 --     is being modelled in spec form.

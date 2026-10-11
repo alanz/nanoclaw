@@ -47,6 +47,14 @@ vi.mock('../modules/permissions/db/users.js', () => ({
   mergeUsersInto: vi.fn().mockResolvedValue([]),
 }));
 
+// Question liveness: by default every card's question is still waiting.
+const waiting = vi.hoisted(() => ({ ids: null as Set<string> | null }));
+vi.mock('./question-render-registry.js', () => ({
+  resolveQuestionRender: vi.fn(async (id: string) =>
+    waiting.ids === null || waiting.ids.has(id) ? { title: 'T', options: [] } : undefined,
+  ),
+}));
+
 // --- DeltaChat RPC mock ---
 
 type EventHandler = (...args: unknown[]) => unknown;
@@ -1264,6 +1272,150 @@ describe('DeltaChat channel adapter', () => {
     it('openDM throws for an unknown handle', async () => {
       const { adapter } = await buildSetupAdapter();
       await expect(adapter.openDM!(`fp:${FP}`)).rejects.toThrow('no known contact');
+    });
+  });
+
+  describe('question cards (answered by reply)', () => {
+    const askContent = (questionId: string, extra: Record<string, unknown> = {}) => ({
+      type: 'ask_question',
+      questionId,
+      title: 'Prior notes exist',
+      question: 'Use the existing note or start a new one?',
+      options: [
+        { label: 'Use existing', selectedLabel: 'Using existing', value: 'existing' },
+        { label: 'New note', value: 'new' },
+      ],
+      ...extra,
+    });
+
+    async function deliverCard(
+      adapter: Awaited<ReturnType<typeof buildSetupAdapter>>['adapter'],
+      dc: ReturnType<typeof makeDcMock>,
+      questionId: string,
+      msgId: number,
+      extra: Record<string, unknown> = {},
+    ) {
+      dc.rpc.sendMsg.mockResolvedValueOnce(msgId);
+      return adapter.deliver(PLATFORM_ID, null, {
+        kind: 'chat-sdk',
+        content: askContent(questionId, extra),
+      } as OutboundMessage);
+    }
+
+    async function reply(dc: ReturnType<typeof makeDcMock>, text: string, quote: unknown = null, msgId = MSG_ID) {
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text, quote }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat({ chatType: 'Single' }));
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg(CHAT_ID, msgId);
+      await flush();
+    }
+
+    beforeEach(() => {
+      waiting.ids = null;
+    });
+
+    it('sends a question as numbered text and returns its message id', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      const id = await deliverCard(adapter, dc, 'q1', 501, { sender: 'Researcher' });
+      expect(id).toBe('501');
+      const sent = dc.rpc.sendMsg.mock.calls.at(-1)![2] as { text: string; overrideSenderName: string | null };
+      expect(sent.text).toBe(
+        '❓ Researcher: Prior notes exist\nUse the existing note or start a new one?\n1. Use existing\n2. New note\nReply with the number or the option.',
+      );
+      expect(sent.overrideSenderName).toBe('Researcher');
+    });
+
+    it('an unquoted number answers the only waiting card and is not routed as chat', async () => {
+      const { adapter, config, dc } = await buildSetupAdapter();
+      await deliverCard(adapter, dc, 'q1', 501);
+      await reply(dc, '1');
+      expect(config.onAction).toHaveBeenCalledWith('q1', 'existing', 'dc:alice@example.com', {
+        messageId: '501',
+        platformId: PLATFORM_ID,
+        threadId: null,
+      });
+      expect(config.onInbound).not.toHaveBeenCalled();
+      expect(dc.rpc.sendEditRequest).toHaveBeenCalledWith(ACCOUNT_ID, 501, expect.stringContaining('→ Using existing'));
+    });
+
+    it('an option label answers too', async () => {
+      const { adapter, config, dc } = await buildSetupAdapter();
+      await deliverCard(adapter, dc, 'q1', 501);
+      await reply(dc, 'new note!');
+      expect(config.onAction).toHaveBeenCalledWith('q1', 'new', expect.any(String), expect.anything());
+    });
+
+    it('text that names no option is ordinary chat', async () => {
+      const { adapter, config, dc } = await buildSetupAdapter();
+      await deliverCard(adapter, dc, 'q1', 501);
+      await reply(dc, 'what do you mean?');
+      expect(config.onAction).not.toHaveBeenCalled();
+      expect(config.onInbound).toHaveBeenCalled();
+    });
+
+    it('with two cards waiting, an unquoted answer is ambiguous and a quoted one picks its card', async () => {
+      const { adapter, config, dc } = await buildSetupAdapter();
+      await deliverCard(adapter, dc, 'q1', 501);
+      await deliverCard(adapter, dc, 'q2', 502);
+
+      await reply(dc, '2', null, 601);
+      expect(config.onAction).not.toHaveBeenCalled();
+      expect(config.onInbound).not.toHaveBeenCalled();
+      const notice = dc.rpc.sendMsg.mock.calls.at(-1)![2] as { text: string };
+      expect(notice.text).toContain('Reply to (quote) the one you mean');
+
+      await reply(dc, '2', { kind: 'WithMessage', text: '❓ Prior notes exist', messageId: 502 }, 602);
+      expect(config.onAction).toHaveBeenCalledWith(
+        'q2',
+        'new',
+        expect.any(String),
+        expect.objectContaining({ messageId: '502' }),
+      );
+    });
+
+    it('a card whose question is no longer waiting does not capture replies', async () => {
+      const { adapter, config, dc } = await buildSetupAdapter();
+      await deliverCard(adapter, dc, 'q1', 501);
+      waiting.ids = new Set();
+      await reply(dc, '1');
+      expect(config.onAction).not.toHaveBeenCalled();
+      expect(config.onInbound).toHaveBeenCalled();
+    });
+
+    it('an expired card stops matching unquoted replies but still takes a quoted one', async () => {
+      const { adapter, config, dc } = await buildSetupAdapter();
+      await deliverCard(adapter, dc, 'q1', 501, { expiresAt: new Date(Date.now() - 1000).toISOString() });
+      await reply(dc, '1', null, 601);
+      expect(config.onAction).not.toHaveBeenCalled();
+      await reply(dc, '1', { kind: 'WithMessage', text: 'card', messageId: 501 }, 602);
+      expect(config.onAction).toHaveBeenCalledWith('q1', 'existing', expect.any(String), expect.anything());
+    });
+
+    it('an approval card terminal edit is rendered as text', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      await adapter.deliver(PLATFORM_ID, null, {
+        kind: 'chat-sdk',
+        content: {
+          operation: 'edit',
+          messageId: '501',
+          terminalCard: { title: 'Approval', question: 'Allow x?', resolution: 'Approved by Alan' },
+        },
+      } as OutboundMessage);
+      expect(dc.rpc.sendEditRequest).toHaveBeenCalledWith(ACCOUNT_ID, 501, 'Approval\nAllow x?\n→ Approved by Alan');
+    });
+
+    it('a display card is sent as text', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      await adapter.deliver(PLATFORM_ID, null, {
+        kind: 'chat-sdk',
+        content: {
+          type: 'card',
+          card: { title: 'Build', description: 'All green', actions: [{ label: 'Logs', url: 'https://x.test' }] },
+          fallbackText: '',
+        },
+      } as OutboundMessage);
+      const sent = dc.rpc.sendMsg.mock.calls.at(-1)![2] as { text: string };
+      expect(sent.text).toBe('Build\nAll green\nLogs: https://x.test');
     });
   });
 });

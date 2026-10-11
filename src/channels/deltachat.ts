@@ -10,6 +10,9 @@
  *
  * Inbound: debounces rapid messages before routing, attaches 👀 on receipt.
  * Outbound: sends text/files, handles edit/reaction operations; sends ✅ on delivery.
+ * Cards: DeltaChat has no buttons, so question cards are sent as numbered text
+ * and answered by reply (deltachat-cards.ts); display cards are sent as text.
+ * A `sender` on the content is shown as the message's sender name.
  * Typing: sends 💭 on the last incoming message for the platformId.
  *
  * Credentials: set DELTACHAT_CHATMAIL_QR (chatmail QR) or DELTACHAT_ADDR +
@@ -28,6 +31,16 @@ import { log } from '../log.js';
 import { mergeUsersInto } from '../modules/permissions/db/users.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import {
+  AMBIGUOUS_REPLY_NOTICE,
+  CardBook,
+  matchReply,
+  parseQuestionContent,
+  renderAnswered,
+  renderDisplayCard,
+  renderQuestion,
+} from './deltachat-cards.js';
+import { resolveQuestionRender } from './question-render-registry.js';
 import {
   fingerprintFromHandle,
   fingerprintHandle,
@@ -143,6 +156,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   /** Dedup set for IncomingMsg (short window) and edit-detection set (1-hour window). */
   const seenMsgIds = new Set<number>();
   const processedMsgIds = new Set<number>();
+  /** Question cards delivered to chats, for answering by reply. */
+  let cards = new CardBook(null);
   /** Resolved sender handle per DeltaChat contact id, and fingerprint → contact id for openDM. */
   const senderByContact = new Map<number, { handle: string; name: string }>();
   const contactByFingerprint = new Map<string, number>();
@@ -228,7 +243,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     });
   }
 
-  async function sendText(platformId: string, text: string): Promise<string | null> {
+  async function sendText(platformId: string, text: string, sender?: string): Promise<string | null> {
     const chatId = chatIdFromPlatformId(platformId);
     if (chatId === null || !dc || accountId === null) return null;
     const msgId = await dc.rpc.sendMsg(accountId, chatId, {
@@ -238,11 +253,59 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       file: null,
       filename: null,
       location: null,
-      overrideSenderName: null,
+      overrideSenderName: sender ?? null,
       quotedMessageId: null,
       quotedText: null,
     });
     return String(msgId);
+  }
+
+  /**
+   * A reply that answers a question card: report the choice to the host and
+   * mark the card answered. Returns true when the reply was consumed.
+   */
+  async function answerByReply(
+    platformId: string,
+    msgId: number,
+    text: string,
+    quotedMsgId: number | null,
+    sender: string,
+  ): Promise<boolean> {
+    if (!dc || accountId === null || !channelSetup) return false;
+    const match = await matchReply(cards, platformId, text, quotedMsgId, async (qid) =>
+      Boolean(await resolveQuestionRender(qid)),
+    );
+    if (match.kind === 'none') return false;
+    if (match.kind === 'ambiguous') {
+      await sendText(platformId, AMBIGUOUS_REPLY_NOTICE);
+      return true;
+    }
+    const { card, option } = match;
+    const render = await resolveQuestionRender(card.questionId);
+    if (!render?.deferResolution) {
+      try {
+        await dc.rpc.sendEditRequest(
+          accountId,
+          card.msgId,
+          renderAnswered(`❓ ${card.title}`, option.selectedLabel, render?.question),
+        );
+      } catch (err) {
+        log.warn('DeltaChat: failed to mark card answered', { err, msgId: card.msgId });
+      }
+    }
+    try {
+      await dc.rpc.sendReaction(accountId, msgId, ['✅']);
+    } catch {
+      // cosmetic
+    }
+    cards.remove(card.questionId);
+    channelSetup.onAction(card.questionId, option.value, `dc:${sender}`, {
+      messageId: String(card.msgId),
+      platformId,
+      threadId: null,
+    });
+    log.info('DeltaChat: question answered by reply', { questionId: card.questionId, platformId });
+    return true;
   }
 
   async function sendFileTmp(platformId: string, filePath: string, caption: string | undefined): Promise<void> {
@@ -279,6 +342,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     async setup(config: ChannelSetup): Promise<void> {
       channelSetup = config;
       fs.mkdirSync(dataDir, { recursive: true });
+      cards = new CardBook(path.join(dataDir, 'nanoclaw-cards.json'));
 
       // DeltaChat requires accounts.toml on startup
       const accountsToml = path.join(dataDir, 'accounts.toml');
@@ -394,6 +458,15 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           if (text.trim() === '/chatid') {
             await sendText(platformId, `Chat ID: ${platformId}`);
             return;
+          }
+
+          // A text reply may be the answer to a question card
+          const viewTypeIn = (msg.viewType as string | undefined) ?? 'Unknown';
+          if (text && (viewTypeIn === 'Text' || viewTypeIn === 'Unknown')) {
+            const quote = msg.quote as { kind: string; messageId?: number } | null;
+            const quotedMsgId =
+              quote?.kind === 'WithMessage' && typeof quote.messageId === 'number' ? quote.messageId : null;
+            if (await answerByReply(platformId, msgId, text, quotedMsgId, sender)) return;
           }
 
           // React with 👀 to acknowledge receipt; track msgId for typing/done reactions
@@ -622,9 +695,20 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       const content = message.content as Record<string, unknown>;
 
       // edit_message: { operation: 'edit', messageId: platformMsgId, text }
+      // or an approval card's terminal state: { ..., terminalCard: { title, question, resolution } }
       if (content.operation === 'edit') {
         const rawId = content.messageId;
-        const text = content.text;
+        const terminal = content.terminalCard as
+          | { title?: unknown; question?: unknown; resolution?: unknown }
+          | undefined;
+        const text =
+          terminal && typeof terminal.title === 'string' && typeof terminal.resolution === 'string'
+            ? renderAnswered(
+                terminal.title,
+                terminal.resolution,
+                typeof terminal.question === 'string' ? terminal.question : undefined,
+              )
+            : content.text;
         if (typeof rawId === 'string' && typeof text === 'string') {
           const msgId = parseInt(rawId, 10);
           if (!isNaN(msgId)) {
@@ -655,7 +739,28 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
         return undefined;
       }
 
-      const text = typeof content.text === 'string' ? content.text : '';
+      const sender = typeof content.sender === 'string' && content.sender ? content.sender : undefined;
+
+      // Question card (ask_user_question, approvals): numbered text, answered by reply
+      const question = parseQuestionContent(content);
+      if (question) {
+        const platformMsgId = await sendText(platformId, renderQuestion(question), sender);
+        if (platformMsgId) {
+          cards.add({
+            msgId: parseInt(platformMsgId, 10),
+            platformId,
+            questionId: question.questionId,
+            title: question.sender ? `${question.sender}: ${question.title}` : question.title,
+            options: question.options,
+            expiresAt: question.expiresAt ?? null,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        return platformMsgId ?? undefined;
+      }
+
+      const text =
+        typeof content.text === 'string' ? content.text : content.type === 'card' ? renderDisplayCard(content) : '';
 
       // send_file: host has resolved the file buffers into message.files
       if (message.files && message.files.length > 0) {
@@ -679,7 +784,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
       // Plain text message
       if (!text) return undefined;
-      const platformMsgId = await sendText(platformId, text);
+      const platformMsgId = await sendText(platformId, text, sender);
       await sendDoneReaction(platformId);
       return platformMsgId ?? undefined;
     },

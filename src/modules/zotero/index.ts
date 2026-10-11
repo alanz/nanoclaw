@@ -12,6 +12,7 @@ import { registerSessionContributor } from '../../container-runner.js';
 import { readEnvFile } from '../../env.js';
 import { proxiedService } from '../../gateway-providers/native-proxy.js';
 import { onHostStart } from '../../host-lifecycle.js';
+import { registerMemoryWorkspaceDir } from '../../memory/workspace-dirs.js';
 
 import { ZOTERO_GROUP_FOLDER } from './config.js';
 
@@ -20,6 +21,14 @@ import './group-delete.js';
 
 onHostStart(() => {
   startZoteroMonitor();
+});
+
+// The library's item files are searchable from memory_search as source
+// `zotero` (specs/memory.allium) — only in the group the library syncs into.
+registerMemoryWorkspaceDir({
+  subdir: 'zotero-md',
+  source: 'zotero',
+  appliesTo: (folder) => !!ZOTERO_GROUP_FOLDER && folder === ZOTERO_GROUP_FOLDER,
 });
 
 // The sync itself runs in the container (container/tools/zotero-sync.mjs) and

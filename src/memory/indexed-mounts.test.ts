@@ -41,7 +41,8 @@ import { createAgentGroup } from '../db/agent-groups.js';
 import { closeDb, initTestDb } from '../db/connection.js';
 import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
 import { runMigrations } from '../db/migrations/index.js';
-import { batchEmbeddings, indexedMountDirs, MemoryIndexManager, zettelDirs } from './manager.js';
+import { batchEmbeddings, indexedMountDirs, MemoryIndexManager } from './manager.js';
+import { workspaceIndexDirs } from './workspace-dirs.js';
 import { TokenBucketRateLimiter } from './rate-limiter.js';
 
 let root: string;
@@ -115,9 +116,9 @@ describe('indexing the Zettelkasten', () => {
   it('is found only when the folder exists', () => {
     const group = path.join(root, 'group');
     fs.mkdirSync(group);
-    expect(zettelDirs(group)).toEqual([]);
+    expect(workspaceIndexDirs(group)).toEqual([]);
     fs.mkdirSync(path.join(group, 'zettel'));
-    expect(zettelDirs(group)).toEqual([{ dir: path.join(group, 'zettel'), source: 'zettel' }]);
+    expect(workspaceIndexDirs(group)).toEqual([{ dir: path.join(group, 'zettel'), source: 'zettel' }]);
   });
 
   it('is indexed as source zettel beside memory/', async () => {
@@ -136,7 +137,7 @@ describe('indexing the Zettelkasten', () => {
       path.join(root, 'index.db'),
       'test-key',
       'gemini-embedding-001',
-      zettelDirs(group),
+      workspaceIndexDirs(group),
     );
     await manager.init();
     await manager.sync({ force: true });

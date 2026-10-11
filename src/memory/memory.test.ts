@@ -20,6 +20,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../db/index.js';
 import { MEMORY_CONFIG } from './config.js';
+import { groupByFile } from './hybrid.js';
+import { registerMemoryWorkspaceDir } from './workspace-dirs.js';
 import type { MemoryChunk, MemoryFile } from './db.js';
 import {
   createMemoryChunk,
@@ -226,11 +228,19 @@ describe('value types', () => {
     expect(Object.keys(p)).toEqual(['path_prefix', 'source', 'limit', 'order_by', 'parse_frontmatter']);
   });
 
-  it('MemorySearchResult has chunk, score, and snippet fields', async () => {
-    // [entity-fields.MemorySearchResult, value-equality.MemorySearchResult]
-    const r = { chunk: {} as MemoryChunk, score: 0.85, snippet: 'excerpt' };
-    expect(typeof r.score).toBe('number');
-    expect(typeof r.snippet).toBe('string');
+  it('MemorySearchResult is one file with a score, its locations and a count of the rest', async () => {
+    // [entity-fields.MemorySearchResult, entity-fields.MemorySearchLocation]
+    const [r] = groupByFile(
+      [{ path: 'groups/g/memory/a.md', source: 'memory', startLine: 1, endLine: 5, score: 0.85, snippet: 'excerpt' }],
+      { limit: 6, locationsPerFile: 3, otherSnippetChars: 200 },
+    );
+    expect(r).toEqual({
+      path: 'groups/g/memory/a.md',
+      source: 'memory',
+      score: 0.85,
+      locations: [{ startLine: 1, endLine: 5, score: 0.85, snippet: 'excerpt' }],
+      moreLocations: 0,
+    });
   });
 });
 
@@ -478,9 +488,11 @@ describe('FileSynced rule', () => {
 // ── MemorySearched rule  [rule-success.MemorySearched, rule-failure.MemorySearched.*] ──
 
 describe('MemorySearched rule', () => {
-  it('returns an array of results for a valid session+group pair  [rule-success.MemorySearched]', async () => {
-    const results = await handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'meeting notes' });
-    expect(Array.isArray(results)).toBe(true);
+  it('returns a mode and an array of results for a valid session+group pair  [rule-success.MemorySearched]', async () => {
+    const response = await handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'meeting notes' });
+    expect(Array.isArray(response.results)).toBe(true);
+    // No manager for this group on the host: the container falls back to keyword search.
+    expect(response.mode).toBe('unavailable');
   });
 
   it('rejects when session.agent_group_id does not match group  [rule-failure.MemorySearched.1]', async () => {
@@ -584,11 +596,21 @@ describe('invariant: MemoryFilesWithinWorkspace', () => {
     expect((await getAllMemoryFiles()).map((f) => f.path)).toContain(zettelPath);
   });
 
+  it('accepts a registered workspace folder, and only once registered  [invariant.MemoryFilesWithinWorkspace]', async () => {
+    const libPath = `groups/${GROUP_FOLDER}/test-library/KEY1.md`;
+    await expect(
+      handleWorkspaceFileChanged({ group_id: GROUP_ID, path: libPath, content_hash: 'h' }),
+    ).rejects.toThrow();
+    registerMemoryWorkspaceDir({ subdir: 'test-library', source: 'library' });
+    await handleWorkspaceFileChanged({ group_id: GROUP_ID, path: libPath, content_hash: 'h' });
+    expect((await getAllMemoryFiles()).map((f) => f.path)).toContain(libPath);
+  });
+
   it('rejects a memory/ directory that is not the top of the group workspace  [invariant.MemoryFilesWithinWorkspace]', async () => {
     await expect(
       handleWorkspaceFileChanged({
         group_id: GROUP_ID,
-        path: `groups/${GROUP_FOLDER}/zotero-md/memory/a.md`,
+        path: `groups/${GROUP_FOLDER}/projects/memory/a.md`,
         content_hash: 'h',
       }),
     ).rejects.toThrow();

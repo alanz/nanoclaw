@@ -109,3 +109,82 @@ export function mergeHybridResults(params: {
     }))
     .sort((a, b) => b.score - a.score);
 }
+
+export interface SearchLocation {
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+}
+
+export interface FileSearchResult {
+  path: string;
+  source: string;
+  /** The best of its locations' scores. */
+  score: number;
+  /** Best first, at most `locationsPerFile`. */
+  locations: SearchLocation[];
+  /** Matching locations left out by the cap. */
+  moreLocations: number;
+}
+
+/**
+ * Group ranked chunks into one result per file (specs/memory.allium,
+ * MemorySearched): files rank by their best chunk and `limit` counts files.
+ * Chunks whose line ranges overlap — adjacent chunks overlap by design — merge
+ * into one location keeping the better score and its snippet. The best
+ * location keeps its snippet whole; the others are cut to `otherSnippetChars`.
+ *
+ * The container's keyword fallback restates this (mcp-tools/memory.ts): host
+ * and container share no modules.
+ */
+export function groupByFile(
+  chunks: ReadonlyArray<{
+    path: string;
+    source: string;
+    startLine: number;
+    endLine: number;
+    score: number;
+    snippet: string;
+  }>,
+  opts: { limit: number; locationsPerFile: number; otherSnippetChars: number },
+): FileSearchResult[] {
+  const byPath = new Map<string, { source: string; chunks: SearchLocation[] }>();
+  for (const c of chunks) {
+    const entry = byPath.get(c.path) ?? { source: c.source, chunks: [] };
+    entry.chunks.push({ startLine: c.startLine, endLine: c.endLine, score: c.score, snippet: c.snippet });
+    byPath.set(c.path, entry);
+  }
+
+  const files: FileSearchResult[] = [];
+  for (const [path, entry] of byPath) {
+    const byLine = [...entry.chunks].sort((a, b) => a.startLine - b.startLine);
+    const merged: SearchLocation[] = [];
+    for (const c of byLine) {
+      const last = merged[merged.length - 1];
+      if (last && c.startLine <= last.endLine) {
+        last.endLine = Math.max(last.endLine, c.endLine);
+        if (c.score > last.score) {
+          last.score = c.score;
+          last.snippet = c.snippet;
+        }
+      } else {
+        merged.push({ ...c });
+      }
+    }
+    merged.sort((a, b) => b.score - a.score);
+    const locations = merged.slice(0, opts.locationsPerFile).map((l, i) => ({
+      ...l,
+      snippet: i === 0 ? l.snippet : l.snippet.slice(0, opts.otherSnippetChars),
+    }));
+    files.push({
+      path,
+      source: entry.source,
+      score: locations[0]!.score,
+      locations,
+      moreLocations: merged.length - locations.length,
+    });
+  }
+
+  return files.sort((a, b) => b.score - a.score).slice(0, opts.limit);
+}

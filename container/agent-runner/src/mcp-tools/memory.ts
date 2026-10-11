@@ -3,22 +3,38 @@
  *
  * Only available in non-specialist containers. The host maintains a per-group
  * SQLite index at data/v2-memory/<group_id>/index.db, mounted read-only at
- * /workspace/memory/index.db. Tools query it directly via bun:sqlite — no
- * host round-trip needed for reads.
+ * /workspace/memory/index.db.
  *
- * Search uses FTS5 keyword matching (always available). The host also writes
- * vector embeddings, but loading the sqlite-vec extension in the container
- * requires the native binary; we fall back gracefully if unavailable.
+ * Search is the host's hybrid (vector + keyword) search: the host holds the
+ * embedding key and budget. The tool writes a memory_search_request system
+ * message and waits for the matching response in inbound.db. If none comes in
+ * time, it runs FTS5 keyword search on the read-only index itself. Get and list
+ * read the index directly — no host round-trip.
  */
 import { Database } from 'bun:sqlite';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+
+import { findCliResponse, markCompleted } from '../db/messages-in.js';
+import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
 const INDEX_PATH = '/workspace/memory/index.db';
 const FTS_TABLE = 'chunks_fts';
 const SNIPPET_MAX = 700;
+/** Snippets of a result's locations after its best one. */
+const OTHER_SNIPPET_MAX = 200;
+/** specs/memory.allium config.search_locations_per_file. */
+const LOCATIONS_PER_FILE = 3;
+/** Chunk candidates per requested file: grouping by file uses some up. */
+const CANDIDATES_PER_RESULT = 8;
+const MAX_TOP_K = 20;
+const DEFAULT_MIN_SCORE = 0.1;
+/** specs/memory.allium config.search_host_timeout. */
+const HOST_TIMEOUT_MS = 15_000;
+const HOST_POLL_MS = 500;
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max);
@@ -98,96 +114,215 @@ function parseFrontmatter(content: string): Record<string, unknown> | undefined 
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-export const memorySearch: McpToolDefinition = {
-  tool: {
-    name: 'memory_search',
-    description:
-      'Search your personal knowledge base (memory files, research documents, notes). Use when the user references something you may have notes on, or when background context would improve your answer.\n\nReturns ranked results with path, line range, score, and snippet. Use memory_get_file_content to fetch the full content of a result.',
-    inputSchema: {
-      type: 'object' as const,
-      required: ['query'],
-      properties: {
-        query: { type: 'string', description: 'What to search for.' },
-        top_k: { type: 'number', description: 'Max results (default 6, max 20).' },
-        path_prefix: {
-          type: 'string',
-          description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/zettel/notes/".',
+export interface SearchArgs {
+  query: string;
+  topK: number;
+  pathPrefix?: string;
+  source?: string;
+  /** Applied by the keyword fallback. */
+  minScore: number;
+  /** The caller's own min_score, if any — the host applies its default otherwise. */
+  requestedMinScore?: number;
+}
+
+/** Keyword-only search of the read-only index — the fallback when the host does not answer. */
+export function keywordSearch(db: Database, args: SearchArgs): unknown[] {
+  const ftsQuery = buildFtsQuery(args.query);
+  if (!ftsQuery) return [];
+
+  // Filters narrow the candidates before LIMIT, so matches inside them are
+  // never crowded out by better-ranked matches outside them.
+  const conditions = [`${FTS_TABLE} MATCH ?`];
+  const params: (string | number)[] = [ftsQuery];
+  if (args.source) {
+    conditions.push('source = ?');
+    params.push(args.source);
+  }
+  if (args.pathPrefix) {
+    conditions.push('substr(path, 1, length(?)) = ?');
+    params.push(args.pathPrefix, args.pathPrefix);
+  }
+
+  const rows = db
+    .query<
+      { path: string; source: string; start_line: number; end_line: number; text: string; rank: number },
+      (string | number)[]
+    >(`SELECT path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` + `  FROM ${FTS_TABLE}` + ` WHERE ${conditions.join(' AND ')}` + ` ORDER BY rank ASC LIMIT ?`)
+    .all(...params, args.topK * CANDIDATES_PER_RESULT);
+
+  const chunks = rows
+    .map((r) => ({
+      path: r.path,
+      startLine: r.start_line,
+      endLine: r.end_line,
+      score: bm25ToScore(r.rank),
+      snippet: truncate(r.text, SNIPPET_MAX),
+      source: r.source,
+    }))
+    .filter((r) => r.score >= args.minScore);
+  return groupByFile(chunks, args.topK);
+}
+
+interface SearchLocation {
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+}
+
+/**
+ * One result per file, as the host returns them (src/memory/hybrid.ts
+ * groupByFile, restated: host and container share no modules). Files rank by
+ * their best chunk; overlapping chunks merge into one location; at most
+ * LOCATIONS_PER_FILE listed, best first, the rest counted.
+ */
+export function groupByFile(
+  chunks: ReadonlyArray<SearchLocation & { path: string; source: string }>,
+  limit: number,
+): unknown[] {
+  const byPath = new Map<string, { source: string; chunks: SearchLocation[] }>();
+  for (const c of chunks) {
+    const entry = byPath.get(c.path) ?? { source: c.source, chunks: [] };
+    entry.chunks.push({ startLine: c.startLine, endLine: c.endLine, score: c.score, snippet: c.snippet });
+    byPath.set(c.path, entry);
+  }
+
+  const files: Array<{
+    path: string;
+    source: string;
+    score: number;
+    locations: SearchLocation[];
+    moreLocations: number;
+  }> = [];
+  for (const [filePath, entry] of byPath) {
+    const merged: SearchLocation[] = [];
+    for (const c of [...entry.chunks].sort((a, b) => a.startLine - b.startLine)) {
+      const last = merged[merged.length - 1];
+      if (last && c.startLine <= last.endLine) {
+        last.endLine = Math.max(last.endLine, c.endLine);
+        if (c.score > last.score) {
+          last.score = c.score;
+          last.snippet = c.snippet;
+        }
+      } else {
+        merged.push({ ...c });
+      }
+    }
+    merged.sort((a, b) => b.score - a.score);
+    const locations = merged.slice(0, LOCATIONS_PER_FILE).map((l, i) => ({
+      ...l,
+      snippet: i === 0 ? l.snippet : truncate(l.snippet, OTHER_SNIPPET_MAX),
+    }));
+    files.push({
+      path: filePath,
+      source: entry.source,
+      score: locations[0]!.score,
+      locations,
+      moreLocations: merged.length - locations.length,
+    });
+  }
+  return files.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+type HostAnswer = { mode: string; results: unknown[] } | { error: string };
+
+/** Ask the host for a hybrid search; null when it does not answer in time. */
+async function askHost(args: SearchArgs, timeoutMs: number, signal?: AbortSignal): Promise<HostAnswer | null> {
+  const requestId = `mem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await writeMessageOut({
+    id: requestId,
+    kind: 'system',
+    content: JSON.stringify({
+      action: 'memory_search_request',
+      requestId,
+      query: args.query,
+      top_k: args.topK,
+      path_prefix: args.pathPrefix,
+      source: args.source,
+      min_score: args.requestedMinScore,
+    }),
+  });
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && !signal?.aborted) {
+    const row = findCliResponse(requestId);
+    if (row) {
+      markCompleted([row.id]);
+      return JSON.parse(row.content) as HostAnswer;
+    }
+    try {
+      await sleep(HOST_POLL_MS, undefined, { signal });
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function textResult(value: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
+}
+
+export function createMemorySearch(hostTimeoutMs = HOST_TIMEOUT_MS): McpToolDefinition {
+  return {
+    tool: {
+      name: 'memory_search',
+      description:
+        'Search your personal knowledge base (memory files, research documents, notes). Use when the user references something you may have notes on, or when background context would improve your answer.\n\nMatches by meaning and by keyword. Returns { mode, results }: one result per file, ranked — path, source, score, and up to 3 locations (line range, score, snippet; best first), with moreLocations counting matches left out; mode is "hybrid", or "keyword" when meaning-based search was unavailable (then every query word must appear). Use memory_get_file_content to fetch the full content of a result.',
+      inputSchema: {
+        type: 'object' as const,
+        required: ['query'],
+        properties: {
+          query: { type: 'string', description: 'What to search for.' },
+          top_k: { type: 'number', description: 'Max files returned (default 6, max 20).' },
+          path_prefix: {
+            type: 'string',
+            description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/zettel/notes/".',
+          },
+          source: {
+            type: 'string',
+            description:
+              'Filter by source: "memory" (memory/), "zettel" (the Zettelkasten, zettel/), "zotero" (the Zotero library, zotero-md/, where synced), or a mount name such as "org".',
+          },
+          min_score: {
+            type: 'number',
+            description: 'Min relevance score 0–1 (default 0.35 in hybrid mode, 0.1 in keyword mode).',
+          },
         },
-        source: {
-          type: 'string',
-          description:
-            'Filter by source: "memory" (memory/), "zettel" (the Zettelkasten, zettel/), or a mount name such as "org".',
-        },
-        min_score: { type: 'number', description: 'Min relevance score 0–1 (default 0.1).' },
       },
     },
-  },
-  async handler(args) {
-    const query = args.query as string;
-    const topK = typeof args.top_k === 'number' ? Math.min(args.top_k, 20) : 6;
-    const pathPrefix = args.path_prefix as string | undefined;
-    const source = args.source as string | undefined;
-    const minScore = typeof args.min_score === 'number' ? args.min_score : 0.1;
+    async handler(args, context) {
+      const query = args.query as string;
+      const searchArgs: SearchArgs = {
+        query,
+        topK: typeof args.top_k === 'number' ? Math.min(args.top_k, MAX_TOP_K) : 6,
+        pathPrefix: (args.path_prefix as string | undefined) || undefined,
+        source: (args.source as string | undefined) || undefined,
+        minScore: typeof args.min_score === 'number' ? args.min_score : DEFAULT_MIN_SCORE,
+        requestedMinScore: typeof args.min_score === 'number' ? args.min_score : undefined,
+      };
 
-    const db = openDb();
-    if (!db) return { content: [{ type: 'text' as const, text: JSON.stringify([]) }] };
+      const answer = await askHost(searchArgs, hostTimeoutMs, context?.signal);
+      if (answer && 'mode' in answer && answer.mode !== 'unavailable') {
+        return textResult({ mode: answer.mode, results: answer.results });
+      }
+      if (answer && 'error' in answer) console.error(`[mcp-tools] memory_search: host error: ${answer.error}`);
 
-    try {
-      const ftsQuery = buildFtsQuery(query);
-      if (!ftsQuery) {
+      const db = openDb();
+      if (!db) return textResult({ mode: 'keyword', results: [] });
+      try {
+        return textResult({ mode: 'keyword', results: keywordSearch(db, searchArgs) });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
+      } finally {
         db.close();
-        return { content: [{ type: 'text' as const, text: JSON.stringify([]) }] };
       }
+    },
+  };
+}
 
-      const conditions = [`${FTS_TABLE} MATCH ?`];
-      const params: (string | number)[] = [ftsQuery];
-      if (source) {
-        conditions.push('source = ?');
-        params.push(source);
-      }
-
-      const rows = db
-        .query<
-          {
-            id: string;
-            path: string;
-            source: string;
-            start_line: number;
-            end_line: number;
-            text: string;
-            rank: number;
-          },
-          (string | number)[]
-        >(
-          `SELECT id, path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` +
-            `  FROM ${FTS_TABLE}` +
-            ` WHERE ${conditions.join(' AND ')}` +
-            ` ORDER BY rank ASC LIMIT ?`,
-        )
-        .all(...params, topK * 4);
-
-      const results = rows
-        .map((r) => ({
-          path: r.path,
-          startLine: r.start_line,
-          endLine: r.end_line,
-          score: bm25ToScore(r.rank),
-          snippet: truncate(r.text, SNIPPET_MAX),
-          source: r.source,
-        }))
-        .filter((r) => r.score >= minScore)
-        .filter((r) => !pathPrefix || r.path.startsWith(pathPrefix))
-        .slice(0, topK);
-
-      db.close();
-      return { content: [{ type: 'text' as const, text: JSON.stringify(results) }] };
-    } catch (err) {
-      db.close();
-      const msg = err instanceof Error ? err.message : String(err);
-      return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true };
-    }
-  },
-};
+export const memorySearch = createMemorySearch();
 
 export const memoryGetFileContent: McpToolDefinition = {
   tool: {

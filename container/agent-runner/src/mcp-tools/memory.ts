@@ -282,7 +282,7 @@ export function createMemorySearch(hostTimeoutMs = HOST_TIMEOUT_MS): McpToolDefi
           source: {
             type: 'string',
             description:
-              'Filter by source: "memory" (memory/), "zettel" (the Zettelkasten, zettel/), or a mount name such as "org".',
+              'Filter by source: "memory" (memory/), "zettel" (the Zettelkasten, zettel/), "zotero" (the Zotero library, zotero-md/, where synced), or a mount name such as "org".',
           },
           min_score: {
             type: 'number',

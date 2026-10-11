@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../db/index.js';
 import { MEMORY_CONFIG } from './config.js';
 import { groupByFile } from './hybrid.js';
+import { registerMemoryWorkspaceDir } from './workspace-dirs.js';
 import type { MemoryChunk, MemoryFile } from './db.js';
 import {
   createMemoryChunk,
@@ -595,11 +596,21 @@ describe('invariant: MemoryFilesWithinWorkspace', () => {
     expect((await getAllMemoryFiles()).map((f) => f.path)).toContain(zettelPath);
   });
 
+  it('accepts a registered workspace folder, and only once registered  [invariant.MemoryFilesWithinWorkspace]', async () => {
+    const libPath = `groups/${GROUP_FOLDER}/test-library/KEY1.md`;
+    await expect(
+      handleWorkspaceFileChanged({ group_id: GROUP_ID, path: libPath, content_hash: 'h' }),
+    ).rejects.toThrow();
+    registerMemoryWorkspaceDir({ subdir: 'test-library', source: 'library' });
+    await handleWorkspaceFileChanged({ group_id: GROUP_ID, path: libPath, content_hash: 'h' });
+    expect((await getAllMemoryFiles()).map((f) => f.path)).toContain(libPath);
+  });
+
   it('rejects a memory/ directory that is not the top of the group workspace  [invariant.MemoryFilesWithinWorkspace]', async () => {
     await expect(
       handleWorkspaceFileChanged({
         group_id: GROUP_ID,
-        path: `groups/${GROUP_FOLDER}/zotero-md/memory/a.md`,
+        path: `groups/${GROUP_FOLDER}/projects/memory/a.md`,
         content_hash: 'h',
       }),
     ).rejects.toThrow();

@@ -70,19 +70,6 @@ export interface IndexedDir {
 }
 
 /**
- * The group's Zettelkasten: `groups/<folder>/zettel/`, kept apart from the
- * OKF memory/ tree because its rules are the opposite — notes are permanent
- * and never edited, where memory/ is updated and pruned in place. Indexed as
- * source `zettel` when the folder exists.
- */
-export const ZETTEL_DIR = 'zettel';
-
-export function zettelDirs(groupDir: string): IndexedDir[] {
-  const dir = path.join(groupDir, ZETTEL_DIR);
-  return fsSync.existsSync(dir) ? [{ dir, source: ZETTEL_DIR }] : [];
-}
-
-/**
  * The group's mounts marked for indexing, read from its container config in
  * the DB. (This replaces `memoryIndexDirs`, read from container.json — a file
  * regenerated from the DB at every spawn, which never carried the field, so
@@ -116,6 +103,7 @@ export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
   return dirs;
 }
 import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
+import { workspaceIndexDirs } from './workspace-dirs.js';
 import { chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
@@ -703,7 +691,7 @@ export async function initMemoryManagers(params: {
     const dbPath = path.join(dbDir, 'index.db');
 
     const additionalDirs = [
-      ...zettelDirs(path.join(params.groupsDir, group.folder)),
+      ...workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
       ...(await indexedMountDirs(group.id)),
     ];
 
@@ -745,7 +733,7 @@ export async function initMemoryManagerForGroup(params: {
     dbPath,
     apiKey: params.apiKey,
     model: params.model,
-    additionalDirs: zettelDirs(path.join(params.groupsDir, group.folder)),
+    additionalDirs: workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
   }).catch((err) => {
     log.warn('Failed to init memory manager for group', { groupId: group.id, err });
   });

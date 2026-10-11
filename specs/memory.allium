@@ -3,7 +3,8 @@
 --
 -- NanoClaw v2 memory indexing and semantic search.
 -- Each agent group has an embedded memory index built from markdown and org files in its workspace
--- (groups/<group>/memory/, and the group's Zettelkasten at groups/<group>/zettel/). Agents can
+-- (groups/<group>/memory/, the group's Zettelkasten at groups/<group>/zettel/, and the Zotero
+-- library's item files at groups/<group>/zotero-md/ in the group it syncs into). Agents can
 -- search memory using natural language queries; results use
 -- hybrid vector + keyword scoring.
 --
@@ -18,7 +19,10 @@
 -- Key v2 differences from v1:
 --   - Groups are now AgentGroups (identity.allium); the indexed roots are groups/<folder>/memory/
 --     and groups/<folder>/zettel/ (the Zettelkasten, kept apart from the memory/ tree because its
---     notes are permanent where memory/ is updated and pruned in place; see memory-graph.allium)
+--     notes are permanent where memory/ is updated and pruned in place; see memory-graph.allium),
+--     plus workspace folders another module registers for the groups it writes into — today
+--     groups/<folder>/zotero-md/, the Zotero library (zotero.allium), indexed as source "zotero"
+--     in the group named by its sync config only
 --   - The v1 IPC query path is replaced by the MemoryMcpTools surface (see bottom of file);
 --     MCP tools are registered in container/agent-runner/src/mcp-tools/. Search is still
 --     fulfilled by the host — it holds the embedding credential and the embedding budget —
@@ -411,14 +415,16 @@ rule MemoryListed {
 -- Invariants
 ------------------------------------------------------------
 
--- All indexed files must live within the group's memory/ subdirectory or its
--- Zettelkasten, zettel/ — each at the top of the group workspace.
+-- All indexed files must live within the group's memory/ subdirectory, its
+-- Zettelkasten, zettel/, or a registered workspace folder (today zotero-md/) — each at
+-- the top of the group workspace.
 -- Non-specialist agents write there directly (group dir is mounted RW).
 -- Specialist agents land files there via commit_to_memory on result delivery
 -- (group dir is mounted RO for specialists; the host performs the copy).
 invariant MemoryFilesWithinWorkspace {
     for f in MemoryFiles:
-        startsWith(f.path, "groups/") and (contains(f.path, "/memory/") or contains(f.path, "/zettel/"))
+        startsWith(f.path, "groups/") and (contains(f.path, "/memory/") or contains(f.path, "/zettel/")
+            or contains(f.path, "/zotero-md/"))
 }
 
 -- Every chunk belongs to an indexed (or pending) file, never a removed one.

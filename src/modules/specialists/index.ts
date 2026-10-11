@@ -21,6 +21,7 @@ import { registerBootCrashExemption } from '../boot-crash/index.js';
 import { registerMemoryGroupExclusion } from '../../memory/manager.js';
 import { getSpecialist, getTask } from './db.js';
 import './group-delete.js';
+import './relay.js';
 import { handleDispatchSpecialist, handleDispatchSubTask } from './dispatch.js';
 import { handleDeliverSpecialistResult } from './delivery.js';
 import {

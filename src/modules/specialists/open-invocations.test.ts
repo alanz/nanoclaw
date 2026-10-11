@@ -33,7 +33,11 @@ vi.mock('../../db/index.js', () => ({
     all: async (sql: string) => (sql.includes('FROM invocations') ? h.open : []),
   }),
 }));
-vi.mock('../../delivery.js', () => ({ registerDeliveryAction: vi.fn(), deliverSessionMessages: vi.fn() }));
+vi.mock('../../delivery.js', () => ({
+  registerDeliveryAction: vi.fn(),
+  registerPostDeliveryHook: vi.fn(),
+  deliverSessionMessages: vi.fn(),
+}));
 vi.mock('../../db/sessions.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../db/sessions.js')>()),
   getSession: vi.fn(async (id: string) => ({ id, agent_group_id: 'ag-1', thread_id: null })),

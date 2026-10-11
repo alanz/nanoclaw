@@ -27,6 +27,7 @@ vi.mock('../../container-runner.js', () => ({
 
 vi.mock('../../delivery.js', () => ({
   registerDeliveryAction: vi.fn(),
+  registerPostDeliveryHook: vi.fn(),
   deliverSessionMessages: vi.fn(async () => {
     hooks.order.push('drain');
   }),
@@ -57,8 +58,9 @@ import './index.js';
 
 async function exitSession(id: string, threadId: string | null): Promise<void> {
   hooks.sessions.set(id, { id, agent_group_id: 'ag-1', thread_id: threadId });
-  // The file-handover contributor (registered first) records the invocation.
-  await hooks.contributors[0]({ session: { id }, agentGroup: { id: 'ag-1' } });
+  // The file-handover contributor records the invocation: index.ts's first,
+  // registered after relay.ts's (its import runs first).
+  await hooks.contributors[1]({ session: { id }, agentGroup: { id: 'ag-1' } });
   for (const exit of hooks.exits) exit({ sessionId: id });
   await vi.waitFor(() => expect(hooks.order.at(-1)).toBe('end-invocation'));
 }

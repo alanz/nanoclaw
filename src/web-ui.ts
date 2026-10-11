@@ -358,6 +358,23 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!state.folder) { showGroupListInternal(); return; }
       var data = await fetch('/api/groups').then(function(r) { return r.json(); });
       var g = data.find(function(x) { return x.folder === state.folder; });
+      // A link from before a move (v1's group "main", memory/notes/ before
+      // zettel/): ask for the current place and show that address instead.
+      if (!g || state.filePath) {
+        var q = '/api/resolve-link?folder=' + encodeURIComponent(state.folder) +
+          (state.filePath ? '&path=' + encodeURIComponent(state.filePath) : '');
+        var rr = await fetch(q).catch(function() { return null; });
+        if (rr && rr.ok) {
+          var cur = await rr.json();
+          if (cur.folder !== state.folder || (cur.path || null) !== state.filePath) {
+            state.folder = cur.folder;
+            state.filePath = cur.path || null;
+            var rest = state.filePath ? '/files/' + state.filePath : state.noteId ? '/notes/' + state.noteId : '/' + (state.tab || 'messages');
+            history.replaceState(null, '', '#groups/' + state.folder + rest);
+            g = data.find(function(x) { return x.folder === state.folder; });
+          }
+        }
+      }
       if (!g) { showGroupListInternal(); return; }
       currentGroup = g;
       document.getElementById('groups-list').style.display = 'none';
@@ -1539,6 +1556,72 @@ export function resolveWorkspaceLink(filePath: string, href: string): { folder: 
 }
 
 /**
+ * Dashboard links sent in chat before a file moved still name its old place:
+ * v1 links say group `main` (v1's main group folder), and links from before
+ * the Zettelkasten moved to `zettel/` (2026-10-04) say `memory/notes/…`,
+ * `memory/reports/…` and so on. Chat history cannot be rewritten, so the
+ * dashboard maps such a link to the file's current place.
+ *
+ * Renames are tried only when the path as given does not exist, so a link
+ * that works today never changes. `memory/digests/` maps to `zettel/digests/`
+ * only for the digests that moved (the rest stayed in memory/digests/).
+ */
+const LEGACY_PATH_RENAMES: ReadonlyArray<readonly [string, string]> = [
+  ['memory/notes/', 'zettel/notes/'],
+  ['memory/reports/', 'zettel/reports/'],
+  ['memory/drafts/', 'zettel/drafts/'],
+  ['memory/digests/', 'zettel/digests/'],
+  ['memory/research-topics.md', 'zettel/research-topics.md'],
+  ['agents/researcher/reports/', 'zettel/reports/'],
+];
+const LEGACY_MAIN_FOLDER = 'main';
+
+/**
+ * The current `{ folder, path }` for a dashboard link's group folder and file
+ * path (path null for a group-level link), or null when nothing matches.
+ * `mainFolder` is the current main agent group's folder.
+ */
+export function resolveLegacyLink(
+  folder: string,
+  filePath: string | null,
+  ctx: { groupsDir: string; folders: readonly string[]; mainFolder: string | null },
+): { folder: string; path: string | null } | null {
+  const current = ctx.folders.includes(folder)
+    ? folder
+    : folder === LEGACY_MAIN_FOLDER && ctx.mainFolder
+      ? ctx.mainFolder
+      : null;
+  if (!current) return null;
+  if (!filePath) return { folder: current, path: null };
+
+  const root = path.resolve(ctx.groupsDir, current);
+  const exists = (p: string): boolean => {
+    const abs = path.resolve(root, p);
+    return abs.startsWith(root + path.sep) && fs.existsSync(abs) && fs.statSync(abs).isFile();
+  };
+  let decoded = filePath;
+  try {
+    decoded = decodeURIComponent(filePath);
+  } catch {
+    // keep as given
+  }
+  for (const given of new Set([filePath, decoded])) {
+    // A container path leaked into some links: agent/memory/… for memory/….
+    const candidates = [given, given.startsWith('agent/') ? given.slice('agent/'.length) : null];
+    for (const p of candidates) {
+      if (!p) continue;
+      if (exists(p)) return { folder: current, path: p };
+      for (const [from, to] of LEGACY_PATH_RENAMES) {
+        if (!p.startsWith(from)) continue;
+        const renamed = to + p.slice(from.length);
+        if (exists(renamed)) return { folder: current, path: renamed };
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * The key a note's source report is matched on against
  * `specialist_tasks.committed_files`: `reports/<file>`. Committed paths were
  * `memory/reports/…` before the Zettelkasten moved to `zettel/`, and are
@@ -1944,6 +2027,37 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
       // GET /api/org-ids
       if (req.method === 'GET' && pathname === '/api/org-ids') {
         sendJson(res, getOrgIdIndex());
+        return;
+      }
+
+      // GET /api/resolve-link?folder=&path= — current place of a dashboard
+      // link that may predate a move (resolveLegacyLink)
+      if (req.method === 'GET' && pathname === '/api/resolve-link') {
+        const folder = url.searchParams.get('folder');
+        if (!folder) {
+          sendJson(res, { error: 'folder required' }, 400);
+          return;
+        }
+        const groups = await getAllAgentGroups();
+        let mainFolder: string | null = null;
+        try {
+          const row = (await getDb().get('SELECT folder FROM agent_groups WHERE is_main = 1 LIMIT 1')) as
+            | { folder: string }
+            | undefined;
+          mainFolder = row?.folder ?? null;
+        } catch {
+          // no is_main column without the concurrency module
+        }
+        const resolved = resolveLegacyLink(folder, url.searchParams.get('path'), {
+          groupsDir: GROUPS_DIR,
+          folders: groups.map((g) => g.folder),
+          mainFolder,
+        });
+        if (!resolved) {
+          sendJson(res, { error: 'not found' }, 404);
+          return;
+        }
+        sendJson(res, resolved);
         return;
       }
 

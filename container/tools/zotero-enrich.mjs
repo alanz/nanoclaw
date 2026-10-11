@@ -55,10 +55,17 @@ const CLI_OPTS = {
 
 const S2_FIELDS  = 'title,abstract,year,externalIds';
 const TITLE_MATCH = 0.80;
-const S2_PAUSE_MS = 3500;
+// Unkeyed S2 requests share one pool across all users. Measured 2026-10-11:
+// lookups by ID were never refused; /paper/search was refused ~90% of the time
+// whatever the spacing, /paper/search/match ~35%. A 429 carries no Retry-After
+// and reflects others' traffic, so a short jittered retry beats long backoff.
+const S2_PAUSE_MS = 1000;
 const CR_PAUSE_MS = 1000;
 const REQUEST_TIMEOUT_MS = 12000;
 const MIN_REQUEST_MS = 1000;   // don't start a request with less time than this left
+const MAX_TRIES = 4;           // per request, on 429
+const RETRY_WAIT_MS = 2000;    // plus up to RETRY_JITTER_MS
+const RETRY_JITTER_MS = 1000;
 const CR_MAILTO   = process.env.CROSSREF_MAILTO || '';
 
 // ── Budget ────────────────────────────────────────────────────────────────────
@@ -99,7 +106,7 @@ function sleep(ms) {
  * unexpected status, rate-limit retries exhausted. OutOfBudget propagates.
  */
 export async function fetchWithRetry(url, headers = {}, deadline = Infinity, get = httpGet) {
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
     const left = remaining(deadline);
     if (left < MIN_REQUEST_MS) throw new OutOfBudget();
     let r;
@@ -117,9 +124,9 @@ export async function fetchWithRetry(url, headers = {}, deadline = Infinity, get
     }
     if (r.status === 404 || r.status === 400) return { ok: true, data: null };
     if (r.status === 429) {
-      if (attempt === 3) break;
-      const wait = 5000 * (2 ** attempt);
-      process.stderr.write(`  rate limited (${url.slice(0, 60)}), waiting ${wait / 1000}s\n`);
+      if (attempt === MAX_TRIES - 1) break;
+      const wait = RETRY_WAIT_MS + Math.floor(Math.random() * RETRY_JITTER_MS);
+      process.stderr.write(`  rate limited (${url.slice(0, 60)}), retrying in ${(wait / 1000).toFixed(1)}s\n`);
       await pause(wait, deadline);
       continue;
     }
@@ -168,9 +175,11 @@ async function s2ById(identifier, deadline) {
   return { ok: r.ok, abstract: r.ok ? validateAbstract(r.data?.abstract) : null };
 }
 
+// /paper/search/match returns the single best title match (404 when there is
+// none); the similarity check still guards against a near-miss paper.
 async function s2ByTitle(title, deadline) {
   await pause(S2_PAUSE_MS, deadline);
-  const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(title)}&fields=${S2_FIELDS}&limit=3`;
+  const url = `https://api.semanticscholar.org/graph/v1/paper/search/match?query=${encodeURIComponent(title)}&fields=${S2_FIELDS}`;
   const r = await fetchWithRetry(url, {}, deadline);
   if (!r.ok) return { ok: false, abstract: null };
   for (const paper of r.data?.data || []) {

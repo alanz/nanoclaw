@@ -20,6 +20,7 @@ import {
 } from './zotero-frontmatter.mjs';
 import { fetchWithRetry, OutOfBudget } from './zotero-enrich.mjs';
 import { forgetNotFound, runBacklogPass } from './zotero-abstracts.mjs';
+import { backoffFromResponse } from './zotero-extract-abstracts.mjs';
 
 const FM = `---
 title: Test Paper
@@ -234,9 +235,15 @@ describe('fetchWithRetry', () => {
     const fail = async () => { throw new Error('ECONNRESET'); };
     assert.deepEqual(await fetchWithRetry('u', {}, Infinity, fail), { ok: false });
   });
-  it('a rate limit whose backoff would pass the deadline stops instead of waiting', async () => {
+  it('retries a rate limit and returns the answer that follows', async () => {
+    let calls = 0;
+    const get = async () => (++calls < 2 ? { status: 429, body: '' } : { status: 200, body: '{"x":1}' });
+    assert.deepEqual(await fetchWithRetry('u', {}, Infinity, get), { ok: true, data: { x: 1 } });
+    assert.equal(calls, 2);
+  });
+  it('a rate limit whose retry wait would pass the deadline stops instead of waiting', async () => {
     const start = Date.now();
-    await assert.rejects(fetchWithRetry('u', {}, Date.now() + 3000, answer(429)), OutOfBudget);
+    await assert.rejects(fetchWithRetry('u', {}, Date.now() + 2500, answer(429)), OutOfBudget);
     assert.ok(Date.now() - start < 1000);
   });
   it('refuses to start a request with no time left', async () => {
@@ -314,4 +321,21 @@ describe('runBacklogPass', () => {
     assert.equal(read(d, 'N').meta.abstract_lookup, undefined);
     assert.equal(read(d, 'I').meta.abstract_lookup, `${daysAgo(3)} inconclusive`);
   });
+});
+
+describe('backoffFromResponse (Zotero)', () => {
+  const T = 1_000_000;
+  it('no wait on a plain success', () => assert.equal(backoffFromResponse(200, {}, T), 0));
+  it('honours Backoff on any response', () => assert.equal(backoffFromResponse(200, { backoff: '30' }, T), T + 30_000));
+  it('honours Retry-After on 429 and 503', () => {
+    assert.equal(backoffFromResponse(429, { 'retry-after': '5' }, T), T + 5_000);
+    assert.equal(backoffFromResponse(503, { 'retry-after': '60' }, T), T + 60_000);
+  });
+  it('a 429 without Retry-After stops Zotero requests for the rest of the run', () =>
+    assert.equal(backoffFromResponse(429, {}, T), Infinity));
+  it('a rejected key stops Zotero requests for the rest of the run', () => {
+    assert.equal(backoffFromResponse(403, {}, T), Infinity);
+    assert.equal(backoffFromResponse(401, {}, T), Infinity);
+  });
+  it('ignores Retry-After on other statuses', () => assert.equal(backoffFromResponse(200, { 'retry-after': '5' }, T), 0));
 });

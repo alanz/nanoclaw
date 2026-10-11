@@ -60,6 +60,49 @@ const API_TIMEOUT_MS = 30000;
 const DOWNLOAD_TIMEOUT_MS = 60000;
 const MIN_DOWNLOAD_MS = 3000;   // don't start a download with less time than this left
 
+// ── Zotero rate limiting ──────────────────────────────────────────────────────
+//
+// Zotero sends `Backoff: <s>` (any response) when overloaded and 429/503 with an
+// optional `Retry-After: <s>`. Repeated violations bring stricter throttling or
+// a temporary block, so within one process: honour both, and after a 429/503
+// without Retry-After, or a 401/403 (bad key), make no further Zotero requests.
+
+let zoteroBackoffUntil = 0;
+
+/** When Zotero may next be asked, given one response (ms since epoch; 0 = no wait). */
+export function backoffFromResponse(status, headers, now = Date.now()) {
+  const secs = (name) => {
+    const v = parseInt(headers?.[name] ?? '', 10);
+    return Number.isFinite(v) && v >= 0 ? v : null;
+  };
+  const retryAfter = secs('retry-after');
+  const backoff = secs('backoff');
+  let until = backoff !== null ? now + backoff * 1000 : 0;
+  if (status === 429 || status === 503) until = Math.max(until, retryAfter !== null ? now + retryAfter * 1000 : Infinity);
+  // A rejected key: each further request counts as another authentication
+  // failure, and enough of those block the client.
+  if (status === 401 || status === 403) until = Infinity;
+  return until;
+}
+
+function noteResponse(res) {
+  zoteroBackoffUntil = Math.max(zoteroBackoffUntil, backoffFromResponse(res.statusCode, res.headers));
+}
+
+/** Wait out a Zotero backoff if it ends in time; false when it does not. */
+async function zoteroReady(deadline, needMs) {
+  const wait = zoteroBackoffUntil - Date.now();
+  if (wait <= 0) return true;
+  if (wait + needMs > deadline - Date.now()) return false;
+  await sleep(wait);
+  return true;
+}
+
+/** @internal for tests */
+export function _resetZoteroBackoff() {
+  zoteroBackoffUntil = 0;
+}
+
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 function httpGetJson(url, timeoutMs = API_TIMEOUT_MS) {
@@ -72,11 +115,12 @@ function httpGetJson(url, timeoutMs = API_TIMEOUT_MS) {
         'User-Agent': 'zotero-extract-abstracts/1.0',
       },
     }, (res) => {
+      noteResponse(res);
       let body = '';
       res.on('data', (c) => { body += c; });
       res.on('end', () => {
         if (res.statusCode === 200) resolve(JSON.parse(body));
-        else reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        else reject(Object.assign(new Error(`HTTP ${res.statusCode} for ${url}`), { status: res.statusCode }));
       });
     });
     req.on('error', reject);
@@ -95,6 +139,7 @@ function httpDownloadToFile(url, destPath, timeoutMs = DOWNLOAD_TIMEOUT_MS) {
         'User-Agent': 'zotero-extract-abstracts/1.0',
       },
     }, (res) => {
+      noteResponse(res);
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
         // Follow redirect without Zotero auth headers
@@ -112,7 +157,7 @@ function httpDownloadToFile(url, destPath, timeoutMs = DOWNLOAD_TIMEOUT_MS) {
       }
       if (res.statusCode !== 200) {
         file.close();
-        reject(new Error(`HTTP ${res.statusCode}`));
+        reject(Object.assign(new Error(`HTTP ${res.statusCode}`), { status: res.statusCode }));
         return;
       }
       res.pipe(file);
@@ -185,8 +230,8 @@ function extractAbstractFromPdf(pdfPath) {
  * zotero.allium PdfAbstractExtracted for one item. Returns { abstract } on
  * success, else { abstract: null, inconclusive, reason }. No PDF, a PDF over
  * the size limit, or a PDF without an abstract section is conclusive; an API
- * or download failure, missing credentials, or too little time left before
- * `deadline` (ms since epoch) is not.
+ * or download failure, missing credentials, a Zotero backoff, or too little
+ * time left before `deadline` (ms since epoch) is not.
  */
 export async function findPdfAbstract(meta, opts = {}) {
   const { deadline = Infinity, maxMb = DEFAULT_MAX_PDF_MB, tmpFile = path.join(os.tmpdir(), `zotero-pdf-${process.pid}.pdf`) } = opts;
@@ -195,16 +240,29 @@ export async function findPdfAbstract(meta, opts = {}) {
   if (!meta.zoteroKey) return miss(false, 'no key');
   const left = () => deadline - Date.now();
 
+  // One Zotero request, retried once after a Retry-After that fits the budget.
+  const zotero = async (request) => {
+    for (let attempt = 0; ; attempt++) {
+      if (!(await zoteroReady(deadline, PAUSE_MS + MIN_DOWNLOAD_MS))) throw new Error('zotero backoff');
+      if (left() < PAUSE_MS + MIN_DOWNLOAD_MS) throw new Error('out of time');
+      await sleep(PAUSE_MS);
+      try {
+        return await request();
+      } catch (err) {
+        if (attempt === 0 && (err.status === 429 || err.status === 503)) continue;
+        throw err;
+      }
+    }
+  };
+
   try {
-    if (left() < PAUSE_MS + MIN_DOWNLOAD_MS) return miss(true, 'out of time');
-    await sleep(PAUSE_MS);
-    const att = await getPdfAttachment(meta.zoteroKey, Math.min(API_TIMEOUT_MS, left()));
+    const att = await zotero(() => getPdfAttachment(meta.zoteroKey, Math.min(API_TIMEOUT_MS, left())));
     if (!att) return miss(false, 'no PDF');
     if (att.size > 0 && att.size / 1_000_000 > maxMb) return miss(false, 'too large');
 
-    if (left() < PAUSE_MS + MIN_DOWNLOAD_MS) return miss(true, 'out of time');
-    await sleep(PAUSE_MS);
-    await httpDownloadToFile(`${BASE_URL}/items/${att.key}/file`, tmpFile, Math.min(DOWNLOAD_TIMEOUT_MS, left()));
+    await zotero(() =>
+      httpDownloadToFile(`${BASE_URL}/items/${att.key}/file`, tmpFile, Math.min(DOWNLOAD_TIMEOUT_MS, left())),
+    );
     const abstract = extractAbstractFromPdf(tmpFile);
     return abstract ? { abstract } : miss(false, 'no abstract in PDF');
   } catch (err) {

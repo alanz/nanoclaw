@@ -3,6 +3,7 @@ export const MEMORY_CONFIG = {
   chunk_overlap_tokens: 80,
   search_top_k: 6,
   min_search_score: 0.35,
+  search_embed_wait_ms: 3_000,
   vector_score_weight: 0.7,
   keyword_score_weight: 0.3,
   embedding_provider: 'gemini',
@@ -18,6 +19,7 @@ export type MemoryConfig = {
   chunk_overlap_tokens: number;
   search_top_k: number;
   min_search_score: number;
+  search_embed_wait_ms: number;
   vector_score_weight: number;
   keyword_score_weight: number;
   embedding_provider: string;

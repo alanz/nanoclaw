@@ -16,19 +16,28 @@ function assertSearchEnabled(config: MemoryConfig): void {
   }
 }
 
+export interface MemorySearchResponse {
+  /** hybrid | keyword: which search produced the results; unavailable: no index for this group on the host. */
+  mode: 'hybrid' | 'keyword' | 'unavailable';
+  results: unknown[];
+}
+
 export async function handleMemorySearch(
-  params: { session: Session; group_id: string; query: string; top_k?: number },
+  params: { session: Session; group_id: string; query: string; top_k?: number; path_prefix?: string; source?: string },
   config: MemoryConfig = MEMORY_CONFIG,
-): Promise<unknown[]> {
+): Promise<MemorySearchResponse> {
   assertSearchEnabled(config);
   assertSessionMatchesGroup(params.session, params.group_id);
 
   const manager = getMemoryManager(params.group_id);
-  if (!manager) return [];
+  if (!manager) return { mode: 'unavailable', results: [] };
 
   return manager.search(params.query, {
-    maxResults: params.top_k ?? config.search_top_k,
+    maxResults: Math.min(params.top_k ?? config.search_top_k, 20),
     minScore: config.min_search_score,
+    pathPrefix: params.path_prefix || undefined,
+    source: params.source || undefined,
+    embedWaitMs: config.search_embed_wait_ms,
   });
 }
 

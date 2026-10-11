@@ -250,20 +250,35 @@ export function searchIndex(
 ): SearchResult[] {
   const { db, vecAvailable, model } = index;
   const candidates = opts.limit * opts.candidatesMultiplier;
+  // Filters narrow the candidates in SQL, before LIMIT: a match inside them is
+  // never displaced by better-ranked matches outside them.
+  const filter = (col: (name: string) => string) => {
+    const clauses: string[] = [];
+    const args: string[] = [];
+    if (opts.source) {
+      clauses.push(` AND ${col('source')} = ?`);
+      args.push(opts.source);
+    }
+    if (opts.pathPrefix) {
+      clauses.push(` AND substr(${col('path')}, 1, length(?)) = ?`);
+      args.push(opts.pathPrefix, opts.pathPrefix);
+    }
+    return { sql: clauses.join(''), args };
+  };
 
   // --- vector search ---
   const vectorResults: ReturnType<typeof mergeHybridResults>[0][] = [];
   if (queryVec.length > 0) {
     if (vecAvailable) {
-      const sourceClause = opts.source ? ' AND c.source = ?' : '';
-      const bindArgs: unknown[] = [vectorToBuffer(queryVec), model, ...(opts.source ? [opts.source] : []), candidates];
+      const where = filter((name) => `c.${name}`);
+      const bindArgs: unknown[] = [vectorToBuffer(queryVec), model, ...where.args, candidates];
       const rows = db
         .prepare(
           `SELECT c.id, c.path, c.start_line, c.end_line, c.text, c.source,` +
             `       vec_distance_cosine(v.embedding, ?) AS dist` +
             `  FROM ${VECTOR_TABLE} v` +
             `  JOIN chunks c ON c.id = v.id` +
-            ` WHERE c.model = ?${sourceClause}` +
+            ` WHERE c.model = ?${where.sql}` +
             ` ORDER BY dist ASC` +
             ` LIMIT ?`,
         )
@@ -289,12 +304,12 @@ export function searchIndex(
       }
     } else {
       // In-memory cosine similarity fallback
-      const sourceClause = opts.source ? ' AND source = ?' : '';
+      const where = filter((name) => name);
       const rows = db
         .prepare(
-          `SELECT id, path, start_line, end_line, text, embedding, source FROM chunks WHERE model = ?${sourceClause}`,
+          `SELECT id, path, start_line, end_line, text, embedding, source FROM chunks WHERE model = ?${where.sql}`,
         )
-        .all(model, ...(opts.source ? [opts.source] : [])) as Array<{
+        .all(model, ...where.args) as Array<{
         id: string;
         path: string;
         start_line: number;
@@ -330,15 +345,15 @@ export function searchIndex(
   const keywordResults: (ReturnType<typeof mergeHybridResults>[0] & { textScore: number })[] = [];
   const ftsQuery = buildFtsQuery(query);
   if (ftsQuery) {
-    const sourceClause = opts.source ? ' AND source = ?' : '';
+    const where = filter((name) => name);
     const rows = db
       .prepare(
         `SELECT id, path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` +
           `  FROM ${FTS_TABLE}` +
-          ` WHERE ${FTS_TABLE} MATCH ? AND model = ?${sourceClause}` +
+          ` WHERE ${FTS_TABLE} MATCH ? AND model = ?${where.sql}` +
           ` ORDER BY rank ASC LIMIT ?`,
       )
-      .all(ftsQuery, model, ...(opts.source ? [opts.source] : []), candidates) as Array<{
+      .all(ftsQuery, model, ...where.args, candidates) as Array<{
       id: string;
       path: string;
       source: string;
@@ -369,8 +384,5 @@ export function searchIndex(
     textWeight: opts.textWeight,
   });
 
-  return merged
-    .filter((r) => r.score >= opts.minScore)
-    .filter((r) => !opts.pathPrefix || r.path.startsWith(opts.pathPrefix))
-    .slice(0, opts.limit);
+  return merged.filter((r) => r.score >= opts.minScore).slice(0, opts.limit);
 }

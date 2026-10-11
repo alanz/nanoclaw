@@ -532,7 +532,12 @@ export class MemoryIndexManager {
     log.info('Memory sync complete', { groupId: this.groupId, indexed, skipped, removed });
   }
 
-  /** Full hybrid search (vector + FTS5). Called by host-side memory_hybrid_search. */
+  /**
+   * Full hybrid search (vector + FTS5). Called by host-side memory_hybrid_search.
+   * Keyword-only when the query cannot be embedded — including when no
+   * embedding permit is granted within `embedWaitMs`: a search does not queue
+   * behind indexing for the rate limiter's cool-down or the daily stop.
+   */
   async search(
     query: string,
     opts?: {
@@ -541,20 +546,22 @@ export class MemoryIndexManager {
       pathPrefix?: string;
       source?: string;
       includeContent?: boolean;
+      embedWaitMs?: number;
     },
-  ): Promise<MemorySearchResult[]> {
-    if (!query.trim() || this.closed) return [];
+  ): Promise<{ mode: 'hybrid' | 'keyword'; results: MemorySearchResult[] }> {
+    if (!query.trim() || this.closed) return { mode: 'keyword', results: [] };
 
     // Trigger background sync if dirty; search on current state immediately.
     if (this.dirty) void this.sync();
 
     let queryVec: number[] = [];
     try {
-      await this.rateLimiter.acquirePermit(1);
+      await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms);
       queryVec = await this.provider.embedQuery(query);
     } catch (err) {
       log.warn('Memory search: query embed failed, falling back to FTS', { groupId: this.groupId, err });
     }
+    const mode = queryVec.length > 0 ? 'hybrid' : 'keyword';
 
     const maxResults = opts?.maxResults ?? MEMORY_CONFIG.search_top_k;
     const minScore = opts?.minScore ?? MEMORY_CONFIG.min_search_score;
@@ -571,9 +578,9 @@ export class MemoryIndexManager {
       candidatesMultiplier: CANDIDATES_MULTIPLIER,
     });
 
-    if (!includeContent) return results;
+    if (!includeContent) return { mode, results };
 
-    return Promise.all(
+    const withContent = await Promise.all(
       results.map(async (r) => {
         const result: MemorySearchResult = { ...r };
         try {
@@ -585,6 +592,28 @@ export class MemoryIndexManager {
         return result;
       }),
     );
+    return { mode, results: withContent };
+  }
+
+  /**
+   * An embedding permit, or a rejection once `waitMs` has passed. A permit
+   * granted after the deadline is still spent from the budget — one request,
+   * the price of not cancelling inside the limiter.
+   */
+  private async searchPermit(waitMs: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`no embedding permit within ${waitMs}ms`)), waitMs);
+    });
+    const permit = this.rateLimiter.acquirePermit(1, waitMs);
+    // Once the deadline wins nobody awaits the permit; a later rejection
+    // must not surface as an unhandled one.
+    permit.catch(() => {});
+    try {
+      await Promise.race([permit, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   get syncing(): boolean {

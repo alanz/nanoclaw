@@ -478,9 +478,11 @@ describe('FileSynced rule', () => {
 // ── MemorySearched rule  [rule-success.MemorySearched, rule-failure.MemorySearched.*] ──
 
 describe('MemorySearched rule', () => {
-  it('returns an array of results for a valid session+group pair  [rule-success.MemorySearched]', async () => {
-    const results = await handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'meeting notes' });
-    expect(Array.isArray(results)).toBe(true);
+  it('returns a mode and an array of results for a valid session+group pair  [rule-success.MemorySearched]', async () => {
+    const response = await handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'meeting notes' });
+    expect(Array.isArray(response.results)).toBe(true);
+    // No manager for this group on the host: the container falls back to keyword search.
+    expect(response.mode).toBe('unavailable');
   });
 
   it('rejects when session.agent_group_id does not match group  [rule-failure.MemorySearched.1]', async () => {

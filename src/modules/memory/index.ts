@@ -21,6 +21,7 @@ import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
 import { closeAllMemoryManagers, initMemoryManagers, isMemoryGroupExcluded } from '../../memory/manager.js';
 import './group-delete.js';
+import './search-action.js';
 
 const SETTINGS = ['MEMORY_SEARCH_GEMINI_API_KEY', 'MEMORY_SEARCH_MODEL', 'MEMORY_SEARCH_GROUPS'] as const;
 
@@ -56,9 +57,9 @@ onHostStart(async () => {
 
 onHostShutdown(() => closeAllMemoryManagers());
 
-// The container reads the index directly via bun:sqlite — no host round trip —
-// so it needs the group's index dir mounted, and NANOCLAW_MEMORY_ENABLED to
-// register the tools. Keyed on the dir existing: only indexed groups have one,
+// Search goes to the host (search-action.ts); get, list and the keyword-only
+// fallback read the index directly via bun:sqlite, so the container needs the
+// group's index dir mounted, and NANOCLAW_MEMORY_ENABLED to register the tools. Keyed on the dir existing: only indexed groups have one,
 // so a group outside MEMORY_SEARCH_GROUPS is never told about a search it
 // cannot run. A directory mount, not the index file: Apple Container binds
 // directories only.

@@ -14,13 +14,17 @@
 --   - Embedding provider internals (treated as black box)
 --   - sqlite-vec extension mechanics (implementation detail)
 --
--- NOTE: This is a ported template from v1. The v2 implementation is not yet written.
+-- Ported from v1; implemented in src/memory/ (host) and container/agent-runner/src/mcp-tools/memory.ts.
 -- Key v2 differences from v1:
 --   - Groups are now AgentGroups (identity.allium); the indexed roots are groups/<folder>/memory/
 --     and groups/<folder>/zettel/ (the Zettelkasten, kept apart from the memory/ tree because its
 --     notes are permanent where memory/ is updated and pruned in place; see memory-graph.allium)
---   - The v1 IPC query path (HostFulfilled* rules) is replaced by the MemoryMcpTools surface
---     (see bottom of file); MCP tools are registered in container/agent-runner/src/mcp-tools/
+--   - The v1 IPC query path is replaced by the MemoryMcpTools surface (see bottom of file);
+--     MCP tools are registered in container/agent-runner/src/mcp-tools/. Search is still
+--     fulfilled by the host — it holds the embedding credential and the embedding budget —
+--     over the session DBs: the container writes a memory_search_request system message to
+--     outbound.db and waits for the matching response in inbound.db (the same envelope as
+--     ncl's cli_request). Get and list read the group's read-only index mount directly.
 --   - Write path differs by agent type (see MemoryFilesWithinWorkspace invariant comment):
 --       non-specialist agents — group dir mounted RW; agents write to memory/ directly
 --       specialist agents     — group dir mounted RO; files land via commit_to_memory on result delivery
@@ -168,6 +172,8 @@ config {
     chunk_overlap_tokens: Integer = 80
     search_top_k: Integer = 6
     min_search_score: Decimal = 0.35
+    search_host_timeout: Duration = 15.seconds   -- container waits this long for the host's answer
+    search_embed_wait: Duration = 3.seconds      -- host waits this long for an embedding permit before keyword-only
     vector_score_weight: Decimal = 0.7
     keyword_score_weight: Decimal = 0.3
     embedding_provider: String = "gemini"
@@ -304,7 +310,7 @@ rule FileSynced {
 -- An agent queries its group's memory with a natural language string.
 -- Results are ranked by hybrid vector + keyword score and filtered by min_search_score.
 rule MemorySearched {
-    when: AgentMemorySearch(session, group, query, top_k?)
+    when: AgentMemorySearch(session, group, query, top_k?, path_prefix?, source?)
 
     requires: session.agent_group = group
     requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
@@ -314,8 +320,8 @@ rule MemorySearched {
     let params = MemorySearchParams{
         limit: top_k ?? config.search_top_k,
         min_score: config.min_search_score,
-        path_prefix: null,
-        source: null,
+        path_prefix: path_prefix,
+        source: source,
         include_content: null
     }
     let results = memory_hybrid_search(group, query, params)
@@ -327,6 +333,16 @@ rule MemorySearched {
         -- and FTS5 keyword match, weighted by config.vector_score_weight and
         -- config.keyword_score_weight. If the vector index is unavailable, falls back
         -- to keyword-only search. Returns a list of MemorySearchResult values.
+        -- path_prefix and source narrow the candidate set before ranking: a result inside
+        -- the filter is never displaced by better-ranked results outside it, so a filtered
+        -- search returns up to limit results whenever that many match.
+        -- The query embedding counts against the shared embedding budget. If no permit is
+        -- granted within config.search_embed_wait (RPM/TPM cool-down, or the daily stop
+        -- in force), the search runs keyword-only rather than waiting.
+        -- If the host does not answer within config.search_host_timeout (host down,
+        -- restarting, or busy), the container runs the keyword-only search itself against
+        -- the read-only index mount, with the same filters. Either way the response says
+        -- which mode produced it (hybrid | keyword) so the agent can tell.
         -- Not available in specialist containers: memory search, get, and list are not
         -- registered in the specialist container MCP server (gated by isSpecialist at
         -- startup). Specialists that need memory access must use the query_memory tool,
@@ -427,7 +443,7 @@ surface MemoryMcpTools {
     facing agent: sessions/Session
 
     provides:
-        AgentMemorySearch(agent, group, query, top_k?)
+        AgentMemorySearch(agent, group, query, top_k?, path_prefix?, source?)
         AgentMemoryGet(agent, group, path, parse_frontmatter?)
         AgentMemoryList(agent, group, list_params?)
 

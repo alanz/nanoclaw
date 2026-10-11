@@ -147,6 +147,13 @@ relevant. No runner or context patch.
 `.env`: `SESSION_RESET_GROUPS=dm-with-alanz` (empty → off),
 `SESSION_RESET_TIME=04:00`, `SESSION_RESET_MIN_IDLE_MINUTES=60`.
 
+## Backfill (done 2026-10-11)
+
+Conversations from before the module existed were summarised once, outside the module,
+into `memory/sessions/` (2026-06-01 … 2026-10-04): the Sep 24 – Oct 4 chat
+(`df4578eb…`, archive `2026-10-04-conversation-1509.md`) and the rotated
+transcripts since May.
+
 ## Not in scope
 
 - PreCompact archives that repeat the whole transcript (overlapping copies in
@@ -156,7 +163,4 @@ relevant. No runner or context patch.
 
 ## Open
 
-- Backfill (owner: later, optional, once this runs): summarise conversations from before the module existed? The
-  Sep 24 – Oct 4 chat (`df4578eb…`, archive `2026-10-04-conversation-1509.md`)
-  and the 8 rotated transcripts since May are still on disk.
 - Agent-to-agent sessions of a reset group: excluded in this draft.

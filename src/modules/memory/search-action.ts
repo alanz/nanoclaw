@@ -15,6 +15,11 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value ? value : undefined;
 }
 
+/** A caller's min_score, when it is a usable 0–1 score; otherwise the host default applies. */
+function scoreIn(value: unknown): number | undefined {
+  return typeof value === 'number' && value >= 0 && value <= 1 ? value : undefined;
+}
+
 registerDeliveryAction(
   'memory_search_request',
   async (content, session) => {
@@ -37,6 +42,7 @@ registerDeliveryAction(
             top_k: typeof content.top_k === 'number' ? content.top_k : undefined,
             path_prefix: optionalString(content.path_prefix),
             source: optionalString(content.source),
+            min_score: scoreIn(content.min_score),
           });
     } catch (err) {
       response = { error: err instanceof Error ? err.message : String(err) };

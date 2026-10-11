@@ -119,7 +119,10 @@ export interface SearchArgs {
   topK: number;
   pathPrefix?: string;
   source?: string;
+  /** Applied by the keyword fallback. */
   minScore: number;
+  /** The caller's own min_score, if any — the host applies its default otherwise. */
+  requestedMinScore?: number;
 }
 
 /** Keyword-only search of the read-only index — the fallback when the host does not answer. */
@@ -236,6 +239,7 @@ async function askHost(args: SearchArgs, timeoutMs: number, signal?: AbortSignal
       top_k: args.topK,
       path_prefix: args.pathPrefix,
       source: args.source,
+      min_score: args.requestedMinScore,
     }),
   });
 
@@ -280,7 +284,10 @@ export function createMemorySearch(hostTimeoutMs = HOST_TIMEOUT_MS): McpToolDefi
             description:
               'Filter by source: "memory" (memory/), "zettel" (the Zettelkasten, zettel/), or a mount name such as "org".',
           },
-          min_score: { type: 'number', description: 'Keyword mode only: min relevance score 0–1 (default 0.1).' },
+          min_score: {
+            type: 'number',
+            description: 'Min relevance score 0–1 (default 0.35 in hybrid mode, 0.1 in keyword mode).',
+          },
         },
       },
     },
@@ -292,6 +299,7 @@ export function createMemorySearch(hostTimeoutMs = HOST_TIMEOUT_MS): McpToolDefi
         pathPrefix: (args.path_prefix as string | undefined) || undefined,
         source: (args.source as string | undefined) || undefined,
         minScore: typeof args.min_score === 'number' ? args.min_score : DEFAULT_MIN_SCORE,
+        requestedMinScore: typeof args.min_score === 'number' ? args.min_score : undefined,
       };
 
       const answer = await askHost(searchArgs, hostTimeoutMs, context?.signal);

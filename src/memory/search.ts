@@ -23,7 +23,15 @@ export interface MemorySearchResponse {
 }
 
 export async function handleMemorySearch(
-  params: { session: Session; group_id: string; query: string; top_k?: number; path_prefix?: string; source?: string },
+  params: {
+    session: Session;
+    group_id: string;
+    query: string;
+    top_k?: number;
+    path_prefix?: string;
+    source?: string;
+    min_score?: number;
+  },
   config: MemoryConfig = MEMORY_CONFIG,
 ): Promise<MemorySearchResponse> {
   assertSearchEnabled(config);
@@ -34,7 +42,7 @@ export async function handleMemorySearch(
 
   return manager.search(params.query, {
     maxResults: Math.min(params.top_k ?? config.search_top_k, 20),
-    minScore: config.min_search_score,
+    minScore: params.min_score ?? config.min_search_score,
     pathPrefix: params.path_prefix || undefined,
     source: params.source || undefined,
     embedWaitMs: config.search_embed_wait_ms,

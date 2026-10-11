@@ -48,6 +48,7 @@ describe('memory_search_request', () => {
         top_k: 3,
         path_prefix: 'groups/g/zettel/notes/',
         source: 'zettel',
+        min_score: 0.5,
         group_id: 'ag-other',
       },
       session,
@@ -59,6 +60,7 @@ describe('memory_search_request', () => {
       top_k: 3,
       path_prefix: 'groups/g/zettel/notes/',
       source: 'zettel',
+      min_score: 0.5,
     });
     expect(written()).toEqual({
       type: 'memory_search_response',
@@ -66,6 +68,14 @@ describe('memory_search_request', () => {
       mode: 'hybrid',
       results: [{ path: 'a.md' }],
     });
+  });
+
+  it('passes on only a usable 0–1 min_score, so the host default applies otherwise', async () => {
+    mockSearch.mockResolvedValue({ mode: 'hybrid', results: [] });
+    for (const min_score of [undefined, -1, 2, '0.5']) {
+      await getDeliveryAction('memory_search_request')!({ requestId: 'r1', query: 'q', min_score }, session);
+    }
+    for (const call of mockSearch.mock.calls) expect(call[0].min_score).toBeUndefined();
   });
 
   it('answers unavailable for an excluded group without searching', async () => {

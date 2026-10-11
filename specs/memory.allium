@@ -320,7 +320,7 @@ rule FileSynced {
 -- An agent queries its group's memory with a natural language string.
 -- Results are ranked by hybrid vector + keyword score and filtered by min_search_score.
 rule MemorySearched {
-    when: AgentMemorySearch(session, group, query, top_k?, path_prefix?, source?)
+    when: AgentMemorySearch(session, group, query, top_k?, path_prefix?, source?, min_score?)
 
     requires: session.agent_group = group
     requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
@@ -329,7 +329,7 @@ rule MemorySearched {
 
     let params = MemorySearchParams{
         limit: top_k ?? config.search_top_k,
-        min_score: config.min_search_score,
+        min_score: min_score ?? config.min_search_score,
         path_prefix: path_prefix,
         source: source,
         include_content: null
@@ -459,7 +459,7 @@ surface MemoryMcpTools {
     facing agent: sessions/Session
 
     provides:
-        AgentMemorySearch(agent, group, query, top_k?, path_prefix?, source?)
+        AgentMemorySearch(agent, group, query, top_k?, path_prefix?, source?, min_score?)
         AgentMemoryGet(agent, group, path, parse_frontmatter?)
         AgentMemoryList(agent, group, list_params?)
 

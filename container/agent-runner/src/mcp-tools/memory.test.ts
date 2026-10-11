@@ -235,6 +235,15 @@ describe('memory_search handler', () => {
       path_prefix: 'groups/g/',
       source: 'zettel',
     });
+    // No min_score from the agent: none is sent, so the host applies its own default.
+    expect(request()).not.toHaveProperty('min_score');
+  });
+
+  it("forwards the agent's own min_score to the host", async () => {
+    const call = createMemorySearch(3_000).handler({ query: 'emacs', min_score: 0.5 });
+    await hostAnswers((requestId) => ({ type: 'memory_search_response', requestId, mode: 'hybrid', results: [] }));
+    await call;
+    expect(request()?.min_score).toBe(0.5);
   });
 
   it('falls back to keyword mode when the host has no index for the group', async () => {

@@ -2,7 +2,9 @@ export const MEMORY_CONFIG = {
   chunk_tokens: 400,
   chunk_overlap_tokens: 80,
   search_top_k: 6,
+  search_locations_per_file: 3,
   min_search_score: 0.35,
+  search_embed_wait_ms: 3_000,
   vector_score_weight: 0.7,
   keyword_score_weight: 0.3,
   embedding_provider: 'gemini',
@@ -17,7 +19,9 @@ export type MemoryConfig = {
   chunk_tokens: number;
   chunk_overlap_tokens: number;
   search_top_k: number;
+  search_locations_per_file: number;
   min_search_score: number;
+  search_embed_wait_ms: number;
   vector_score_weight: number;
   keyword_score_weight: number;
   embedding_provider: string;

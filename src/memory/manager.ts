@@ -129,7 +129,7 @@ import {
   upsertFileRecord,
   searchIndex,
   type IndexDb,
-  type SearchResult,
+  type FileSearchResult,
 } from './index-db.js';
 
 const ALLOWED_EXTENSIONS = new Set(['.md', '.org']);
@@ -171,11 +171,12 @@ export function batchEmbeddings<T>(
   if (current.length > 0) batches.push(current);
   return batches;
 }
-const CANDIDATES_MULTIPLIER = 4;
+// Chunk candidates per requested file: grouping by file uses some up.
+const CANDIDATES_MULTIPLIER = 8;
 const VECTOR_WEIGHT = 0.7;
 const TEXT_WEIGHT = 0.3;
 
-export type MemorySearchResult = SearchResult & {
+export type MemorySearchResult = FileSearchResult & {
   content?: string;
   frontmatter?: Record<string, unknown>;
 };
@@ -576,6 +577,7 @@ export class MemoryIndexManager {
       vectorWeight: VECTOR_WEIGHT,
       textWeight: TEXT_WEIGHT,
       candidatesMultiplier: CANDIDATES_MULTIPLIER,
+      locationsPerFile: MEMORY_CONFIG.search_locations_per_file,
     });
 
     if (!includeContent) return { mode, results };

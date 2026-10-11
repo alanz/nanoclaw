@@ -19,6 +19,7 @@ import { closeSessionDb, getInboundDb, initTestSessionDb } from '../mailbox/sqli
 // TODO: export individual tool definitions from memory.ts so tests can inspect them
 import {
   createMemorySearch,
+  groupByFile,
   keywordSearch,
   memoryGetFileContent,
   memoryListFiles,
@@ -149,6 +150,43 @@ describe('keywordSearch', () => {
   it('source filters in SQL; path_prefix is literal, not a LIKE pattern', () => {
     expect(keywordSearch(db, { ...args, source: 'zettel' })).toHaveLength(2);
     expect(keywordSearch(db, { ...args, pathPrefix: 'groups/g/zettel/n_tes/' })).toEqual([]);
+  });
+});
+
+describe('groupByFile (keyword fallback)', () => {
+  const chunk = (startLine: number, endLine: number, score: number, snippet = 'x'.repeat(700)) => ({
+    path: 'a.md',
+    source: 'zettel',
+    startLine,
+    endLine,
+    score,
+    snippet,
+  });
+
+  it('one result per file: overlapping chunks merge, 3 locations at most, the rest counted', () => {
+    const results = groupByFile(
+      [
+        chunk(36, 47, 0.8, 'best'),
+        chunk(44, 59, 0.6),
+        chunk(100, 110, 0.7),
+        chunk(200, 210, 0.5),
+        chunk(300, 310, 0.4),
+      ],
+      6,
+    ) as Array<{
+      score: number;
+      locations: Array<{ startLine: number; endLine: number; snippet: string }>;
+      moreLocations: number;
+    }>;
+    expect(results).toHaveLength(1);
+    expect(results[0]!.score).toBe(0.8);
+    expect(results[0]!.locations.map((l) => [l.startLine, l.endLine])).toEqual([
+      [36, 59],
+      [100, 110],
+      [200, 210],
+    ]);
+    expect(results[0]!.locations.map((l) => l.snippet.length)).toEqual([4, 200, 200]);
+    expect(results[0]!.moreLocations).toBe(1);
   });
 });
 

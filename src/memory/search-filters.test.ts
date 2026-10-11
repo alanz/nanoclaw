@@ -29,6 +29,7 @@ vi.mock('@parcel/watcher', () => ({
   default: { subscribe: async () => ({ unsubscribe: async () => {} }) },
 }));
 
+import { groupByFile } from './hybrid.js';
 import { insertChunk, openIndexDb, searchIndex, type IndexDb } from './index-db.js';
 import { MemoryIndexManager } from './manager.js';
 
@@ -54,7 +55,14 @@ function add(id: string, p: string, source: string, text: string, embedding: num
   });
 }
 
-const opts = { limit: 6, minScore: 0, vectorWeight: 0.7, textWeight: 0.3, candidatesMultiplier: 4 };
+const opts = {
+  limit: 6,
+  minScore: 0,
+  vectorWeight: 0.7,
+  textWeight: 0.3,
+  candidatesMultiplier: 8,
+  locationsPerFile: 3,
+};
 
 beforeEach(async () => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'search-filters-')));
@@ -136,5 +144,56 @@ describe('MemoryIndexManager.search embedding permit', () => {
     process.off('unhandledRejection', unhandled);
     expect(unhandled).not.toHaveBeenCalled();
     await m.close();
+  });
+});
+
+// One result per file (specs/memory.allium, MemorySearchResult): chunks of a
+// file group into locations; overlapping chunks merge; at most
+// locationsPerFile listed, the rest counted.
+describe('groupByFile', () => {
+  const chunk = (p: string, startLine: number, endLine: number, score: number, snippet = 'x'.repeat(700)) => ({
+    path: p,
+    source: 'zettel',
+    startLine,
+    endLine,
+    score,
+    snippet,
+  });
+  const group = (chunks: ReturnType<typeof chunk>[], limit = 6) =>
+    groupByFile(chunks, { limit, locationsPerFile: 3, otherSnippetChars: 200 });
+
+  it('ranks files by their best chunk, and limit counts files', () => {
+    const results = group(
+      [chunk('a.md', 1, 10, 0.9), chunk('b.md', 1, 10, 0.8), chunk('a.md', 50, 60, 0.7), chunk('c.md', 1, 10, 0.6)],
+      2,
+    );
+    expect(results.map((r) => [r.path, r.score])).toEqual([
+      ['a.md', 0.9],
+      ['b.md', 0.8],
+    ]);
+    expect(results[0]!.locations.map((l) => [l.startLine, l.endLine])).toEqual([
+      [1, 10],
+      [50, 60],
+    ]);
+  });
+
+  it('merges overlapping chunks into one location with the better score and its snippet', () => {
+    const [result] = group([
+      chunk('a.md', 44, 59, 0.6, 'later'),
+      chunk('a.md', 36, 47, 0.8, 'earlier'),
+      chunk('a.md', 60, 70, 0.5),
+    ]);
+    expect(result!.locations).toEqual([
+      { startLine: 36, endLine: 59, score: 0.8, snippet: 'earlier' },
+      { startLine: 60, endLine: 70, score: 0.5, snippet: 'x'.repeat(200) },
+    ]);
+  });
+
+  it('lists at most locationsPerFile, best first, counts the rest, and shortens all but the best snippet', () => {
+    const scores = [0.5, 0.9, 0.7, 0.6, 0.8];
+    const [result] = group(scores.map((s, i) => chunk('a.md', i * 100, i * 100 + 10, s)));
+    expect(result!.locations.map((l) => l.score)).toEqual([0.9, 0.8, 0.7]);
+    expect(result!.moreLocations).toBe(2);
+    expect(result!.locations.map((l) => l.snippet.length)).toEqual([700, 200, 200]);
   });
 });

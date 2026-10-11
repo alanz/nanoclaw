@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../db/index.js';
 import { MEMORY_CONFIG } from './config.js';
+import { groupByFile } from './hybrid.js';
 import type { MemoryChunk, MemoryFile } from './db.js';
 import {
   createMemoryChunk,
@@ -226,11 +227,19 @@ describe('value types', () => {
     expect(Object.keys(p)).toEqual(['path_prefix', 'source', 'limit', 'order_by', 'parse_frontmatter']);
   });
 
-  it('MemorySearchResult has chunk, score, and snippet fields', async () => {
-    // [entity-fields.MemorySearchResult, value-equality.MemorySearchResult]
-    const r = { chunk: {} as MemoryChunk, score: 0.85, snippet: 'excerpt' };
-    expect(typeof r.score).toBe('number');
-    expect(typeof r.snippet).toBe('string');
+  it('MemorySearchResult is one file with a score, its locations and a count of the rest', async () => {
+    // [entity-fields.MemorySearchResult, entity-fields.MemorySearchLocation]
+    const [r] = groupByFile(
+      [{ path: 'groups/g/memory/a.md', source: 'memory', startLine: 1, endLine: 5, score: 0.85, snippet: 'excerpt' }],
+      { limit: 6, locationsPerFile: 3, otherSnippetChars: 200 },
+    );
+    expect(r).toEqual({
+      path: 'groups/g/memory/a.md',
+      source: 'memory',
+      score: 0.85,
+      locations: [{ startLine: 1, endLine: 5, score: 0.85, snippet: 'excerpt' }],
+      moreLocations: 0,
+    });
   });
 });
 

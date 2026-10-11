@@ -24,6 +24,12 @@ import type { McpToolDefinition } from './types.js';
 const INDEX_PATH = '/workspace/memory/index.db';
 const FTS_TABLE = 'chunks_fts';
 const SNIPPET_MAX = 700;
+/** Snippets of a result's locations after its best one. */
+const OTHER_SNIPPET_MAX = 200;
+/** specs/memory.allium config.search_locations_per_file. */
+const LOCATIONS_PER_FILE = 3;
+/** Chunk candidates per requested file: grouping by file uses some up. */
+const CANDIDATES_PER_RESULT = 8;
 const MAX_TOP_K = 20;
 const DEFAULT_MIN_SCORE = 0.1;
 /** specs/memory.allium config.search_host_timeout. */
@@ -139,9 +145,9 @@ export function keywordSearch(db: Database, args: SearchArgs): unknown[] {
       { path: string; source: string; start_line: number; end_line: number; text: string; rank: number },
       (string | number)[]
     >(`SELECT path, source, start_line, end_line, text, bm25(${FTS_TABLE}) AS rank` + `  FROM ${FTS_TABLE}` + ` WHERE ${conditions.join(' AND ')}` + ` ORDER BY rank ASC LIMIT ?`)
-    .all(...params, args.topK * 4);
+    .all(...params, args.topK * CANDIDATES_PER_RESULT);
 
-  return rows
+  const chunks = rows
     .map((r) => ({
       path: r.path,
       startLine: r.start_line,
@@ -150,8 +156,69 @@ export function keywordSearch(db: Database, args: SearchArgs): unknown[] {
       snippet: truncate(r.text, SNIPPET_MAX),
       source: r.source,
     }))
-    .filter((r) => r.score >= args.minScore)
-    .slice(0, args.topK);
+    .filter((r) => r.score >= args.minScore);
+  return groupByFile(chunks, args.topK);
+}
+
+interface SearchLocation {
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+}
+
+/**
+ * One result per file, as the host returns them (src/memory/hybrid.ts
+ * groupByFile, restated: host and container share no modules). Files rank by
+ * their best chunk; overlapping chunks merge into one location; at most
+ * LOCATIONS_PER_FILE listed, best first, the rest counted.
+ */
+export function groupByFile(
+  chunks: ReadonlyArray<SearchLocation & { path: string; source: string }>,
+  limit: number,
+): unknown[] {
+  const byPath = new Map<string, { source: string; chunks: SearchLocation[] }>();
+  for (const c of chunks) {
+    const entry = byPath.get(c.path) ?? { source: c.source, chunks: [] };
+    entry.chunks.push({ startLine: c.startLine, endLine: c.endLine, score: c.score, snippet: c.snippet });
+    byPath.set(c.path, entry);
+  }
+
+  const files: Array<{
+    path: string;
+    source: string;
+    score: number;
+    locations: SearchLocation[];
+    moreLocations: number;
+  }> = [];
+  for (const [filePath, entry] of byPath) {
+    const merged: SearchLocation[] = [];
+    for (const c of [...entry.chunks].sort((a, b) => a.startLine - b.startLine)) {
+      const last = merged[merged.length - 1];
+      if (last && c.startLine <= last.endLine) {
+        last.endLine = Math.max(last.endLine, c.endLine);
+        if (c.score > last.score) {
+          last.score = c.score;
+          last.snippet = c.snippet;
+        }
+      } else {
+        merged.push({ ...c });
+      }
+    }
+    merged.sort((a, b) => b.score - a.score);
+    const locations = merged.slice(0, LOCATIONS_PER_FILE).map((l, i) => ({
+      ...l,
+      snippet: i === 0 ? l.snippet : truncate(l.snippet, OTHER_SNIPPET_MAX),
+    }));
+    files.push({
+      path: filePath,
+      source: entry.source,
+      score: locations[0]!.score,
+      locations,
+      moreLocations: merged.length - locations.length,
+    });
+  }
+  return files.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 type HostAnswer = { mode: string; results: unknown[] } | { error: string };
@@ -197,13 +264,13 @@ export function createMemorySearch(hostTimeoutMs = HOST_TIMEOUT_MS): McpToolDefi
     tool: {
       name: 'memory_search',
       description:
-        'Search your personal knowledge base (memory files, research documents, notes). Use when the user references something you may have notes on, or when background context would improve your answer.\n\nMatches by meaning and by keyword. Returns { mode, results }: ranked results with path, line range, score, and snippet; mode is "hybrid", or "keyword" when meaning-based search was unavailable (then every query word must appear). Use memory_get_file_content to fetch the full content of a result.',
+        'Search your personal knowledge base (memory files, research documents, notes). Use when the user references something you may have notes on, or when background context would improve your answer.\n\nMatches by meaning and by keyword. Returns { mode, results }: one result per file, ranked — path, source, score, and up to 3 locations (line range, score, snippet; best first), with moreLocations counting matches left out; mode is "hybrid", or "keyword" when meaning-based search was unavailable (then every query word must appear). Use memory_get_file_content to fetch the full content of a result.',
       inputSchema: {
         type: 'object' as const,
         required: ['query'],
         properties: {
           query: { type: 'string', description: 'What to search for.' },
-          top_k: { type: 'number', description: 'Max results (default 6, max 20).' },
+          top_k: { type: 'number', description: 'Max files returned (default 6, max 20).' },
           path_prefix: {
             type: 'string',
             description: 'Filter to a path subtree, e.g. "groups/dm-with-alanz/zettel/notes/".',

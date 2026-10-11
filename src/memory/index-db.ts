@@ -11,13 +11,15 @@
 import Database from 'better-sqlite3';
 
 import { loadSqliteVecExtension } from './sqlite-vec.js';
-import { buildFtsQuery, bm25RankToScore, mergeHybridResults } from './hybrid.js';
+import { buildFtsQuery, bm25RankToScore, groupByFile, mergeHybridResults, type FileSearchResult } from './hybrid.js';
 
 export const VECTOR_TABLE = 'chunks_vec';
 export const FTS_TABLE = 'chunks_fts';
 export const CACHE_TABLE = 'embedding_cache';
 
 const SNIPPET_MAX_CHARS = 700;
+/** Snippets of a result's locations after its best one. */
+const OTHER_SNIPPET_MAX_CHARS = 200;
 
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -225,14 +227,7 @@ export function upsertFileRecord(
   );
 }
 
-export type SearchResult = {
-  path: string;
-  startLine: number;
-  endLine: number;
-  score: number;
-  snippet: string;
-  source: string;
-};
+export type { FileSearchResult };
 
 export function searchIndex(
   index: IndexDb,
@@ -246,8 +241,9 @@ export function searchIndex(
     vectorWeight: number;
     textWeight: number;
     candidatesMultiplier: number;
+    locationsPerFile: number;
   },
-): SearchResult[] {
+): FileSearchResult[] {
   const { db, vecAvailable, model } = index;
   const candidates = opts.limit * opts.candidatesMultiplier;
   // Filters narrow the candidates in SQL, before LIMIT: a match inside them is
@@ -384,5 +380,8 @@ export function searchIndex(
     textWeight: opts.textWeight,
   });
 
-  return merged.filter((r) => r.score >= opts.minScore).slice(0, opts.limit);
+  return groupByFile(
+    merged.filter((r) => r.score >= opts.minScore),
+    { limit: opts.limit, locationsPerFile: opts.locationsPerFile, otherSnippetChars: OTHER_SNIPPET_MAX_CHARS },
+  );
 }

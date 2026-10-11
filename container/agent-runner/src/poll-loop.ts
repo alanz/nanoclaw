@@ -7,7 +7,7 @@ import {
   type MessageInRow,
 } from './db/messages-in.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
-import { clearStaleProcessingAcks } from './db/container-state.js';
+import { clearContainerToolInFlight, clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
 import {
@@ -127,6 +127,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   clearStaleProcessingAcks();
   // Same for the reply stamp a killed container left behind (see session-state.ts).
   clearCurrentReplyRoute();
+  // And the in-flight tool: a container killed mid-tool never ran PostToolUse,
+  // and a stale current_tool makes the host read every later idle container
+  // in this session as busy (reaped as "work outstanding", not as idle).
+  clearContainerToolInFlight();
 
   let pollCount = 0;
   let isFirstPoll = true;

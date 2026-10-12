@@ -22,6 +22,18 @@ const KEEP_FILES = 40;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 const METHODS = ['log', 'info', 'warn', 'error', 'debug'] as const;
+/**
+ * Lines are labelled by stream, not severity: the runner's ordinary logging
+ * goes through console.error, so a severity label would mark every line an
+ * error.
+ */
+const STREAM: Record<(typeof METHODS)[number], string> = {
+  log: 'stdout',
+  info: 'stdout',
+  debug: 'stdout',
+  warn: 'stderr',
+  error: 'stderr',
+};
 
 export interface RunLog {
   file: string;
@@ -58,7 +70,7 @@ export function startRunLog(processName: string, dir: string = RUN_LOG_DIR): Run
   const originals = METHODS.map((method) => [method, console[method]] as const);
   for (const [method, original] of originals) {
     console[method] = (...args: unknown[]) => {
-      append(method, args);
+      append(STREAM[method], args);
       original.apply(console, args);
     };
   }

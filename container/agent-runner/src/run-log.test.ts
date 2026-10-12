@@ -31,7 +31,7 @@ describe('run log', () => {
     const text = fs.readFileSync(run!.file, 'utf8');
     expect(path.basename(run!.file)).toMatch(/-runner-\d+\.log$/);
     expect(text).toContain('run log started: runner');
-    expect(text).toMatch(/ error \[poll-loop\] claimed 2 messages\n/);
+    expect(text).toMatch(/ stderr \[poll-loop\] claimed 2 messages\n/);
   });
 
   it('keeps only the newest files', () => {

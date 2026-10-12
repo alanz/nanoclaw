@@ -32,3 +32,18 @@ registerMigration({
     `);
   },
 });
+
+// MemoryFile and MemoryChunk are realised by each group's index.db (specs/memory.allium,
+// 2026-10-13). These tables were a spec-compliance mirror nothing read: rows never
+// reached 'indexed', memory_chunks stayed empty. Dropped, not migrated.
+registerMigration({
+  version: 31,
+  name: 'module:memory:retire-central-ledger',
+  sqliteOnly: true,
+  up(db: Database.Database) {
+    db.exec(`
+      DROP TABLE IF EXISTS memory_chunks;
+      DROP TABLE IF EXISTS memory_files;
+    `);
+  },
+});

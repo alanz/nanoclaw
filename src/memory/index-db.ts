@@ -10,6 +10,7 @@
  */
 import Database from 'better-sqlite3';
 
+import { log } from '../log.js';
 import { loadSqliteVecExtension } from './sqlite-vec.js';
 import { buildFtsQuery, bm25RankToScore, groupByFile, mergeHybridResults, type FileSearchResult } from './hybrid.js';
 
@@ -53,10 +54,12 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 export type IndexDb = {
   db: Database.Database;
   vecAvailable: boolean;
+  /** Why sqlite-vec is unavailable, when it is. */
+  vecError: string | null;
   model: string;
 };
 
-export async function openIndexDb(dbPath: string, model: string): Promise<IndexDb> {
+export async function openIndexDb(dbPath: string, model: string, dims = 3072): Promise<IndexDb> {
   const db = new Database(dbPath);
   // DELETE mode, not WAL: the index is mounted read-only into containers, and
   // WAL-mode databases require the reader to access the .db-wal + .db-shm files
@@ -66,14 +69,34 @@ export async function openIndexDb(dbPath: string, model: string): Promise<IndexD
   db.pragma('journal_mode = DELETE');
 
   const vecResult = await loadSqliteVecExtension({ db });
-  const vecAvailable = vecResult.ok;
+  let vecError = vecResult.ok ? null : (vecResult.error ?? 'unknown error');
 
-  ensureSchema(db, vecAvailable, 3072);
+  const vecTableError = ensureSchema(db, vecError === null, dims);
+  if (vecError === null && vecTableError) vecError = `vector table: ${vecTableError}`;
+  if (vecError !== null) {
+    // Search falls back to an in-process scan, and vector rows are neither
+    // written nor deleted: the index is marked for repair once vectors return.
+    log.warn('Memory index: vector search unavailable', { dbPath, error: vecError });
+  }
 
-  return { db, vecAvailable, model };
+  dropV1MetaRows(db, dbPath);
+
+  return { db, vecAvailable: vecError === null, vecError, model };
 }
 
-function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number): void {
+/**
+ * v2's index started as a hand copy of v1's (2026-05-06). v1's meta rows came
+ * with it; v2 never reads them, and one holds v1's host paths.
+ */
+function dropV1MetaRows(db: Database.Database, dbPath: string): void {
+  const dropped = db
+    .prepare("DELETE FROM meta WHERE key IN ('memory_index_meta_v1', 'memory_index_config_v1')")
+    .run().changes;
+  if (dropped > 0) log.info('Memory index: dropped v1 meta rows', { dbPath, dropped });
+}
+
+/** Returns why the vector table could not be created, if it could not. */
+function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number): string | null {
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS files (
@@ -97,6 +120,7 @@ function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number
     );
     CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
     CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+    CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(hash);
     CREATE TABLE IF NOT EXISTS ${CACHE_TABLE} (
       provider     TEXT NOT NULL,
       model        TEXT NOT NULL,
@@ -118,19 +142,82 @@ function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number
 
   if (vecAvailable) {
     try {
+      // A vector table of another size cannot take this model's vectors: drop
+      // it. The full re-index a dims change forces refills it.
+      const existing = db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(VECTOR_TABLE) as
+        | { sql: string }
+        | undefined;
+      const size = existing?.sql.match(/float\[(\d+)\]/)?.[1];
+      if (size !== undefined && Number(size) !== dims) {
+        log.warn('Memory index: vector size changed; recreating the vector table', { from: Number(size), to: dims });
+        db.exec(`DROP TABLE ${VECTOR_TABLE}`);
+        setVectorState(db, 'needs_repair');
+      }
       db.exec(
         `CREATE VIRTUAL TABLE IF NOT EXISTS ${VECTOR_TABLE} USING vec0(` +
           `  id TEXT PRIMARY KEY, embedding float[${dims}]` +
           `);`,
       );
-    } catch {}
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
   }
+  return null;
 }
 
-export function getCachedEmbedding(db: Database.Database, model: string, chunkHash: string): number[] | null {
+const VECTOR_STATE_KEY = 'vector_state';
+
+/**
+ * Whether the vector rows are known to match the chunks: 'clean' after a
+ * repair pass, 'needs_repair' once a vector write or delete failed or could
+ * not be attempted, null for an index that has never been checked.
+ */
+export type VectorState = 'clean' | 'needs_repair' | null;
+
+export function getVectorState(db: Database.Database): VectorState {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(VECTOR_STATE_KEY) as { value: string } | undefined;
+  return row?.value === 'clean' || row?.value === 'needs_repair' ? row.value : null;
+}
+
+export function setVectorState(db: Database.Database, state: 'clean' | 'needs_repair'): void {
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(VECTOR_STATE_KEY, state);
+}
+
+// One warning a minute per index: a vector table that fails, fails for every row.
+const VECTOR_WARN_INTERVAL_MS = 60_000;
+const vectorWarnings = new WeakMap<Database.Database, { at: number; suppressed: number }>();
+
+/**
+ * A vector row could not be written or deleted. Nothing is swallowed: the
+ * index is marked for repair (the chunk row itself stands, searchable by
+ * keyword and by the in-process scan) and the failure is logged.
+ */
+function vectorFailed(db: Database.Database, op: 'insert' | 'delete', id: string, err: unknown): void {
+  setVectorState(db, 'needs_repair');
+  const now = Date.now();
+  const last = vectorWarnings.get(db);
+  if (last && now - last.at < VECTOR_WARN_INTERVAL_MS) {
+    last.suppressed++;
+    return;
+  }
+  vectorWarnings.set(db, { at: now, suppressed: 0 });
+  log.warn('Memory index: vector row write failed; index marked for repair', {
+    op,
+    chunkId: id,
+    error: err instanceof Error ? err.message : String(err),
+    suppressedSinceLastWarning: last?.suppressed ?? 0,
+  });
+}
+
+export function getCachedEmbedding(
+  db: Database.Database,
+  model: string,
+  providerKey: string,
+  chunkHash: string,
+): number[] | null {
   const row = db
     .prepare(`SELECT embedding FROM ${CACHE_TABLE} WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`)
-    .get('gemini', model, '', chunkHash) as { embedding: string } | undefined;
+    .get('gemini', model, providerKey, chunkHash) as { embedding: string } | undefined;
   if (!row) return null;
   try {
     return JSON.parse(row.embedding) as number[];
@@ -142,12 +229,43 @@ export function getCachedEmbedding(db: Database.Database, model: string, chunkHa
 export function saveCachedEmbedding(
   db: Database.Database,
   model: string,
+  providerKey: string,
   chunkHash: string,
   embedding: number[],
 ): void {
   db.prepare(
     `INSERT OR REPLACE INTO ${CACHE_TABLE} (provider, model, provider_key, hash, embedding, dims, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run('gemini', model, '', chunkHash, JSON.stringify(embedding), embedding.length, Date.now());
+  ).run('gemini', model, providerKey, chunkHash, JSON.stringify(embedding), embedding.length, Date.now());
+}
+
+/**
+ * Cache rows written before the provider key was recorded (key '') were all
+ * made by `provider` against its one endpoint: give them their key, per model,
+ * so they keep serving lookups. A row whose keyed twin already exists is
+ * dropped.
+ */
+export function adoptUnkeyedCacheRows(
+  db: Database.Database,
+  provider: string,
+  keyFor: (model: string) => string,
+): number {
+  const models = db
+    .prepare(`SELECT DISTINCT model FROM ${CACHE_TABLE} WHERE provider = ? AND provider_key = ''`)
+    .all(provider) as Array<{ model: string }>;
+  if (models.length === 0) return 0;
+  let adopted = 0;
+  db.transaction(() => {
+    for (const { model } of models) {
+      adopted += db
+        .prepare(
+          `UPDATE OR IGNORE ${CACHE_TABLE} SET provider_key = ? WHERE provider = ? AND model = ? AND provider_key = ''`,
+        )
+        .run(keyFor(model), provider, model).changes;
+    }
+    db.prepare(`DELETE FROM ${CACHE_TABLE} WHERE provider = ? AND provider_key = ''`).run(provider);
+  })();
+  log.info('Memory index: cache rows given their provider key', { adopted });
+  return adopted;
 }
 
 export function deleteFileChunks(db: Database.Database, filePath: string, vecAvailable: boolean): void {
@@ -158,11 +276,18 @@ export function deleteFileChunks(db: Database.Database, filePath: string, vecAva
   db.prepare('DELETE FROM chunks WHERE path = ?').run(filePath);
   db.prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ?`).run(filePath);
 
-  if (vecAvailable && chunkIds.length > 0) {
-    for (const id of chunkIds) {
-      try {
-        db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`).run(id);
-      } catch {}
+  if (chunkIds.length === 0) return;
+  // Without sqlite-vec the vector rows cannot be reached; left behind, they
+  // are orphans until the repair pass removes them.
+  if (!vecAvailable) {
+    setVectorState(db, 'needs_repair');
+    return;
+  }
+  for (const id of chunkIds) {
+    try {
+      db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`).run(id);
+    } catch (err) {
+      vectorFailed(db, 'delete', id, err);
     }
   }
 }
@@ -201,17 +326,157 @@ export function insertChunk(
   );
 
   if (params.vecAvailable) {
+    // vec0 does not honour INSERT OR REPLACE: on an existing id it throws, and
+    // the old vector stays. Delete, then insert.
     try {
-      db.prepare(`INSERT OR REPLACE INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`).run(
+      db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`).run(params.id);
+      db.prepare(`INSERT INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`).run(
         params.id,
         vectorToBuffer(params.embedding),
       );
-    } catch {}
+    } catch (err) {
+      vectorFailed(db, 'insert', params.id, err);
+    }
+  } else {
+    // The chunk has no vector until the repair pass writes it.
+    setVectorState(db, 'needs_repair');
   }
 
   db.prepare(
     `INSERT OR REPLACE INTO ${FTS_TABLE} (text, id, path, source, model, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(params.text, params.id, params.path, params.source, params.model, params.startLine, params.endLine);
+}
+
+export type VectorRepair = { removed: number; added: number; failed: number };
+
+/**
+ * Bring the vector rows back in line with the chunks, from data already in
+ * the index (no embedding calls): delete vector rows whose chunk is gone, and
+ * write the missing vector of any chunk from its stored embedding. Marks the
+ * index clean only when every row was put right. Needs sqlite-vec.
+ */
+export function repairVectors(index: IndexDb): VectorRepair | null {
+  const { db } = index;
+  if (!index.vecAvailable) return null;
+  const result: VectorRepair = { removed: 0, added: 0, failed: 0 };
+  db.transaction(() => {
+    // vec0 keeps its ids in the chunks_vec_rowids shadow table; reading it
+    // there avoids a scan of the vectors themselves.
+    const orphans = db
+      .prepare(`SELECT r.id FROM ${VECTOR_TABLE}_rowids r WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = r.id)`)
+      .all() as Array<{ id: string }>;
+    const remove = db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`);
+    for (const { id } of orphans) {
+      try {
+        remove.run(id);
+        result.removed++;
+      } catch (err) {
+        result.failed++;
+        vectorFailed(db, 'delete', id, err);
+      }
+    }
+
+    const missing = db
+      .prepare(
+        // Only this model's embeddings fit the table; a chunk of another model
+        // gets its vector when it is re-indexed.
+        `SELECT c.id, c.embedding FROM chunks c WHERE c.model = ? AND NOT EXISTS (SELECT 1 FROM ${VECTOR_TABLE}_rowids r WHERE r.id = c.id)`,
+      )
+      .all(index.model) as Array<{ id: string; embedding: string }>;
+    const insert = db.prepare(`INSERT INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`);
+    for (const { id, embedding } of missing) {
+      try {
+        insert.run(id, vectorToBuffer(JSON.parse(embedding) as number[]));
+        result.added++;
+      } catch (err) {
+        result.failed++;
+        vectorFailed(db, 'insert', id, err);
+      }
+    }
+
+    if (result.failed === 0) setVectorState(db, 'clean');
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+      LAST_REPAIR_KEY,
+      JSON.stringify({ at: new Date().toISOString(), ...result }),
+    );
+  })();
+  return result;
+}
+
+const LAST_CACHE_PRUNE_KEY = 'last_cache_prune';
+
+/**
+ * Drop cache rows no chunk uses (by hash and model) that were written before
+ * `writtenBefore` (ms epoch). The age is a grace window: an edit undone soon
+ * after still finds its old text's embedding. A hit does not refresh a row's
+ * age, so the window runs from when the embedding was made.
+ */
+export function pruneEmbeddingCache(db: Database.Database, writtenBefore: number): number {
+  const removed = db
+    .prepare(
+      `DELETE FROM ${CACHE_TABLE} WHERE updated_at < ? AND NOT EXISTS ` +
+        `(SELECT 1 FROM chunks c WHERE c.hash = ${CACHE_TABLE}.hash AND c.model = ${CACHE_TABLE}.model)`,
+    )
+    .run(writtenBefore).changes;
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+    LAST_CACHE_PRUNE_KEY,
+    JSON.stringify({ at: new Date().toISOString(), removed }),
+  );
+  return removed;
+}
+
+export function getLastCachePrune(db: Database.Database): { at: string; removed: number } | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(LAST_CACHE_PRUNE_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as { at: string; removed: number };
+  } catch {
+    return null;
+  }
+}
+
+const LAST_REPAIR_KEY = 'last_vector_repair';
+const LAST_FULL_REINDEX_KEY = 'last_full_reindex';
+
+/** The last full re-index: why, when, how many files, and how it ended. */
+export type FullReindexRecord = {
+  reason: string;
+  startedAt: string;
+  finishedAt: string | null;
+  files: number;
+  result: 'running' | 'completed' | 'incomplete' | 'interrupted';
+};
+
+export function setLastFullReindex(db: Database.Database, record: FullReindexRecord): void {
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+    LAST_FULL_REINDEX_KEY,
+    JSON.stringify(record),
+  );
+}
+
+/** A record still 'running' when read at start belongs to a host that died mid-pass. */
+export function getLastFullReindex(db: Database.Database): FullReindexRecord | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(LAST_FULL_REINDEX_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as FullReindexRecord;
+  } catch {
+    return null;
+  }
+}
+
+export function getLastVectorRepair(db: Database.Database): (VectorRepair & { at: string }) | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(LAST_REPAIR_KEY) as { value: string } | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as VectorRepair & { at: string };
+  } catch {
+    return null;
+  }
 }
 
 export function upsertFileRecord(
@@ -225,6 +490,18 @@ export function upsertFileRecord(
     Math.round(params.mtimeMs),
     params.size,
   );
+}
+
+const FINGERPRINT_KEY = 'index_fingerprint_v2';
+
+/** The settings the index was last fully built with (see MemoryIndexManager.init). */
+export function getIndexFingerprint(db: Database.Database): string | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(FINGERPRINT_KEY) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setIndexFingerprint(db: Database.Database, fingerprint: string): void {
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, fingerprint);
 }
 
 export type { FileSearchResult };

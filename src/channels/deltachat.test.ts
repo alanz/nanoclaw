@@ -659,18 +659,13 @@ describe('DeltaChat channel adapter', () => {
       return built;
     }
 
-    it('stays out of a quick turn', async () => {
+    it('appears with the first status, then follows it at most every 10 s', async () => {
       const { adapter, dc } = await turnStarted();
+      expect(sentTexts(dc)).toEqual(['⏳ Thinking…']);
       vi.setSystemTime(Date.now() + 10_000);
       await adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
-      expect(dc.rpc.sendMsg).not.toHaveBeenCalled();
-    });
-
-    it('appears once the turn has run 15 s, then follows the status at most every 10 s', async () => {
-      const { adapter, dc } = await turnStarted();
-      vi.setSystemTime(Date.now() + 16_000);
-      await adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
-      expect(sentTexts(dc)).toEqual(['⏳ Searching the web…']);
+      expect(dc.rpc.sendEditRequest).toHaveBeenCalledWith(ACCOUNT_ID, PROGRESS_ID, '⏳ Searching the web…');
+      vi.mocked(dc.rpc.sendEditRequest).mockClear();
 
       vi.setSystemTime(Date.now() + 4_000);
       await adapter.setTyping!(PLATFORM_ID, null, 'reading a web page');
@@ -682,23 +677,8 @@ describe('DeltaChat channel adapter', () => {
       expect(dc.rpc.sendMsg).toHaveBeenCalledTimes(1);
     });
 
-    it('counts the 15 s from when the message arrived, not from the first status', async () => {
-      const built = await buildSetupAdapter();
-      built.dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
-      built.dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
-      built.dc.rpc.getContact.mockResolvedValueOnce(makeContact());
-      emitIncomingMsg();
-      await flush();
-      vi.setSystemTime(Date.now() + 12_000);
-      await built.adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
-      vi.setSystemTime(Date.now() + 4_000);
-      await built.adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
-      expect(sentTexts(built.dc)).toEqual(['⏳ Searching the web…']);
-    });
-
     it('is deleted for everyone when the reply arrives', async () => {
       const { adapter, dc } = await turnStarted();
-      vi.setSystemTime(Date.now() + 16_000);
       await adapter.setTyping!(PLATFORM_ID, null, 'thinking');
       await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Answer' } });
 
@@ -708,7 +688,6 @@ describe('DeltaChat channel adapter', () => {
 
     it('stays while a specialist relays under its own name', async () => {
       const { adapter, dc } = await turnStarted();
-      vi.setSystemTime(Date.now() + 16_000);
       await adapter.setTyping!(PLATFORM_ID, null, 'waiting on a specialist');
       await adapter.deliver(PLATFORM_ID, null, {
         kind: 'chat',
@@ -720,7 +699,6 @@ describe('DeltaChat channel adapter', () => {
 
     it('is deleted when the turn ends without a reply', async () => {
       const { adapter, dc } = await turnStarted();
-      vi.setSystemTime(Date.now() + 16_000);
       await adapter.setTyping!(PLATFORM_ID, null, 'thinking');
 
       await completedHooks.at(-1)!(

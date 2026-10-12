@@ -19,10 +19,10 @@
  * most once, and never over a reaction the agent chose itself. ✅ goes on
  * with the reply, or — for a turn that ends without one — when the host
  * sweep sees the agent finished the message (up to a minute later).
- * Progress: on a turn that runs past PROGRESS_AFTER_MS, a "⏳ Searching the
- * web…" message follows the status the typing refresh passes, edited at most
- * every PROGRESS_EDIT_MS, and is deleted for everyone when the reply arrives
- * or the turn ends.
+ * Progress: while the agent works, a "⏳ Searching the web…" message follows
+ * the status the typing refresh passes, edited at most every
+ * PROGRESS_EDIT_MS, and is deleted for everyone when the reply arrives or
+ * the turn ends.
  *
  * Credentials: set DELTACHAT_CHATMAIL_QR (chatmail QR) or DELTACHAT_ADDR +
  * DELTACHAT_MAIL_PW in .env. DELTACHAT_CHATMAIL_QR defaults to
@@ -86,8 +86,6 @@ function attachmentType(viewType: string): string {
       return 'file';
   }
 }
-/** A turn shows a progress message only once it has run this long. */
-const PROGRESS_AFTER_MS = 15_000;
 /** Each edit is a message to the chat, so the progress line changes at most this often. */
 const PROGRESS_EDIT_MS = 10_000;
 
@@ -192,15 +190,10 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   let channelSetup: ChannelSetup | null = null;
   let removeCompletedHook: (() => void) | null = null;
   /** The progress message for each platformId's current turn (forMsgId = the incoming message). */
-  const progress = new Map<
-    string,
-    { forMsgId: number; since: number; msgId?: number; text?: string; editedAt: number }
-  >();
+  const progress = new Map<string, { forMsgId: number; msgId?: number; text?: string; editedAt: number }>();
 
   /** Last incoming message ID per platformId — used for reactions. */
   const lastMsgId = new Map<string, number>();
-  /** When each platformId's last incoming message arrived — a turn's age counts from here. */
-  const receivedAt = new Map<string, number>();
   /** The reaction the bot last put on each platformId's last incoming message. */
   const shownReaction = new Map<string, { msgId: number; emoji: string }>();
   /** Debounce state: accumulate rapid messages per chat before routing. */
@@ -410,10 +403,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     if (!p || p.forMsgId !== forMsgId) {
       // A new incoming message starts a new turn; an older turn's line goes.
       if (p) await clearProgress(platformId);
-      p = { forMsgId, since: receivedAt.get(platformId) ?? now, editedAt: 0 };
+      p = { forMsgId, editedAt: 0 };
       progress.set(platformId, p);
     }
-    if (now - p.since < PROGRESS_AFTER_MS) return;
     const text = `⏳ ${status.charAt(0).toUpperCase()}${status.slice(1)}…`;
     if (p.msgId === undefined) {
       if (p.editedAt !== 0) return; // a send is already in flight
@@ -448,12 +440,12 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
   /**
    * Delete the turn's progress message. `restart` keeps the turn going (a
-   * reply mid-turn): a new line may appear if the agent works on for long.
+   * reply mid-turn): a new line appears if the agent works on.
    */
   async function clearProgress(platformId: string, restart = false): Promise<void> {
     const p = progress.get(platformId);
     if (!p) return;
-    if (restart) progress.set(platformId, { forMsgId: p.forMsgId, since: Date.now(), editedAt: 0 });
+    if (restart) progress.set(platformId, { forMsgId: p.forMsgId, editedAt: 0 });
     else progress.delete(platformId);
     if (p.msgId !== undefined) await deleteForAll([p.msgId]);
   }
@@ -621,7 +613,6 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
           // React with 👀 to acknowledge receipt; track msgId for typing/done reactions
           lastMsgId.set(platformId, msgId);
-          receivedAt.set(platformId, Date.now());
           shownReaction.set(platformId, { msgId, emoji: '👀' });
           try {
             await dcRef.rpc.sendReaction(aid, msgId, ['👀']);

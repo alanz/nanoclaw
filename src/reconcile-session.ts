@@ -153,14 +153,22 @@ export function shouldCloseTaskSession(
 }
 
 /**
- * Called with the inbound messages a reconcile pass has just moved to
- * 'completed' — the agent finished its turn on them. Lets a channel mark a
- * message handled even when the turn ended without a reply. Runs after the
- * mailbox operation; a hook that throws is logged and skipped.
+ * Called with inbound messages the agent has finished with — 'completed',
+ * and the session since gone quiet — so a channel can mark a message handled
+ * even when the turn ended without a reply. Runs after the mailbox
+ * operation; a hook that throws is logged and skipped.
+ *
+ * 'completed' alone is not the end of a turn: the runner acks a follow-up
+ * message as soon as it pushes it into a running query, so completions are
+ * held until the session is quiet (see isSessionQuiet).
  */
 export type InboundCompletedHook = (completed: CompletedInbound[], session: Session) => void | Promise<void>;
 
 const inboundCompletedHooks = new Set<InboundCompletedHook>();
+/** Completions awaiting a quiet session, per session id. */
+const heldCompletions = new Map<string, CompletedInbound[]>();
+/** No agent activity for this long, with nothing claimed or in flight, ends the turn. */
+const TURN_QUIET_MS = 10_000;
 
 /** Register a hook; returns a function that removes it. */
 export function registerInboundCompletedHook(hook: InboundCompletedHook): () => void {
@@ -168,8 +176,18 @@ export function registerInboundCompletedHook(hook: InboundCompletedHook): () => 
   return () => inboundCompletedHooks.delete(hook);
 }
 
-async function dispatchInboundCompleted(completed: CompletedInbound[], session: Session): Promise<void> {
+async function dispatchInboundCompleted(
+  newlyCompleted: CompletedInbound[],
+  session: Session,
+  quiet: boolean,
+): Promise<void> {
+  const completed = [...(heldCompletions.get(session.id) ?? []), ...newlyCompleted];
   if (completed.length === 0) return;
+  if (!quiet) {
+    heldCompletions.set(session.id, completed);
+    return;
+  }
+  heldCompletions.delete(session.id);
   for (const hook of inboundCompletedHooks) {
     try {
       await hook(completed, session);
@@ -194,8 +212,10 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     let dueCount = 0;
     let shouldWake = false;
     let completed: CompletedInbound[] = [];
+    let quiet = false;
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       completed = mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
+      quiet = isSessionQuiet(mailbox, session, agentGroup.id);
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
@@ -204,7 +224,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
       return true;
     });
     if (!exists) return;
-    await dispatchInboundCompleted(completed, session);
+    await dispatchInboundCompleted(completed, session, quiet);
 
     if (!shouldWake) return;
 
@@ -261,6 +281,13 @@ async function maintainSessionMailbox(
     log.error('Echo backlog prune failed', { sessionId: session.id, err });
   }
   // MODULE-HOOK:cross-session-echo-prune:end
+}
+
+/** The agent is between turns: no container, or one with nothing claimed, no tool running and no recent activity. */
+function isSessionQuiet(mailbox: OutboundMailbox, session: Session, agentGroupId: string): boolean {
+  if (!isContainerRunning(session.id)) return true;
+  if (mailbox.getProcessingClaims().length > 0 || mailbox.getContainerState()?.currentTool) return false;
+  return Date.now() - heartbeatMtimeMs(agentGroupId, session.id) > TURN_QUIET_MS;
 }
 
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
@@ -429,3 +456,5 @@ function resetStuckProcessingRows(
     log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
   }
 }
+
+export const _dispatchInboundCompletedForTesting = dispatchInboundCompleted;

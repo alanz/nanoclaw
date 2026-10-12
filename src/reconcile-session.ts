@@ -39,7 +39,7 @@ import { heartbeatPath, withExistingMailboxSession } from './session-manager.js'
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
 import type { Session } from './types.js';
-import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
+import type { CompletedInbound, ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
 
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
@@ -142,6 +142,33 @@ export function shouldCloseTaskSession(
   return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
 }
 
+/**
+ * Called with the inbound messages a reconcile pass has just moved to
+ * 'completed' — the agent finished its turn on them. Lets a channel mark a
+ * message handled even when the turn ended without a reply. Runs after the
+ * mailbox operation; a hook that throws is logged and skipped.
+ */
+export type InboundCompletedHook = (completed: CompletedInbound[], session: Session) => void | Promise<void>;
+
+const inboundCompletedHooks = new Set<InboundCompletedHook>();
+
+/** Register a hook; returns a function that removes it. */
+export function registerInboundCompletedHook(hook: InboundCompletedHook): () => void {
+  inboundCompletedHooks.add(hook);
+  return () => inboundCompletedHooks.delete(hook);
+}
+
+async function dispatchInboundCompleted(completed: CompletedInbound[], session: Session): Promise<void> {
+  if (completed.length === 0) return;
+  for (const hook of inboundCompletedHooks) {
+    try {
+      await hook(completed, session);
+    } catch (err) {
+      log.warn('Inbound-completed hook failed', { sessionId: session.id, err });
+    }
+  }
+}
+
 /** Reconcile one session against current state. Missing/closed sessions no-op. */
 export async function reconcileSession(sessionId: string): Promise<void> {
   const session = await getSession(sessionId);
@@ -156,8 +183,9 @@ async function reconcileActiveSession(session: Session): Promise<void> {
   try {
     let dueCount = 0;
     let shouldWake = false;
+    let completed: CompletedInbound[] = [];
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
+      completed = mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
@@ -166,6 +194,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
       return true;
     });
     if (!exists) return;
+    await dispatchInboundCompleted(completed, session);
 
     if (!shouldWake) return;
 

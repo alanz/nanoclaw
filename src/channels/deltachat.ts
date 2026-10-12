@@ -16,7 +16,9 @@
  * Typing: sends 💭 on the last incoming message for the platformId.
  * A reaction is a message to the chat, not an ephemeral indicator, so the
  * status reactions move one way per message — 👀 → 💭 → ✅ — each sent at
- * most once, and never over a reaction the agent chose itself.
+ * most once, and never over a reaction the agent chose itself. ✅ goes on
+ * with the reply, or — for a turn that ends without one — when the host
+ * sweep sees the agent finished the message (up to a minute later).
  *
  * Credentials: set DELTACHAT_CHATMAIL_QR (chatmail QR) or DELTACHAT_ADDR +
  * DELTACHAT_MAIL_PW in .env. DELTACHAT_CHATMAIL_QR defaults to
@@ -31,6 +33,7 @@ import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 import { ASSISTANT_NAME } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import { registerInboundCompletedHook } from '../reconcile-session.js';
 import { mergeUsersInto } from '../modules/permissions/db/users.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -152,6 +155,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   let accountId: number | null = null;
   let _connected = false;
   let channelSetup: ChannelSetup | null = null;
+  let removeCompletedHook: (() => void) | null = null;
 
   /** Last incoming message ID per platformId — used for reactions. */
   const lastMsgId = new Map<string, number>();
@@ -366,6 +370,17 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
     async setup(config: ChannelSetup): Promise<void> {
       channelSetup = config;
+      removeCompletedHook?.();
+      removeCompletedHook = registerInboundCompletedHook(async (completed, session) => {
+        for (const c of completed) {
+          if (c.channelType !== 'deltachat' || !c.platformId) continue;
+          // Inbound ids are `<platform msg id>:<agent group id>` (router).
+          const suffix = `:${session.agent_group_id}`;
+          if (!c.id.endsWith(suffix)) continue;
+          const msgId = Number(c.id.slice(0, -suffix.length));
+          if (lastMsgId.get(c.platformId) === msgId) await advanceStatus(c.platformId, '✅');
+        }
+      });
       fs.mkdirSync(dataDir, { recursive: true });
       cards = new CardBook(path.join(dataDir, 'nanoclaw-cards.json'));
 
@@ -699,6 +714,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     },
 
     async teardown(): Promise<void> {
+      removeCompletedHook?.();
+      removeCompletedHook = null;
       if (dc && accountId !== null) {
         try {
           await dc.rpc.stopIo(accountId);

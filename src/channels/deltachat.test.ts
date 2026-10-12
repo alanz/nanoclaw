@@ -3,6 +3,13 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 // --- Mocks (must precede imports that trigger side effects) ---
 
 vi.mock('./channel-registry.js', () => ({ registerChannelAdapter: vi.fn() }));
+const completedHooks = vi.hoisted(() => [] as Array<(completed: unknown[], session: unknown) => Promise<void>>);
+vi.mock('../reconcile-session.js', () => ({
+  registerInboundCompletedHook: (hook: (completed: unknown[], session: unknown) => Promise<void>) => {
+    completedHooks.push(hook);
+    return () => completedHooks.splice(completedHooks.indexOf(hook), 1);
+  },
+}));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   DATA_DIR: '/tmp/dc-test/data',
@@ -632,6 +639,59 @@ describe('DeltaChat channel adapter', () => {
 
       await adapter.setTyping!(PID_2, null);
       expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, ['💭']);
+    });
+  });
+
+  describe('turn completed without a reply', () => {
+    const AG = 'ag-test';
+    const completedOn = (msgId: number) => [
+      { id: `${msgId}:${AG}`, kind: 'chat', platformId: PLATFORM_ID, channelType: 'deltachat', threadId: null },
+    ];
+
+    it('sets ✅ on the last incoming message when its turn completes', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      dc.rpc.sendReaction.mockClear();
+
+      await completedHooks.at(-1)!(completedOn(MSG_ID), { agent_group_id: AG });
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledTimes(1);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['✅']);
+    });
+
+    it('leaves a newer message alone when an older turn completes', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      dc.rpc.sendReaction.mockClear();
+
+      await completedHooks.at(-1)!(completedOn(MSG_ID - 1), { agent_group_id: AG });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('does not resend ✅ after the reply already set it', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Reply' } });
+      dc.rpc.sendReaction.mockClear();
+
+      await completedHooks.at(-1)!(completedOn(MSG_ID), { agent_group_id: AG });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
     });
   });
 

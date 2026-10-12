@@ -47,6 +47,15 @@ export interface MessageRetry {
   processAfter: string | null;
 }
 
+/** An inbound message whose turn the agent has just finished (status → completed). */
+export interface CompletedInbound {
+  id: string;
+  kind: string;
+  platformId: string | null;
+  channelType: string | null;
+  threadId: string | null;
+}
+
 export interface ProcessingClaim {
   messageId: string;
   statusChanged: string;
@@ -109,7 +118,8 @@ export interface InboundMailbox {
   failPendingMessages(): number;
   retryWithBackoff(messageId: string, backoffSec: number): void;
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;
-  applyProcessingAcks(acks: ProcessingAck[]): void;
+  /** Apply terminal acks; returns the messages this call moved to 'completed'. */
+  applyProcessingAcks(acks: ProcessingAck[]): CompletedInbound[];
   getDeliveredIds(): Set<string>;
   markDelivered(messageOutId: string, platformMessageId: string | null): void;
   markDeliveryFailed(messageOutId: string): void;

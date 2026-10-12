@@ -32,6 +32,8 @@ ARG BUN_VERSION=1.4.0
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
 # SIGTERM instead of being orphaned by the shell entrypoint.
+# imagemagick, jq, python3, ripgrep, sqlite3, zip: the general CLI kit agents
+# reach for in Bash and task gate scripts (v1's image had them).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -55,9 +57,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         curl \
         git \
+        imagemagick \
+        jq \
         poppler-utils \
+        python3 \
+        ripgrep \
+        sqlite3 \
         tini \
         unzip \
+        zip \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
         apt-get install -y --no-install-recommends fonts-noto-cjk; \
        fi \

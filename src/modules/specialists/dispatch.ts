@@ -46,6 +46,27 @@ function notifyAgent(session: Session, text: string): void {
     .catch((err) => log.warn('specialists: failed to notify agent', { sessionId: session.id, err }));
 }
 
+/**
+ * Note a successful dispatch in the caller's session as context only — no
+ * trigger, no wake. The dispatch tool already told the agent; a triggering
+ * note started a turn of its own after the agent's reply, and the agent
+ * answered it to the user ("Noted. I'll send the report…"). The task id
+ * stays visible with the agent's next message.
+ */
+function noteDispatched(session: Session, taskId: string): void {
+  void writeSessionMessage(session.agent_group_id, session.id, {
+    id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    content: JSON.stringify({
+      text: `Specialist task dispatched (id: ${taskId}). Result will arrive as a follow-up message.`,
+      sender: 'system',
+      senderId: 'system',
+    }),
+    trigger: false,
+  }).catch((err) => log.warn('specialists: failed to note dispatch', { sessionId: session.id, err }));
+}
+
 function formatTaskPrompt(task: SpecialistTask, specialist: Specialist | undefined): string {
   if (!task.is_last_same_type_dispatch) return task.prompt;
   const notice = specialist?.last_turn_sub_notice ?? SPECIALISTS_CONFIG.defaultLastTurnSubNotice;
@@ -127,7 +148,7 @@ export async function handleDispatchSpecialist(content: Record<string, unknown>,
   await createTask(task);
   await spawnTaskSession(task);
 
-  notifyAgent(session, `Specialist task dispatched (id: ${taskId}). Result will arrive as a follow-up message.`);
+  noteDispatched(session, taskId);
   log.info('specialists: root task dispatched', { taskId, specialistGroupId, requesterGroup: session.agent_group_id });
 }
 

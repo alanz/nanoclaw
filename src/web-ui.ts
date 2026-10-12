@@ -1490,7 +1490,7 @@ document.addEventListener('DOMContentLoaded', function() {
         +'<div class="dim" style="margin:4px 0 10px">'+esc(t.completed_runs)+' runs'+(t.failed_runs ? ', '+esc(t.failed_runs)+' failed' : '')+(t.recurrence ? ' &middot; '+esc(t.recurrence) : '')+'</div>'
         +'<div class="dim">Prompt</div><div '+pre+'>'+esc(t.prompt)+'</div>'
         +(t.script ? '<div class="dim">Gate script</div><div '+pre+'>'+esc(t.script)+'</div>' : '')
-        +'<div class="dim">Recent run log</div><div '+pre+'>'+esc(t.recent_log || '(no runs logged)')+'</div>'
+        +'<div class="dim">Recent run log</div><div '+pre+'>'+esc(Array.isArray(t.recent_log) ? t.recent_log.join(String.fromCharCode(10, 10)) : (t.recent_log || '')) + ((!t.recent_log || !t.recent_log.length) ? '(no runs logged)' : '')+'</div>'
         +'</div>';
     } catch(err) { el.innerHTML = '<div class="empty">Error loading task</div>'; }
   });

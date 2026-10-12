@@ -115,6 +115,10 @@ import {
   adoptUnkeyedCacheRows,
   getVectorState,
   repairVectors,
+  getLastVectorRepair,
+  getLastFullReindex,
+  type FullReindexRecord,
+  type VectorRepair,
   pruneEmbeddingCache,
   getLastCachePrune,
   setIndexFingerprint,
@@ -258,6 +262,9 @@ export class MemoryIndexManager {
   /** The full re-index under way, for stats. */
   private reindex: { reason: string; startedAt: string; done: number; total: number } | null = null;
   private providerKey = '';
+  /** Counts of the pass under way (or the last one). */
+  private syncCounts = { indexed: 0, skipped: 0, removed: 0, incomplete: 0 };
+  private lastSync: MemoryIndexStats['lastSync'] = null;
   private syncLock: Promise<void> = Promise.resolve();
   private periodicTimer: ReturnType<typeof setInterval> | null = null;
   private rpdResumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -400,6 +407,10 @@ export class MemoryIndexManager {
       .join('; ');
   }
 
+  private recordSync(outcome: SyncOutcome): void {
+    this.lastSync = { at: new Date().toISOString(), outcome, ...this.syncCounts };
+  }
+
   private repairVectors(): void {
     try {
       const repair = repairVectors(this.index);
@@ -419,7 +430,12 @@ export class MemoryIndexManager {
   private async _doSync(force: boolean): Promise<void> {
     if (!force && !this.dirty) return;
     if (!force) {
-      await this.syncFiles(false);
+      let outcome: SyncOutcome = 'interrupted';
+      try {
+        outcome = await this.syncFiles(false);
+      } finally {
+        this.recordSync(outcome);
+      }
       return;
     }
 
@@ -436,6 +452,7 @@ export class MemoryIndexManager {
     try {
       outcome = await this.syncFiles(true);
     } finally {
+      this.recordSync(outcome);
       const files = this.reindex?.done ?? 0;
       this.reindex = null;
       const finishedAt = new Date().toISOString();
@@ -472,10 +489,8 @@ export class MemoryIndexManager {
     log.info('Memory sync: starting', { groupId: this.groupId, count: fileEntries.length, force });
     if (this.reindex) this.reindex.total = fileEntries.length;
 
-    let indexed = 0,
-      skipped = 0,
-      removed = 0;
-    let incomplete = 0;
+    const counts = { indexed: 0, skipped: 0, removed: 0, incomplete: 0 };
+    this.syncCounts = counts;
     let consecutiveRlFailures = 0;
     const MAX_CONSECUTIVE_RL = 3;
     const seenPaths = new Set<string>();
@@ -508,7 +523,7 @@ export class MemoryIndexManager {
         | { hash: string; source: string }
         | undefined;
       if (existing?.hash === contentHash && existing.source === fileSource && !force) {
-        skipped++;
+        counts.skipped++;
         continue;
       }
 
@@ -603,7 +618,7 @@ export class MemoryIndexManager {
       if (!complete) {
         // Unrecorded, so the next sync takes it up again.
         this.dirty = true;
-        incomplete++;
+        counts.incomplete++;
         continue;
       }
 
@@ -650,10 +665,10 @@ export class MemoryIndexManager {
           err,
         });
         this.dirty = true;
-        incomplete++;
+        counts.incomplete++;
         continue;
       }
-      indexed++;
+      counts.indexed++;
     }
 
     // Stopped part-way: seenPaths covers only the files reached, so the
@@ -679,7 +694,7 @@ export class MemoryIndexManager {
           this.dirty = true;
           continue;
         }
-        removed++;
+        counts.removed++;
       }
     }
 
@@ -702,15 +717,15 @@ export class MemoryIndexManager {
 
     // A file left incomplete still holds its old entries under an unchanged
     // hash, so only a forced pass that reached every file clears the debt.
-    if (force && incomplete === 0) {
+    if (force && counts.incomplete === 0) {
       setIndexFingerprint(this.index.db, this.fingerprint());
       this.forcePending = false;
     }
 
     this._syncing = false;
     this._lastSyncAt = Date.now();
-    log.info('Memory sync complete', { groupId: this.groupId, indexed, skipped, removed });
-    return incomplete === 0 ? 'completed' : 'incomplete';
+    log.info('Memory sync complete', { groupId: this.groupId, ...counts });
+    return counts.incomplete === 0 ? 'completed' : 'incomplete';
   }
 
   /**
@@ -830,14 +845,56 @@ export class MemoryIndexManager {
     const sources = files
       .map((f) => ({ source: f.source, files: f.n, chunks: chunks.get(f.source) ?? 0 }))
       .sort((a, b) => a.source.localeCompare(b.source));
+    const db = this.index.db;
+    const state = getVectorState(db);
+    const vectorState = state ?? 'unchecked';
+    let lastFullReindex = getLastFullReindex(db);
+    if (lastFullReindex?.result === 'running' && !this.reindex) {
+      lastFullReindex = { ...lastFullReindex, result: 'interrupted' };
+    }
+    const cache = db
+      .prepare(
+        'SELECT COUNT(*) AS rows, ' +
+          'SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM chunks c WHERE c.hash = e.hash AND c.model = e.model) THEN 1 ELSE 0 END) AS unused ' +
+          'FROM embedding_cache e',
+      )
+      .get() as { rows: number; unused: number | null };
+    const pageSize = db.pragma('page_size', { simple: true }) as number;
+    const pages = db.pragma('page_count', { simple: true }) as number;
+    const free = db.pragma('freelist_count', { simple: true }) as number;
+    const settingsCurrent = getIndexFingerprint(db) === this.fingerprint();
+
+    const warnings: string[] = [];
+    if (!this.index.vecAvailable) {
+      warnings.push(`Vector search unavailable (${this.index.vecError ?? 'unknown'}); searching by in-process scan`);
+    }
+    if (vectorState === 'needs_repair') warnings.push('Vector rows need repair; the next sync repairs them');
+    if (lastFullReindex && (lastFullReindex.result === 'interrupted' || lastFullReindex.result === 'incomplete')) {
+      warnings.push(`Last full re-index ${lastFullReindex.result}; it runs again at the next start`);
+    }
+    if (this.lastSync && this.lastSync.incomplete > 0) {
+      warnings.push(`${this.lastSync.incomplete} file(s) could not be indexed in the last sync; retried at the next`);
+    }
+
     return {
       groupId: this.groupId,
       groupFolder: this.groupFolder,
       model: this.model,
       vectorSearch: this.index.vecAvailable,
+      vectorError: this.index.vecError,
+      vectorState,
+      lastVectorRepair: getLastVectorRepair(db),
       syncing: this._syncing,
       dirty: this.dirty,
       lastSyncAt: this._lastSyncAt === null ? null : new Date(this._lastSyncAt).toISOString(),
+      lastSync: this.lastSync,
+      settingsCurrent,
+      reindex: this.reindex ? { ...this.reindex } : null,
+      lastFullReindex,
+      cache: { rows: cache.rows, unused: cache.unused ?? 0 },
+      lastCachePrune: getLastCachePrune(db),
+      db: { bytes: pageSize * pages, freeBytes: pageSize * free },
+      warnings,
       sources,
       quota: this.rateLimiter.snapshot(),
     };
@@ -885,9 +942,33 @@ export interface MemoryIndexStats {
   groupFolder: string;
   model: string;
   vectorSearch: boolean;
+  /** Why vector search is unavailable, when it is. */
+  vectorError: string | null;
+  /** 'unchecked': never repaired (an index from before vector_state existed). */
+  vectorState: 'clean' | 'needs_repair' | 'unchecked';
+  lastVectorRepair: (VectorRepair & { at: string }) | null;
   syncing: boolean;
   dirty: boolean;
   lastSyncAt: string | null;
+  lastSync: {
+    at: string;
+    outcome: 'completed' | 'incomplete' | 'interrupted';
+    indexed: number;
+    skipped: number;
+    removed: number;
+    incomplete: number;
+  } | null;
+  /** Whether the index was last fully built with the current settings. */
+  settingsCurrent: boolean;
+  /** A full re-index under way. */
+  reindex: { reason: string; startedAt: string; done: number; total: number } | null;
+  /** A record left 'running' by a host that stopped mid-pass reads as 'interrupted'. */
+  lastFullReindex: FullReindexRecord | null;
+  cache: { rows: number; unused: number };
+  lastCachePrune: { at: string; removed: number } | null;
+  db: { bytes: number; freeBytes: number };
+  /** Plain-language problems for the dashboard to show. */
+  warnings: string[];
   sources: Array<{ source: string; files: number; chunks: number }>;
   quota: RateLimiterSnapshot;
 }

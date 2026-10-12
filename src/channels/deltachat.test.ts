@@ -682,6 +682,20 @@ describe('DeltaChat channel adapter', () => {
       expect(dc.rpc.sendMsg).toHaveBeenCalledTimes(1);
     });
 
+    it('counts the 15 s from when the message arrived, not from the first status', async () => {
+      const built = await buildSetupAdapter();
+      built.dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      built.dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      built.dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      vi.setSystemTime(Date.now() + 12_000);
+      await built.adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
+      vi.setSystemTime(Date.now() + 4_000);
+      await built.adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
+      expect(sentTexts(built.dc)).toEqual(['⏳ Searching the web…']);
+    });
+
     it('is deleted for everyone when the reply arrives', async () => {
       const { adapter, dc } = await turnStarted();
       vi.setSystemTime(Date.now() + 16_000);

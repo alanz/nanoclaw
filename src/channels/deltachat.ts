@@ -199,6 +199,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
   /** Last incoming message ID per platformId — used for reactions. */
   const lastMsgId = new Map<string, number>();
+  /** When each platformId's last incoming message arrived — a turn's age counts from here. */
+  const receivedAt = new Map<string, number>();
   /** The reaction the bot last put on each platformId's last incoming message. */
   const shownReaction = new Map<string, { msgId: number; emoji: string }>();
   /** Debounce state: accumulate rapid messages per chat before routing. */
@@ -408,7 +410,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     if (!p || p.forMsgId !== forMsgId) {
       // A new incoming message starts a new turn; an older turn's line goes.
       if (p) await clearProgress(platformId);
-      p = { forMsgId, since: now, editedAt: 0 };
+      p = { forMsgId, since: receivedAt.get(platformId) ?? now, editedAt: 0 };
       progress.set(platformId, p);
     }
     if (now - p.since < PROGRESS_AFTER_MS) return;
@@ -619,6 +621,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
           // React with 👀 to acknowledge receipt; track msgId for typing/done reactions
           lastMsgId.set(platformId, msgId);
+          receivedAt.set(platformId, Date.now());
           shownReaction.set(platformId, { msgId, emoji: '👀' });
           try {
             await dcRef.rpc.sendReaction(aid, msgId, ['👀']);

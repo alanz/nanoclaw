@@ -7,6 +7,9 @@
  * short interval — but only while the agent is actually WORKING, gated
  * on the heartbeat file's mtime after an initial grace period.
  *
+ * Each interval tick also passes a status — what the agent is doing, from
+ * the tool the container reports in flight — for channels that show one.
+ *
  * After delivering a user-facing message, the refresh is paused for
  * POST_DELIVERY_PAUSE_MS so the client-side indicator can visually
  * clear.
@@ -19,7 +22,8 @@
  */
 import fs from 'fs';
 
-import { heartbeatPath } from '../../session-manager.js';
+import { log } from '../../log.js';
+import { heartbeatPath, withExistingMailboxSession } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
@@ -45,7 +49,14 @@ const HEARTBEAT_FRESH_MS = 6000;
 const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface TypingAdapter {
-  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  setTyping?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    instance?: string,
+    status?: string,
+    statusKind?: 'auto' | 'agent',
+  ): Promise<void>;
 }
 
 interface TypingTarget {
@@ -79,11 +90,51 @@ async function triggerTyping(
   platformId: string,
   threadId: string | null,
   instance?: string,
+  status?: string,
 ): Promise<void> {
   try {
-    await adapter?.setTyping?.(channelType, platformId, threadId, instance);
+    await adapter?.setTyping?.(channelType, platformId, threadId, instance, status, status ? 'auto' : undefined);
   } catch {
     // Typing is best-effort — don't let it fail delivery or routing.
+  }
+}
+
+/** Plain-words labels for the tools an agent spends visible time in. */
+const TOOL_STATUS: Record<string, string> = {
+  Bash: 'running a command',
+  Read: 'reading files',
+  Grep: 'searching files',
+  Glob: 'searching files',
+  Write: 'writing files',
+  Edit: 'editing files',
+  NotebookEdit: 'editing a notebook',
+  WebSearch: 'searching the web',
+  WebFetch: 'reading a web page',
+  Task: 'running a sub-agent',
+  brave_web_search: 'searching the web',
+  memory_search: 'searching memory',
+  memory_get_file_content: 'reading memory',
+  memory_list_files: 'reading memory',
+  dispatch_specialist: 'waiting on a specialist',
+  dispatch_sub_task: 'waiting on a specialist',
+  ask_user_question: 'waiting for your answer',
+};
+
+/** What the agent is doing, for channels that show a status line. */
+export function describeTool(tool: string | null | undefined): string {
+  if (!tool) return 'thinking';
+  // MCP tools arrive as mcp__<server>__<tool>.
+  const name = tool.startsWith('mcp__') ? tool.split('__').slice(2).join('__') : tool;
+  return TOOL_STATUS[name] ?? `using ${name}`;
+}
+
+async function currentStatus(agentGroupId: string, sessionId: string): Promise<string | undefined> {
+  try {
+    const state = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getContainerState());
+    return describeTool(state?.currentTool);
+  } catch (err) {
+    log.debug('Typing: could not read container state', { sessionId, err });
+    return undefined;
   }
 }
 
@@ -142,7 +193,14 @@ export function startTypingRefresh(
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
-      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance).catch(() => {});
+      void currentStatus(entry.agentGroupId, sessionId)
+        .then((status) => {
+          // The read is async: skip if the refresh stopped or a delivery
+          // paused it meanwhile.
+          if (typingRefreshers.get(sessionId) !== entry || entry.pausedUntil > Date.now()) return;
+          return triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance, status);
+        })
+        .catch(() => {});
       return;
     }
 
@@ -174,6 +232,20 @@ export function pauseTypingRefreshAfterDelivery(sessionId: string): void {
   const entry = typingRefreshers.get(sessionId);
   if (!entry) return;
   entry.pausedUntil = Date.now() + POST_DELIVERY_PAUSE_MS;
+}
+
+/**
+ * The session's container exited. Keep the refresh through a fresh grace
+ * window instead of stopping it: if the exit was a failed spawn or a crash
+ * that the host retries, the respawn carries the indicator on (a stop here
+ * left the respawned turn with no refresh at all). If nothing respawns, the
+ * refresh ends by itself once the grace passes with no heartbeat. A refresh
+ * that already ended (the usual case — the turn finished first) stays ended.
+ */
+export function holdTypingForRespawn(sessionId: string): void {
+  const entry = typingRefreshers.get(sessionId);
+  if (!entry) return;
+  entry.startedAt = Date.now();
 }
 
 export function stopTypingRefresh(sessionId: string): void {

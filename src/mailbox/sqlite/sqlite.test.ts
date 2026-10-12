@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { parseProcessingAckRecord } from '../model.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 import { wrapSqliteInbound, wrapSqliteOutbound } from './index.js';
 
@@ -125,6 +126,43 @@ describe('SQLite mailbox canonical serialization', () => {
         inReplyTo: null,
       },
     ]);
+  });
+
+  it('reports the messages an ack pass moves to completed, once', async () => {
+    const inboundDb = new Database(':memory:');
+    databases.push(inboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    let sequence = 0;
+    const inbound = wrapSqliteInbound(inboundDb, () => (sequence += 2));
+    for (const id of ['in-1', 'in-2']) {
+      await inbound.insertMessage({
+        id,
+        kind: 'chat',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        platformId: 'room',
+        channelType: 'test',
+        threadId: null,
+        content: '{"text":"hello"}',
+        processAfter: null,
+        recurrence: null,
+        trigger: true,
+        sourceSessionId: null,
+        onWake: false,
+      });
+    }
+    const acks = [
+      parseProcessingAckRecord({ messageId: 'in-1', status: 'completed', statusChanged: '2026-01-01T00:00:01.000Z' }),
+      parseProcessingAckRecord({
+        messageId: 'in-2',
+        status: 'script-skip:error',
+        statusChanged: '2026-01-01T00:00:01.000Z',
+      }),
+    ];
+
+    expect(inbound.applyProcessingAcks(acks)).toEqual([
+      { id: 'in-1', kind: 'chat', platformId: 'room', channelType: 'test', threadId: null },
+    ]);
+    expect(inbound.applyProcessingAcks(acks)).toEqual([]);
   });
 
   it('returns only the conversation root and top-level outbound timeline', () => {

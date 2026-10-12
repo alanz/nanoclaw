@@ -53,6 +53,7 @@ import {
 } from './tasks.js';
 import type {
   AgentMailbox,
+  CompletedInbound,
   InboundMailbox,
   MailboxHistoryMessage,
   MailboxSession,
@@ -72,17 +73,29 @@ function sqliteTimestamp(value: string): string {
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : value;
 }
 
-function applyProcessingAcks(db: Database.Database, acks: ProcessingAck[]): void {
-  if (acks.length === 0) return;
+function applyProcessingAcks(db: Database.Database, acks: ProcessingAck[]): CompletedInbound[] {
+  if (acks.length === 0) return [];
   const complete = db.prepare(
     "UPDATE messages_in SET status = 'completed' WHERE id = ? AND status NOT IN ('completed', 'failed')",
   );
   const fail = db.prepare(
     "UPDATE messages_in SET status = 'failed' WHERE id = ? AND status NOT IN ('completed', 'failed')",
   );
+  const read = db.prepare(
+    'SELECT id, kind, platform_id AS platformId, channel_type AS channelType, thread_id AS threadId FROM messages_in WHERE id = ?',
+  );
+  const completed: CompletedInbound[] = [];
   db.transaction(() => {
-    for (const ack of acks) (ack.status === 'script-skip:error' ? fail : complete).run(ack.messageId);
+    for (const ack of acks) {
+      if (ack.status === 'script-skip:error') {
+        fail.run(ack.messageId);
+      } else if (complete.run(ack.messageId).changes > 0) {
+        const row = read.get(ack.messageId) as CompletedInbound | undefined;
+        if (row) completed.push(row);
+      }
+    }
   })();
+  return completed;
 }
 
 type TaskSqlRow = {

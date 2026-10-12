@@ -14,6 +14,15 @@
  * and answered by reply (deltachat-cards.ts); display cards are sent as text.
  * A `sender` on the content is shown as the message's sender name.
  * Typing: sends 💭 on the last incoming message for the platformId.
+ * A reaction is a message to the chat, not an ephemeral indicator, so the
+ * status reactions move one way per message — 👀 → 💭 → ✅ — each sent at
+ * most once, and never over a reaction the agent chose itself. ✅ goes on
+ * with the reply, or — for a turn that ends without one — when the host
+ * sweep sees the agent finished the message (up to a minute later).
+ * Progress: while the agent works, a "⏳ Searching the web…" message follows
+ * the status the typing refresh passes, edited at most every
+ * PROGRESS_EDIT_MS, and is deleted for everyone when the reply arrives or
+ * the turn ends.
  *
  * Credentials: set DELTACHAT_CHATMAIL_QR (chatmail QR) or DELTACHAT_ADDR +
  * DELTACHAT_MAIL_PW in .env. DELTACHAT_CHATMAIL_QR defaults to
@@ -28,6 +37,7 @@ import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 import { ASSISTANT_NAME } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import { registerInboundCompletedHook } from '../reconcile-session.js';
 import { mergeUsersInto } from '../modules/permissions/db/users.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -48,8 +58,39 @@ import {
   parseRelays,
 } from './deltachat-identity.js';
 
-/** Files larger than this are delivered as placeholders, not base64-embedded. */
-const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+/**
+ * Files larger than this reach the agent as a placeholder, not a file.
+ * Chatmail relays cap a whole mail at about 30 MB, so in practice every
+ * received file fits; the cap only guards against a relay that allows more.
+ */
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
+
+/** How the agent is told what kind of file arrived (`[voice message: x.ogg — saved to …]`). */
+function attachmentType(viewType: string): string {
+  switch (viewType) {
+    case 'Image':
+      return 'image';
+    case 'Gif':
+      return 'gif';
+    case 'Sticker':
+      return 'sticker';
+    case 'Video':
+      return 'video';
+    case 'Audio':
+      return 'audio';
+    case 'Voice':
+      return 'voice message';
+    case 'Vcard':
+      return 'contact (vCard)';
+    default:
+      return 'file';
+  }
+}
+/** Each edit is a message to the chat, so the progress line changes at most this often. */
+const PROGRESS_EDIT_MS = 10_000;
+
+/** Status reactions on an incoming message, in the only order they move. */
+const STATUS_STEPS = ['👀', '💭', '✅'];
 
 /** Wait this long for additional messages from the same chat before routing to agent. */
 const DEBOUNCE_MS = 1500;
@@ -147,9 +188,14 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   let accountId: number | null = null;
   let _connected = false;
   let channelSetup: ChannelSetup | null = null;
+  let removeCompletedHook: (() => void) | null = null;
+  /** The progress message for each platformId's current turn (forMsgId = the incoming message). */
+  const progress = new Map<string, { forMsgId: number; msgId?: number; text?: string; editedAt: number }>();
 
   /** Last incoming message ID per platformId — used for reactions. */
   const lastMsgId = new Map<string, number>();
+  /** The reaction the bot last put on each platformId's last incoming message. */
+  const shownReaction = new Map<string, { msgId: number; emoji: string }>();
   /** Debounce state: accumulate rapid messages per chat before routing. */
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const debounceEntries = new Map<string, DebounceEntry>();
@@ -324,14 +370,97 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     });
   }
 
-  async function sendDoneReaction(platformId: string): Promise<void> {
+  /**
+   * Move the last incoming message's status reaction forward to `emoji`.
+   * No-op when it is already there or further on, or when the reaction
+   * showing is one the agent chose (not a status step).
+   */
+  async function advanceStatus(platformId: string, emoji: '💭' | '✅'): Promise<void> {
     const msgId = lastMsgId.get(platformId);
     if (msgId === undefined || !dc || accountId === null) return;
-    try {
-      await dc.rpc.sendReaction(accountId, msgId, ['✅']);
-    } catch (err) {
-      log.warn('DeltaChat: failed to send ✅ reaction', { err, platformId });
+    const shown = shownReaction.get(platformId);
+    if (shown?.msgId === msgId) {
+      const at = STATUS_STEPS.indexOf(shown.emoji);
+      if (at === -1 || at >= STATUS_STEPS.indexOf(emoji)) return;
     }
+    // Recorded before the send so a concurrent refresh tick sees it.
+    shownReaction.set(platformId, { msgId, emoji });
+    try {
+      await dc.rpc.sendReaction(accountId, msgId, [emoji]);
+    } catch (err) {
+      if (shown) shownReaction.set(platformId, shown);
+      else shownReaction.delete(platformId);
+      log.warn(`DeltaChat: failed to send ${emoji} reaction`, { err, platformId });
+    }
+  }
+
+  /** Show what the agent is doing, once the turn has run long enough to be worth it. */
+  async function showProgress(platformId: string, status: string): Promise<void> {
+    const forMsgId = lastMsgId.get(platformId);
+    if (forMsgId === undefined || !dc || accountId === null) return;
+    const now = Date.now();
+    let p = progress.get(platformId);
+    if (!p || p.forMsgId !== forMsgId) {
+      // A new incoming message starts a new turn; an older turn's line goes.
+      if (p) await clearProgress(platformId);
+      p = { forMsgId, editedAt: 0 };
+      progress.set(platformId, p);
+    }
+    const text = `⏳ ${status.charAt(0).toUpperCase()}${status.slice(1)}…`;
+    if (p.msgId === undefined) {
+      if (p.editedAt !== 0) return; // a send is already in flight
+      p.editedAt = now;
+      let sent: number;
+      try {
+        const id = await sendText(platformId, text);
+        if (id === null) throw new Error('not connected');
+        sent = Number(id);
+      } catch (err) {
+        p.editedAt = 0; // let the next tick try again
+        log.warn('DeltaChat: failed to send progress message', { err, platformId });
+        return;
+      }
+      if (progress.get(platformId) !== p) {
+        // The reply overtook the send: the line is already stale.
+        await deleteForAll([sent]);
+        return;
+      }
+      p.msgId = sent;
+      p.text = text;
+    } else if (text !== p.text && now - p.editedAt >= PROGRESS_EDIT_MS) {
+      p.text = text;
+      p.editedAt = now;
+      try {
+        await dc.rpc.sendEditRequest(accountId, p.msgId, text);
+      } catch (err) {
+        log.warn('DeltaChat: failed to edit progress message', { err, platformId });
+      }
+    }
+  }
+
+  /**
+   * Delete the turn's progress message. `restart` keeps the turn going (a
+   * reply mid-turn): a new line appears if the agent works on.
+   */
+  async function clearProgress(platformId: string, restart = false): Promise<void> {
+    const p = progress.get(platformId);
+    if (!p) return;
+    if (restart) progress.set(platformId, { forMsgId: p.forMsgId, editedAt: 0 });
+    else progress.delete(platformId);
+    if (p.msgId !== undefined) await deleteForAll([p.msgId]);
+  }
+
+  async function deleteForAll(msgIds: number[]): Promise<void> {
+    if (!dc || accountId === null || msgIds.some((id) => !Number.isFinite(id))) return;
+    try {
+      await dc.rpc.deleteMessagesForAll(accountId, msgIds);
+    } catch (err) {
+      log.warn('DeltaChat: failed to delete progress message', { err, msgIds });
+    }
+  }
+
+  async function sendDoneReaction(platformId: string): Promise<void> {
+    await advanceStatus(platformId, '✅');
   }
 
   const adapter: ChannelAdapter = {
@@ -341,6 +470,19 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
     async setup(config: ChannelSetup): Promise<void> {
       channelSetup = config;
+      removeCompletedHook?.();
+      removeCompletedHook = registerInboundCompletedHook(async (completed, session) => {
+        for (const c of completed) {
+          if (c.channelType !== 'deltachat' || !c.platformId) continue;
+          // Inbound ids are `<platform msg id>:<agent group id>` (router).
+          const suffix = `:${session.agent_group_id}`;
+          if (!c.id.endsWith(suffix)) continue;
+          const msgId = Number(c.id.slice(0, -suffix.length));
+          if (lastMsgId.get(c.platformId) !== msgId) continue;
+          await clearProgress(c.platformId);
+          await advanceStatus(c.platformId, '✅');
+        }
+      });
       fs.mkdirSync(dataDir, { recursive: true });
       cards = new CardBook(path.join(dataDir, 'nanoclaw-cards.json'));
 
@@ -471,6 +613,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
           // React with 👀 to acknowledge receipt; track msgId for typing/done reactions
           lastMsgId.set(platformId, msgId);
+          shownReaction.set(platformId, { msgId, emoji: '👀' });
           try {
             await dcRef.rpc.sendReaction(aid, msgId, ['👀']);
           } catch (err) {
@@ -501,12 +644,13 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
               if (stat.size <= MAX_ATTACHMENT_BYTES) {
                 const data = fs.readFileSync(msg.file as string);
                 const filename = path.basename(msg.file as string);
-                const attachType = viewType === 'Image' || viewType === 'Gif' ? 'image' : 'file';
-                attachments.push({ data: data.toString('base64'), name: filename, type: attachType });
+                attachments.push({ data: data.toString('base64'), name: filename, type: attachmentType(viewType) });
                 if (text) contentParts.push(text);
               } else {
+                const mb = Math.round(stat.size / (1024 * 1024));
                 contentParts.push(
-                  mediaPlaceholder(viewType, (msg.fileName as string | null | undefined) ?? null, text),
+                  `${mediaPlaceholder(viewType, (msg.fileName as string | null | undefined) ?? null, text)}\n` +
+                    `(file not passed on: ${mb} MB is over the ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB limit)`,
                 );
               }
             } catch {
@@ -673,6 +817,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     },
 
     async teardown(): Promise<void> {
+      removeCompletedHook?.();
+      removeCompletedHook = null;
       if (dc && accountId !== null) {
         try {
           await dc.rpc.stopIo(accountId);
@@ -731,6 +877,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           if (!isNaN(msgId)) {
             try {
               await dc.rpc.sendReaction(accountId, msgId, [emoji]);
+              if (lastMsgId.get(platformId) === msgId) shownReaction.set(platformId, { msgId, emoji });
             } catch (err) {
               log.warn('DeltaChat: failed to send reaction', { err, platformId, msgId });
             }
@@ -740,6 +887,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       }
 
       const sender = typeof content.sender === 'string' && content.sender ? content.sender : undefined;
+      // The agent's own reply replaces its progress line; a message relayed
+      // under another name (a specialist) does not — the agent is still working.
+      if (!sender) await clearProgress(platformId, true);
 
       // Question card (ask_user_question, approvals): numbered text, answered by reply
       const question = parseQuestionContent(content);
@@ -797,14 +947,11 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       return platformIdForChat(await dc.rpc.createChatByContactId(accountId, contactId));
     },
 
-    async setTyping(platformId: string, _threadId: string | null): Promise<void> {
-      const msgId = lastMsgId.get(platformId);
-      if (msgId === undefined || !dc || accountId === null) return;
-      try {
-        await dc.rpc.sendReaction(accountId, msgId, ['💭']);
-      } catch (err) {
-        log.warn('DeltaChat: failed to send 💭 typing reaction', { err, platformId });
-      }
+    async setTyping(platformId: string, _threadId: string | null, status?: string): Promise<void> {
+      // The typing module re-fires this every few seconds while the agent
+      // works; only the first call per message reaches the chat.
+      await advanceStatus(platformId, '💭');
+      if (status) await showProgress(platformId, status);
     },
   };
 

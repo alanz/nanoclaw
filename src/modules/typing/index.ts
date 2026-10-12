@@ -234,6 +234,20 @@ export function pauseTypingRefreshAfterDelivery(sessionId: string): void {
   entry.pausedUntil = Date.now() + POST_DELIVERY_PAUSE_MS;
 }
 
+/**
+ * The session's container exited. Keep the refresh through a fresh grace
+ * window instead of stopping it: if the exit was a failed spawn or a crash
+ * that the host retries, the respawn carries the indicator on (a stop here
+ * left the respawned turn with no refresh at all). If nothing respawns, the
+ * refresh ends by itself once the grace passes with no heartbeat. A refresh
+ * that already ended (the usual case — the turn finished first) stays ended.
+ */
+export function holdTypingForRespawn(sessionId: string): void {
+  const entry = typingRefreshers.get(sessionId);
+  if (!entry) return;
+  entry.startedAt = Date.now();
+}
+
 export function stopTypingRefresh(sessionId: string): void {
   const entry = typingRefreshers.get(sessionId);
   if (!entry) return;

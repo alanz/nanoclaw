@@ -94,6 +94,75 @@ describe('decideStuckAction', () => {
     expect(res).toMatchObject({ action: 'kill-ceiling', idle: false });
   });
 
+  // v1 closed an idle container after 5 min; under the 30-min ceiling alone a
+  // script-only task kept its VM up half of every hour (2026-10-12 audit).
+  describe('idle ceiling', () => {
+    const IDLE = 10 * 60 * 1000;
+
+    it('reaps an idle container once silent past the idle ceiling', () => {
+      const res = decideStuckAction({
+        now: BASE,
+        heartbeatMtimeMs: BASE - IDLE - 1,
+        containerState: null,
+        claims: [],
+        idleCeilingMs: IDLE,
+      });
+      expect(res).toEqual({ action: 'kill-ceiling', heartbeatAgeMs: IDLE + 1, ceilingMs: IDLE, idle: true });
+    });
+
+    it('leaves an idle container alone within the idle ceiling', () => {
+      expect(
+        decideStuckAction({
+          now: BASE,
+          heartbeatMtimeMs: BASE - IDLE + 1,
+          containerState: null,
+          claims: [],
+          idleCeilingMs: IDLE,
+        }),
+      ).toEqual({ action: 'ok' });
+    });
+
+    it('does not apply to a container with a tool in flight', () => {
+      expect(
+        decideStuckAction({
+          now: BASE,
+          heartbeatMtimeMs: BASE - IDLE - 1,
+          containerState: {
+            currentTool: 'mcp__nanoclaw__dispatch_sub_task',
+            toolDeclaredTimeoutMs: null,
+            toolStartedAt: parseIsoTimestamp(new Date(BASE - IDLE - 1).toISOString()),
+          },
+          claims: [],
+          idleCeilingMs: IDLE,
+        }),
+      ).toEqual({ action: 'ok' });
+    });
+
+    it('does not apply while a message is due', () => {
+      expect(
+        decideStuckAction({
+          now: BASE,
+          heartbeatMtimeMs: BASE - IDLE - 1,
+          containerState: null,
+          claims: [],
+          dueMessages: 1,
+          idleCeilingMs: IDLE,
+        }),
+      ).toEqual({ action: 'ok' });
+    });
+
+    it('never exceeds the absolute ceiling', () => {
+      const res = decideStuckAction({
+        now: BASE,
+        heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+        containerState: null,
+        claims: [],
+        idleCeilingMs: 2 * ABSOLUTE_CEILING_MS,
+      });
+      expect(res).toMatchObject({ action: 'kill-ceiling', ceilingMs: ABSOLUTE_CEILING_MS, idle: true });
+    });
+  });
+
   it('skips the ceiling check when no heartbeat file exists and no fallback is known', () => {
     // A freshly-spawned container hasn't produced any SDK events yet, so no
     // heartbeat. Prior behavior treated this as infinitely stale and killed

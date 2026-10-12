@@ -34,6 +34,8 @@ import fs from 'fs';
 import { getSessionClaim } from './db/coordination.js';
 import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getMessagingGroup } from './db/messaging-groups.js';
+import { CONTAINER_IDLE_MS, TASK_CONTAINER_IDLE_MS } from './config.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
@@ -69,9 +71,15 @@ export function decideStuckAction(args: {
   claims: Array<{ messageId: string; statusChanged: string }>;
   /** Due inbound messages, claimed or not. Defaults to none. */
   dueMessages?: number;
+  /**
+   * Reap an idle container once silent this long (capped at the absolute
+   * ceiling). Defaults to the ceiling.
+   */
+  idleCeilingMs?: number;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims, dueMessages = 0 } = args;
+  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims, dueMessages = 0, idleCeilingMs } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
+  const idle = claims.length === 0 && !containerState?.currentTool && dueMessages === 0;
 
   // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
   // container hasn't had any SDK activity yet so no heartbeat file exists —
@@ -92,7 +100,10 @@ export function decideStuckAction(args: {
   const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
   if (effectiveHeartbeatMs !== 0) {
     const heartbeatAge = now - effectiveHeartbeatMs;
-    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
+    const ceiling =
+      idle && idleCeilingMs !== undefined
+        ? Math.min(idleCeilingMs, ABSOLUTE_CEILING_MS)
+        : Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
       // Two very different situations reach this line, and only one is a fault.
       //
@@ -115,7 +126,6 @@ export function decideStuckAction(args: {
       // waiting at the ceiling means the loop has hung. (A message landing in
       // the very second of this check reads as outstanding — it only changes
       // the log level of a kill that happens either way.)
-      const idle = claims.length === 0 && !containerState?.currentTool && dueMessages === 0;
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling, idle };
     }
   }
@@ -289,6 +299,19 @@ function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
   }
 }
 
+/**
+ * A session someone is talking to: wired to a real chat and not a task
+ * thread. Tasks, module sessions (no messaging group) and specialists (the
+ * null channel) are not — follow-ups to them are rare.
+ */
+async function isChatSession(session: Session): Promise<boolean> {
+  if (!session.messaging_group_id || isTaskThread(session.thread_id)) return false;
+  const mg = await getMessagingGroup(session.messaging_group_id);
+  // 'null_channel' = NULL_CHANNEL_TYPE; not imported, as that module
+  // registers the null adapter on load.
+  return !!mg && mg.channel_type !== 'null_channel';
+}
+
 function bashTimeoutMs(state: ContainerState | null): number | null {
   if (!state || state.currentTool !== 'Bash') return null;
   return state.toolDeclaredTimeoutMs;
@@ -335,6 +358,7 @@ async function enforceRunningContainerSla(
     containerState: outDb.getContainerState(),
     claims: gatedClaims,
     dueMessages: inDb.countDueMessages(),
+    idleCeilingMs: (await isChatSession(session)) ? CONTAINER_IDLE_MS : TASK_CONTAINER_IDLE_MS,
   });
 
   if (decision.action === 'ok') return;

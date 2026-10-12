@@ -58,11 +58,6 @@ export function isMemoryGroupExcluded(groupId: string): boolean {
  * until the next full sync removed them.) A folder inside the group's
  * workspace has no prefix: it is stored repo-relative, like memory/.
  */
-/** In the repo, as the central DB's workspace-file tracking means it — not an indexed mount, not outside. */
-function isRepoPath(p: string): boolean {
-  return !p.startsWith('..') && !p.startsWith('extra/');
-}
-
 export interface IndexedDir {
   dir: string;
   source: string;
@@ -102,12 +97,12 @@ export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
   }
   return dirs;
 }
-import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
 import { workspaceIndexDirs } from './workspace-dirs.js';
-import { chunkFile, type MemoryChunk } from './chunking.js';
+import { CHUNKER_VERSION, chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
+import { GEMINI_EMBEDDING_DIMS, geminiProviderKey, isUsableEmbedding } from './embedding-identity.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
-import { TokenBucketRateLimiter } from './rate-limiter.js';
+import { TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
 import {
   openIndexDb,
   getCachedEmbedding,
@@ -115,6 +110,14 @@ import {
   deleteFileChunks,
   insertChunk,
   upsertFileRecord,
+  getIndexFingerprint,
+  setLastFullReindex,
+  adoptUnkeyedCacheRows,
+  getVectorState,
+  repairVectors,
+  pruneEmbeddingCache,
+  getLastCachePrune,
+  setIndexFingerprint,
   searchIndex,
   type IndexDb,
   type FileSearchResult,
@@ -123,6 +126,13 @@ import {
 const ALLOWED_EXTENSIONS = new Set(['.md', '.org']);
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'venv', '__pycache__', '.venv']);
 const WATCH_DEBOUNCE_MS = 3000;
+/** Cache rows nothing uses are dropped once they are this old. */
+const CACHE_PRUNE_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
+/** How often the cache is pruned, besides after every full re-index. */
+const CACHE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/** How a pass ended: every file done, some left for the next sync, or stopped part-way. */
+type SyncOutcome = 'completed' | 'incomplete' | 'interrupted';
 const BATCH_SIZE = 100;
 
 /** The rate limiter's estimate: a token per four characters. */
@@ -241,6 +251,13 @@ export class MemoryIndexManager {
   private rateLimiter!: TokenBucketRateLimiter;
   private watchers: parcelWatcher.AsyncSubscription[] = [];
   private dirty = false;
+  /** Set until a full re-index under the current settings has completed. */
+  private forcePending = false;
+  /** Why the pending full re-index runs: the settings that changed. */
+  private reindexReason: string | null = null;
+  /** The full re-index under way, for stats. */
+  private reindex: { reason: string; startedAt: string; done: number; total: number } | null = null;
+  private providerKey = '';
   private syncLock: Promise<void> = Promise.resolve();
   private periodicTimer: ReturnType<typeof setInterval> | null = null;
   private rpdResumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -261,7 +278,9 @@ export class MemoryIndexManager {
   async init(): Promise<void> {
     fsSync.mkdirSync(path.dirname(this.dbPath), { recursive: true });
 
-    this.index = await openIndexDb(this.dbPath, this.model);
+    this.providerKey = geminiProviderKey(this.model);
+    this.index = await openIndexDb(this.dbPath, this.model, GEMINI_EMBEDDING_DIMS);
+    adoptUnkeyedCacheRows(this.index.db, 'gemini', geminiProviderKey);
 
     const { provider } = { provider: createGeminiEmbeddingProvider({ apiKey: this.apiKey, model: this.model }) };
     this.provider = provider;
@@ -305,9 +324,21 @@ export class MemoryIndexManager {
       24 * 60 * 60 * 1000,
     );
 
-    // Force initial sync
+    // A full re-index only when the settings that shape the index changed
+    // since it was last fully built; otherwise only changed files are
+    // re-indexed. Re-indexing everything on every start rewrote the whole
+    // index.db (~1.6 GB of backup delta per host restart) for no change.
+    const stored = getIndexFingerprint(this.index.db);
+    this.forcePending = stored !== this.fingerprint();
+    if (this.forcePending) {
+      this.reindexReason = this.fingerprintChanges(stored);
+      log.warn('Memory index: settings changed since the last full build; re-indexing every file', {
+        groupId: this.groupId,
+        changes: this.reindexReason,
+      });
+    }
     this.dirty = true;
-    void this.sync({ force: true });
+    void this.sync();
 
     log.info('Memory index manager initialized', {
       groupId: this.groupId,
@@ -330,14 +361,99 @@ export class MemoryIndexManager {
     this.rpdResumeTimer.unref?.();
   }
 
+  /**
+   * What an unchanged file's index entries depend on besides its content.
+   * Recorded once a full re-index under it completes; a mismatch at start
+   * forces one, so no file keeps chunks from an older model or chunker.
+   */
+  private fingerprint(): string {
+    return JSON.stringify(this.fingerprintFields());
+  }
+
+  private fingerprintFields(): Record<string, string | number> {
+    return {
+      model: this.model,
+      chunkTokens: MEMORY_CONFIG.chunk_tokens,
+      chunkOverlap: MEMORY_CONFIG.chunk_overlap_tokens,
+      chunker: CHUNKER_VERSION,
+      provider: 'gemini',
+      providerKey: this.providerKey,
+      vectorDims: GEMINI_EMBEDDING_DIMS,
+    };
+  }
+
+  /** "field: old → new" for each setting that differs from the stored fingerprint. */
+  private fingerprintChanges(stored: string | null): string {
+    if (stored === null) return 'first full build (no settings recorded)';
+    let old: Record<string, unknown> = {};
+    try {
+      old = JSON.parse(stored) as Record<string, unknown>;
+    } catch {}
+    const current = this.fingerprintFields();
+    const keys = [...new Set([...Object.keys(old), ...Object.keys(current)])];
+    return keys
+      .filter((k) => JSON.stringify(old[k]) !== JSON.stringify(current[k]))
+      .map(
+        (k) =>
+          `${k}: ${old[k] === undefined ? '(none)' : String(old[k])} → ${current[k] === undefined ? '(none)' : String(current[k])}`,
+      )
+      .join('; ');
+  }
+
+  private repairVectors(): void {
+    try {
+      const repair = repairVectors(this.index);
+      if (!repair) return;
+      const level = repair.failed > 0 ? 'warn' : 'info';
+      log[level]('Memory index: vector rows repaired', { groupId: this.groupId, ...repair });
+    } catch (err) {
+      log.warn('Memory index: vector repair failed', { groupId: this.groupId, err });
+    }
+  }
+
   async sync(opts?: { force?: boolean }): Promise<void> {
-    const force = opts?.force ?? false;
-    this.syncLock = this.syncLock.then(() => this._doSync(force)).catch(() => {});
+    this.syncLock = this.syncLock.then(() => this._doSync((opts?.force ?? false) || this.forcePending)).catch(() => {});
     return this.syncLock;
   }
 
   private async _doSync(force: boolean): Promise<void> {
     if (!force && !this.dirty) return;
+    if (!force) {
+      await this.syncFiles(false);
+      return;
+    }
+
+    // A full re-index: logged, recorded in meta, and its progress reported
+    // (stats) while it runs.
+    const reason = this.reindexReason ?? 'requested';
+    const startedAt = new Date().toISOString();
+    this.reindex = { reason, startedAt, done: 0, total: 0 };
+    log.info('Memory index: full re-index started', { groupId: this.groupId, reason });
+    try {
+      setLastFullReindex(this.index.db, { reason, startedAt, finishedAt: null, files: 0, result: 'running' });
+    } catch {}
+    let outcome: SyncOutcome = 'interrupted';
+    try {
+      outcome = await this.syncFiles(true);
+    } finally {
+      const files = this.reindex?.done ?? 0;
+      this.reindex = null;
+      const finishedAt = new Date().toISOString();
+      try {
+        if (!this.closed) setLastFullReindex(this.index.db, { reason, startedAt, finishedAt, files, result: outcome });
+      } catch {}
+      if (outcome === 'completed') this.reindexReason = null;
+      log[outcome === 'completed' ? 'info' : 'warn']('Memory index: full re-index finished', {
+        groupId: this.groupId,
+        reason,
+        files,
+        result: outcome,
+      });
+    }
+  }
+
+  /** One pass over every indexed file; force re-indexes unchanged files too. */
+  private async syncFiles(force: boolean): Promise<SyncOutcome> {
     this.dirty = false;
     this._syncing = true;
 
@@ -354,16 +470,19 @@ export class MemoryIndexManager {
     }
 
     log.info('Memory sync: starting', { groupId: this.groupId, count: fileEntries.length, force });
+    if (this.reindex) this.reindex.total = fileEntries.length;
 
     let indexed = 0,
       skipped = 0,
       removed = 0;
+    let incomplete = 0;
     let consecutiveRlFailures = 0;
     const MAX_CONSECUTIVE_RL = 3;
     const seenPaths = new Set<string>();
 
     for (const { absPath, source: fileSource, dir, pathPrefix } of fileEntries) {
       if (this.closed) break;
+      if (this.reindex) this.reindex.done++;
 
       let content: string;
       let stat: Awaited<ReturnType<typeof fs.stat>>;
@@ -383,16 +502,12 @@ export class MemoryIndexManager {
 
       const contentHash = hashFile(content);
 
-      // Update central DB (spec compliance) — only for in-repo paths
-      if (isRepoPath(repoPath)) {
-        handleWorkspaceFileChanged({ group_id: this.groupId, path: repoPath, content_hash: contentHash });
-      }
-
       // Check if already indexed with same hash
-      const existing = this.index.db.prepare('SELECT hash FROM files WHERE path = ?').get(repoPath) as
-        | { hash: string }
+      // The source too: a folder relabelled keeps its paths and content.
+      const existing = this.index.db.prepare('SELECT hash, source FROM files WHERE path = ?').get(repoPath) as
+        | { hash: string; source: string }
         | undefined;
-      if (existing?.hash === contentHash && !force) {
+      if (existing?.hash === contentHash && existing.source === fileSource && !force) {
         skipped++;
         continue;
       }
@@ -410,8 +525,8 @@ export class MemoryIndexManager {
       for (let ci = 0; ci < chunks.length; ci++) {
         const chunk = chunks[ci];
         if (!chunk) continue;
-        const cached = getCachedEmbedding(this.index.db, this.model, chunk.hash);
-        if (cached) {
+        const cached = getCachedEmbedding(this.index.db, this.model, this.providerKey, chunk.hash);
+        if (cached && isUsableEmbedding(cached, GEMINI_EMBEDDING_DIMS)) {
           embeddings[ci] = cached;
         } else {
           toEmbed.push({ chunk, idx: ci });
@@ -420,20 +535,33 @@ export class MemoryIndexManager {
 
       const toEmbedFiltered = toEmbed.filter((e) => e.chunk.text.trim().length > 0);
 
+      // A file is written only when every chunk has its embedding: one written
+      // with chunks missing would be recorded as indexed and never retried.
+      let complete = true;
       if (toEmbedFiltered.length > 0) {
         for (const batch of batchEmbeddings(toEmbedFiltered, (e) => estimateTokens(e.chunk.text))) {
-          if (this.closed) break;
+          if (this.closed) {
+            complete = false;
+            break;
+          }
           const texts = batch.map((e) => e.chunk.text);
           const estimatedTokens = texts.reduce((s, t) => s + estimateTokens(t), 0);
           try {
             await this.rateLimiter.acquirePermit(1, 600_000, estimatedTokens);
             const vecs = await this.provider.embedBatch(texts);
+            // One unusable vector fails the batch: the file stays unwritten and
+            // is retried, rather than stored with a chunk missing or wrong.
+            if (vecs.length !== batch.length || !vecs.every((v) => isUsableEmbedding(v, GEMINI_EMBEDDING_DIMS))) {
+              throw new Error(
+                `Embedding provider returned ${vecs.length} vectors for ${batch.length} texts, or an unusable one (expected ${GEMINI_EMBEDDING_DIMS} finite, non-zero values)`,
+              );
+            }
             for (let j = 0; j < batch.length; j++) {
               const item = batch[j];
               const vec = vecs[j];
               if (!item || !vec) continue;
               embeddings[item.idx] = vec;
-              saveCachedEmbedding(this.index.db, this.model, item.chunk.hash, vec);
+              saveCachedEmbedding(this.index.db, this.model, this.providerKey, item.chunk.hash, vec);
             }
             consecutiveRlFailures = 0;
           } catch (err) {
@@ -447,7 +575,7 @@ export class MemoryIndexManager {
               this.dirty = true;
               this._syncing = false;
               this.scheduleRpdResume(resumeInMs);
-              return;
+              return 'interrupted';
             }
             if (isEmbeddingRateLimitError(err)) {
               this.rateLimiter.depleteQuotaForType(err.quotaType, err.retryDelayMs);
@@ -459,7 +587,7 @@ export class MemoryIndexManager {
                 });
                 this.dirty = true;
                 this._syncing = false;
-                return;
+                return 'interrupted';
               }
             }
             log.warn('Memory sync: embedding batch failed, skipping file', {
@@ -467,40 +595,72 @@ export class MemoryIndexManager {
               err,
               file: absPath,
             });
+            complete = false;
             break;
           }
         }
       }
-
-      deleteFileChunks(this.index.db, repoPath, this.index.vecAvailable);
-
-      for (let ci = 0; ci < chunks.length; ci++) {
-        const chunk = chunks[ci];
-        const vec = embeddings[ci];
-        if (!chunk || !vec) continue;
-        const chunkId = `${repoPath}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`;
-        insertChunk(this.index.db, {
-          id: chunkId,
-          path: repoPath,
-          source: fileSource,
-          startLine: chunk.startLine,
-          endLine: chunk.endLine,
-          hash: chunk.hash,
-          model: this.model,
-          text: chunk.text,
-          embedding: vec,
-          vecAvailable: this.index.vecAvailable,
-        });
+      if (!complete) {
+        // Unrecorded, so the next sync takes it up again.
+        this.dirty = true;
+        incomplete++;
+        continue;
       }
 
-      upsertFileRecord(this.index.db, {
-        path: repoPath,
-        source: fileSource,
-        hash: contentHash,
-        mtimeMs: stat.mtimeMs,
-        size: stat.size,
-      });
+      // One transaction per file: its chunk, keyword and vector rows and its
+      // files row change together, so a reader (the container mounts this
+      // file read-only) sees the file before or after, never half-written, and
+      // a failure part-way leaves the old entries whole.
+      try {
+        this.index.db.transaction(() => {
+          deleteFileChunks(this.index.db, repoPath, this.index.vecAvailable);
+
+          for (let ci = 0; ci < chunks.length; ci++) {
+            const chunk = chunks[ci];
+            const vec = embeddings[ci];
+            if (!chunk || !vec) continue;
+            const chunkId = `${repoPath}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`;
+            insertChunk(this.index.db, {
+              id: chunkId,
+              path: repoPath,
+              source: fileSource,
+              startLine: chunk.startLine,
+              endLine: chunk.endLine,
+              hash: chunk.hash,
+              model: this.model,
+              text: chunk.text,
+              embedding: vec,
+              vecAvailable: this.index.vecAvailable,
+            });
+          }
+
+          upsertFileRecord(this.index.db, {
+            path: repoPath,
+            source: fileSource,
+            hash: contentHash,
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+          });
+        })();
+      } catch (err) {
+        if (this.closed) break;
+        log.warn('Memory sync: writing file failed, kept its previous entries', {
+          groupId: this.groupId,
+          file: repoPath,
+          err,
+        });
+        this.dirty = true;
+        incomplete++;
+        continue;
+      }
       indexed++;
+    }
+
+    // Stopped part-way: seenPaths covers only the files reached, so the
+    // stale pass below would drop every file not yet visited.
+    if (this.closed) {
+      this._syncing = false;
+      return 'interrupted';
     }
 
     // Remove stale files no longer on disk
@@ -509,16 +669,48 @@ export class MemoryIndexManager {
     );
     for (const p of allPaths) {
       if (!seenPaths.has(p)) {
-        deleteFileChunks(this.index.db, p, this.index.vecAvailable);
-        this.index.db.prepare('DELETE FROM files WHERE path = ?').run(p);
-        if (isRepoPath(p)) handleWorkspaceFileRemoved({ group_id: this.groupId, path: p });
+        try {
+          this.index.db.transaction(() => {
+            deleteFileChunks(this.index.db, p, this.index.vecAvailable);
+            this.index.db.prepare('DELETE FROM files WHERE path = ?').run(p);
+          })();
+        } catch (err) {
+          log.warn('Memory sync: removing a deleted file failed', { groupId: this.groupId, file: p, err });
+          this.dirty = true;
+          continue;
+        }
         removed++;
       }
+    }
+
+    // Vector rows that drifted from the chunks — a failed or impossible vector
+    // write, or an index never checked — are put right from the stored
+    // embeddings, no embedding calls.
+    if (getVectorState(this.index.db) !== 'clean') this.repairVectors();
+
+    // Embeddings no chunk uses any more — old text, another model or provider
+    // key — once past the grace window: after a full re-index, and daily.
+    const lastPrune = getLastCachePrune(this.index.db);
+    if (force || !lastPrune || Date.now() - Date.parse(lastPrune.at) >= CACHE_PRUNE_INTERVAL_MS) {
+      try {
+        const pruned = pruneEmbeddingCache(this.index.db, Date.now() - CACHE_PRUNE_GRACE_MS);
+        if (pruned > 0) log.info('Memory index: unused cached embeddings pruned', { groupId: this.groupId, pruned });
+      } catch (err) {
+        log.warn('Memory index: cache prune failed', { groupId: this.groupId, err });
+      }
+    }
+
+    // A file left incomplete still holds its old entries under an unchanged
+    // hash, so only a forced pass that reached every file clears the debt.
+    if (force && incomplete === 0) {
+      setIndexFingerprint(this.index.db, this.fingerprint());
+      this.forcePending = false;
     }
 
     this._syncing = false;
     this._lastSyncAt = Date.now();
     log.info('Memory sync complete', { groupId: this.groupId, indexed, skipped, removed });
+    return incomplete === 0 ? 'completed' : 'incomplete';
   }
 
   /**
@@ -546,7 +738,11 @@ export class MemoryIndexManager {
     let queryVec: number[] = [];
     try {
       await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms);
-      queryVec = await this.provider.embedQuery(query);
+      const vec: number[] = await this.provider.embedQuery(query);
+      if (!isUsableEmbedding(vec, GEMINI_EMBEDDING_DIMS)) {
+        throw new Error(`unusable query embedding (${(vec as number[]).length} values)`);
+      }
+      queryVec = vec;
     } catch (err) {
       log.warn('Memory search: query embed failed, falling back to FTS', { groupId: this.groupId, err });
     }
@@ -616,23 +812,102 @@ export class MemoryIndexManager {
     return this._lastSyncAt;
   }
 
+  /** Index health for the dashboard: files and chunks per source, sync state, embedding quota. */
+  stats(): MemoryIndexStats | null {
+    if (this.closed || !this.index) return null;
+    const files = this.index.db.prepare('SELECT source, COUNT(*) AS n FROM files GROUP BY source').all() as Array<{
+      source: string;
+      n: number;
+    }>;
+    const chunks = new Map(
+      (
+        this.index.db.prepare('SELECT source, COUNT(*) AS n FROM chunks GROUP BY source').all() as Array<{
+          source: string;
+          n: number;
+        }>
+      ).map((r) => [r.source, r.n]),
+    );
+    const sources = files
+      .map((f) => ({ source: f.source, files: f.n, chunks: chunks.get(f.source) ?? 0 }))
+      .sort((a, b) => a.source.localeCompare(b.source));
+    return {
+      groupId: this.groupId,
+      groupFolder: this.groupFolder,
+      model: this.model,
+      vectorSearch: this.index.vecAvailable,
+      syncing: this._syncing,
+      dirty: this.dirty,
+      lastSyncAt: this._lastSyncAt === null ? null : new Date(this._lastSyncAt).toISOString(),
+      sources,
+      quota: this.rateLimiter.snapshot(),
+    };
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     if (this.periodicTimer) clearInterval(this.periodicTimer);
     if (this.rpdResumeTimer) clearTimeout(this.rpdResumeTimer);
-    for (const sub of this.watchers) {
-      try {
-        await sub.unsubscribe();
-      } catch {}
-    }
+    // Bounded: while the native watcher is still crawling a large tree (the
+    // first minutes after start), unsubscribe does not return, and the host
+    // shutdown it sits in was killed before it finished (2026-10-12).
+    await settleWithin(Promise.allSettled(this.watchers.map((sub) => sub.unsubscribe())), CLOSE_WAIT_MS);
+    // Let an in-flight sync reach its next `closed` check before the index
+    // goes away under it.
+    await settleWithin(this.syncLock, CLOSE_WAIT_MS);
     try {
       this.index.db.close();
     } catch {}
   }
 }
 
+/** How long close() waits on each of the watchers and an in-flight sync. */
+const CLOSE_WAIT_MS = 1000;
+
+function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+    p.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+    );
+  });
+}
+
+export interface MemoryIndexStats {
+  groupId: string;
+  groupFolder: string;
+  model: string;
+  vectorSearch: boolean;
+  syncing: boolean;
+  dirty: boolean;
+  lastSyncAt: string | null;
+  sources: Array<{ source: string; files: number; chunks: number }>;
+  quota: RateLimiterSnapshot;
+}
+
 // Module-level manager registry — one instance per group
 const managers = new Map<string, MemoryIndexManager>();
+
+/** Index health of every open manager, for the dashboard. */
+export function getAllMemoryIndexStats(): MemoryIndexStats[] {
+  const out: MemoryIndexStats[] = [];
+  for (const m of managers.values()) {
+    try {
+      const s = m.stats();
+      if (s) out.push(s);
+    } catch (err) {
+      log.debug('Memory index stats unavailable', { err });
+    }
+  }
+  return out;
+}
 
 export function getMemoryManager(groupId: string): MemoryIndexManager | undefined {
   return managers.get(groupId);

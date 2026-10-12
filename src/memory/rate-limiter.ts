@@ -250,4 +250,30 @@ export class TokenBucketRateLimiter {
   depleteQuota(): void {
     this.depleteQuotaForType('unknown');
   }
+
+  /** Read-only view for the dashboard. */
+  snapshot(now = Date.now()): RateLimiterSnapshot {
+    this.rollRpdWindow(now);
+    return {
+      rpmLimit: this.rpmLimit ?? null,
+      tpmLimit: this.tpmLimit ?? null,
+      rpdBudget: this.rpdSessionBudget ?? null,
+      rpdUsed: this.rpdSessionUsed,
+      rpdWindowStart: this.rpdWindowStart === null ? null : new Date(this.rpdWindowStart).toISOString(),
+      coolDownUntil: this.coolDownUntil > now ? new Date(this.coolDownUntil).toISOString() : null,
+      rpdStoppedUntil: this.rpdExhaustedUntil > now ? new Date(this.rpdExhaustedUntil).toISOString() : null,
+    };
+  }
+}
+
+export interface RateLimiterSnapshot {
+  rpmLimit: number | null;
+  tpmLimit: number | null;
+  /** Daily request budget, counted over a 24h window from its first request. */
+  rpdBudget: number | null;
+  rpdUsed: number;
+  rpdWindowStart: string | null;
+  coolDownUntil: string | null;
+  /** Set while a daily quota stop holds. */
+  rpdStoppedUntil: string | null;
 }

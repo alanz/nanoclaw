@@ -19,6 +19,8 @@
  *   /home/node/.claude/ ← Claude SDK state + skill symlinks (RW)
  */
 
+// First: the run log must be capturing before any other module logs.
+import './run-log-start.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';

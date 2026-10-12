@@ -5,6 +5,8 @@
  * Adding a new tool module: create the file, call `registerTools([...])`
  * at module scope, and append the import here. No central list.
  */
+// First: the run log must be capturing before any other module logs.
+import './run-log-start.js';
 import './core.js';
 import './interactive.js';
 import './agents.js';

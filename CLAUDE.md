@@ -321,8 +321,9 @@ Check these first when something goes wrong:
 | Host logs | `logs/nanoclaw.error.log` first (delivery failures, crash-loop backoff, warnings), then `logs/nanoclaw.log` for the full routing chain |
 | Setup logs | `logs/setup.log` (overall), `logs/setup-steps/*.log` (per-step: bootstrap, environment, container, gateway, mounts, service, etc.) |
 | Session DBs | `data/v2-sessions/<agent-group>/<session>/` — `inbound.db` (`messages_in`: did the message reach the container?), `outbound.db` (`messages_out`: did the agent produce a response?) |
+| Container logs | `data/v2-sessions/<agent-group>/<session>/logs/` — one file per container run and process (`…-runner-<pid>.log`, `…-mcp-<pid>.log`), newest 40 kept, 10 MB cap each (`container/agent-runner/src/run-log.ts`) |
 
-Note: container logs are lost after the container exits (`--rm` flag). If the agent silently failed inside the container, there's no persistent log to inspect.
+Containers are removed on exit (`--rm`), so the runtime's own logs go with them; the run log above is the persistent record. Output from before the runner's first import (a Bun boot failure) is not in it — the boot-crash stderr tail covers that.
 
 ## Timestamps
 

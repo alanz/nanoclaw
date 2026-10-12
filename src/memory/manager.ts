@@ -420,9 +420,15 @@ export class MemoryIndexManager {
 
       const toEmbedFiltered = toEmbed.filter((e) => e.chunk.text.trim().length > 0);
 
+      // A file is written only when every chunk has its embedding: one written
+      // with chunks missing would be recorded as indexed and never retried.
+      let complete = true;
       if (toEmbedFiltered.length > 0) {
         for (const batch of batchEmbeddings(toEmbedFiltered, (e) => estimateTokens(e.chunk.text))) {
-          if (this.closed) break;
+          if (this.closed) {
+            complete = false;
+            break;
+          }
           const texts = batch.map((e) => e.chunk.text);
           const estimatedTokens = texts.reduce((s, t) => s + estimateTokens(t), 0);
           try {
@@ -467,9 +473,15 @@ export class MemoryIndexManager {
               err,
               file: absPath,
             });
+            complete = false;
             break;
           }
         }
+      }
+      if (!complete) {
+        // Unrecorded, so the next sync takes it up again.
+        this.dirty = true;
+        continue;
       }
 
       deleteFileChunks(this.index.db, repoPath, this.index.vecAvailable);
@@ -501,6 +513,13 @@ export class MemoryIndexManager {
         size: stat.size,
       });
       indexed++;
+    }
+
+    // Stopped part-way: seenPaths covers only the files reached, so the
+    // stale pass below would drop every file not yet visited.
+    if (this.closed) {
+      this._syncing = false;
+      return;
     }
 
     // Remove stale files no longer on disk
@@ -620,15 +639,37 @@ export class MemoryIndexManager {
     this.closed = true;
     if (this.periodicTimer) clearInterval(this.periodicTimer);
     if (this.rpdResumeTimer) clearTimeout(this.rpdResumeTimer);
-    for (const sub of this.watchers) {
-      try {
-        await sub.unsubscribe();
-      } catch {}
-    }
+    // Bounded: while the native watcher is still crawling a large tree (the
+    // first minutes after start), unsubscribe does not return, and the host
+    // shutdown it sits in was killed before it finished (2026-10-12).
+    await settleWithin(Promise.allSettled(this.watchers.map((sub) => sub.unsubscribe())), CLOSE_WAIT_MS);
+    // Let an in-flight sync reach its next `closed` check before the index
+    // goes away under it.
+    await settleWithin(this.syncLock, CLOSE_WAIT_MS);
     try {
       this.index.db.close();
     } catch {}
   }
+}
+
+/** How long close() waits on each of the watchers and an in-flight sync. */
+const CLOSE_WAIT_MS = 1000;
+
+function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+    p.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+    );
+  });
 }
 
 // Module-level manager registry — one instance per group

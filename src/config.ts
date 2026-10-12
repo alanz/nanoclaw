@@ -16,6 +16,8 @@ const envConfig = readEnvFile([
   'CONTAINER_CPU_LIMIT',
   'CONTAINER_MEMORY_LIMIT',
   'CONTAINER_PIDS_LIMIT',
+  'CONTAINER_IDLE_MS',
+  'TASK_CONTAINER_IDLE_MS',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'WEBHOOK_PORT',
@@ -100,6 +102,18 @@ export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envC
 // blocks it from spawning subprocesses, and neither is reported as a PID limit.
 // Empty = no cap.
 export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfig.CONTAINER_PIDS_LIMIT ?? '2048';
+
+// How long a container may sit idle — nothing claimed, no tool running,
+// nothing due — before the sweep reaps it; the next message respawns it and
+// resumes the session. Chat sessions get a window for follow-ups; task,
+// script and specialist sessions rarely get one, so they go at the first
+// sweep (60 s) after idling. Neither can exceed the 30-min absolute ceiling.
+function msSetting(name: 'CONTAINER_IDLE_MS' | 'TASK_CONTAINER_IDLE_MS', fallback: number): number {
+  const n = parseInt(process.env[name] || envConfig[name] || '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+export const CONTAINER_IDLE_MS = msSetting('CONTAINER_IDLE_MS', 10 * 60 * 1000);
+export const TASK_CONTAINER_IDLE_MS = msSetting('TASK_CONTAINER_IDLE_MS', 30 * 1000);
 
 // Egress lockdown — force all agent traffic through the selected gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.

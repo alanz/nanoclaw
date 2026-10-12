@@ -920,9 +920,29 @@ describe('DeltaChat channel adapter', () => {
       expect(attachments[0].type).toBe('image');
     });
 
-    it('falls back to placeholder when file exceeds size limit', async () => {
+    it('passes on a file well past the old 5 MB cap, labelled by kind', async () => {
       const { config, dc } = await buildSetupAdapter();
-      vi.mocked(fs.statSync).mockReturnValueOnce({ size: 10 * 1024 * 1024 } as ReturnType<typeof fs.statSync>);
+      vi.mocked(fs.statSync).mockReturnValueOnce({ size: 25 * 1024 * 1024 } as ReturnType<typeof fs.statSync>);
+      vi.mocked(fs.readFileSync).mockReturnValueOnce(Buffer.from('ogg') as ReturnType<typeof fs.readFileSync>);
+
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Voice', text: '', file: '/dc/blobs/note.ogg' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
+      const attachments = (msg.content as Record<string, unknown>).attachments as Array<{
+        name: string;
+        type?: string;
+      }>;
+      expect(attachments[0]).toMatchObject({ name: 'note.ogg', type: 'voice message' });
+    });
+
+    it('falls back to a placeholder that says why when file exceeds size limit', async () => {
+      const { config, dc } = await buildSetupAdapter();
+      vi.mocked(fs.statSync).mockReturnValueOnce({ size: 100 * 1024 * 1024 } as ReturnType<typeof fs.statSync>);
 
       dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/big.jpg' }));
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
@@ -933,7 +953,7 @@ describe('DeltaChat channel adapter', () => {
 
       const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
       const content = msg.content as Record<string, unknown>;
-      expect(content.text).toBe('[Image]');
+      expect(content.text).toBe('[Image]\n(file not passed on: 100 MB is over the 64 MB limit)');
       expect(content.attachments).toBeUndefined();
     });
 

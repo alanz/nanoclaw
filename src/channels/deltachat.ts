@@ -54,8 +54,34 @@ import {
   parseRelays,
 } from './deltachat-identity.js';
 
-/** Files larger than this are delivered as placeholders, not base64-embedded. */
-const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+/**
+ * Files larger than this reach the agent as a placeholder, not a file.
+ * Chatmail relays cap a whole mail at about 30 MB, so in practice every
+ * received file fits; the cap only guards against a relay that allows more.
+ */
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
+
+/** How the agent is told what kind of file arrived (`[voice message: x.ogg — saved to …]`). */
+function attachmentType(viewType: string): string {
+  switch (viewType) {
+    case 'Image':
+      return 'image';
+    case 'Gif':
+      return 'gif';
+    case 'Sticker':
+      return 'sticker';
+    case 'Video':
+      return 'video';
+    case 'Audio':
+      return 'audio';
+    case 'Voice':
+      return 'voice message';
+    case 'Vcard':
+      return 'contact (vCard)';
+    default:
+      return 'file';
+  }
+}
 /** Status reactions on an incoming message, in the only order they move. */
 const STATUS_STEPS = ['👀', '💭', '✅'];
 
@@ -542,12 +568,13 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
               if (stat.size <= MAX_ATTACHMENT_BYTES) {
                 const data = fs.readFileSync(msg.file as string);
                 const filename = path.basename(msg.file as string);
-                const attachType = viewType === 'Image' || viewType === 'Gif' ? 'image' : 'file';
-                attachments.push({ data: data.toString('base64'), name: filename, type: attachType });
+                attachments.push({ data: data.toString('base64'), name: filename, type: attachmentType(viewType) });
                 if (text) contentParts.push(text);
               } else {
+                const mb = Math.round(stat.size / (1024 * 1024));
                 contentParts.push(
-                  mediaPlaceholder(viewType, (msg.fileName as string | null | undefined) ?? null, text),
+                  `${mediaPlaceholder(viewType, (msg.fileName as string | null | undefined) ?? null, text)}\n` +
+                    `(file not passed on: ${mb} MB is over the ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB limit)`,
                 );
               }
             } catch {

@@ -20,6 +20,8 @@ import { getQueueStatus } from './modules/concurrency/index.js';
 // the seam owns their layout, so take the paths from it rather than guessing.
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { log } from './log.js';
+import { dispatch } from './cli/dispatch.js';
+import { getAllMemoryIndexStats } from './memory/manager.js';
 
 // ---------------------------------------------------------------------------
 // HTML dashboard
@@ -57,7 +59,26 @@ tr:hover td{background:#1c2128}
 .msg:last-child{border-bottom:none}
 .msg-meta{font-size:11px;color:#8b949e;margin-bottom:3px}
 .msg-body{font-size:13px;white-space:pre-wrap;word-break:break-word}
-.msg.outbound .msg-body{color:#79c0ff}.msg.inbound .msg-body{color:#e6edf3}
+.msg.outbound .msg-body{color:#79c0ff}
+.chat{display:flex;flex-direction:column;gap:6px}
+.bubble{max-width:78%;padding:8px 12px;border-radius:12px;font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.45}
+.bubble a{color:#58a6ff}
+.bubble .who{font-size:11px;font-weight:600;margin-bottom:3px;white-space:normal}
+.bubble .when{font-size:10px;color:#8b949e;margin-top:4px;text-align:right;white-space:normal}
+.bubble.user{align-self:flex-end;background:#0d2744;border:1px solid #1f6feb}
+.bubble.user .who{color:#58a6ff}
+.bubble.agent{align-self:flex-start;background:#21262d;border:1px solid #30363d}
+.bubble.agent .who{color:#3fb950}
+.bubble.specialist{align-self:flex-start;background:#271d38;border:1px solid #8957e5}
+.bubble.specialist .who{color:#bc8cff}
+.bubble.echo{align-self:flex-start;background:#161b22;border:1px dashed #30363d}
+.bubble.echo .who{color:#8b949e}
+.bubble.system{align-self:center;max-width:90%;background:#161b22;border:1px solid #30363d;color:#8b949e;font-size:12px}
+.bubble .files,.bubble .opts{margin-top:6px;white-space:normal}
+.bubble .files span{display:inline-block;background:#30363d;border-radius:6px;padding:2px 8px;margin:2px 4px 0 0;font-size:11px}
+.bubble .opts div{font-size:12px;color:#e6edf3}
+.chat-event{align-self:center;font-size:11px;color:#6e7681;padding:1px 0}
+.chat-day{align-self:center;font-size:11px;color:#8b949e;margin:10px 0 4px;padding:2px 10px;border-radius:10px;background:#21262d}.msg.inbound .msg-body{color:#e6edf3}
 .back{color:#8b949e;font-size:13px;cursor:pointer;margin-bottom:16px;display:inline-block}
 .back:hover{color:#e6edf3}
 .empty{color:#8b949e;font-style:italic;text-align:center;padding:32px}
@@ -146,6 +167,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
   <h1>NanoClaw</h1>
   <a id="nav-overview" href="#overview">Overview</a>
   <a id="nav-groups" href="#groups">Groups</a>
+  <a id="nav-specialists" href="#specialists">Specialists</a>
   <a id="nav-system" href="#system">System</a>
   <a id="nav-database" href="#database">Database</a>
 </nav>
@@ -160,7 +182,21 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Active Sessions</div>
     <div id="overview-sessions" class="card" style="padding:0;margin-bottom:20px;overflow:hidden"></div>
     <div id="overview-orphans-label" style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Orphan Containers</div>
-    <div id="overview-orphans" class="card" style="padding:0;overflow:hidden"></div>
+    <div id="overview-orphans" class="card" style="padding:0;overflow:hidden;margin-bottom:20px"></div>
+    <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Memory Index</div>
+    <div id="overview-memory" class="card" style="padding:0;overflow:hidden"></div>
+  </div>
+
+  <!-- Specialists -->
+  <div id="section-specialists" class="section">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <h2 style="margin-bottom:0">Specialist Tasks</h2>
+      <span id="spec-refresh-status" class="dim" style="font-size:12px"></span>
+    </div>
+    <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Live</div>
+    <div id="spec-live" class="card" style="padding:0;overflow:hidden;margin-bottom:20px"></div>
+    <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Recent</div>
+    <div id="spec-recent" class="card" style="padding:0;overflow:hidden"></div>
   </div>
 
   <!-- Groups: list + detail -->
@@ -179,6 +215,13 @@ button:disabled{opacity:.4;cursor:not-allowed}
         <a data-tab="messages">Messages</a>
         <a data-tab="files">Files</a>
         <a data-tab="notes">Graph</a>
+        <a data-tab="tasks">Tasks</a>
+      </div>
+
+      <!-- Tasks tab -->
+      <div id="group-tab-tasks" style="display:none">
+        <div id="group-tasks" class="card" style="padding:0;overflow:hidden"></div>
+        <div id="group-task-detail"></div>
       </div>
 
       <!-- Messages tab -->
@@ -322,6 +365,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var section = parts[0] || 'groups';
     if (section === 'overview') return { section: 'overview' };
     if (section === 'system') return { section: 'system' };
+    if (section === 'specialists') return { section: 'specialists', taskId: parts[1] || null };
     if (section === 'database') {
       var dbTable = parts[1] || null;
       var dbPage = 0, dbSearch = '';
@@ -348,6 +392,7 @@ document.addEventListener('DOMContentLoaded', function() {
       if (state.section === 'overview') { activateSection('overview'); clearInterval(pollTimer); pollTimer = null; startOverview(); return; }
       stopOverview();
       if (state.section === 'system') { activateSection('system'); clearInterval(pollTimer); pollTimer = null; loadSystem(); return; }
+      if (state.section === 'specialists') { activateSection('specialists'); startSpecialists(state.taskId); return; }
       if (state.section === 'database') {
         activateSection('database'); clearInterval(pollTimer); pollTimer = null;
         if (state.table) { pendingDbTable = state.table; pendingDbPage = state.page || 0; pendingDbSearch = state.search || ''; }
@@ -416,6 +461,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (name === 'overview') startOverview();
     if (name === 'groups') showGroupListInternal();
     if (name === 'system') loadSystem();
+    if (name === 'specialists') startSpecialists(null);
     if (name === 'database') loadDbTables();
   }
 
@@ -496,6 +542,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('group-tab-messages').style.display = tab === 'messages' ? '' : 'none';
     document.getElementById('group-tab-files').style.display   = tab === 'files'    ? '' : 'none';
     document.getElementById('group-tab-notes').style.display   = tab === 'notes'    ? '' : 'none';
+    document.getElementById('group-tab-tasks').style.display   = tab === 'tasks'    ? '' : 'none';
     if (tab !== 'files' && document.body.classList.contains('file-maximized')) {
       document.body.classList.remove('file-maximized');
       var btn = document.getElementById('file-maximize-btn');
@@ -511,6 +558,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (tab === 'messages') loadGroupMessages();
     if (tab === 'files')    loadGroupFiles(autoFilePath);
     if (tab === 'notes')    loadGroupGraph();
+    if (tab === 'tasks')    loadGroupTasks();
   }
 
   // ── Messages tab ───────────────────────────────────────────────────────────
@@ -571,6 +619,43 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
+  var URL_RE = new RegExp('https?://[^ <>"' + String.fromCharCode(9, 10, 13) + ']+', 'g');
+
+  // Escape, then make bare URLs clickable — the way a chat client shows them.
+  function linkify(text) {
+    return esc(text).replace(URL_RE, function(url) {
+      var trail = '';
+      while (/[.,;:!?)]$/.test(url)) { trail = url.slice(-1) + trail; url = url.slice(0, -1); }
+      var href = url.replace(/&amp;/g, '&');
+      return '<a href="' + href + '" target="_blank" rel="noopener">' + url + '</a>' + trail;
+    });
+  }
+
+  var ROLE_NAME = { user: 'You', agent: 'Agent', specialist: 'Specialist', system: 'System', echo: 'Agent, from another session' };
+
+  function renderChat(items) {
+    var lastDay = '';
+    var agentName = currentGroup ? currentGroup.name : 'Agent';
+    return items.map(function(m) {
+      var out = '';
+      var day = new Date(m.timestamp).toDateString();
+      if (day !== lastDay) { out += '<div class="chat-day">' + esc(day) + '</div>'; lastDay = day; }
+      if (m.type === 'event') {
+        return out + '<div class="chat-event">' + esc(m.text) + ' &middot; ' + fmtTime(m.timestamp) + '</div>';
+      }
+      var who = m.role === 'agent' ? agentName
+        : m.role === 'echo' ? agentName + ' (another session)'
+        : m.sender || ROLE_NAME[m.role] || '';
+      var files = m.files && m.files.length
+        ? '<div class="files">' + m.files.map(function(f) { return '<span>&#128206; ' + esc(f) + '</span>'; }).join('') + '</div>' : '';
+      var opts = m.options && m.options.length
+        ? '<div class="opts">' + m.options.map(function(o, i) { return '<div>' + (i + 1) + '. ' + esc(o) + '</div>'; }).join('') + '</div>' : '';
+      return out + '<div class="bubble ' + esc(m.role) + '"><div class="who">' + esc(who) + '</div>'
+        + linkify(m.text) + opts + files
+        + '<div class="when">' + fmtTime(m.timestamp) + '</div></div>';
+    }).join('');
+  }
+
   async function loadSessionMessages(sessionId) {
     if (!sessionId || currentTab !== 'messages') return;
     var el = document.getElementById('group-msgs');
@@ -578,11 +663,7 @@ document.addEventListener('DOMContentLoaded', function() {
       var data = await fetch('/api/messages?session='+encodeURIComponent(sessionId)+'&limit=150').then(function(r) { return r.json(); });
       if (!data.length) { el.innerHTML = '<div class="empty">No messages yet</div>'; return; }
       var atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 60;
-      el.innerHTML = data.map(function(m) {
-        var cls = m.direction === 'outbound' ? 'outbound' : 'inbound';
-        var dirLabel = m.direction === 'outbound' ? 'Agent' : (m.sender || 'User');
-        return '<div class="msg '+cls+'"><div class="msg-meta">'+esc(dirLabel)+' &middot; '+fmtTime(m.timestamp)+'</div><div class="msg-body">'+esc(m.text)+'</div></div>';
-      }).join('');
+      el.innerHTML = '<div class="chat">' + renderChat(data) + '</div>';
       if (atBottom) el.scrollTop = el.scrollHeight;
     } catch(e) {}
   }
@@ -1137,6 +1218,11 @@ document.addEventListener('DOMContentLoaded', function() {
         e.preventDefault();
         if (fileRel) switchTab('files', fileRel);
       };
+      var taskLink = document.getElementById('graph-task-link');
+      if (taskLink) taskLink.onclick = function(e) {
+        e.preventDefault();
+        openSpecialistTask(taskLink.dataset.taskId);
+      };
     });
 
     graphCy.on('mouseover', 'node', function(evt) {
@@ -1232,6 +1318,7 @@ document.addEventListener('DOMContentLoaded', function() {
     try {
       var data = await fetch('/api/status').then(function(r) { return r.json(); });
       statusEl.textContent = 'Updated '+fmtTime(new Date().toISOString());
+      loadMemoryIndex();
 
       statsEl.innerHTML = [
         { label: 'Uptime', value: data.uptimeStr, color: '#3fb950' },
@@ -1280,6 +1367,217 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     } catch(e) {}
   }
+
+  // ── Memory index (overview panel) ────────────────────────────────────────
+
+  function fmtMB(bytes) {
+    if (bytes == null) return '';
+    return bytes >= 1073741824 ? (bytes / 1073741824).toFixed(2)+' GB' : (bytes / 1048576).toFixed(0)+' MB';
+  }
+
+  async function loadMemoryIndex() {
+    var el = document.getElementById('overview-memory');
+    try {
+      var data = await fetch('/api/memory-index').then(function(r) { return r.json(); });
+      if (!data.length) { el.innerHTML = '<div class="empty" style="padding:16px">No memory index open</div>'; return; }
+      el.innerHTML = data.map(function(g) {
+        var q = g.quota || {};
+        var state = g.syncing ? '<span class="badge bb">syncing</span>' : g.dirty ? '<span class="badge by">pending changes</span>' : '<span class="badge bg">up to date</span>';
+        var stop = q.rpdStoppedUntil ? ' <span class="badge br">daily quota stop until '+esc(fmtTime(q.rpdStoppedUntil))+'</span>'
+          : q.coolDownUntil ? ' <span class="badge by">cooling down</span>' : '';
+        var budget = q.rpdBudget != null ? esc(q.rpdUsed)+' / '+esc(q.rpdBudget) : esc(q.rpdUsed);
+        var totalFiles = 0, totalChunks = 0;
+        g.sources.forEach(function(s) { totalFiles += s.files; totalChunks += s.chunks; });
+        var ri = g.reindex;
+        var reindexing = ri ? ' <span class="badge bb">full re-index '+esc(ri.done)+' / '+esc(ri.total)+'</span>' : '';
+        var warnings = (g.warnings || []).map(function(w) {
+          return '<div style="margin-top:4px;color:#f85149">&#9888; '+esc(w)+'</div>';
+        }).join('');
+        var ls = g.lastSync;
+        var lastSync = ls
+          ? fmtDate(ls.at)+' ('+esc(ls.outcome)+': '+esc(ls.indexed)+' indexed, '+esc(ls.skipped)+' unchanged, '+esc(ls.removed)+' removed'
+            +(ls.incomplete ? ', '+esc(ls.incomplete)+' failed' : '')+')'
+          : (g.lastSyncAt ? fmtDate(g.lastSyncAt) : 'never');
+        var vr = g.lastVectorRepair;
+        var vectors = (g.vectorSearch ? 'vector + keyword' : 'keyword + in-process scan')
+          +' &middot; vectors '+esc(g.vectorState.replace(/_/g, ' '))
+          +(vr ? ' (repaired '+fmtDate(vr.at)+': '+esc(vr.removed)+' removed, '+esc(vr.added)+' added'+(vr.failed ? ', '+esc(vr.failed)+' failed' : '')+')' : '');
+        var fr = g.lastFullReindex;
+        var fullReindex = ri
+          ? 'running since '+fmtDate(ri.startedAt)+' &mdash; '+esc(ri.reason)
+          : fr ? esc(fr.result)+' '+fmtDate(fr.finishedAt || fr.startedAt)+', '+esc(fr.files)+' files &mdash; '+esc(fr.reason)
+          : 'none recorded';
+        var lp = g.lastCachePrune;
+        var storage = 'cached embeddings '+esc(g.cache.rows)+' ('+esc(g.cache.unused)+' unused'
+          +(lp ? '; pruned '+fmtDate(lp.at)+', '+esc(lp.removed)+' removed' : '')+')'
+          +' &middot; index file '+fmtMB(g.db.bytes)+' ('+fmtMB(g.db.freeBytes)+' free)';
+        return '<div style="padding:12px 16px;border-bottom:1px solid #21262d">'
+          +'<strong>'+esc(g.groupName)+'</strong> '+state+reindexing+stop
+          +warnings
+          +'<div class="dim" style="margin-top:4px">'+esc(g.model)+' &middot; '+vectors
+          +' &middot; embedding requests today '+budget+'</div>'
+          +'<div class="dim" style="margin-top:2px">last sync '+lastSync+'</div>'
+          +'<div class="dim" style="margin-top:2px">full re-index: '+fullReindex
+          +(g.settingsCurrent ? '' : ' <span class="badge by">settings changed</span>')+'</div>'
+          +'<div class="dim" style="margin-top:2px">'+storage+'</div></div>'
+          +'<table><thead><tr><th>Source</th><th style="text-align:right">Files</th><th style="text-align:right">Chunks</th></tr></thead><tbody>'
+          + g.sources.map(function(s) {
+            return '<tr><td>'+esc(s.source)+'</td><td style="text-align:right">'+esc(s.files)+'</td><td style="text-align:right">'+esc(s.chunks)+'</td></tr>';
+          }).join('')
+          +'<tr><td class="dim">total</td><td class="dim" style="text-align:right">'+totalFiles+'</td><td class="dim" style="text-align:right">'+totalChunks+'</td></tr>'
+          +'</tbody></table>';
+      }).join('');
+    } catch(e) { el.innerHTML = '<div class="empty" style="padding:16px">Index status unavailable</div>'; }
+  }
+
+  // ── Specialists ──────────────────────────────────────────────────────────
+
+  var specOpen = null;
+
+  function fmtDuration(fromTs, toTs) {
+    if (!fromTs) return '';
+    var ms = (toTs ? new Date(toTs) : new Date()) - new Date(fromTs);
+    var sec = Math.max(0, Math.floor(ms / 1000));
+    if (sec < 60) return sec+'s';
+    if (sec < 3600) return Math.floor(sec/60)+'m '+(sec%60)+'s';
+    return Math.floor(sec/3600)+'h '+Math.floor(sec%3600/60)+'m';
+  }
+
+  function statusBadge(st) {
+    var cls = st === 'completed' ? 'bg' : st === 'failed' ? 'br' : st === 'running' ? 'bb' : 'by';
+    return '<span class="badge '+cls+'">'+esc(st.replace(/_/g, ' '))+'</span>';
+  }
+
+  function startSpecialists(taskId) {
+    clearInterval(pollTimer); pollTimer = null;
+    stopOverview();
+    specOpen = taskId || null;
+    loadSpecialists(true);
+    pollTimer = setInterval(function() { loadSpecialists(false); }, 10000);
+  }
+
+  function openSpecialistTask(taskId) {
+    pushHash('specialists/' + taskId);
+    activateSection('specialists');
+    startSpecialists(taskId);
+  }
+
+  function specTable(tasks) {
+    if (!tasks.length) return '<div class="empty" style="padding:16px">None</div>';
+    return '<table><thead><tr><th>Specialist</th><th>Status</th><th>Dispatched</th><th>Took</th><th>For</th><th>Task</th></tr></thead><tbody>'
+      + tasks.map(function(t) {
+        var forWhom = t.requester_name ? esc(t.requester_name) : t.requester_task_id ? 'sub-task of '+esc(t.requester_task_id.slice(0, 14))+'…' : '';
+        var row = '<tr data-spec-task="'+esc(t.id)+'" style="cursor:pointer">'
+          +'<td>'+esc(t.specialist_name)+'</td>'
+          +'<td>'+statusBadge(t.status)+'</td>'
+          +'<td class="dim">'+fmtDate(t.dispatched_at)+'</td>'
+          +'<td class="dim">'+fmtDuration(t.dispatched_at, t.closed_at)+'</td>'
+          +'<td class="dim">'+forWhom+'</td>'
+          +'<td style="font-size:12px">'+esc((t.prompt || '').slice(0, 90))+((t.prompt || '').length > 90 ? '…' : '')+'</td>'
+          +'</tr>';
+        if (specOpen === t.id) row += '<tr><td colspan="6" style="background:#0d1117">'+specDetail(t)+'</td></tr>';
+        return row;
+      }).join('')
+      +'</tbody></table>';
+  }
+
+  function specDetail(t) {
+    var pre = 'style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:4px 0 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px"';
+    var out = '<div class="dim" style="margin-bottom:8px">'+esc(t.id)
+      +' &middot; depth '+esc(t.depth)
+      +(t.restart_attempt_count ? ' &middot; restarts '+esc(t.restart_attempt_count) : '')
+      +(t.requester_task_id ? ' &middot; parent <a href="#specialists/'+esc(t.requester_task_id)+'" data-spec-link="'+esc(t.requester_task_id)+'" style="color:#58a6ff">'+esc(t.requester_task_id)+'</a>' : '')
+      +(t.pending_sub_task_id ? ' &middot; waiting on <a href="#specialists/'+esc(t.pending_sub_task_id)+'" data-spec-link="'+esc(t.pending_sub_task_id)+'" style="color:#58a6ff">'+esc(t.pending_sub_task_id)+'</a>' : '')
+      +'</div>';
+    out += '<div class="dim">Prompt</div><div '+pre+'>'+esc(t.prompt)+'</div>';
+    if (t.status === 'failed') {
+      out += '<div class="dim">Failure</div><div '+pre+'>'+esc(t.failure_kind || 'unknown')+(t.failure_detail ? ' — '+esc(t.failure_detail) : '')+'</div>';
+    } else if (t.result) {
+      out += '<div class="dim">Result</div><div '+pre+'>'+esc(t.result)+'</div>';
+    }
+    if (t.committed_files && t.committed_files.length) {
+      out += '<div class="dim">Committed to memory</div><div style="margin:4px 0 8px">'
+        + t.committed_files.map(function(f) {
+          return t.requester_folder
+            ? '<div><a href="#groups/'+esc(t.requester_folder)+'/files/'+esc(f)+'" style="color:#58a6ff;font-size:12px">'+esc(f)+'</a></div>'
+            : '<div style="font-size:12px">'+esc(f)+'</div>';
+        }).join('')
+        +'</div>';
+    }
+    return out;
+  }
+
+  async function loadSpecialists(scroll) {
+    var liveEl = document.getElementById('spec-live');
+    var recentEl = document.getElementById('spec-recent');
+    try {
+      var data = await fetch('/api/specialists').then(function(r) { return r.json(); });
+      document.getElementById('spec-refresh-status').textContent = 'Updated '+fmtTime(new Date().toISOString());
+      liveEl.innerHTML = specTable(data.live);
+      recentEl.innerHTML = specTable(data.recent);
+      if (scroll && specOpen) {
+        var row = document.querySelector('[data-spec-task="'+specOpen+'"]');
+        if (row) row.scrollIntoView({ block: 'center' });
+      }
+    } catch(e) { liveEl.innerHTML = '<div class="empty">Error loading specialist tasks</div>'; }
+  }
+
+  document.getElementById('section-specialists').addEventListener('click', function(e) {
+    var link = e.target.closest('[data-spec-link]');
+    if (link) { e.preventDefault(); openSpecialistTask(link.dataset.specLink); return; }
+    if (e.target.closest('a')) return;
+    var row = e.target.closest('[data-spec-task]');
+    if (!row) return;
+    var id = row.dataset.specTask;
+    specOpen = specOpen === id ? null : id;
+    history.replaceState(null, '', '#specialists' + (specOpen ? '/' + specOpen : ''));
+    loadSpecialists(false);
+  });
+
+  // ── Tasks tab ────────────────────────────────────────────────────────────
+
+  async function loadGroupTasks() {
+    if (!currentGroup) return;
+    var el = document.getElementById('group-tasks');
+    document.getElementById('group-task-detail').innerHTML = '';
+    el.innerHTML = '<div class="empty" style="padding:16px">Loading…</div>';
+    try {
+      var data = await fetch('/api/tasks?group='+encodeURIComponent(currentGroup.folder)).then(function(r) { return r.json(); });
+      if (data.error) { el.innerHTML = '<div class="empty" style="padding:16px">'+esc(data.error)+'</div>'; return; }
+      if (!data.length) { el.innerHTML = '<div class="empty" style="padding:16px">No scheduled tasks</div>'; return; }
+      el.innerHTML = '<table><thead><tr><th>Series</th><th>Status</th><th>Schedule</th><th>Next run</th><th>Last run</th><th>Runs</th><th>Task</th></tr></thead><tbody>'
+        + data.map(function(t) {
+          return '<tr data-task-series="'+esc(t.series_id)+'" style="cursor:pointer">'
+            +'<td style="font-family:monospace;font-size:11px">'+esc(t.series_id)+'</td>'
+            +'<td>'+statusBadge(t.status)+'</td>'
+            +'<td style="font-family:monospace;font-size:12px">'+esc(t.schedule)+'</td>'
+            +'<td class="dim">'+fmtDate(t.next_run)+'</td>'
+            +'<td class="dim">'+(t.last_run ? fmtDate(t.last_run) : '—')+'</td>'
+            +'<td class="dim">'+esc(t.runs)+(t.failed_runs ? ' <span class="badge br">'+esc(t.failed_runs)+' failed</span>' : '')+'</td>'
+            +'<td style="font-size:12px">'+(t.has_script ? '<span class="badge bb">script</span> ' : '')+esc(t.prompt)+'</td>'
+            +'</tr>';
+        }).join('')
+        +'</tbody></table>';
+    } catch(e) { el.innerHTML = '<div class="empty" style="padding:16px">Error loading tasks</div>'; }
+  }
+
+  document.getElementById('group-tasks').addEventListener('click', async function(e) {
+    var row = e.target.closest('[data-task-series]');
+    if (!row || !currentGroup) return;
+    var el = document.getElementById('group-task-detail');
+    el.innerHTML = '<div class="dim">Loading…</div>';
+    try {
+      var t = await fetch('/api/task?group='+encodeURIComponent(currentGroup.folder)+'&id='+encodeURIComponent(row.dataset.taskSeries)).then(function(r) { return r.json(); });
+      if (t.error) { el.innerHTML = '<div class="empty">'+esc(t.error)+'</div>'; return; }
+      var pre = 'style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:4px 0 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;max-height:400px;overflow:auto"';
+      el.innerHTML = '<div class="card"><strong>'+esc(row.dataset.taskSeries)+'</strong>'
+        +'<div class="dim" style="margin:4px 0 10px">'+esc(t.completed_runs)+' runs'+(t.failed_runs ? ', '+esc(t.failed_runs)+' failed' : '')+(t.recurrence ? ' &middot; '+esc(t.recurrence) : '')+'</div>'
+        +'<div class="dim">Prompt</div><div '+pre+'>'+esc(t.prompt)+'</div>'
+        +(t.script ? '<div class="dim">Gate script</div><div '+pre+'>'+esc(t.script)+'</div>' : '')
+        +'<div class="dim">Recent run log</div><div '+pre+'>'+esc(Array.isArray(t.recent_log) ? t.recent_log.join(String.fromCharCode(10, 10)) : (t.recent_log || '')) + ((!t.recent_log || !t.recent_log.length) ? '(no runs logged)' : '')+'</div>'
+        +'</div>';
+    } catch(err) { el.innerHTML = '<div class="empty">Error loading task</div>'; }
+  });
 
   // ── System ────────────────────────────────────────────────────────────────
 
@@ -1814,97 +2112,246 @@ async function getDbTableData(
 // Message reading from session DBs
 // ---------------------------------------------------------------------------
 
-type SessionMessage = {
+/**
+ * One entry in the Messages tab, shaped like the chat surface the user saw:
+ * a `bubble` from the user, the agent or a specialist, or a one-line
+ * `event` for what happened around it (a reaction, an edit, an agent
+ * action, a dispatch). Plumbing the user never saw — memory search answers
+ * and other system rows — is dropped.
+ */
+export type ChatItem = {
   id: string;
   timestamp: string;
-  direction: 'inbound' | 'outbound';
-  kind: string;
+  type: 'bubble' | 'event';
+  /** user | agent | specialist | system | echo (another session's message shown in this chat) */
+  role: 'user' | 'agent' | 'specialist' | 'system' | 'echo';
+  sender: string | null;
   text: string;
-  sender?: string | null;
+  files?: string[];
+  options?: string[];
 };
 
-function parseContentText(contentJson: string, kind: string): string {
+function obj(contentJson: string): Record<string, unknown> | null {
   try {
-    const obj = JSON.parse(contentJson);
-    if (typeof obj === 'string') return obj;
-    if (typeof obj.text === 'string') return obj.text;
-    if (Array.isArray(obj)) {
-      // Anthropic content block array
-      return obj
-        .map((b: Record<string, unknown>) => (typeof b.text === 'string' ? b.text : ''))
-        .filter(Boolean)
-        .join('\n');
-    }
-    if (kind === 'text' || kind === 'message') return JSON.stringify(obj);
-    return JSON.stringify(obj);
+    const v = JSON.parse(contentJson);
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
   } catch {
-    return contentJson;
+    return null;
   }
 }
 
-function readSessionMessages(agentGroupId: string, sessionId: string, limit: number): SessionMessage[] {
-  const messages: SessionMessage[] = [];
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
 
-  const iPath = inboundDbPath(agentGroupId, sessionId);
-  if (fs.existsSync(iPath)) {
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(iPath, { readonly: true });
-      db.pragma('busy_timeout = 3000');
-      const rows = db
-        .prepare(`SELECT id, timestamp, kind, content, platform_id FROM messages_in ORDER BY seq ASC LIMIT ?`)
-        .all(limit) as Array<{
-        id: string;
-        timestamp: string;
-        kind: string;
-        content: string;
-        platform_id: string | null;
-      }>;
-      for (const r of rows) {
-        messages.push({
-          id: r.id,
-          timestamp: r.timestamp,
-          direction: 'inbound',
-          kind: r.kind,
-          text: parseContentText(r.content, r.kind),
-          sender: r.platform_id,
-        });
-      }
-    } catch {
-      /* DB may not exist yet */
-    } finally {
-      db?.close();
+const RELAY_PREFIX = /^\[(.+?) told the user: ([\s\S]*)\]$/;
+
+/** Shape one inbound row; null when it is plumbing. Exported for tests. */
+export function shapeInbound(row: {
+  id: string;
+  timestamp: string;
+  kind: string;
+  channel_type: string | null;
+  content: string;
+}): ChatItem | null {
+  const c = obj(row.content);
+  const base = { id: row.id, timestamp: row.timestamp };
+  if (!c) return { ...base, type: 'bubble', role: 'user', sender: null, text: row.content };
+  if (row.kind === 'system') {
+    if (c.type === 'question_response') {
+      return { ...base, type: 'event', role: 'user', sender: null, text: `answered: ${str(c.selectedOption)}` };
     }
+    return null; // memory search answers and other host replies
   }
-
-  const oPath = outboundDbPath(agentGroupId, sessionId);
-  if (fs.existsSync(oPath)) {
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(oPath, { readonly: true });
-      db.pragma('busy_timeout = 3000');
-      const rows = db
-        .prepare(`SELECT id, timestamp, kind, content FROM messages_out ORDER BY seq ASC LIMIT ?`)
-        .all(limit) as Array<{ id: string; timestamp: string; kind: string; content: string }>;
-      for (const r of rows) {
-        messages.push({
-          id: r.id,
-          timestamp: r.timestamp,
-          direction: 'outbound',
-          kind: r.kind,
-          text: parseContentText(r.content, r.kind),
-        });
-      }
-    } catch {
-      /* DB may not exist yet */
-    } finally {
-      db?.close();
+  const text = str(c.text);
+  const sender = str(c.sender) || null;
+  if (row.kind === 'task') {
+    return { ...base, type: 'event', role: 'system', sender: null, text: `scheduled task ran` };
+  }
+  if (row.channel_type === 'session-echo') {
+    return { ...base, type: 'bubble', role: 'echo', sender, text };
+  }
+  if (sender === 'system' || c.senderId === 'system') {
+    if (text.startsWith('Specialist task dispatched')) {
+      return { ...base, type: 'event', role: 'system', sender: null, text: 'specialist task dispatched' };
     }
+    return {
+      ...base,
+      type: 'bubble',
+      role: 'system',
+      sender: c.completedSpecialistTaskId ? 'Specialist result' : 'System',
+      text,
+    };
   }
+  const relay = RELAY_PREFIX.exec(text);
+  if (relay) return { ...base, type: 'bubble', role: 'specialist', sender: relay[1] ?? sender, text: relay[2] ?? '' };
+  const attachments = Array.isArray(c.attachments) ? (c.attachments as Array<Record<string, unknown>>) : [];
+  const files = attachments.map((a) => str(a.name) || str(a.filename)).filter(Boolean);
+  return { ...base, type: 'bubble', role: 'user', sender, text, ...(files.length ? { files } : {}) };
+}
 
-  // merge and sort by timestamp, take most recent `limit`
-  messages.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
-  return messages.slice(-limit);
+/** Shape one outbound row; null when there is nothing to show. Exported for tests. */
+export function shapeOutbound(row: {
+  id: string;
+  timestamp: string;
+  kind: string;
+  channel_type: string | null;
+  content: string;
+}): ChatItem | null {
+  const c = obj(row.content);
+  const base = { id: row.id, timestamp: row.timestamp };
+  if (!c) return { ...base, type: 'bubble', role: 'agent', sender: null, text: row.content };
+  if (row.kind === 'system') {
+    const action = str(c.action) || 'action';
+    const detail =
+      action === 'memory_search_request' ? `: ${str(c.query)}` : action === 'dispatch_specialist' ? '' : '';
+    return { ...base, type: 'event', role: 'agent', sender: null, text: `${action.replace(/_/g, ' ')}${detail}` };
+  }
+  if (c.operation === 'reaction') {
+    return { ...base, type: 'event', role: 'agent', sender: null, text: `reacted ${str(c.emoji)}` };
+  }
+  if (c.operation === 'edit') {
+    return { ...base, type: 'event', role: 'agent', sender: null, text: 'edited a message' };
+  }
+  if (row.channel_type === 'agent') {
+    return {
+      ...base,
+      type: 'event',
+      role: 'agent',
+      sender: null,
+      text: `to another agent: ${str(c.text).slice(0, 120)}`,
+    };
+  }
+  const sender = str(c.sender) || null;
+  const role = sender ? 'specialist' : 'agent';
+  if (c.type === 'ask_question') {
+    const options = Array.isArray(c.options)
+      ? (c.options as unknown[]).map((o) => (typeof o === 'string' ? o : str((o as Record<string, unknown>)?.label)))
+      : [];
+    return {
+      ...base,
+      type: 'bubble',
+      role,
+      sender,
+      text: [str(c.title), str(c.question)].filter(Boolean).join('\n'),
+      options,
+    };
+  }
+  const files = Array.isArray(c.files)
+    ? (c.files as unknown[]).map((f) => (typeof f === 'string' ? f : '')).filter(Boolean)
+    : [];
+  const text = str(c.text) || (c.type === 'card' ? str(c.title) : '');
+  if (!text && !files.length) return null;
+  return { ...base, type: 'bubble', role, sender, text, ...(files.length ? { files } : {}) };
+}
+
+type Row = { id: string; timestamp: string; kind: string; channel_type: string | null; content: string };
+
+/** The newest `limit` rows of one mailbox table, oldest first. */
+function newestRows(dbPath: string, table: 'messages_in' | 'messages_out', limit: number): Row[] {
+  if (!fs.existsSync(dbPath)) return [];
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    db.pragma('busy_timeout = 3000');
+    const rows = db
+      .prepare(`SELECT id, timestamp, kind, channel_type, content FROM ${table} ORDER BY seq DESC LIMIT ?`)
+      .all(limit) as Row[];
+    return rows.reverse();
+  } catch {
+    return []; // DB may not exist yet
+  } finally {
+    db?.close();
+  }
+}
+
+function readSessionMessages(agentGroupId: string, sessionId: string, limit: number): ChatItem[] {
+  // Read past the limit: plumbing rows are dropped after shaping.
+  const items: ChatItem[] = [
+    ...newestRows(inboundDbPath(agentGroupId, sessionId), 'messages_in', limit * 2).map(shapeInbound),
+    ...newestRows(outboundDbPath(agentGroupId, sessionId), 'messages_out', limit * 2).map(shapeOutbound),
+  ].filter((m): m is ChatItem => m !== null);
+  items.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  return items.slice(-limit);
+}
+
+// ---------------------------------------------------------------------------
+// Specialists and scheduled tasks
+// ---------------------------------------------------------------------------
+
+const LIVE_TASK_STATUSES = ['queued', 'running', 'awaiting_sub_task', 'awaiting_restart'];
+const TEXT_CAP = 4000;
+
+function cap(text: string | null): string | null {
+  return text && text.length > TEXT_CAP ? `${text.slice(0, TEXT_CAP)}…` : text;
+}
+
+/**
+ * Specialist tasks for the Specialists page: everything live, plus the 50
+ * most recently finished. Plain SQL against specialist_tasks — read-only.
+ */
+async function specialistTasks(): Promise<{ live: unknown[]; recent: unknown[] }> {
+  const db = getDb();
+  const groups = await getAllAgentGroups();
+  const byId = new Map(groups.map((g) => [g.id, g]));
+  const placeholders = LIVE_TASK_STATUSES.map(() => '?').join(', ');
+  type Row = {
+    id: string;
+    specialist_group_id: string;
+    prompt: string;
+    requester_group_id: string | null;
+    requester_task_id: string | null;
+    depth: number;
+    status: string;
+    dispatched_at: string;
+    closed_at: string | null;
+    result: string | null;
+    failure_kind: string | null;
+    failure_detail: string | null;
+    committed_files: string | null;
+    restart_attempt_count: number;
+    pending_sub_task_id: string | null;
+  };
+  const cols = `id, specialist_group_id, prompt, requester_group_id, requester_task_id, depth, status,
+    dispatched_at, closed_at, result, failure_kind, failure_detail, committed_files,
+    restart_attempt_count, pending_sub_task_id`;
+  const live = (await db.all(
+    `SELECT ${cols} FROM specialist_tasks WHERE status IN (${placeholders}) ORDER BY dispatched_at DESC`,
+    ...LIVE_TASK_STATUSES,
+  )) as Row[];
+  const recent = (await db.all(
+    `SELECT ${cols} FROM specialist_tasks WHERE status NOT IN (${placeholders})
+      ORDER BY COALESCE(closed_at, dispatched_at) DESC LIMIT 50`,
+    ...LIVE_TASK_STATUSES,
+  )) as Row[];
+  const shape = (t: Row) => {
+    let committed: string[] = [];
+    try {
+      committed = t.committed_files ? (JSON.parse(t.committed_files) as string[]) : [];
+    } catch {
+      committed = [];
+    }
+    const specialist = byId.get(t.specialist_group_id);
+    const requester = t.requester_group_id ? byId.get(t.requester_group_id) : undefined;
+    return {
+      ...t,
+      prompt: cap(t.prompt),
+      result: cap(t.result),
+      committed_files: committed,
+      specialist_name: specialist?.name ?? t.specialist_group_id,
+      specialist_folder: specialist?.folder ?? null,
+      requester_name: requester?.name ?? null,
+      requester_folder: requester?.folder ?? null,
+    };
+  };
+  return { live: live.map(shape), recent: recent.map(shape) };
+}
+
+/** Run a read-only ncl command as the host and return its data. */
+async function nclRead(command: string, args: Record<string, unknown>): Promise<unknown> {
+  const res = await dispatch({ id: `web-ui-${Date.now()}`, command, args }, { caller: 'host' });
+  if (!res.ok) return { error: res.error.message };
+  return res.data;
 }
 
 // ---------------------------------------------------------------------------
@@ -2237,6 +2684,40 @@ export function startWebUi(port: number, host = '127.0.0.1'): Server {
           }),
         );
         sendJson(res, { sessions, messagingGroups });
+        return;
+      }
+
+      // GET /api/specialists — live + recent specialist tasks
+      if (req.method === 'GET' && pathname === '/api/specialists') {
+        sendJson(res, await specialistTasks());
+        return;
+      }
+
+      // GET /api/tasks?group=<folder> — the group's scheduled task series
+      if (req.method === 'GET' && pathname === '/api/tasks') {
+        const group = await getAgentGroupByFolder(url.searchParams.get('group') ?? '');
+        if (!group) return sendJson(res, { error: 'unknown group' }, 404);
+        sendJson(res, await nclRead('tasks-list', { group: group.id }));
+        return;
+      }
+
+      // GET /api/task?group=<folder>&id=<series> — one series with its prompt, script and run log tail
+      if (req.method === 'GET' && pathname === '/api/task') {
+        const group = await getAgentGroupByFolder(url.searchParams.get('group') ?? '');
+        const id = url.searchParams.get('id') ?? '';
+        if (!group || !id) return sendJson(res, { error: 'group and id required' }, 400);
+        sendJson(res, await nclRead('tasks-get', { group: group.id, id }));
+        return;
+      }
+
+      // GET /api/memory-index — index health and embedding quota per indexed group
+      if (req.method === 'GET' && pathname === '/api/memory-index') {
+        const groups = await getAllAgentGroups();
+        const byId = new Map(groups.map((g) => [g.id, g]));
+        sendJson(
+          res,
+          getAllMemoryIndexStats().map((s) => ({ ...s, groupName: byId.get(s.groupId)?.name ?? s.groupFolder })),
+        );
         return;
       }
 

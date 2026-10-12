@@ -3,6 +3,13 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 // --- Mocks (must precede imports that trigger side effects) ---
 
 vi.mock('./channel-registry.js', () => ({ registerChannelAdapter: vi.fn() }));
+const completedHooks = vi.hoisted(() => [] as Array<(completed: unknown[], session: unknown) => Promise<void>>);
+vi.mock('../reconcile-session.js', () => ({
+  registerInboundCompletedHook: (hook: (completed: unknown[], session: unknown) => Promise<void>) => {
+    completedHooks.push(hook);
+    return () => completedHooks.splice(completedHooks.indexOf(hook), 1);
+  },
+}));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   DATA_DIR: '/tmp/dc-test/data',
@@ -92,6 +99,7 @@ function makeDcMock() {
       sendMsg: vi.fn().mockResolvedValue(42),
       sendReaction: vi.fn().mockResolvedValue(undefined),
       sendEditRequest: vi.fn().mockResolvedValue(null),
+      deleteMessagesForAll: vi.fn().mockResolvedValue(null),
       getConnectivity: vi.fn().mockResolvedValue(4000),
       getConfig: vi.fn().mockResolvedValue('bot@example.com'),
       getChatSecurejoinQrCode: vi.fn().mockResolvedValue('https://i.delta.chat/#MOCKINVITE'),
@@ -511,6 +519,107 @@ describe('DeltaChat channel adapter', () => {
       expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['💭']);
     });
 
+    it('sends 💭 once however often the typing refresh fires', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.setTyping!(PLATFORM_ID, null);
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledTimes(1);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['💭']);
+    });
+
+    it('sends each status step in a later second than the one before, however fast the reply', async () => {
+      // Whole-second reaction timestamps: two steps in one second can show in
+      // either order, which left 💭 over ✅ after a sub-second "Session cleared.".
+      vi.setSystemTime(new Date('2026-10-14T19:47:07.100Z'));
+      const { adapter, dc } = await buildSetupAdapter();
+      const sentAt: Array<[string, number]> = [];
+      dc.rpc.sendReaction.mockImplementation(async (_a: number, _m: number, [emoji]: string[]) => {
+        sentAt.push([emoji, Date.now()]);
+      });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      const typing = adapter.setTyping!(PLATFORM_ID, null);
+      const reply = adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Session cleared.' } });
+      await vi.advanceTimersByTimeAsync(3000);
+      await Promise.all([typing, reply]);
+
+      expect(sentAt.map(([emoji]) => emoji)).toEqual(['👀', '💭', '✅']);
+      const seconds = sentAt.map(([, t]) => Math.floor(t / 1000));
+      expect(seconds[1]).toBeGreaterThan(seconds[0]);
+      expect(seconds[2]).toBeGreaterThan(seconds[1]);
+    });
+
+    it('does not put 💭 back over ✅ once a reply is delivered', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Part one' } });
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Part two' } });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('leaves a reaction the agent chose on the message', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      await adapter.deliver(PLATFORM_ID, null, {
+        kind: 'chat',
+        content: { operation: 'reaction', messageId: String(MSG_ID), emoji: '👍' },
+      });
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Done' } });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('starts again from 👀 on the next incoming message', async () => {
+      const MSG_ID_2 = 150;
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Reply' } });
+
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'next' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg(CHAT_ID, MSG_ID_2);
+      await flush();
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, ['💭']);
+    });
+
     it('does nothing when no message has been received yet', async () => {
       const { adapter, dc } = await buildSetupAdapter();
 
@@ -557,6 +666,126 @@ describe('DeltaChat channel adapter', () => {
 
       await adapter.setTyping!(PID_2, null);
       expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, ['💭']);
+    });
+  });
+
+  describe('progress message', () => {
+    const PROGRESS_ID = 42; // sendMsg mock's id
+    const sentTexts = (dc: { rpc: { sendMsg: { mock: { calls: unknown[][] } } } }) =>
+      dc.rpc.sendMsg.mock.calls.map((c) => (c[2] as { text: string }).text);
+
+    async function turnStarted() {
+      const built = await buildSetupAdapter();
+      built.dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      built.dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      built.dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await built.adapter.setTyping!(PLATFORM_ID, null, 'thinking');
+      return built;
+    }
+
+    it('appears with the first status, then follows it at most every 10 s', async () => {
+      const { adapter, dc } = await turnStarted();
+      expect(sentTexts(dc)).toEqual(['⏳ Thinking…']);
+      vi.setSystemTime(Date.now() + 10_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
+      expect(dc.rpc.sendEditRequest).toHaveBeenCalledWith(ACCOUNT_ID, PROGRESS_ID, '⏳ Searching the web…');
+      vi.mocked(dc.rpc.sendEditRequest).mockClear();
+
+      vi.setSystemTime(Date.now() + 4_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'reading a web page');
+      expect(dc.rpc.sendEditRequest).not.toHaveBeenCalled();
+
+      vi.setSystemTime(Date.now() + 8_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'reading a web page');
+      expect(dc.rpc.sendEditRequest).toHaveBeenCalledWith(ACCOUNT_ID, PROGRESS_ID, '⏳ Reading a web page…');
+      expect(dc.rpc.sendMsg).toHaveBeenCalledTimes(1);
+    });
+
+    it('is deleted for everyone when the reply arrives', async () => {
+      const { adapter, dc } = await turnStarted();
+      await adapter.setTyping!(PLATFORM_ID, null, 'thinking');
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Answer' } });
+
+      expect(dc.rpc.deleteMessagesForAll).toHaveBeenCalledWith(ACCOUNT_ID, [PROGRESS_ID]);
+      expect(sentTexts(dc)).toEqual(['⏳ Thinking…', 'Answer']);
+    });
+
+    it('stays while a specialist relays under its own name', async () => {
+      const { adapter, dc } = await turnStarted();
+      await adapter.setTyping!(PLATFORM_ID, null, 'waiting on a specialist');
+      await adapter.deliver(PLATFORM_ID, null, {
+        kind: 'chat',
+        content: { text: 'Found three papers', sender: 'Researcher' },
+      });
+
+      expect(dc.rpc.deleteMessagesForAll).not.toHaveBeenCalled();
+    });
+
+    it('is deleted when the turn ends without a reply', async () => {
+      const { adapter, dc } = await turnStarted();
+      await adapter.setTyping!(PLATFORM_ID, null, 'thinking');
+
+      await completedHooks.at(-1)!(
+        [{ id: `${MSG_ID}:ag-test`, kind: 'chat', platformId: PLATFORM_ID, channelType: 'deltachat', threadId: null }],
+        { agent_group_id: 'ag-test' },
+      );
+
+      expect(dc.rpc.deleteMessagesForAll).toHaveBeenCalledWith(ACCOUNT_ID, [PROGRESS_ID]);
+    });
+  });
+
+  describe('turn completed without a reply', () => {
+    const AG = 'ag-test';
+    const completedOn = (msgId: number) => [
+      { id: `${msgId}:${AG}`, kind: 'chat', platformId: PLATFORM_ID, channelType: 'deltachat', threadId: null },
+    ];
+
+    it('sets ✅ on the last incoming message when its turn completes', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      dc.rpc.sendReaction.mockClear();
+
+      await completedHooks.at(-1)!(completedOn(MSG_ID), { agent_group_id: AG });
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledTimes(1);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['✅']);
+    });
+
+    it('leaves a newer message alone when an older turn completes', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      dc.rpc.sendReaction.mockClear();
+
+      await completedHooks.at(-1)!(completedOn(MSG_ID - 1), { agent_group_id: AG });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('does not resend ✅ after the reply already set it', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Reply' } });
+      dc.rpc.sendReaction.mockClear();
+
+      await completedHooks.at(-1)!(completedOn(MSG_ID), { agent_group_id: AG });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
     });
   });
 
@@ -785,9 +1014,29 @@ describe('DeltaChat channel adapter', () => {
       expect(attachments[0].type).toBe('image');
     });
 
-    it('falls back to placeholder when file exceeds size limit', async () => {
+    it('passes on a file well past the old 5 MB cap, labelled by kind', async () => {
       const { config, dc } = await buildSetupAdapter();
-      vi.mocked(fs.statSync).mockReturnValueOnce({ size: 10 * 1024 * 1024 } as ReturnType<typeof fs.statSync>);
+      vi.mocked(fs.statSync).mockReturnValueOnce({ size: 25 * 1024 * 1024 } as ReturnType<typeof fs.statSync>);
+      vi.mocked(fs.readFileSync).mockReturnValueOnce(Buffer.from('ogg') as ReturnType<typeof fs.readFileSync>);
+
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Voice', text: '', file: '/dc/blobs/note.ogg' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+
+      emitIncomingMsg();
+      await flush();
+
+      const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
+      const attachments = (msg.content as Record<string, unknown>).attachments as Array<{
+        name: string;
+        type?: string;
+      }>;
+      expect(attachments[0]).toMatchObject({ name: 'note.ogg', type: 'voice message' });
+    });
+
+    it('falls back to a placeholder that says why when file exceeds size limit', async () => {
+      const { config, dc } = await buildSetupAdapter();
+      vi.mocked(fs.statSync).mockReturnValueOnce({ size: 100 * 1024 * 1024 } as ReturnType<typeof fs.statSync>);
 
       dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ viewType: 'Image', text: '', file: '/dc/blobs/big.jpg' }));
       dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
@@ -798,7 +1047,7 @@ describe('DeltaChat channel adapter', () => {
 
       const [, , msg] = vi.mocked(config.onInbound).mock.calls[0];
       const content = msg.content as Record<string, unknown>;
-      expect(content.text).toBe('[Image]');
+      expect(content.text).toBe('[Image]\n(file not passed on: 100 MB is over the 64 MB limit)');
       expect(content.attachments).toBeUndefined();
     });
 

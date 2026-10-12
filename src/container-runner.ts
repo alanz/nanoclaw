@@ -59,7 +59,7 @@ import {
 import { releaseGatewaySession, type GatewaySessionControl } from './gateway-session-lifecycle.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
-import { stopTypingRefresh } from './modules/typing/index.js';
+import { holdTypingForRespawn } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider contracts use a separate barrel so update-skills identity detection
@@ -794,9 +794,9 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
     log.error('Failed to record stopped container', { sessionId, containerName, err });
   }
   try {
-    stopTypingRefresh(sessionId);
+    holdTypingForRespawn(sessionId);
   } catch (err) {
-    log.error('Failed to stop typing refresh', { sessionId, containerName, err });
+    log.error('Failed to hold typing refresh', { sessionId, containerName, err });
   }
 
   if (failure && failure.kind !== 'started-then-died') {

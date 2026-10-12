@@ -59,7 +59,26 @@ tr:hover td{background:#1c2128}
 .msg:last-child{border-bottom:none}
 .msg-meta{font-size:11px;color:#8b949e;margin-bottom:3px}
 .msg-body{font-size:13px;white-space:pre-wrap;word-break:break-word}
-.msg.outbound .msg-body{color:#79c0ff}.msg.inbound .msg-body{color:#e6edf3}
+.msg.outbound .msg-body{color:#79c0ff}
+.chat{display:flex;flex-direction:column;gap:6px}
+.bubble{max-width:78%;padding:8px 12px;border-radius:12px;font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.45}
+.bubble a{color:#58a6ff}
+.bubble .who{font-size:11px;font-weight:600;margin-bottom:3px;white-space:normal}
+.bubble .when{font-size:10px;color:#8b949e;margin-top:4px;text-align:right;white-space:normal}
+.bubble.user{align-self:flex-end;background:#0d2744;border:1px solid #1f6feb}
+.bubble.user .who{color:#58a6ff}
+.bubble.agent{align-self:flex-start;background:#21262d;border:1px solid #30363d}
+.bubble.agent .who{color:#3fb950}
+.bubble.specialist{align-self:flex-start;background:#271d38;border:1px solid #8957e5}
+.bubble.specialist .who{color:#bc8cff}
+.bubble.echo{align-self:flex-start;background:#161b22;border:1px dashed #30363d}
+.bubble.echo .who{color:#8b949e}
+.bubble.system{align-self:center;max-width:90%;background:#161b22;border:1px solid #30363d;color:#8b949e;font-size:12px}
+.bubble .files,.bubble .opts{margin-top:6px;white-space:normal}
+.bubble .files span{display:inline-block;background:#30363d;border-radius:6px;padding:2px 8px;margin:2px 4px 0 0;font-size:11px}
+.bubble .opts div{font-size:12px;color:#e6edf3}
+.chat-event{align-self:center;font-size:11px;color:#6e7681;padding:1px 0}
+.chat-day{align-self:center;font-size:11px;color:#8b949e;margin:10px 0 4px;padding:2px 10px;border-radius:10px;background:#21262d}.msg.inbound .msg-body{color:#e6edf3}
 .back{color:#8b949e;font-size:13px;cursor:pointer;margin-bottom:16px;display:inline-block}
 .back:hover{color:#e6edf3}
 .empty{color:#8b949e;font-style:italic;text-align:center;padding:32px}
@@ -600,6 +619,43 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
+  var URL_RE = new RegExp('https?://[^ <>"' + String.fromCharCode(9, 10, 13) + ']+', 'g');
+
+  // Escape, then make bare URLs clickable — the way a chat client shows them.
+  function linkify(text) {
+    return esc(text).replace(URL_RE, function(url) {
+      var trail = '';
+      while (/[.,;:!?)]$/.test(url)) { trail = url.slice(-1) + trail; url = url.slice(0, -1); }
+      var href = url.replace(/&amp;/g, '&');
+      return '<a href="' + href + '" target="_blank" rel="noopener">' + url + '</a>' + trail;
+    });
+  }
+
+  var ROLE_NAME = { user: 'You', agent: 'Agent', specialist: 'Specialist', system: 'System', echo: 'Agent, from another session' };
+
+  function renderChat(items) {
+    var lastDay = '';
+    var agentName = currentGroup ? currentGroup.name : 'Agent';
+    return items.map(function(m) {
+      var out = '';
+      var day = new Date(m.timestamp).toDateString();
+      if (day !== lastDay) { out += '<div class="chat-day">' + esc(day) + '</div>'; lastDay = day; }
+      if (m.type === 'event') {
+        return out + '<div class="chat-event">' + esc(m.text) + ' &middot; ' + fmtTime(m.timestamp) + '</div>';
+      }
+      var who = m.role === 'agent' ? agentName
+        : m.role === 'echo' ? agentName + ' (another session)'
+        : m.sender || ROLE_NAME[m.role] || '';
+      var files = m.files && m.files.length
+        ? '<div class="files">' + m.files.map(function(f) { return '<span>&#128206; ' + esc(f) + '</span>'; }).join('') + '</div>' : '';
+      var opts = m.options && m.options.length
+        ? '<div class="opts">' + m.options.map(function(o, i) { return '<div>' + (i + 1) + '. ' + esc(o) + '</div>'; }).join('') + '</div>' : '';
+      return out + '<div class="bubble ' + esc(m.role) + '"><div class="who">' + esc(who) + '</div>'
+        + linkify(m.text) + opts + files
+        + '<div class="when">' + fmtTime(m.timestamp) + '</div></div>';
+    }).join('');
+  }
+
   async function loadSessionMessages(sessionId) {
     if (!sessionId || currentTab !== 'messages') return;
     var el = document.getElementById('group-msgs');
@@ -607,11 +663,7 @@ document.addEventListener('DOMContentLoaded', function() {
       var data = await fetch('/api/messages?session='+encodeURIComponent(sessionId)+'&limit=150').then(function(r) { return r.json(); });
       if (!data.length) { el.innerHTML = '<div class="empty">No messages yet</div>'; return; }
       var atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 60;
-      el.innerHTML = data.map(function(m) {
-        var cls = m.direction === 'outbound' ? 'outbound' : 'inbound';
-        var dirLabel = m.direction === 'outbound' ? 'Agent' : (m.sender || 'User');
-        return '<div class="msg '+cls+'"><div class="msg-meta">'+esc(dirLabel)+' &middot; '+fmtTime(m.timestamp)+'</div><div class="msg-body">'+esc(m.text)+'</div></div>';
-      }).join('');
+      el.innerHTML = '<div class="chat">' + renderChat(data) + '</div>';
       if (atBottom) el.scrollTop = el.scrollHeight;
     } catch(e) {}
   }
@@ -2028,97 +2080,167 @@ async function getDbTableData(
 // Message reading from session DBs
 // ---------------------------------------------------------------------------
 
-type SessionMessage = {
+/**
+ * One entry in the Messages tab, shaped like the chat surface the user saw:
+ * a `bubble` from the user, the agent or a specialist, or a one-line
+ * `event` for what happened around it (a reaction, an edit, an agent
+ * action, a dispatch). Plumbing the user never saw — memory search answers
+ * and other system rows — is dropped.
+ */
+export type ChatItem = {
   id: string;
   timestamp: string;
-  direction: 'inbound' | 'outbound';
-  kind: string;
+  type: 'bubble' | 'event';
+  /** user | agent | specialist | system | echo (another session's message shown in this chat) */
+  role: 'user' | 'agent' | 'specialist' | 'system' | 'echo';
+  sender: string | null;
   text: string;
-  sender?: string | null;
+  files?: string[];
+  options?: string[];
 };
 
-function parseContentText(contentJson: string, kind: string): string {
+function obj(contentJson: string): Record<string, unknown> | null {
   try {
-    const obj = JSON.parse(contentJson);
-    if (typeof obj === 'string') return obj;
-    if (typeof obj.text === 'string') return obj.text;
-    if (Array.isArray(obj)) {
-      // Anthropic content block array
-      return obj
-        .map((b: Record<string, unknown>) => (typeof b.text === 'string' ? b.text : ''))
-        .filter(Boolean)
-        .join('\n');
-    }
-    if (kind === 'text' || kind === 'message') return JSON.stringify(obj);
-    return JSON.stringify(obj);
+    const v = JSON.parse(contentJson);
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
   } catch {
-    return contentJson;
+    return null;
   }
 }
 
-function readSessionMessages(agentGroupId: string, sessionId: string, limit: number): SessionMessage[] {
-  const messages: SessionMessage[] = [];
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
 
-  const iPath = inboundDbPath(agentGroupId, sessionId);
-  if (fs.existsSync(iPath)) {
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(iPath, { readonly: true });
-      db.pragma('busy_timeout = 3000');
-      const rows = db
-        .prepare(`SELECT id, timestamp, kind, content, platform_id FROM messages_in ORDER BY seq ASC LIMIT ?`)
-        .all(limit) as Array<{
-        id: string;
-        timestamp: string;
-        kind: string;
-        content: string;
-        platform_id: string | null;
-      }>;
-      for (const r of rows) {
-        messages.push({
-          id: r.id,
-          timestamp: r.timestamp,
-          direction: 'inbound',
-          kind: r.kind,
-          text: parseContentText(r.content, r.kind),
-          sender: r.platform_id,
-        });
-      }
-    } catch {
-      /* DB may not exist yet */
-    } finally {
-      db?.close();
+const RELAY_PREFIX = /^\[(.+?) told the user: ([\s\S]*)\]$/;
+
+/** Shape one inbound row; null when it is plumbing. Exported for tests. */
+export function shapeInbound(row: {
+  id: string;
+  timestamp: string;
+  kind: string;
+  channel_type: string | null;
+  content: string;
+}): ChatItem | null {
+  const c = obj(row.content);
+  const base = { id: row.id, timestamp: row.timestamp };
+  if (!c) return { ...base, type: 'bubble', role: 'user', sender: null, text: row.content };
+  if (row.kind === 'system') {
+    if (c.type === 'question_response') {
+      return { ...base, type: 'event', role: 'user', sender: null, text: `answered: ${str(c.selectedOption)}` };
     }
+    return null; // memory search answers and other host replies
   }
-
-  const oPath = outboundDbPath(agentGroupId, sessionId);
-  if (fs.existsSync(oPath)) {
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(oPath, { readonly: true });
-      db.pragma('busy_timeout = 3000');
-      const rows = db
-        .prepare(`SELECT id, timestamp, kind, content FROM messages_out ORDER BY seq ASC LIMIT ?`)
-        .all(limit) as Array<{ id: string; timestamp: string; kind: string; content: string }>;
-      for (const r of rows) {
-        messages.push({
-          id: r.id,
-          timestamp: r.timestamp,
-          direction: 'outbound',
-          kind: r.kind,
-          text: parseContentText(r.content, r.kind),
-        });
-      }
-    } catch {
-      /* DB may not exist yet */
-    } finally {
-      db?.close();
+  const text = str(c.text);
+  const sender = str(c.sender) || null;
+  if (row.kind === 'task') {
+    return { ...base, type: 'event', role: 'system', sender: null, text: `scheduled task ran` };
+  }
+  if (row.channel_type === 'session-echo') {
+    return { ...base, type: 'bubble', role: 'echo', sender, text };
+  }
+  if (sender === 'system' || c.senderId === 'system') {
+    if (text.startsWith('Specialist task dispatched')) {
+      return { ...base, type: 'event', role: 'system', sender: null, text: 'specialist task dispatched' };
     }
+    return {
+      ...base,
+      type: 'bubble',
+      role: 'system',
+      sender: c.completedSpecialistTaskId ? 'Specialist result' : 'System',
+      text,
+    };
   }
+  const relay = RELAY_PREFIX.exec(text);
+  if (relay) return { ...base, type: 'bubble', role: 'specialist', sender: relay[1] ?? sender, text: relay[2] ?? '' };
+  const attachments = Array.isArray(c.attachments) ? (c.attachments as Array<Record<string, unknown>>) : [];
+  const files = attachments.map((a) => str(a.name) || str(a.filename)).filter(Boolean);
+  return { ...base, type: 'bubble', role: 'user', sender, text, ...(files.length ? { files } : {}) };
+}
 
-  // merge and sort by timestamp, take most recent `limit`
-  messages.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
-  return messages.slice(-limit);
+/** Shape one outbound row; null when there is nothing to show. Exported for tests. */
+export function shapeOutbound(row: {
+  id: string;
+  timestamp: string;
+  kind: string;
+  channel_type: string | null;
+  content: string;
+}): ChatItem | null {
+  const c = obj(row.content);
+  const base = { id: row.id, timestamp: row.timestamp };
+  if (!c) return { ...base, type: 'bubble', role: 'agent', sender: null, text: row.content };
+  if (row.kind === 'system') {
+    const action = str(c.action) || 'action';
+    const detail =
+      action === 'memory_search_request' ? `: ${str(c.query)}` : action === 'dispatch_specialist' ? '' : '';
+    return { ...base, type: 'event', role: 'agent', sender: null, text: `${action.replace(/_/g, ' ')}${detail}` };
+  }
+  if (c.operation === 'reaction') {
+    return { ...base, type: 'event', role: 'agent', sender: null, text: `reacted ${str(c.emoji)}` };
+  }
+  if (c.operation === 'edit') {
+    return { ...base, type: 'event', role: 'agent', sender: null, text: 'edited a message' };
+  }
+  if (row.channel_type === 'agent') {
+    return {
+      ...base,
+      type: 'event',
+      role: 'agent',
+      sender: null,
+      text: `to another agent: ${str(c.text).slice(0, 120)}`,
+    };
+  }
+  const sender = str(c.sender) || null;
+  const role = sender ? 'specialist' : 'agent';
+  if (c.type === 'ask_question') {
+    const options = Array.isArray(c.options)
+      ? (c.options as unknown[]).map((o) => (typeof o === 'string' ? o : str((o as Record<string, unknown>)?.label)))
+      : [];
+    return {
+      ...base,
+      type: 'bubble',
+      role,
+      sender,
+      text: [str(c.title), str(c.question)].filter(Boolean).join('\n'),
+      options,
+    };
+  }
+  const files = Array.isArray(c.files)
+    ? (c.files as unknown[]).map((f) => (typeof f === 'string' ? f : '')).filter(Boolean)
+    : [];
+  const text = str(c.text) || (c.type === 'card' ? str(c.title) : '');
+  if (!text && !files.length) return null;
+  return { ...base, type: 'bubble', role, sender, text, ...(files.length ? { files } : {}) };
+}
+
+type Row = { id: string; timestamp: string; kind: string; channel_type: string | null; content: string };
+
+/** The newest `limit` rows of one mailbox table, oldest first. */
+function newestRows(dbPath: string, table: 'messages_in' | 'messages_out', limit: number): Row[] {
+  if (!fs.existsSync(dbPath)) return [];
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    db.pragma('busy_timeout = 3000');
+    const rows = db
+      .prepare(`SELECT id, timestamp, kind, channel_type, content FROM ${table} ORDER BY seq DESC LIMIT ?`)
+      .all(limit) as Row[];
+    return rows.reverse();
+  } catch {
+    return []; // DB may not exist yet
+  } finally {
+    db?.close();
+  }
+}
+
+function readSessionMessages(agentGroupId: string, sessionId: string, limit: number): ChatItem[] {
+  // Read past the limit: plumbing rows are dropped after shaping.
+  const items: ChatItem[] = [
+    ...newestRows(inboundDbPath(agentGroupId, sessionId), 'messages_in', limit * 2).map(shapeInbound),
+    ...newestRows(outboundDbPath(agentGroupId, sessionId), 'messages_out', limit * 2).map(shapeOutbound),
+  ].filter((m): m is ChatItem => m !== null);
+  items.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  return items.slice(-limit);
 }
 
 // ---------------------------------------------------------------------------

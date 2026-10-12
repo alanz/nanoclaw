@@ -13,6 +13,8 @@ import { createAgentGroup } from '../../db/agent-groups.js';
 import { createSession, getSession } from '../../db/sessions.js';
 import { createSpecialist, createTask } from './db.js';
 import { endActiveInvocationForSession } from './invocation.js';
+import { buildPostMortem } from './postmortem.js';
+import { writeSessionMessage } from '../../session-manager.js';
 import { routeResult } from './routing.js';
 import type { SpecialistTask } from './types.js';
 
@@ -28,6 +30,10 @@ vi.mock('../../session-manager.js', () => ({
   // undefined is what an unprovisioned session looks like, which is the case
   // this file cares about: cleanup must not throw when there is no mailbox.
   withExistingMailboxSession: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('./postmortem.js', () => ({
+  buildPostMortem: vi.fn(() => 'What the specialist was doing:\n• Last tool: WebFetch({})'),
 }));
 
 vi.mock('./invocation.js', () => ({
@@ -219,5 +225,26 @@ describe('specialist session cleanup on terminal task', () => {
     // mailbox on disk; cleanup must handle that without crashing.
     const { task } = await makeFailedRootTask();
     await expect(routeResult(task)).resolves.not.toThrow();
+  });
+});
+
+describe('failure post-mortem', () => {
+  it('appends what the specialist was doing to the failure its requester receives', async () => {
+    const { task, specialistGroupId, specialistSessionId, requesterSessionId } = await makeFailedRootTask();
+    await routeResult(task);
+
+    expect(buildPostMortem).toHaveBeenCalledWith(specialistGroupId, specialistSessionId);
+    const [, sessionId, message] = vi.mocked(writeSessionMessage).mock.calls.at(-1)!;
+    expect(sessionId).toBe(requesterSessionId);
+    expect(JSON.parse((message as { content: string }).content).text).toBe(
+      'Specialist task failed: host_restart — container failed to start after 2 restart attempts\n\n' +
+        'What the specialist was doing:\n• Last tool: WebFetch({})',
+    );
+  });
+
+  it('is not built for a completed task', async () => {
+    const { task } = await makeFailedRootTask();
+    await routeResult({ ...task, status: 'completed', result: 'done', failure_kind: null, failure_detail: null });
+    expect(buildPostMortem).not.toHaveBeenCalled();
   });
 });

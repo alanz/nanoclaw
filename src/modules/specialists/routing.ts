@@ -16,6 +16,7 @@ import { GROUPS_DIR } from '../../config.js';
 import { getSpecialist, getTask, updateTaskStatus } from './db.js';
 import { SPECIALISTS_CONFIG } from './config.js';
 import { closeSpecialistSession, findSessionByAgentGroupAndThread } from './session-helpers.js';
+import { buildPostMortem } from './postmortem.js';
 import {
   endActiveInvocationForSession,
   expireTransfersForTerminalTask,
@@ -28,11 +29,11 @@ function generateId(): string {
   return `spec-res-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function formatOutcome(task: SpecialistTask): string {
+function formatOutcome(task: SpecialistTask, postMortem: string | null): string {
   if (task.status === 'completed' && task.result) return task.result;
   const kind = task.failure_kind ?? 'unknown';
   const detail = task.failure_detail ?? '';
-  return `Specialist task failed: ${kind}${detail ? ` — ${detail}` : ''}`;
+  return `Specialist task failed: ${kind}${detail ? ` — ${detail}` : ''}${postMortem ? `\n\n${postMortem}` : ''}`;
 }
 
 async function lastTurnParentNotice(task: SpecialistTask): Promise<string> {
@@ -63,7 +64,11 @@ async function sendToSession(agentGroupId: string, sessionId: string, text: stri
 }
 
 /** Route a completed or failed root task result to the main group session. */
-async function routeResultToMain(task: SpecialistTask, transfer: ContainerTransfer | null): Promise<void> {
+async function routeResultToMain(
+  task: SpecialistTask,
+  transfer: ContainerTransfer | null,
+  postMortem: string | null,
+): Promise<void> {
   const session = await getSession(task.requester_session_id);
   if (!session) {
     log.warn('specialists: cannot route result to main — requester session not found', { taskId: task.id });
@@ -155,7 +160,7 @@ async function routeResultToMain(task: SpecialistTask, transfer: ContainerTransf
       content = transfer.result_text;
     }
   } else {
-    content = formatOutcome(task) + (await lastTurnParentNotice(task));
+    content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
   }
 
   await sendToSession(session.agent_group_id, session.id, content, task.id);
@@ -166,6 +171,7 @@ async function routeResultToParent(
   task: SpecialistTask,
   parentTask: SpecialistTask,
   transfer: ContainerTransfer | null,
+  postMortem: string | null,
 ): Promise<void> {
   const parentSession = await findSessionByAgentGroupAndThread(parentTask.specialist_group_id, parentTask.id);
   if (!parentSession) {
@@ -190,7 +196,7 @@ async function routeResultToParent(
     await placeTransferIntoActiveIpcIn(parentSession.id, { ...transfer, recipient_session_id: parentSession.id });
     content = transfer.result_text;
   } else {
-    content = formatOutcome(task) + (await lastTurnParentNotice(task));
+    content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
   }
 
   await sendToSession(parentSession.agent_group_id, parentSession.id, content, task.id);
@@ -211,6 +217,12 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
   // This is more reliable than relying on the container close event, which
   // may not fire promptly on all runtimes (e.g. Apple Container).
   const specialistSession = await findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
+  // Read before the session closes. Rejections (cycle, depth…) never ran,
+  // so there is nothing to read.
+  const postMortem =
+    task.status === 'failed' && specialistSession
+      ? buildPostMortem(task.specialist_group_id, specialistSession.id)
+      : null;
   if (specialistSession) {
     // Awaited, so the run's cleanup is done before the session closes — and a
     // failure here is logged rather than escaping as an unhandled rejection,
@@ -224,7 +236,7 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
   }
 
   if (task.requester_group_id) {
-    await routeResultToMain(task, transfer);
+    await routeResultToMain(task, transfer, postMortem);
     await expireTransfersForTerminalTask(task.id);
     return;
   }
@@ -239,6 +251,6 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
     return;
   }
   if (parent.status !== 'awaiting_sub_task') return;
-  await routeResultToParent(task, parent, transfer);
+  await routeResultToParent(task, parent, transfer, postMortem);
   await expireTransfersForTerminalTask(task.id);
 }

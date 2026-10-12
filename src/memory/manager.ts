@@ -107,7 +107,7 @@ import { workspaceIndexDirs } from './workspace-dirs.js';
 import { chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
-import { TokenBucketRateLimiter } from './rate-limiter.js';
+import { TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
 import {
   openIndexDb,
   getCachedEmbedding,
@@ -635,6 +635,37 @@ export class MemoryIndexManager {
     return this._lastSyncAt;
   }
 
+  /** Index health for the dashboard: files and chunks per source, sync state, embedding quota. */
+  stats(): MemoryIndexStats | null {
+    if (this.closed || !this.index) return null;
+    const files = this.index.db.prepare('SELECT source, COUNT(*) AS n FROM files GROUP BY source').all() as Array<{
+      source: string;
+      n: number;
+    }>;
+    const chunks = new Map(
+      (
+        this.index.db.prepare('SELECT source, COUNT(*) AS n FROM chunks GROUP BY source').all() as Array<{
+          source: string;
+          n: number;
+        }>
+      ).map((r) => [r.source, r.n]),
+    );
+    const sources = files
+      .map((f) => ({ source: f.source, files: f.n, chunks: chunks.get(f.source) ?? 0 }))
+      .sort((a, b) => a.source.localeCompare(b.source));
+    return {
+      groupId: this.groupId,
+      groupFolder: this.groupFolder,
+      model: this.model,
+      vectorSearch: this.index.vecAvailable,
+      syncing: this._syncing,
+      dirty: this.dirty,
+      lastSyncAt: this._lastSyncAt === null ? null : new Date(this._lastSyncAt).toISOString(),
+      sources,
+      quota: this.rateLimiter.snapshot(),
+    };
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     if (this.periodicTimer) clearInterval(this.periodicTimer);
@@ -672,8 +703,34 @@ function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
   });
 }
 
+export interface MemoryIndexStats {
+  groupId: string;
+  groupFolder: string;
+  model: string;
+  vectorSearch: boolean;
+  syncing: boolean;
+  dirty: boolean;
+  lastSyncAt: string | null;
+  sources: Array<{ source: string; files: number; chunks: number }>;
+  quota: RateLimiterSnapshot;
+}
+
 // Module-level manager registry — one instance per group
 const managers = new Map<string, MemoryIndexManager>();
+
+/** Index health of every open manager, for the dashboard. */
+export function getAllMemoryIndexStats(): MemoryIndexStats[] {
+  const out: MemoryIndexStats[] = [];
+  for (const m of managers.values()) {
+    try {
+      const s = m.stats();
+      if (s) out.push(s);
+    } catch (err) {
+      log.debug('Memory index stats unavailable', { err });
+    }
+  }
+  return out;
+}
 
 export function getMemoryManager(groupId: string): MemoryIndexManager | undefined {
   return managers.get(groupId);

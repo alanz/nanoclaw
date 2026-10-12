@@ -19,6 +19,10 @@
  * most once, and never over a reaction the agent chose itself. ✅ goes on
  * with the reply, or — for a turn that ends without one — when the host
  * sweep sees the agent finished the message (up to a minute later).
+ * Progress: on a turn that runs past PROGRESS_AFTER_MS, a "⏳ Searching the
+ * web…" message follows the status the typing refresh passes, edited at most
+ * every PROGRESS_EDIT_MS, and is deleted for everyone when the reply arrives
+ * or the turn ends.
  *
  * Credentials: set DELTACHAT_CHATMAIL_QR (chatmail QR) or DELTACHAT_ADDR +
  * DELTACHAT_MAIL_PW in .env. DELTACHAT_CHATMAIL_QR defaults to
@@ -82,6 +86,11 @@ function attachmentType(viewType: string): string {
       return 'file';
   }
 }
+/** A turn shows a progress message only once it has run this long. */
+const PROGRESS_AFTER_MS = 15_000;
+/** Each edit is a message to the chat, so the progress line changes at most this often. */
+const PROGRESS_EDIT_MS = 10_000;
+
 /** Status reactions on an incoming message, in the only order they move. */
 const STATUS_STEPS = ['👀', '💭', '✅'];
 
@@ -182,6 +191,11 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   let _connected = false;
   let channelSetup: ChannelSetup | null = null;
   let removeCompletedHook: (() => void) | null = null;
+  /** The progress message for each platformId's current turn (forMsgId = the incoming message). */
+  const progress = new Map<
+    string,
+    { forMsgId: number; since: number; msgId?: number; text?: string; editedAt: number }
+  >();
 
   /** Last incoming message ID per platformId — used for reactions. */
   const lastMsgId = new Map<string, number>();
@@ -385,6 +399,72 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     }
   }
 
+  /** Show what the agent is doing, once the turn has run long enough to be worth it. */
+  async function showProgress(platformId: string, status: string): Promise<void> {
+    const forMsgId = lastMsgId.get(platformId);
+    if (forMsgId === undefined || !dc || accountId === null) return;
+    const now = Date.now();
+    let p = progress.get(platformId);
+    if (!p || p.forMsgId !== forMsgId) {
+      // A new incoming message starts a new turn; an older turn's line goes.
+      if (p) await clearProgress(platformId);
+      p = { forMsgId, since: now, editedAt: 0 };
+      progress.set(platformId, p);
+    }
+    if (now - p.since < PROGRESS_AFTER_MS) return;
+    const text = `⏳ ${status.charAt(0).toUpperCase()}${status.slice(1)}…`;
+    if (p.msgId === undefined) {
+      if (p.editedAt !== 0) return; // a send is already in flight
+      p.editedAt = now;
+      let sent: number;
+      try {
+        const id = await sendText(platformId, text);
+        if (id === null) throw new Error('not connected');
+        sent = Number(id);
+      } catch (err) {
+        p.editedAt = 0; // let the next tick try again
+        log.warn('DeltaChat: failed to send progress message', { err, platformId });
+        return;
+      }
+      if (progress.get(platformId) !== p) {
+        // The reply overtook the send: the line is already stale.
+        await deleteForAll([sent]);
+        return;
+      }
+      p.msgId = sent;
+      p.text = text;
+    } else if (text !== p.text && now - p.editedAt >= PROGRESS_EDIT_MS) {
+      p.text = text;
+      p.editedAt = now;
+      try {
+        await dc.rpc.sendEditRequest(accountId, p.msgId, text);
+      } catch (err) {
+        log.warn('DeltaChat: failed to edit progress message', { err, platformId });
+      }
+    }
+  }
+
+  /**
+   * Delete the turn's progress message. `restart` keeps the turn going (a
+   * reply mid-turn): a new line may appear if the agent works on for long.
+   */
+  async function clearProgress(platformId: string, restart = false): Promise<void> {
+    const p = progress.get(platformId);
+    if (!p) return;
+    if (restart) progress.set(platformId, { forMsgId: p.forMsgId, since: Date.now(), editedAt: 0 });
+    else progress.delete(platformId);
+    if (p.msgId !== undefined) await deleteForAll([p.msgId]);
+  }
+
+  async function deleteForAll(msgIds: number[]): Promise<void> {
+    if (!dc || accountId === null || msgIds.some((id) => !Number.isFinite(id))) return;
+    try {
+      await dc.rpc.deleteMessagesForAll(accountId, msgIds);
+    } catch (err) {
+      log.warn('DeltaChat: failed to delete progress message', { err, msgIds });
+    }
+  }
+
   async function sendDoneReaction(platformId: string): Promise<void> {
     await advanceStatus(platformId, '✅');
   }
@@ -404,7 +484,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           const suffix = `:${session.agent_group_id}`;
           if (!c.id.endsWith(suffix)) continue;
           const msgId = Number(c.id.slice(0, -suffix.length));
-          if (lastMsgId.get(c.platformId) === msgId) await advanceStatus(c.platformId, '✅');
+          if (lastMsgId.get(c.platformId) !== msgId) continue;
+          await clearProgress(c.platformId);
+          await advanceStatus(c.platformId, '✅');
         }
       });
       fs.mkdirSync(dataDir, { recursive: true });
@@ -811,6 +893,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       }
 
       const sender = typeof content.sender === 'string' && content.sender ? content.sender : undefined;
+      // The agent's own reply replaces its progress line; a message relayed
+      // under another name (a specialist) does not — the agent is still working.
+      if (!sender) await clearProgress(platformId, true);
 
       // Question card (ask_user_question, approvals): numbered text, answered by reply
       const question = parseQuestionContent(content);
@@ -868,10 +953,11 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       return platformIdForChat(await dc.rpc.createChatByContactId(accountId, contactId));
     },
 
-    async setTyping(platformId: string, _threadId: string | null): Promise<void> {
+    async setTyping(platformId: string, _threadId: string | null, status?: string): Promise<void> {
       // The typing module re-fires this every few seconds while the agent
       // works; only the first call per message reaches the chat.
       await advanceStatus(platformId, '💭');
+      if (status) await showProgress(platformId, status);
     },
   };
 

@@ -14,7 +14,7 @@ vi.mock('../../config.js', async () => {
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-typing' };
 });
 
-import { setTypingAdapter, startTypingRefresh, stopTypingRefresh } from './index.js';
+import { describeTool, setTypingAdapter, startTypingRefresh, stopTypingRefresh } from './index.js';
 
 type Call = { channelType: string; platformId: string; threadId: string | null; instance?: string };
 
@@ -119,5 +119,27 @@ describe('startTypingRefresh — instance forwarding', () => {
         instance: 'telegram',
       });
     }
+  });
+});
+
+describe('status', () => {
+  it('interval ticks pass what the agent is doing', async () => {
+    const statuses: Array<string | undefined> = [];
+    setTypingAdapter({
+      async setTyping(_channelType, _platformId, _threadId, _instance, status) {
+        statuses.push(status);
+      },
+    });
+    startTypingRefresh('sess-1', 'ag-1', 'deltachat', 'dc:1', null);
+    await vi.advanceTimersByTimeAsync(4_500);
+    // No mailbox for this session, so no tool in flight: thinking.
+    expect(statuses).toEqual([undefined, 'thinking']);
+  });
+
+  it('names tools in plain words, MCP tools by their own name', () => {
+    expect(describeTool(null)).toBe('thinking');
+    expect(describeTool('WebSearch')).toBe('searching the web');
+    expect(describeTool('mcp__nanoclaw__dispatch_sub_task')).toBe('waiting on a specialist');
+    expect(describeTool('mcp__zotero__lookup')).toBe('using lookup');
   });
 });

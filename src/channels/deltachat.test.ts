@@ -99,6 +99,7 @@ function makeDcMock() {
       sendMsg: vi.fn().mockResolvedValue(42),
       sendReaction: vi.fn().mockResolvedValue(undefined),
       sendEditRequest: vi.fn().mockResolvedValue(null),
+      deleteMessagesForAll: vi.fn().mockResolvedValue(null),
       getConnectivity: vi.fn().mockResolvedValue(4000),
       getConfig: vi.fn().mockResolvedValue('bot@example.com'),
       getChatSecurejoinQrCode: vi.fn().mockResolvedValue('https://i.delta.chat/#MOCKINVITE'),
@@ -639,6 +640,81 @@ describe('DeltaChat channel adapter', () => {
 
       await adapter.setTyping!(PID_2, null);
       expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, ['💭']);
+    });
+  });
+
+  describe('progress message', () => {
+    const PROGRESS_ID = 42; // sendMsg mock's id
+    const sentTexts = (dc: { rpc: { sendMsg: { mock: { calls: unknown[][] } } } }) =>
+      dc.rpc.sendMsg.mock.calls.map((c) => (c[2] as { text: string }).text);
+
+    async function turnStarted() {
+      const built = await buildSetupAdapter();
+      built.dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      built.dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      built.dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await built.adapter.setTyping!(PLATFORM_ID, null, 'thinking');
+      return built;
+    }
+
+    it('stays out of a quick turn', async () => {
+      const { adapter, dc } = await turnStarted();
+      vi.setSystemTime(Date.now() + 10_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
+      expect(dc.rpc.sendMsg).not.toHaveBeenCalled();
+    });
+
+    it('appears once the turn has run 15 s, then follows the status at most every 10 s', async () => {
+      const { adapter, dc } = await turnStarted();
+      vi.setSystemTime(Date.now() + 16_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'searching the web');
+      expect(sentTexts(dc)).toEqual(['⏳ Searching the web…']);
+
+      vi.setSystemTime(Date.now() + 4_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'reading a web page');
+      expect(dc.rpc.sendEditRequest).not.toHaveBeenCalled();
+
+      vi.setSystemTime(Date.now() + 8_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'reading a web page');
+      expect(dc.rpc.sendEditRequest).toHaveBeenCalledWith(ACCOUNT_ID, PROGRESS_ID, '⏳ Reading a web page…');
+      expect(dc.rpc.sendMsg).toHaveBeenCalledTimes(1);
+    });
+
+    it('is deleted for everyone when the reply arrives', async () => {
+      const { adapter, dc } = await turnStarted();
+      vi.setSystemTime(Date.now() + 16_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'thinking');
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Answer' } });
+
+      expect(dc.rpc.deleteMessagesForAll).toHaveBeenCalledWith(ACCOUNT_ID, [PROGRESS_ID]);
+      expect(sentTexts(dc)).toEqual(['⏳ Thinking…', 'Answer']);
+    });
+
+    it('stays while a specialist relays under its own name', async () => {
+      const { adapter, dc } = await turnStarted();
+      vi.setSystemTime(Date.now() + 16_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'waiting on a specialist');
+      await adapter.deliver(PLATFORM_ID, null, {
+        kind: 'chat',
+        content: { text: 'Found three papers', sender: 'Researcher' },
+      });
+
+      expect(dc.rpc.deleteMessagesForAll).not.toHaveBeenCalled();
+    });
+
+    it('is deleted when the turn ends without a reply', async () => {
+      const { adapter, dc } = await turnStarted();
+      vi.setSystemTime(Date.now() + 16_000);
+      await adapter.setTyping!(PLATFORM_ID, null, 'thinking');
+
+      await completedHooks.at(-1)!(
+        [{ id: `${MSG_ID}:ag-test`, kind: 'chat', platformId: PLATFORM_ID, channelType: 'deltachat', threadId: null }],
+        { agent_group_id: 'ag-test' },
+      );
+
+      expect(dc.rpc.deleteMessagesForAll).toHaveBeenCalledWith(ACCOUNT_ID, [PROGRESS_ID]);
     });
   });
 

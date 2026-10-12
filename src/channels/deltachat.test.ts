@@ -511,6 +511,81 @@ describe('DeltaChat channel adapter', () => {
       expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['💭']);
     });
 
+    it('sends 💭 once however often the typing refresh fires', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.setTyping!(PLATFORM_ID, null);
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledTimes(1);
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['💭']);
+    });
+
+    it('does not put 💭 back over ✅ once a reply is delivered', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Part one' } });
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Part two' } });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('leaves a reaction the agent chose on the message', async () => {
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      await adapter.deliver(PLATFORM_ID, null, {
+        kind: 'chat',
+        content: { operation: 'reaction', messageId: String(MSG_ID), emoji: '👍' },
+      });
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Done' } });
+
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('starts again from 👀 on the next incoming message', async () => {
+      const MSG_ID_2 = 150;
+      const { adapter, dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+      await adapter.setTyping!(PLATFORM_ID, null);
+      await adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Reply' } });
+
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg({ text: 'next' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg(CHAT_ID, MSG_ID_2);
+      await flush();
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, null);
+
+      expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID_2, ['💭']);
+    });
+
     it('does nothing when no message has been received yet', async () => {
       const { adapter, dc } = await buildSetupAdapter();
 

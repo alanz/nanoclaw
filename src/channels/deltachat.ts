@@ -14,6 +14,9 @@
  * and answered by reply (deltachat-cards.ts); display cards are sent as text.
  * A `sender` on the content is shown as the message's sender name.
  * Typing: sends 💭 on the last incoming message for the platformId.
+ * A reaction is a message to the chat, not an ephemeral indicator, so the
+ * status reactions move one way per message — 👀 → 💭 → ✅ — each sent at
+ * most once, and never over a reaction the agent chose itself.
  *
  * Credentials: set DELTACHAT_CHATMAIL_QR (chatmail QR) or DELTACHAT_ADDR +
  * DELTACHAT_MAIL_PW in .env. DELTACHAT_CHATMAIL_QR defaults to
@@ -50,6 +53,8 @@ import {
 
 /** Files larger than this are delivered as placeholders, not base64-embedded. */
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+/** Status reactions on an incoming message, in the only order they move. */
+const STATUS_STEPS = ['👀', '💭', '✅'];
 
 /** Wait this long for additional messages from the same chat before routing to agent. */
 const DEBOUNCE_MS = 1500;
@@ -150,6 +155,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
   /** Last incoming message ID per platformId — used for reactions. */
   const lastMsgId = new Map<string, number>();
+  /** The reaction the bot last put on each platformId's last incoming message. */
+  const shownReaction = new Map<string, { msgId: number; emoji: string }>();
   /** Debounce state: accumulate rapid messages per chat before routing. */
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const debounceEntries = new Map<string, DebounceEntry>();
@@ -324,14 +331,32 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     });
   }
 
-  async function sendDoneReaction(platformId: string): Promise<void> {
+  /**
+   * Move the last incoming message's status reaction forward to `emoji`.
+   * No-op when it is already there or further on, or when the reaction
+   * showing is one the agent chose (not a status step).
+   */
+  async function advanceStatus(platformId: string, emoji: '💭' | '✅'): Promise<void> {
     const msgId = lastMsgId.get(platformId);
     if (msgId === undefined || !dc || accountId === null) return;
-    try {
-      await dc.rpc.sendReaction(accountId, msgId, ['✅']);
-    } catch (err) {
-      log.warn('DeltaChat: failed to send ✅ reaction', { err, platformId });
+    const shown = shownReaction.get(platformId);
+    if (shown?.msgId === msgId) {
+      const at = STATUS_STEPS.indexOf(shown.emoji);
+      if (at === -1 || at >= STATUS_STEPS.indexOf(emoji)) return;
     }
+    // Recorded before the send so a concurrent refresh tick sees it.
+    shownReaction.set(platformId, { msgId, emoji });
+    try {
+      await dc.rpc.sendReaction(accountId, msgId, [emoji]);
+    } catch (err) {
+      if (shown) shownReaction.set(platformId, shown);
+      else shownReaction.delete(platformId);
+      log.warn(`DeltaChat: failed to send ${emoji} reaction`, { err, platformId });
+    }
+  }
+
+  async function sendDoneReaction(platformId: string): Promise<void> {
+    await advanceStatus(platformId, '✅');
   }
 
   const adapter: ChannelAdapter = {
@@ -471,6 +496,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
           // React with 👀 to acknowledge receipt; track msgId for typing/done reactions
           lastMsgId.set(platformId, msgId);
+          shownReaction.set(platformId, { msgId, emoji: '👀' });
           try {
             await dcRef.rpc.sendReaction(aid, msgId, ['👀']);
           } catch (err) {
@@ -731,6 +757,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           if (!isNaN(msgId)) {
             try {
               await dc.rpc.sendReaction(accountId, msgId, [emoji]);
+              if (lastMsgId.get(platformId) === msgId) shownReaction.set(platformId, { msgId, emoji });
             } catch (err) {
               log.warn('DeltaChat: failed to send reaction', { err, platformId, msgId });
             }
@@ -798,13 +825,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     },
 
     async setTyping(platformId: string, _threadId: string | null): Promise<void> {
-      const msgId = lastMsgId.get(platformId);
-      if (msgId === undefined || !dc || accountId === null) return;
-      try {
-        await dc.rpc.sendReaction(accountId, msgId, ['💭']);
-      } catch (err) {
-        log.warn('DeltaChat: failed to send 💭 typing reaction', { err, platformId });
-      }
+      // The typing module re-fires this every few seconds while the agent
+      // works; only the first call per message reaches the chat.
+      await advanceStatus(platformId, '💭');
     },
   };
 

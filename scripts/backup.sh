@@ -1,5 +1,6 @@
 #!/bin/bash
-# Hourly backup: SQLite dumps + rsync mirror to local dir, then borg to BorgBase.
+# Hourly backup: SQLite dumps + rsync mirror to local dir, then borg to BorgBase,
+# then a once-a-day borg prune of the v2 archives.
 # Runs via launchd (macOS) or systemd timer (Linux).
 
 set -euo pipefail
@@ -103,3 +104,23 @@ else
   "${borg_create[@]}"
 fi
 echo "Borg backup complete"
+
+# Prune v2 archives once a day: a week of hourlies, then 14 daily, 8 weekly,
+# 12 monthly (~200 archives). The stamp is written only on success, so a day
+# the Mac was off at night, or a failed prune, is caught by the next run.
+# Compaction is left to BorgBase's own schedule. v1 archives are untouched.
+PRUNE_STAMP="$PROJECT_ROOT/data/borg-last-prune"
+today="$(date +%Y-%m-%d)"
+if [[ "$(cat "$PRUNE_STAMP" 2>/dev/null || true)" != "$today" ]]; then
+  borg_prune=(borg prune
+    --glob-archives 'nanoclaw-v2-*'
+    --keep-hourly 168 --keep-daily 14 --keep-weekly 8 --keep-monthly 12
+    "$BORG_REPO")
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" --kill-after=60 1800 "${borg_prune[@]}"
+  else
+    "${borg_prune[@]}"
+  fi
+  echo "$today" > "$PRUNE_STAMP"
+  echo "Borg prune complete"
+fi

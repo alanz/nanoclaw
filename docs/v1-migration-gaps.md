@@ -5,9 +5,13 @@ Features present in v1 (`~/nanoclaw`), or carried into v1 from OpenClaw
 listed here as open is meant to be restored, not dropped, unless it is marked
 obsolete.
 
-Last audited 2026-10-04, when the main agent's standing instructions were
-cleaned of every v1-era section describing a feature v2 lacks. Each removed
-section is accounted for below.
+Audited 2026-10-04, when the main agent's standing instructions were cleaned
+of every v1-era section describing a feature v2 lacks (each removed section is
+accounted for below), and again 2026-10-12 in a deep-dive comparison of v1 and
+v2 across five areas (agent tools, channels, memory/specialists/Zotero/web UI,
+groups/config/ops, host core). That audit's findings — most fixed the same
+day — are in §11; its corrections to this register are folded into §1–§10.
+Register updated 2026-10-13. v1 stopped on 2026-06-16 and is not running.
 
 Snapshots taken at that audit (outside the repo, so they survive v1 being
 removed):
@@ -26,7 +30,7 @@ covers it), **obsolete** (not worth porting, or never real).
 
 ---
 
-## 1. Scheduled tasks — open (none were migrated)
+## 1. Scheduled tasks — done (commit scan, session reset, synthesis scan; user profile replaced, §2)
 
 `setup/migrate-v2/tasks.ts` skips a task whose `group_folder` has no v2 agent
 group. v1's `main` became `dm-with-alanz`, so every active task was skipped,
@@ -35,12 +39,12 @@ scheduled tasks in v2.
 
 Active in v1 (all on the main chat):
 
-| v1 task                     | Schedule                  | What                                                                                                                                                                                                 | Port                                                                                                                                        |
-| --------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `task-1776367857282-67z2x4` | `3 9 * * 6` (Sat)         | Synthesis-candidate scan: tag clusters ≥15 notes, notes ≥12 inbound links → `memory/digests/YYYY-MM-DD-synthesis-scan.md`, message the user. Bash gate script counts `tags:`/`links:` in `MEM-*.md`. | `ncl tasks create --script …` with the v1 prompt/script; `/workspace/group` → `/workspace/agent`, `memory_get` → `memory_get_file_content`. |
-| `task-1776511133337-5u8wle` | `47 1 * * *`              | Nightly NanoClaw commit scan: watermark file + `git log` gate, digest to `memory/digests/`, `MEM-` note for architectural commits, message only for significant ones.                                | As above, plus a read-only mount of the v2 checkout (mount allowlist + `ncl groups config add-mount`); v2 mounts no project dir.            |
-| `task-1776012215818-uahgqr` | `0 4 * * *`, idle ≥60 min | `task_type=session_reset`: archive and summarise the session into `memory/sessions/YYYY-MM-DD-HHmm.md` (`reset-prompt.md`), then clear it. Last v2-visible summary 2026-05-06.                       | No v2 task type. Needs a host module, or a prompt task given access to the session transcript. See §3.                                      |
-| `task-1776625382556-zq1qam` | `7 9 * * 0`               | `task_type=user_profile`: synthesise `memory/USER.md` (<2000 tokens, `user-profile-prompt.md`), injected at session start.                                                                           | No v2 task type; pairs with §2.                                                                                                             |
+| v1 task                     | Schedule                  | What                                                                                                                                                                                                 | Port                                                                      |
+| --------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `task-1776367857282-67z2x4` | `3 9 * * 6` (Sat)         | Synthesis-candidate scan: tag clusters ≥15 notes, notes ≥12 inbound links → `memory/digests/YYYY-MM-DD-synthesis-scan.md`, message the user. Bash gate script counts `tags:`/`links:` in `MEM-*.md`. | **Done 2026-10-14** as `synthesis-scan-a72c` (below).                     |
+| `task-1776511133337-5u8wle` | `47 1 * * *`              | Nightly NanoClaw commit scan: watermark file + `git log` gate, digest to `memory/digests/`, `MEM-` note for architectural commits, message only for significant ones.                                | **Done 2026-10-04** as `nanoclaw change scan` (below).                    |
+| `task-1776012215818-uahgqr` | `0 4 * * *`, idle ≥60 min | `task_type=session_reset`: archive and summarise the session into `memory/sessions/YYYY-MM-DD-HHmm.md` (`reset-prompt.md`), then clear it. Last v2-visible summary 2026-05-06.                       | **Done 2026-10-06** by the host module `src/modules/session-reset/` (§3). |
+| `task-1776625382556-zq1qam` | `7 9 * * 0`               | `task_type=user_profile`: synthesise `memory/USER.md` (<2000 tokens, `user-profile-prompt.md`), injected at session start.                                                                           | No v2 task type; pairs with §2.                                           |
 
 Paused in v1, superseded by the researcher specialist — **obsolete**: the
 Moltbook intake digest (`deltachat_intake`) and its copy-to-digests task.
@@ -51,7 +55,7 @@ OpenClaw crons never ported to v1:
   upcoming events. Was failing in OpenClaw (20 consecutive errors). **Open**, if
   still wanted.
 - **RSS scan (blogwatcher)**: one feed, Guix Planet
-  `https://planet.guix.gnu.org/atom.xml` — not in v1's feed list. **Open**, with §4.
+  `https://planet.guix.gnu.org/atom.xml` — not in v1's feed list. **Done** with §4.
 - Memory index status, per-sender session check, Zotero enrich, Six Nations
   briefing — **obsolete**.
 
@@ -67,10 +71,17 @@ the prompt; a task session has the group's memory tools and may
 August, before the rebuild onto upstream — prove the recurring, script-gated
 path with `ncl tasks run <id>` before relying on it.
 
-- **Synthesis scan — supported.** The v1 gate script, with
-  `/workspace/group` → `/workspace/agent`, runs unchanged against today's notes
-  (339 MEM, 3 SYN, wakes). Prompt edits: paths, `memory_get` →
-  `memory_get_file_content`, and `memory_search` is keyword-only (§6).
+- **Synthesis scan — done 2026-10-14, as `synthesis-scan-a72c`** (`3 9 * * 6`,
+  main group). The v1 gate no longer filtered (at 368 notes, 17 tags ≥15 and
+  30 hubs ≥12 — it would wake every week and repeat itself), so the gate was
+  rewritten: it ranks tag clusters (case-folded, ≥10 notes) and link hubs (≥8
+  inbound links) in `zettel/notes/` and offers the top 5 not yet settled.
+  `.synthesis-scan-state.json` in the group folder records each candidate's
+  disposition — `surfaced` (by the gate, once that run's digest exists),
+  `declined` (Andy, on Alan's "drop it"; never offered again), `synthesised`
+  (a SYN note names the hub, or Andy records it) — and a surfaced or
+  synthesised candidate returns only after growing by half. Seeded with v1's
+  ten surfaced candidates. Digest `zettel/digests/YYYY-MM-DD-synthesis-scan.md`.
 - **Commit scan — done 2026-10-04, as the `nanoclaw change scan` task**
   (`47 1 * * *`, main group). Purpose: keep the agent aware of how the host
   platform it runs on is changing — what is running, not upstream's live
@@ -87,7 +98,8 @@ path with `ncl tasks run <id>` before relying on it.
     a newer upstream), as the range now running.
   - The gate keeps a seen list in `/workspace/agent/.nanoclaw-changes-state.json`;
     the first run reports the last 7 days as a baseline.
-- **User profile — the task is portable, the injection is not there.** A
+- **User profile — replaced 2026-10-14, not ported (see §2).** The 2026-10-04
+  analysis, kept as the record: a
   prompt task can rewrite `memory/USER.md` (v1 prompt; add the backup to
   `USER-<date>.md` the v1 host did). But v2 loads only `memory/index.md` and
   `memory/system/definition.md` at session start; the index's Core Memory is
@@ -122,13 +134,31 @@ path with `ncl tasks run <id>` before relying on it.
   message kind beside `/clear`, plus `/clear` archiving first. Design first —
   this touches `sessions.allium`.
 
-## 2. Session warm-start & user profile — open
+## 2. Session warm-start & user profile — done 2026-10-14 (upstream memory model, no profile task)
 
 **v1:** `src/session-warm-start.ts`: user profile (`memory/USER.md`, 8-day
 staleness), recent A-MEM notes by recency, prior-session tail.
 
 **v2:** SessionStart injects only `memory/index.md` and
 `system/definition.md` (`container/agent-runner/src/memory/context.ts`).
+
+**Done, Alan's decisions:**
+
+- **No generated profile, no weekly task.** Upstream's memory model already
+  has the place for user facts: Core Memory in `index.md` (loaded in every
+  session) and linked concepts the agent keeps current in place. It had been
+  empty since the move, so it was seeded once from v1's last profile:
+  `memory/people/alan.md` (`type: person`, durable facts only) and one Core
+  Memory entry. The five v1 `USER*.md` files are in `memory/people/history/`,
+  indexed as superseded.
+- **Warm-start = summary hand-over.** Every ended chat conversation (reset,
+  `/clear`, rotation) hands its finished summary to the next one: a
+  context-only mailbox row, rendered `<previous-conversation>`, with Summary,
+  Decisions and Open questions inline (≤ 4000 chars) and the summary and
+  archive paths (`src/modules/session-reset/`, rule `SummaryHandedOver` in
+  `specs/session-reset.allium`).
+- **Not ported:** v1's recent-notes block (hybrid `memory_search` covers it on
+  demand) and the datetime block (the runtime header has it).
 
 ## 3. Session summaries (throwaway sessions) — done 2026-10-06
 
@@ -140,21 +170,39 @@ Now written by `src/modules/session-reset/` for every ended chat conversation
 `memory/sessions/` with retry (`MAX_THROWAWAY_RETRIES` etc.); tools
 `list_failed_summaries`, `retry_session_summary`, `report_session`.
 
-**v2:** raw transcripts are archived to `conversations/` (PreCompact hook and
-transcript rotation, `providers/claude-history.ts`) — **replaced** for the
-transcript itself. The LLM summaries are not.
+**Before 2026-10-06, v2** archived raw transcripts to `conversations/`
+(PreCompact hook and transcript rotation, `providers/claude-history.ts`) but
+wrote no summaries; the module now does both. The list/retry tools are not
+ported (§8).
 
-## 4. RSS feed monitoring — open
+## 4. RSS feed monitoring — done 2026-10-14
 
 **v1:** `src/rss-monitor.ts` — per-feed polling, isolated summarising run,
 append to the group's `rss-digest.md` (`## {ISO} — {feed}`), 500-GUID seen
-list, tools `subscribe_rss` / `unsubscribe_rss` / `list_rss_feeds`. One feed:
-Mozilla.ai `https://blog.mozilla.ai/feed/`, daily, no interest filter (the
-interest matching existed but was never used). Last digest entry 2026-05-06.
+list, tools `subscribe_rss` / `unsubscribe_rss` / `list_rss_feeds`. Feeds:
+Mozilla.ai daily (and Simon Willison's Weblog in March), no interest filter
+(the interest matching existed but was never used). Last digest entry
+2026-05-06; the file also held ~100 entries v1's tests wrote into the real
+group folder.
 
-**v2:** nothing. Either a module, or one gated `ncl tasks` task per feed (script
-fetches and diffs GUIDs into a state file; prompt summarises and appends to
-`rss-digest.md`). Add the OpenClaw Guix Planet feed (§1).
+**Done as a gated task, no host code:** `rss-scan-35bb` (`13 9 * * *`, main
+group).
+
+- Feeds: `rss/feeds.json` in the group folder — Mozilla.ai and Planet Guix
+  (OpenClaw's blogwatcher feed). Andy edits it to subscribe or unsubscribe
+  (replaces v1's three tools).
+- Gate: Python in the container (RSS 2.0 and Atom via ElementTree, 10 s per
+  feed); per-feed seen IDs (500) in `rss/state.json`; an offer counts as seen
+  only once that day's digest exists, so a failed run re-offers; a feed's
+  first scan offers its newest 3 posts (catch-up) and baselines the rest; a
+  feed failing 3 scans in a row is reported once, and again when it recovers.
+- Andy writes `memory/digests/YYYY-MM-DD-rss.md`, messages Alan every item
+  (Alan's choice for these low-volume feeds), and offers research for items
+  matching his interests (`memory/people/alan.md`).
+- v1's digest moved to `memory/digests/rss-digest-v1.md`, test entries removed.
+- Prior art checked first: upstream has none (its `self-customize` skill
+  suggests an RSS MCP server); of 515 surveyed forks none tracks seen items
+  across runs; OpenClaw ran blogwatcher daily, ungated, with delivery off.
 
 ## 5. WebXDC apps — open
 
@@ -178,50 +226,76 @@ migrate.
 other support. `todo.md` and `todo-state.json` are already in the main group
 folder.
 
-## 6. Memory — mostly done
+## 6. Memory — done; two small items open
 
 Done: Gemini embeddings, TPM/RPM rate limiting, org-mode chunking,
 `MEMORY_SEARCH_*` config, host-side hybrid merge, indexed mounts (the org
-files).
+files), and:
+
+- **Vector search for agents — done 2026-10-11.** The container's
+  `memory_search` asks the host, which answers with the hybrid search (vector +
+  keyword); keyword-only only when the host cannot answer in time.
+- **`path_prefix` / `source` filters — done 2026-10-11**, applied in SQL before
+  the row limit, so a large source no longer crowds a prefix out.
+- **Index upkeep — done 2026-10-13** ([memory-index-remediation-plan.md](memory-index-remediation-plan.md)):
+  no full re-index at every start (only when the index settings change, logged
+  and shown on the dashboard), per-file transactions, vector repair (12,334
+  orphan vectors from the v1-era index removed), cache pruning, Gemini
+  timeouts/retries; the central `memory_files` / `memory_chunks` mirror retired
+  (spec `memory.allium` updated).
+
+Obsolete: query expansion (v1 `src/memory/query-expansion.ts` was dead code).
 
 Open:
 
-- **The agent gets no vector search.** The container's `memory_search` is
-  FTS/BM25 only (`container/agent-runner/src/mcp-tools/memory.ts`); the host's
-  hybrid `handleMemorySearch` (`src/memory/search.ts`) is called only from tests.
-- Query expansion (v1 `src/memory/query-expansion.ts`).
-- `memory_search` applies `path_prefix` after its row limit, so a large source
-  (the org files) can crowd a prefix's results out.
+- `memory_search` lost v1's `include_content` option (full file content with
+  the hits).
+- **The memory specialist has no ranked search** — it greps. Giving it the
+  hybrid search is a `memory.allium` change, so the owner's decision.
 
-## 7. Zotero — sync done, search open
+## 7. Zotero — sync and search done; search filters open
 
-Sync and pre-check are real (`src/modules/zotero/`). Open: `search_zotero` —
-`zotero-md/` sits at the group root, outside memory search, so agents can only
-grep it. Index it (move under `memory/` or mark it as an indexed mount) or port
-the tool.
+Sync and pre-check are real (`src/modules/zotero/`), and since 2026-10-11
+`zotero-md/` is indexed for memory search as source `zotero`, with hourly
+abstract enrichment. Open: v1 `search_zotero`'s filters — year, tag,
+has-abstract. Today an agent searches with `source: "zotero"` and filters by
+reading the frontmatter.
 
 ## 8. Other MCP tools and chat commands
 
-| v1                                                                          | Status                                                                                                            |
-| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `memory_list`                                                               | done (`memory_list_files`)                                                                                        |
-| `query_memory`, `submit_raw_memory`                                         | uncertain — possibly covered by the memory specialist                                                             |
-| `search_zotero`                                                             | open (§7)                                                                                                         |
-| `query_transcript` (paginated history query)                                | open                                                                                                              |
-| `skill_eval`                                                                | open, low value                                                                                                   |
-| `list_failed_summaries`, `retry_session_summary`, `report_session`          | open (§3)                                                                                                         |
-| `webxdc_update`, `webxdc_send_image`                                        | open (§5)                                                                                                         |
-| `set_reaction`, task tools                                                  | replaced (`add_reaction`, `ncl tasks`)                                                                            |
-| `start_remote_control`, `stop_remote_control`                               | open (§9)                                                                                                         |
-| `register_group`, `set_group_trusted`, `requiresTrigger`, `@Andy` trigger   | replaced (`ncl messaging-groups` / `ncl wirings` with `engage_mode`; privilege from `user_roles`) — operator-side |
-| `/esc <context>`, `/reset`, `/retry-summary`, `/help`, `/app` chat commands | open (`/app` with §5)                                                                                             |
-| `/compact`                                                                  | replaced (native admin command)                                                                                   |
+| v1                                                                        | Status                                                                                                                     |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `memory_list`                                                             | done (`memory_list_files`)                                                                                                 |
+| `memory_search` `include_content`                                         | open (§6)                                                                                                                  |
+| `query_memory`                                                            | replaced (`dispatch_sub_task` to the memory specialist)                                                                    |
+| `submit_raw_memory`                                                       | obsolete (never used)                                                                                                      |
+| `search_zotero`                                                           | done but its filters (§7)                                                                                                  |
+| `query_transcript` (paginated history query)                              | open                                                                                                                       |
+| `skill_eval`                                                              | open, low value                                                                                                            |
+| `list_failed_summaries`, `retry_session_summary`                          | partly replaced: a summary that fails 3 times leaves a `-failed.md` placeholder (§3); no list/retry tool — open, low value |
+| `report_session`                                                          | replaced (it was a resume hand-off; v2 does it internally)                                                                 |
+| `deliver_result`, `dispatch_specialist_task`                              | replaced (`deliver_specialist_result`, `dispatch_specialist` / `dispatch_sub_task`)                                        |
+| `brave_web_search`                                                        | done                                                                                                                       |
+| `get_file_url`                                                            | done, without v1's `view` parameter                                                                                        |
+| ollama tools                                                              | obsolete here (never used); `/add-ollama-tool` installs them                                                               |
+| `webxdc_update`, `webxdc_send_image`                                      | open (§5)                                                                                                                  |
+| `set_reaction`, task tools                                                | replaced (`add_reaction`, `ncl tasks`)                                                                                     |
+| `start_remote_control`, `stop_remote_control`                             | open (§9)                                                                                                                  |
+| `register_group`, `set_group_trusted`, `requiresTrigger`, `@Andy` trigger | replaced (`ncl messaging-groups` / `ncl wirings` with `engage_mode`; privilege from `user_roles`) — operator-side          |
+| `/reset`                                                                  | replaced (native admin command, an alias of `/clear`)                                                                      |
+| `/esc <context>`                                                          | partly covered                                                                                                             |
+| `/retry-summary`                                                          | open, with the row above                                                                                                   |
+| `/help`                                                                   | open (filtered as a native command today)                                                                                  |
+| `/app`                                                                    | open (§5)                                                                                                                  |
+| `/compact`                                                                | replaced (native admin command)                                                                                            |
+| skills `/capabilities`, `/status`, `pdf-reader`                           | open (not in `container/skills/`)                                                                                          |
 
 ## 9. Remote control — open
 
 **v1:** `src/remote-control.ts`, tools `start_remote_control` /
 `stop_remote_control`. **v2:** `/remote-control` is filtered
-(`src/provider-contracts/claude.ts`).
+(`src/provider-contracts/claude.ts`); the 2026-10-12 audit found host and
+container disagreeing on it, to settle with the port.
 
 ## 10. Replaced or obsolete (no action)
 
@@ -236,23 +310,64 @@ the tool.
 - **Global folder** (`groups/global/`, `/workspace/global`): held only a shared
   `CLAUDE.md`; replaced by the composed base document. `/workspace/agent/shared/`
   was never real.
-- **Agent teams**: still enabled for the main group
-  (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`), alongside specialists.
+- **Agent teams**: turned off 2026-10-12 for every group (v2 blocks
+  `SendMessage`, so they could not work); specialists replace them. The
+  settings backups are in `~/nanoclaw-v2-backups/agent-teams-off-20261012/`.
 - **Ollama provider**: skills exist, never used in v1.
 - **Configuration options**: specialist depth is `maxSpecialistDepth`,
   concurrency `MAX_CONCURRENT_CONTAINERS`; directory options are hardcoded; the
   throwaway options return with §3.
-- **Telegram and intake groups**: unused.
-- **Emacs channel**: optional — `/add-emacs` installs it.
+- **Telegram and intake groups**: unused. The 17 v1 intake-group files: no
+  action (owner, 2026-10-12 — the one that mattered, HyperDoc, is being
+  re-researched). Test groups dc:11 and dc:12: obsolete.
+- **v1 `store/messages.db`** (2,221 messages, v1 specialist task history):
+  not carried over (owner, 2026-10-12).
+- **Emacs channel**: never used; `/add-emacs` installs it if wanted.
+- **Dashboard chat tab, router-state view, proxy/Claude request counters**: not
+  brought back — v2's dashboard is read-only by design, and the native
+  credential proxy does not count requests.
+
+## 11. Found by the 2026-10-12 audit
+
+Gaps the register did not list. Fixed the same day unless marked (commit
+subjects; hashes change when the patch stack is folded).
+
+| Finding                                                                                                                                          | Status                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DeltaChat 💭 re-sent every 4 s (777 against 343 replies); a late 💭 could land on ✅; no ✅ when a turn ended without a reply                    | fixed — "send each status reaction once per message", "mark a message ✅ when its turn ends without a reply"                                               |
+| Container image lacked python3, jq, ripgrep, sqlite3, imagemagick, zip                                                                           | fixed — "ship the general CLI kit agents expect"                                                                                                           |
+| Agent teams enabled but unable to work                                                                                                           | fixed — turned off (§10)                                                                                                                                   |
+| DeltaChat attachments over 5 MB never reached the agent; no media-type label                                                                     | fixed — "pass on attachments up to 64 MB, labelled by kind" (not yet seen live with a large file)                                                          |
+| Idle containers held concurrency slots for 30 min (v1: 5 min, or at once when work was queued)                                                   | fixed — "reap idle containers sooner — chat 10 min, tasks at once" (`CONTAINER_IDLE_MS`, `TASK_CONTAINER_IDLE_MS`)                                         |
+| No in-chat progress (v1: "⏳ Using X…")                                                                                                          | fixed — a DeltaChat progress line from the first tool status, removed on reply                                                                             |
+| v1's ⏳/📝 compaction reactions                                                                                                                  | open                                                                                                                                                       |
+| Container logs lost when a container exits                                                                                                       | fixed — one run log per container run, under the session's `logs/`                                                                                         |
+| A failed specialist reported only a one-line error                                                                                               | fixed — "tell the requester what a failed specialist was doing"                                                                                            |
+| Dashboard lost the Specialists page, Tasks tab, index-health panel; graph's Research Task link dead                                              | fixed — Specialists page, Tasks tab, Memory Index panel (extended 2026-10-13), link works                                                                  |
+| Dead `qmd` container skill shipped to every group                                                                                                | fixed — dropped                                                                                                                                            |
+| Nothing pruned the borg repo                                                                                                                     | fixed 2026-10-12/13 — v1 archives pruned to the last one; v2 retention (a week hourly, 14 daily, 8 weekly, 12 monthly) pruned daily by `scripts/backup.sh` |
+| Memory index rewritten at every host start (~1.6 GB borg delta per restart)                                                                      | fixed 2026-10-13 (§6)                                                                                                                                      |
+| Nothing prunes session transcripts; `scripts/cleanup-sessions.sh` is a dead v1 leftover                                                          | open                                                                                                                                                       |
+| Memory specialist has no ranked search; `memory_search` lost `include_content`; Zotero search lost its filters                                   | open (§6, §7)                                                                                                                                              |
+| `/capabilities`, `/status`, `pdf-reader` skills missing                                                                                          | open (§8)                                                                                                                                                  |
+| `get_file_url` lost `view`; `TaskOutput` not in the tool allowlist                                                                               | open, small                                                                                                                                                |
+| 👀 sent in unwired DeltaChat chats; edits of media messages dropped; `/chatid` poorer; a task's output can add ✅ to an already-answered message | open, small                                                                                                                                                |
+| `nonMainReadOnly` warning on every start: a stale v1 key in `~/.config/nanoclaw/mount-allowlist.json`                                            | open, harmless — remove the key                                                                                                                            |
+| v1's gate-script cost guidance missing from the instructions (suspected)                                                                         | open, to check                                                                                                                                             |
+| `MemoryNoteArchived` (`memory-graph.allium`) not implemented                                                                                     | open — spec gap                                                                                                                                            |
+| Only if a DeltaChat group is ever wired: mention mode cannot detect "@Andy"; v1's revoke-trust-on-member-join not ported                         | open, latent                                                                                                                                               |
+| The main agent's `/workspace/project` mount and read-write `messages.db`                                                                         | dropped on purpose (v2 isolation)                                                                                                                          |
 
 ---
 
 ## Priority order (suggested)
 
-1. **Scheduled tasks** (§1) — mostly recreating tasks with `ncl tasks create`;
-   the synthesis scan and commit scan are cheap.
-2. **Vector search for agents** (§6) — memory search is keyword-only today.
-3. **Session summaries + warm-start + user profile** (§2, §3) — continuity.
-4. **RSS** (§4) — self-contained.
-5. **WebXDC todo/app** (§5).
-6. **Zotero search, `query_transcript`, remote control, chat commands** (§7–9).
+1. ~~**Synthesis scan** (§1)~~ — done 2026-10-14.
+2. ~~**User profile + warm-start** (§1, §2)~~ — done 2026-10-14.
+3. ~~**RSS** (§4)~~ — done 2026-10-14.
+4. **WebXDC todo/app** (§5).
+5. **Session transcript pruning** (§11).
+6. **Smaller search gaps** — `include_content`, Zotero filters, the memory
+   specialist's ranked search (spec decision) (§6, §7).
+7. **`query_transcript`, remote control, `/help` and the missing skills** (§8, §9).
+8. The small DeltaChat and tool items in §11.

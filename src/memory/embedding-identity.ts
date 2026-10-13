@@ -21,3 +21,18 @@ export function geminiProviderKey(model: string): string {
     .digest('hex')
     .slice(0, 32);
 }
+
+/**
+ * A vector the index can store: the expected size, every value finite, not
+ * all zeros. Anything else is refused rather than written or cached — a short
+ * or empty vector would be stored as a valid embedding and never retried.
+ */
+export function isUsableEmbedding(vec: unknown, dims: number): vec is number[] {
+  if (!Array.isArray(vec) || vec.length !== dims) return false;
+  let magnitude = 0;
+  for (const v of vec) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return false;
+    magnitude += v * v;
+  }
+  return magnitude > 0;
+}

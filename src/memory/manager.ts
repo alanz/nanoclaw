@@ -106,7 +106,7 @@ import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.
 import { workspaceIndexDirs } from './workspace-dirs.js';
 import { CHUNKER_VERSION, chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
-import { GEMINI_EMBEDDING_DIMS, geminiProviderKey } from './embedding-identity.js';
+import { GEMINI_EMBEDDING_DIMS, geminiProviderKey, isUsableEmbedding } from './embedding-identity.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
 import { TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
 import {
@@ -121,6 +121,8 @@ import {
   adoptUnkeyedCacheRows,
   getVectorState,
   repairVectors,
+  pruneEmbeddingCache,
+  getLastCachePrune,
   setIndexFingerprint,
   searchIndex,
   type IndexDb,
@@ -130,6 +132,10 @@ import {
 const ALLOWED_EXTENSIONS = new Set(['.md', '.org']);
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'venv', '__pycache__', '.venv']);
 const WATCH_DEBOUNCE_MS = 3000;
+/** Cache rows nothing uses are dropped once they are this old. */
+const CACHE_PRUNE_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
+/** How often the cache is pruned, besides after every full re-index. */
+const CACHE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** How a pass ended: every file done, some left for the next sync, or stopped part-way. */
 type SyncOutcome = 'completed' | 'incomplete' | 'interrupted';
@@ -531,7 +537,7 @@ export class MemoryIndexManager {
         const chunk = chunks[ci];
         if (!chunk) continue;
         const cached = getCachedEmbedding(this.index.db, this.model, this.providerKey, chunk.hash);
-        if (cached) {
+        if (cached && isUsableEmbedding(cached, GEMINI_EMBEDDING_DIMS)) {
           embeddings[ci] = cached;
         } else {
           toEmbed.push({ chunk, idx: ci });
@@ -554,6 +560,13 @@ export class MemoryIndexManager {
           try {
             await this.rateLimiter.acquirePermit(1, 600_000, estimatedTokens);
             const vecs = await this.provider.embedBatch(texts);
+            // One unusable vector fails the batch: the file stays unwritten and
+            // is retried, rather than stored with a chunk missing or wrong.
+            if (vecs.length !== batch.length || !vecs.every((v) => isUsableEmbedding(v, GEMINI_EMBEDDING_DIMS))) {
+              throw new Error(
+                `Embedding provider returned ${vecs.length} vectors for ${batch.length} texts, or an unusable one (expected ${GEMINI_EMBEDDING_DIMS} finite, non-zero values)`,
+              );
+            }
             for (let j = 0; j < batch.length; j++) {
               const item = batch[j];
               const vec = vecs[j];
@@ -686,6 +699,18 @@ export class MemoryIndexManager {
     // write, or an index never checked — are put right from the stored
     // embeddings, no embedding calls.
     if (getVectorState(this.index.db) !== 'clean') this.repairVectors();
+
+    // Embeddings no chunk uses any more — old text, another model or provider
+    // key — once past the grace window: after a full re-index, and daily.
+    const lastPrune = getLastCachePrune(this.index.db);
+    if (force || !lastPrune || Date.now() - Date.parse(lastPrune.at) >= CACHE_PRUNE_INTERVAL_MS) {
+      try {
+        const pruned = pruneEmbeddingCache(this.index.db, Date.now() - CACHE_PRUNE_GRACE_MS);
+        if (pruned > 0) log.info('Memory index: unused cached embeddings pruned', { groupId: this.groupId, pruned });
+      } catch (err) {
+        log.warn('Memory index: cache prune failed', { groupId: this.groupId, err });
+      }
+    }
 
     // A file left incomplete still holds its old entries under an unchanged
     // hash, so only a forced pass that reached every file clears the debt.

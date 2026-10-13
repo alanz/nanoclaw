@@ -107,6 +107,7 @@ function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number
     );
     CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
     CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+    CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(hash);
     CREATE TABLE IF NOT EXISTS ${CACHE_TABLE} (
       provider     TEXT NOT NULL,
       model        TEXT NOT NULL,
@@ -387,6 +388,40 @@ export function repairVectors(index: IndexDb): VectorRepair | null {
     );
   })();
   return result;
+}
+
+const LAST_CACHE_PRUNE_KEY = 'last_cache_prune';
+
+/**
+ * Drop cache rows no chunk uses (by hash and model) that were written before
+ * `writtenBefore` (ms epoch). The age is a grace window: an edit undone soon
+ * after still finds its old text's embedding. A hit does not refresh a row's
+ * age, so the window runs from when the embedding was made.
+ */
+export function pruneEmbeddingCache(db: Database.Database, writtenBefore: number): number {
+  const removed = db
+    .prepare(
+      `DELETE FROM ${CACHE_TABLE} WHERE updated_at < ? AND NOT EXISTS ` +
+        `(SELECT 1 FROM chunks c WHERE c.hash = ${CACHE_TABLE}.hash AND c.model = ${CACHE_TABLE}.model)`,
+    )
+    .run(writtenBefore).changes;
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+    LAST_CACHE_PRUNE_KEY,
+    JSON.stringify({ at: new Date().toISOString(), removed }),
+  );
+  return removed;
+}
+
+export function getLastCachePrune(db: Database.Database): { at: string; removed: number } | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(LAST_CACHE_PRUNE_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as { at: string; removed: number };
+  } catch {
+    return null;
+  }
 }
 
 const LAST_REPAIR_KEY = 'last_vector_repair';

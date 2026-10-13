@@ -1370,6 +1370,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── Memory index (overview panel) ────────────────────────────────────────
 
+  function fmtMB(bytes) {
+    if (bytes == null) return '';
+    return bytes >= 1073741824 ? (bytes / 1073741824).toFixed(2)+' GB' : (bytes / 1048576).toFixed(0)+' MB';
+  }
+
   async function loadMemoryIndex() {
     var el = document.getElementById('overview-memory');
     try {
@@ -1383,11 +1388,38 @@ document.addEventListener('DOMContentLoaded', function() {
         var budget = q.rpdBudget != null ? esc(q.rpdUsed)+' / '+esc(q.rpdBudget) : esc(q.rpdUsed);
         var totalFiles = 0, totalChunks = 0;
         g.sources.forEach(function(s) { totalFiles += s.files; totalChunks += s.chunks; });
+        var ri = g.reindex;
+        var reindexing = ri ? ' <span class="badge bb">full re-index '+esc(ri.done)+' / '+esc(ri.total)+'</span>' : '';
+        var warnings = (g.warnings || []).map(function(w) {
+          return '<div style="margin-top:4px;color:#f85149">&#9888; '+esc(w)+'</div>';
+        }).join('');
+        var ls = g.lastSync;
+        var lastSync = ls
+          ? fmtDate(ls.at)+' ('+esc(ls.outcome)+': '+esc(ls.indexed)+' indexed, '+esc(ls.skipped)+' unchanged, '+esc(ls.removed)+' removed'
+            +(ls.incomplete ? ', '+esc(ls.incomplete)+' failed' : '')+')'
+          : (g.lastSyncAt ? fmtDate(g.lastSyncAt) : 'never');
+        var vr = g.lastVectorRepair;
+        var vectors = (g.vectorSearch ? 'vector + keyword' : 'keyword + in-process scan')
+          +' &middot; vectors '+esc(g.vectorState.replace(/_/g, ' '))
+          +(vr ? ' (repaired '+fmtDate(vr.at)+': '+esc(vr.removed)+' removed, '+esc(vr.added)+' added'+(vr.failed ? ', '+esc(vr.failed)+' failed' : '')+')' : '');
+        var fr = g.lastFullReindex;
+        var fullReindex = ri
+          ? 'running since '+fmtDate(ri.startedAt)+' &mdash; '+esc(ri.reason)
+          : fr ? esc(fr.result)+' '+fmtDate(fr.finishedAt || fr.startedAt)+', '+esc(fr.files)+' files &mdash; '+esc(fr.reason)
+          : 'none recorded';
+        var lp = g.lastCachePrune;
+        var storage = 'cached embeddings '+esc(g.cache.rows)+' ('+esc(g.cache.unused)+' unused'
+          +(lp ? '; pruned '+fmtDate(lp.at)+', '+esc(lp.removed)+' removed' : '')+')'
+          +' &middot; index file '+fmtMB(g.db.bytes)+' ('+fmtMB(g.db.freeBytes)+' free)';
         return '<div style="padding:12px 16px;border-bottom:1px solid #21262d">'
-          +'<strong>'+esc(g.groupName)+'</strong> '+state+stop
-          +'<div class="dim" style="margin-top:4px">'+esc(g.model)+(g.vectorSearch ? ' &middot; vector + keyword' : ' &middot; keyword only')
-          +' &middot; last sync '+(g.lastSyncAt ? fmtDate(g.lastSyncAt) : 'never')
-          +' &middot; embedding requests today '+budget+'</div></div>'
+          +'<strong>'+esc(g.groupName)+'</strong> '+state+reindexing+stop
+          +warnings
+          +'<div class="dim" style="margin-top:4px">'+esc(g.model)+' &middot; '+vectors
+          +' &middot; embedding requests today '+budget+'</div>'
+          +'<div class="dim" style="margin-top:2px">last sync '+lastSync+'</div>'
+          +'<div class="dim" style="margin-top:2px">full re-index: '+fullReindex
+          +(g.settingsCurrent ? '' : ' <span class="badge by">settings changed</span>')+'</div>'
+          +'<div class="dim" style="margin-top:2px">'+storage+'</div></div>'
           +'<table><thead><tr><th>Source</th><th style="text-align:right">Files</th><th style="text-align:right">Chunks</th></tr></thead><tbody>'
           + g.sources.map(function(s) {
             return '<tr><td>'+esc(s.source)+'</td><td style="text-align:right">'+esc(s.files)+'</td><td style="text-align:right">'+esc(s.chunks)+'</td></tr>';

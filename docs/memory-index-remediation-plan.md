@@ -1,9 +1,27 @@
 # Memory index remediation — proposal
 
-Status: **proposal, for review** (2026-10-13). Nothing below is implemented
-except where marked _done_. The Option A spec edits were approved and applied
-to `specs/memory.allium` on 2026-10-13 (`allium check` clean); the code still
-follows the old spec until the items below land.
+Status (2026-10-13): **implemented and live**, except the VACUUM (7.4: the
+script is in, running it is an operator step). The Option A spec edits were
+approved and applied to `specs/memory.allium` (4bf0bb13).
+
+| Item                               | Commit                            |
+| ---------------------------------- | --------------------------------- |
+| 1 vector writes                    | 4b793ff3                          |
+| 2 per-file transactions            | d9b4c0b6                          |
+| 3 vector repair                    | 5c94ac9e                          |
+| 4 fingerprint + visible re-index   | 0ed630ee (start-up gate 973be244) |
+| 5 cache: refuse bad vectors, prune | 57eb8714                          |
+| 6 Gemini timeouts + retries        | 6a5cf1c8                          |
+| 7.3 v1 meta rows                   | efa4971f                          |
+| 7.4 `scripts/memory-vacuum.ts`     | a8f97cb9                          |
+| 8 dashboard                        | 753d03ab                          |
+| Option A code                      | 21fba855                          |
+
+Live result at the first start (20:41): v1 meta rows dropped (2), 18,785 cache
+rows keyed, one full re-index (8,643 files, completed, 2 min 17 s, 7 embedding
+requests — only genuinely changed files), **12,334 orphan vectors removed**,
+4,743 unused cache rows pruned; chunks = vectors = 13,910, 0 orphans; 640 MB
+free in the file for the VACUUM.
 
 ## Why
 

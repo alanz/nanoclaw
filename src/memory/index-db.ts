@@ -10,6 +10,7 @@
  */
 import Database from 'better-sqlite3';
 
+import { log } from '../log.js';
 import { loadSqliteVecExtension } from './sqlite-vec.js';
 import { buildFtsQuery, bm25RankToScore, groupByFile, mergeHybridResults, type FileSearchResult } from './hybrid.js';
 
@@ -53,6 +54,8 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 export type IndexDb = {
   db: Database.Database;
   vecAvailable: boolean;
+  /** Why sqlite-vec is unavailable, when it is. */
+  vecError: string | null;
   model: string;
 };
 
@@ -66,14 +69,21 @@ export async function openIndexDb(dbPath: string, model: string): Promise<IndexD
   db.pragma('journal_mode = DELETE');
 
   const vecResult = await loadSqliteVecExtension({ db });
-  const vecAvailable = vecResult.ok;
+  let vecError = vecResult.ok ? null : (vecResult.error ?? 'unknown error');
 
-  ensureSchema(db, vecAvailable, 3072);
+  const vecTableError = ensureSchema(db, vecError === null, 3072);
+  if (vecError === null && vecTableError) vecError = `vector table: ${vecTableError}`;
+  if (vecError !== null) {
+    // Search falls back to an in-process scan, and vector rows are neither
+    // written nor deleted: the index is marked for repair once vectors return.
+    log.warn('Memory index: vector search unavailable', { dbPath, error: vecError });
+  }
 
-  return { db, vecAvailable, model };
+  return { db, vecAvailable: vecError === null, vecError, model };
 }
 
-function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number): void {
+/** Returns why the vector table could not be created, if it could not. */
+function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number): string | null {
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS files (
@@ -123,8 +133,55 @@ function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number
           `  id TEXT PRIMARY KEY, embedding float[${dims}]` +
           `);`,
       );
-    } catch {}
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
   }
+  return null;
+}
+
+const VECTOR_STATE_KEY = 'vector_state';
+
+/**
+ * Whether the vector rows are known to match the chunks: 'clean' after a
+ * repair pass, 'needs_repair' once a vector write or delete failed or could
+ * not be attempted, null for an index that has never been checked.
+ */
+export type VectorState = 'clean' | 'needs_repair' | null;
+
+export function getVectorState(db: Database.Database): VectorState {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(VECTOR_STATE_KEY) as { value: string } | undefined;
+  return row?.value === 'clean' || row?.value === 'needs_repair' ? row.value : null;
+}
+
+export function setVectorState(db: Database.Database, state: 'clean' | 'needs_repair'): void {
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(VECTOR_STATE_KEY, state);
+}
+
+// One warning a minute per index: a vector table that fails, fails for every row.
+const VECTOR_WARN_INTERVAL_MS = 60_000;
+const vectorWarnings = new WeakMap<Database.Database, { at: number; suppressed: number }>();
+
+/**
+ * A vector row could not be written or deleted. Nothing is swallowed: the
+ * index is marked for repair (the chunk row itself stands, searchable by
+ * keyword and by the in-process scan) and the failure is logged.
+ */
+function vectorFailed(db: Database.Database, op: 'insert' | 'delete', id: string, err: unknown): void {
+  setVectorState(db, 'needs_repair');
+  const now = Date.now();
+  const last = vectorWarnings.get(db);
+  if (last && now - last.at < VECTOR_WARN_INTERVAL_MS) {
+    last.suppressed++;
+    return;
+  }
+  vectorWarnings.set(db, { at: now, suppressed: 0 });
+  log.warn('Memory index: vector row write failed; index marked for repair', {
+    op,
+    chunkId: id,
+    error: err instanceof Error ? err.message : String(err),
+    suppressedSinceLastWarning: last?.suppressed ?? 0,
+  });
 }
 
 export function getCachedEmbedding(db: Database.Database, model: string, chunkHash: string): number[] | null {
@@ -158,11 +215,18 @@ export function deleteFileChunks(db: Database.Database, filePath: string, vecAva
   db.prepare('DELETE FROM chunks WHERE path = ?').run(filePath);
   db.prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ?`).run(filePath);
 
-  if (vecAvailable && chunkIds.length > 0) {
-    for (const id of chunkIds) {
-      try {
-        db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`).run(id);
-      } catch {}
+  if (chunkIds.length === 0) return;
+  // Without sqlite-vec the vector rows cannot be reached; left behind, they
+  // are orphans until the repair pass removes them.
+  if (!vecAvailable) {
+    setVectorState(db, 'needs_repair');
+    return;
+  }
+  for (const id of chunkIds) {
+    try {
+      db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`).run(id);
+    } catch (err) {
+      vectorFailed(db, 'delete', id, err);
     }
   }
 }
@@ -201,12 +265,20 @@ export function insertChunk(
   );
 
   if (params.vecAvailable) {
+    // vec0 does not honour INSERT OR REPLACE: on an existing id it throws, and
+    // the old vector stays. Delete, then insert.
     try {
-      db.prepare(`INSERT OR REPLACE INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`).run(
+      db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`).run(params.id);
+      db.prepare(`INSERT INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`).run(
         params.id,
         vectorToBuffer(params.embedding),
       );
-    } catch {}
+    } catch (err) {
+      vectorFailed(db, 'insert', params.id, err);
+    }
+  } else {
+    // The chunk has no vector until the repair pass writes it.
+    setVectorState(db, 'needs_repair');
   }
 
   db.prepare(

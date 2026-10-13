@@ -130,4 +130,22 @@ describe('vector rows', () => {
       expect.objectContaining({ from: 8, to: DIMS }),
     );
   });
+
+  it('drops the meta rows v1 left, and nothing else', async () => {
+    const dbPath = path.join(root, 'index.db');
+    index = await openIndexDb(dbPath, 'gemini-embedding-001');
+    const put = index.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)');
+    put.run('memory_index_meta_v1', '{}');
+    put.run('memory_index_config_v1', '{"extraPaths":["/Users/x/Sync/org"]}');
+    put.run('index_fingerprint_v2', 'kept');
+    index.db.close();
+
+    index = await openIndexDb(dbPath, 'gemini-embedding-001');
+    const keys = (index.db.prepare('SELECT key FROM meta ORDER BY key').all() as Array<{ key: string }>).map(
+      (r) => r.key,
+    );
+    expect(keys).not.toContain('memory_index_meta_v1');
+    expect(keys).not.toContain('memory_index_config_v1');
+    expect(keys).toContain('index_fingerprint_v2');
+  });
 });

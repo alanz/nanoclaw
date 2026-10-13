@@ -79,7 +79,20 @@ export async function openIndexDb(dbPath: string, model: string, dims = 3072): P
     log.warn('Memory index: vector search unavailable', { dbPath, error: vecError });
   }
 
+  dropV1MetaRows(db, dbPath);
+
   return { db, vecAvailable: vecError === null, vecError, model };
+}
+
+/**
+ * v2's index started as a hand copy of v1's (2026-05-06). v1's meta rows came
+ * with it; v2 never reads them, and one holds v1's host paths.
+ */
+function dropV1MetaRows(db: Database.Database, dbPath: string): void {
+  const dropped = db
+    .prepare("DELETE FROM meta WHERE key IN ('memory_index_meta_v1', 'memory_index_config_v1')")
+    .run().changes;
+  if (dropped > 0) log.info('Memory index: dropped v1 meta rows', { dbPath, dropped });
 }
 
 /** Returns why the vector table could not be created, if it could not. */

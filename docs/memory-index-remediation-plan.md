@@ -1,8 +1,9 @@
 # Memory index remediation — proposal
 
 Status: **proposal, for review** (2026-10-13). Nothing below is implemented
-except where marked _done_. The spec section is a draft for the owner's
-approval; `specs/memory.allium` is unchanged.
+except where marked _done_. The Option A spec edits were approved and applied
+to `specs/memory.allium` on 2026-10-13 (`allium check` clean); the code still
+follows the old spec until the items below land.
 
 ## Why
 
@@ -70,7 +71,7 @@ shadow DB and published by ATTACH + table replace in one transaction;
 - **Settings change → automatic full re-index** (not upstream's pause-and-warn),
   with logging and visibility on the dashboard (§4, §8).
 - **Spec: Option A** — the memory entities are realised by `index.db`; the
-  central tables are retired (draft edits below, awaiting approval).
+  central tables are retired (spec edits below, applied 2026-10-13).
 
 ## Proposed changes
 
@@ -189,7 +190,13 @@ Why the tables go: nothing reads them in production; status never reaches
 ever stored) means a file re-created at a removed path is never tracked again;
 the calls are un-awaited and run for every file on every sync.
 
-### Draft spec edits — for approval, not yet applied to `specs/memory.allium`
+### Spec edits — applied to `specs/memory.allium` (2026-10-13)
+
+As applied, item 6 became three rules: `MemoryIndexCreated` (first open,
+`built_with` null), `IndexSettingsChanged` (settings differ → every file
+pending) and `IndexBuilt` (a full pass that reached every file records the
+settings), on a new `MemoryIndex` entity. The spec now states the per-file
+transaction (§2) as intent.
 
 1. **Header** (after "Ported from v1 …"), add:
    > MemoryFile and MemoryChunk are realised by the group's index

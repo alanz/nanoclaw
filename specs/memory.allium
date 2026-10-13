@@ -4,7 +4,8 @@
 -- NanoClaw v2 memory indexing and semantic search.
 -- Each agent group has an embedded memory index built from markdown and org files in its workspace
 -- (groups/<group>/memory/, the group's Zettelkasten at groups/<group>/zettel/, and the Zotero
--- library's item files at groups/<group>/zotero-md/ in the group it syncs into). Agents can
+-- library's item files at groups/<group>/zotero-md/ in the group it syncs into), plus any of
+-- the group's additional mounts marked `index` (e.g. an org-mode tree). Agents can
 -- search memory using natural language queries; results use
 -- hybrid vector + keyword scoring.
 --
@@ -22,7 +23,16 @@
 --     notes are permanent where memory/ is updated and pruned in place; see memory-graph.allium),
 --     plus workspace folders another module registers for the groups it writes into — today
 --     groups/<folder>/zotero-md/, the Zotero library (zotero.allium), indexed as source "zotero"
---     in the group named by its sync config only
+--     in the group named by its sync config only; and the group's additional mounts marked
+--     `index` in its container config, stored under the path the container sees them at,
+--     extra/<mount>/… (source = the mount's name), so a hit maps straight to
+--     /workspace/extra/<mount>/… whatever the host layout
+--   - MemoryFile and MemoryChunk are realised by the group's own index
+--     (data/v2-memory/<group>/index.db: its files and chunks tables, with the keyword and
+--     vector rows for each file written in the same transaction). There is no central copy.
+--     A file is indexed when it has a row there; pending means the watcher or a sync has
+--     seen it change and it is not yet (re)written — held by the host in memory, not stored,
+--     so a restart re-derives it by comparing content hashes.
 --   - The v1 IPC query path is replaced by the MemoryMcpTools surface (see bottom of file);
 --     MCP tools are registered in container/agent-runner/src/mcp-tools/. Search is still
 --     fulfilled by the host — it holds the embedding credential and the embedding budget —
@@ -105,8 +115,10 @@ value MemoryListParams {
 --   memory_hybrid_search(group: identity/AgentGroup, query: String, params: MemorySearchParams)
 --     → list of MemorySearchResult
 --     Combines vector similarity (sqlite-vec cosine distance) and FTS5 keyword match,
---     weighted by config.vector_score_weight and config.keyword_score_weight. Falls
---     back to keyword-only search when the vector index is unavailable.
+--     weighted by config.vector_score_weight and config.keyword_score_weight. When the
+--     vector index is unavailable (sqlite-vec not loaded) the vector half is an in-process
+--     cosine scan over the stored chunk embeddings — still hybrid. Keyword-only applies
+--     when the query itself cannot be embedded (see MemorySearched).
 --
 --   memory_get_file_content(group: identity/AgentGroup, path: String, parse_frontmatter: Boolean)
 --     → file content (optionally with parsed frontmatter metadata)
@@ -129,7 +141,7 @@ value MemoryListParams {
 --     chunk_tokens and overlap_tokens map to chunk_tokens*4 and overlap_tokens*4 characters.
 --     Returns [] for empty files. Blocks and drawers in .org files are never split across
 --     chunk boundaries even if they exceed the token target.
---     hash is SHA-256 of the chunk text; used to deduplicate embeddings across groups.
+--     hash is SHA-256 of the chunk text; the key of the group's embedding cache (per model).
 --
 -- The memory_* helpers are read-only with respect to the memory index. chunk_file is
 -- read-only with respect to the filesystem — it reads but does not mutate MemoryFile
@@ -140,10 +152,13 @@ value MemoryListParams {
 ------------------------------------------------------------
 
 -- A file in a group's workspace that is tracked and indexed for semantic search.
--- Files are re-indexed whenever their content changes.
+-- Files are re-indexed whenever their content changes, and all of them when the index's
+-- settings change (IndexSettingsChanged). A file that leaves the workspace leaves the index:
+-- its record is deleted, not kept as a tombstone, so a file later created at the same path
+-- is discovered afresh.
 entity MemoryFile {
     group: identity/AgentGroup
-    path: String                        -- repo-relative path, e.g. groups/<folder>/zettel/notes/foo.md
+    path: String                        -- groups/<folder>/zettel/notes/foo.md, or extra/<mount>/… for an indexed mount
     content_hash: String
     indexed_at: Timestamp?              -- null until first successful index
     -- The triggering rules fire on WorkspaceFileChanged and WorkspaceFileRemoved — file-system
@@ -151,17 +166,14 @@ entity MemoryFile {
     -- be external triggers. The checker cascades unreachable-trigger → unreachable-rule →
     -- unobserved status assignment. Lift if the checker suppresses that cascade for external triggers.
     -- allium-ignore allium.status.unreachableValue, allium.status.noExit
-    status: pending | indexed | removed
+    status: pending | indexed
 
     -- Relationships
     chunks: MemoryChunk with file = this
 
     transitions status {
         pending -> indexed
-        indexed -> pending              -- file changed; needs re-index
-        indexed -> removed
-        pending -> removed
-        terminal: removed
+        indexed -> pending              -- file changed, or the index settings changed; needs re-index
     }
 }
 
@@ -172,8 +184,17 @@ entity MemoryChunk {
     start_line: Integer
     end_line: Integer
     content: String
-    hash: String                        -- SHA-256 of the chunk text; deduplicates embeddings across groups and models
+    hash: String                        -- SHA-256 of the chunk text; key of the group's embedding cache (per model)
     indexed_at: Timestamp
+}
+
+-- A group's index as a whole: the settings its current contents were built with.
+-- settings is an opaque fingerprint of everything an unchanged file's entries depend on
+-- besides its content — embedding provider and endpoint, model, vector dimensions, chunk
+-- size and overlap, chunker version. Recorded only when a full pass reached every file.
+entity MemoryIndex {
+    group: identity/AgentGroup
+    built_with: String?                 -- null until the first full pass completes
 }
 
 ------------------------------------------------------------
@@ -217,7 +238,6 @@ rule FileUpdated {
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: exists file
     requires: content_hash != file.content_hash
-    requires: file.status in { pending, indexed }
 
     ensures: file.content_hash = content_hash
     ensures: file.status = pending
@@ -239,13 +259,15 @@ rule FileDiscovered {
     )
 
     @guidance
+        -- Includes a file created at the path of one removed earlier: FileRemoved deleted
+        -- that record, so nothing of the old file stands in the way.
         -- Also fires when a specialist delivers a result with commit_to_memory = true
         -- (see specialists/AgentRequestsDeliverSpecialistResult). The host copies the
         -- file into the group's zettel/reports/ before WorkspaceFileChanged is emitted,
         -- so this rule fires under the same conditions as any other new file.
 }
 
--- When a file is removed from the workspace, its chunks are deleted and the file is marked removed.
+-- When a file is removed from the workspace, it and its chunks leave the index.
 rule FileRemoved {
     when: WorkspaceFileRemoved(group, path)
 
@@ -254,16 +276,16 @@ rule FileRemoved {
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
     requires: exists file
-    requires: file.status in { pending, indexed }
 
-    ensures: file.status = removed
     ensures:
         for chunk in file.chunks:
             not exists chunk
+    ensures: not exists file
 
     @guidance
         -- FTS index rows and embedding rows for removed chunks are also deleted
-        -- as part of the same operation to keep the search index consistent.
+        -- in the same transaction, so the search index never holds a vector or keyword row
+        -- for a chunk that is gone, nor a chunk without its vector and keyword rows.
         -- WorkspaceFileRemoved is emitted from two sources: the filesystem watcher
         -- and the periodic sync sweep, which reconciles all tracked paths and emits
         -- the trigger for any file that has disappeared without a watcher event.
@@ -315,8 +337,64 @@ rule FileSynced {
         -- restart also retries them, since the stop is not persisted). No status change is
         -- needed: pending already means "not yet indexed, will be retried." RPM/TPM cool-down
         -- is handled transparently inside acquirePermit.
-        -- Embeddings are cached by chunk hash and reused across groups and models, so a
+        -- Embeddings are cached in the group's index by chunk hash and model, so a
         -- repeated sync after budget recovery only embeds chunks whose hash is not yet cached.
+}
+
+-- ---- Index settings ----
+
+-- The host opens a group's index for the first time: it starts with no recorded settings.
+-- Its files arrive through FileDiscovered; the first full pass to reach them all records
+-- the settings (IndexBuilt).
+rule MemoryIndexCreated {
+    when: MemoryIndexOpened(group, settings)
+
+    requires: group.specialist = null       -- memory indexing is disabled for specialist groups
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: not exists MemoryIndex{group: group}
+
+    ensures: MemoryIndex.created(group: group, built_with: null)
+}
+
+-- The host opens a group's index (at start) with settings that differ from those its
+-- contents were built with: every file returns to pending, so each is chunked and embedded
+-- again under the new settings. With unchanged settings this rule does not fire and only
+-- files whose content changed are re-indexed (FileUpdated, FileDiscovered, FileRemoved).
+rule IndexSettingsChanged {
+    when: MemoryIndexOpened(group, settings)
+
+    let index = MemoryIndex{group: group}
+
+    requires: group.specialist = null       -- memory indexing is disabled for specialist groups
+    requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: exists index
+    requires: settings != index.built_with
+
+    ensures:
+        for f in MemoryFiles where f.group = group:
+            f.status = pending
+
+    @guidance
+        -- Settings are read from configuration when the host starts, so a settings change
+        -- takes effect at the next start; checking at open is equivalent to checking before
+        -- every sync. The host logs each changed setting (old → new) and reports the
+        -- re-index (reason, progress, outcome) on the dashboard. A full re-index reuses
+        -- cached embeddings whose model still matches, so a chunking change costs no
+        -- embedding calls for unchanged text.
+}
+
+-- A full pass under the current settings has reached every file: the index records
+-- the settings it was built with. A pass stopped part-way (shutdown, the daily embedding
+-- stop, a file that could not be embedded) records nothing, so the next open finds the
+-- settings still differ and the full pass runs again.
+rule IndexBuilt {
+    when: MemoryIndexFullPassCompleted(group, settings)
+
+    let index = MemoryIndex{group: group}
+
+    requires: exists index
+
+    ensures: index.built_with = settings
 }
 
 -- ---- Search ----
@@ -415,22 +493,20 @@ rule MemoryListed {
 -- Invariants
 ------------------------------------------------------------
 
--- All indexed files must live within the group's memory/ subdirectory, its
--- Zettelkasten, zettel/, or a registered workspace folder (today zotero-md/) — each at
--- the top of the group workspace.
--- Non-specialist agents write there directly (group dir is mounted RW).
+-- All indexed files live either within the group's workspace — its memory/
+-- subdirectory, its Zettelkasten, zettel/, or a registered workspace folder (today
+-- zotero-md/), each at the top of the group workspace — or in one of the group's
+-- additional mounts marked `index`, stored as extra/<mount>/…. The container config
+-- that marks a mount is not modelled here, so the extra/ branch states the shape only;
+-- the host indexes no other extra/ path.
+-- Non-specialist agents write to the workspace folders directly (group dir is mounted RW).
 -- Specialist agents land files there via commit_to_memory on result delivery
 -- (group dir is mounted RO for specialists; the host performs the copy).
 invariant MemoryFilesWithinWorkspace {
     for f in MemoryFiles:
-        startsWith(f.path, "groups/") and (contains(f.path, "/memory/") or contains(f.path, "/zettel/")
-            or contains(f.path, "/zotero-md/"))
-}
-
--- Every chunk belongs to an indexed (or pending) file, never a removed one.
-invariant NoChunksForRemovedFiles {
-    for c in MemoryChunks:
-        c.file.status != removed
+        (startsWith(f.path, "groups/") and (contains(f.path, "/memory/") or contains(f.path, "/zettel/")
+            or contains(f.path, "/zotero-md/")))
+        or startsWith(f.path, "extra/")
 }
 
 -- A file that has never completed a sync has no chunks.

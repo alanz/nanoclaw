@@ -114,4 +114,20 @@ describe('vector rows', () => {
     deleteFileChunks(index.db, 'groups/g/memory/a.md', false);
     expect(getVectorState(index.db)).toBe('needs_repair');
   });
+
+  it('a vector size change recreates the vector table and marks the index for repair', async () => {
+    const dbPath = path.join(root, 'index.db');
+    index = await openIndexDb(dbPath, 'gemini-embedding-001', 8);
+    index.db.close();
+
+    index = await openIndexDb(dbPath, 'gemini-embedding-001', DIMS);
+    const sql = (index.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chunks_vec'").get() as { sql: string })
+      .sql;
+    expect(sql).toContain(`float[${DIMS}]`);
+    expect(getVectorState(index.db)).toBe('needs_repair');
+    expect(ctl.warn).toHaveBeenCalledWith(
+      expect.stringContaining('vector size changed'),
+      expect.objectContaining({ from: 8, to: DIMS }),
+    );
+  });
 });

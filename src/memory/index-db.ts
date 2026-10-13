@@ -59,7 +59,7 @@ export type IndexDb = {
   model: string;
 };
 
-export async function openIndexDb(dbPath: string, model: string): Promise<IndexDb> {
+export async function openIndexDb(dbPath: string, model: string, dims = 3072): Promise<IndexDb> {
   const db = new Database(dbPath);
   // DELETE mode, not WAL: the index is mounted read-only into containers, and
   // WAL-mode databases require the reader to access the .db-wal + .db-shm files
@@ -71,7 +71,7 @@ export async function openIndexDb(dbPath: string, model: string): Promise<IndexD
   const vecResult = await loadSqliteVecExtension({ db });
   let vecError = vecResult.ok ? null : (vecResult.error ?? 'unknown error');
 
-  const vecTableError = ensureSchema(db, vecError === null, 3072);
+  const vecTableError = ensureSchema(db, vecError === null, dims);
   if (vecError === null && vecTableError) vecError = `vector table: ${vecTableError}`;
   if (vecError !== null) {
     // Search falls back to an in-process scan, and vector rows are neither
@@ -128,6 +128,17 @@ function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number
 
   if (vecAvailable) {
     try {
+      // A vector table of another size cannot take this model's vectors: drop
+      // it. The full re-index a dims change forces refills it.
+      const existing = db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(VECTOR_TABLE) as
+        | { sql: string }
+        | undefined;
+      const size = existing?.sql.match(/float\[(\d+)\]/)?.[1];
+      if (size !== undefined && Number(size) !== dims) {
+        log.warn('Memory index: vector size changed; recreating the vector table', { from: Number(size), to: dims });
+        db.exec(`DROP TABLE ${VECTOR_TABLE}`);
+        setVectorState(db, 'needs_repair');
+      }
       db.exec(
         `CREATE VIRTUAL TABLE IF NOT EXISTS ${VECTOR_TABLE} USING vec0(` +
           `  id TEXT PRIMARY KEY, embedding float[${dims}]` +
@@ -184,10 +195,15 @@ function vectorFailed(db: Database.Database, op: 'insert' | 'delete', id: string
   });
 }
 
-export function getCachedEmbedding(db: Database.Database, model: string, chunkHash: string): number[] | null {
+export function getCachedEmbedding(
+  db: Database.Database,
+  model: string,
+  providerKey: string,
+  chunkHash: string,
+): number[] | null {
   const row = db
     .prepare(`SELECT embedding FROM ${CACHE_TABLE} WHERE provider = ? AND model = ? AND provider_key = ? AND hash = ?`)
-    .get('gemini', model, '', chunkHash) as { embedding: string } | undefined;
+    .get('gemini', model, providerKey, chunkHash) as { embedding: string } | undefined;
   if (!row) return null;
   try {
     return JSON.parse(row.embedding) as number[];
@@ -199,12 +215,43 @@ export function getCachedEmbedding(db: Database.Database, model: string, chunkHa
 export function saveCachedEmbedding(
   db: Database.Database,
   model: string,
+  providerKey: string,
   chunkHash: string,
   embedding: number[],
 ): void {
   db.prepare(
     `INSERT OR REPLACE INTO ${CACHE_TABLE} (provider, model, provider_key, hash, embedding, dims, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run('gemini', model, '', chunkHash, JSON.stringify(embedding), embedding.length, Date.now());
+  ).run('gemini', model, providerKey, chunkHash, JSON.stringify(embedding), embedding.length, Date.now());
+}
+
+/**
+ * Cache rows written before the provider key was recorded (key '') were all
+ * made by `provider` against its one endpoint: give them their key, per model,
+ * so they keep serving lookups. A row whose keyed twin already exists is
+ * dropped.
+ */
+export function adoptUnkeyedCacheRows(
+  db: Database.Database,
+  provider: string,
+  keyFor: (model: string) => string,
+): number {
+  const models = db
+    .prepare(`SELECT DISTINCT model FROM ${CACHE_TABLE} WHERE provider = ? AND provider_key = ''`)
+    .all(provider) as Array<{ model: string }>;
+  if (models.length === 0) return 0;
+  let adopted = 0;
+  db.transaction(() => {
+    for (const { model } of models) {
+      adopted += db
+        .prepare(
+          `UPDATE OR IGNORE ${CACHE_TABLE} SET provider_key = ? WHERE provider = ? AND model = ? AND provider_key = ''`,
+        )
+        .run(keyFor(model), provider, model).changes;
+    }
+    db.prepare(`DELETE FROM ${CACHE_TABLE} WHERE provider = ? AND provider_key = ''`).run(provider);
+  })();
+  log.info('Memory index: cache rows given their provider key', { adopted });
+  return adopted;
 }
 
 export function deleteFileChunks(db: Database.Database, filePath: string, vecAvailable: boolean): void {
@@ -317,9 +364,11 @@ export function repairVectors(index: IndexDb): VectorRepair | null {
 
     const missing = db
       .prepare(
-        `SELECT c.id, c.embedding FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM ${VECTOR_TABLE}_rowids r WHERE r.id = c.id)`,
+        // Only this model's embeddings fit the table; a chunk of another model
+        // gets its vector when it is re-indexed.
+        `SELECT c.id, c.embedding FROM chunks c WHERE c.model = ? AND NOT EXISTS (SELECT 1 FROM ${VECTOR_TABLE}_rowids r WHERE r.id = c.id)`,
       )
-      .all() as Array<{ id: string; embedding: string }>;
+      .all(index.model) as Array<{ id: string; embedding: string }>;
     const insert = db.prepare(`INSERT INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`);
     for (const { id, embedding } of missing) {
       try {
@@ -341,6 +390,36 @@ export function repairVectors(index: IndexDb): VectorRepair | null {
 }
 
 const LAST_REPAIR_KEY = 'last_vector_repair';
+const LAST_FULL_REINDEX_KEY = 'last_full_reindex';
+
+/** The last full re-index: why, when, how many files, and how it ended. */
+export type FullReindexRecord = {
+  reason: string;
+  startedAt: string;
+  finishedAt: string | null;
+  files: number;
+  result: 'running' | 'completed' | 'incomplete' | 'interrupted';
+};
+
+export function setLastFullReindex(db: Database.Database, record: FullReindexRecord): void {
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+    LAST_FULL_REINDEX_KEY,
+    JSON.stringify(record),
+  );
+}
+
+/** A record still 'running' when read at start belongs to a host that died mid-pass. */
+export function getLastFullReindex(db: Database.Database): FullReindexRecord | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(LAST_FULL_REINDEX_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as FullReindexRecord;
+  } catch {
+    return null;
+  }
+}
 
 export function getLastVectorRepair(db: Database.Database): (VectorRepair & { at: string }) | null {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(LAST_REPAIR_KEY) as { value: string } | undefined;

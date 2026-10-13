@@ -9,12 +9,17 @@ import path from 'path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const ctl = vi.hoisted(() => ({ fail: false }));
+const ctl = vi.hoisted(() => ({ fail: false, embedCalls: 0, warn: vi.fn() }));
+
+vi.mock('../log.js', () => ({
+  log: { warn: ctl.warn, info: vi.fn(), debug: vi.fn(), error: vi.fn() },
+}));
 
 vi.mock('./embeddings.js', () => ({
   DEFAULT_GEMINI_EMBEDDING_MODEL: 'gemini-embedding-001',
   createGeminiEmbeddingProvider: () => ({
     embedBatch: async (texts: string[]) => {
+      ctl.embedCalls++;
       if (ctl.fail) throw new Error('embedding service down');
       return texts.map(() => new Array(3072).fill(0.01));
     },
@@ -24,6 +29,7 @@ vi.mock('@parcel/watcher', () => ({
   default: { subscribe: async () => ({ unsubscribe: async () => {} }) },
 }));
 
+import { geminiProviderKey } from './embedding-identity.js';
 import { MemoryIndexManager } from './manager.js';
 
 let root: string;
@@ -39,6 +45,8 @@ beforeEach(() => {
   fs.mkdirSync(notes);
   dbPath = path.join(root, 'index.db');
   ctl.fail = false;
+  ctl.embedCalls = 0;
+  ctl.warn.mockClear();
   fs.writeFileSync(path.join(memory, 'a.md'), '# A\n\nAlpha.\n');
   fs.writeFileSync(path.join(notes, 'n.md'), '# N\n\nA note.\n');
 });
@@ -64,6 +72,16 @@ function rows(sql: string): Array<Record<string, unknown>> {
     db.close();
   }
 }
+
+function write(sql: string): void {
+  const db = new Database(dbPath);
+  try {
+    db.prepare(sql).run();
+  } finally {
+    db.close();
+  }
+}
+const meta = (key: string) => rows(`SELECT value FROM meta WHERE key = '${key}'`)[0]?.value as string | undefined;
 
 const chunkStamps = () => rows('SELECT id, model, updated_at FROM chunks ORDER BY id');
 const fingerprint = () => rows("SELECT value FROM meta WHERE key = 'index_fingerprint_v2'")[0]?.value;
@@ -111,5 +129,44 @@ describe('memory index start-up sync', { timeout: 20_000 }, () => {
     await (await start('gemini-embedding-001', 'zettel')).close();
     expect(rows("SELECT source FROM files WHERE path = 'extra/notes/n.md'")).toEqual([{ source: 'zettel' }]);
     expect(rows("SELECT source FROM chunks WHERE path = 'extra/notes/n.md'")).toEqual([{ source: 'zettel' }]);
+  });
+
+  it('a settings change is logged field by field and its re-index recorded', async () => {
+    await (await start()).close();
+    // The fingerprint as 973be244 recorded it, before provider and dims joined.
+    write(
+      `UPDATE meta SET value = '{"model":"gemini-embedding-001","chunkTokens":400,"chunkOverlap":80,"chunker":1}' WHERE key = 'index_fingerprint_v2'`,
+    );
+
+    await (await start()).close();
+    const changes = expect.stringMatching(/provider: \(none\) → gemini.*vectorDims: \(none\) → 3072/);
+    expect(ctl.warn).toHaveBeenCalledWith(
+      expect.stringContaining('settings changed'),
+      expect.objectContaining({ changes }),
+    );
+    expect(JSON.parse(meta('last_full_reindex')!)).toMatchObject({ reason: changes, result: 'completed', files: 2 });
+  });
+
+  it('a full re-index that leaves a file unembedded is recorded as incomplete', async () => {
+    await (await start()).close();
+    ctl.fail = true;
+    await (await start('gemini-embedding-002')).close();
+    expect(JSON.parse(meta('last_full_reindex')!)).toMatchObject({
+      reason: expect.stringContaining('model: gemini-embedding-001 → gemini-embedding-002'),
+      result: 'incomplete',
+    });
+  });
+
+  it('cache rows from before the provider key keep serving, under their key', async () => {
+    await (await start()).close();
+    write(`UPDATE embedding_cache SET provider_key = ''`);
+    write(`DELETE FROM meta WHERE key = 'index_fingerprint_v2'`);
+    const calls = ctl.embedCalls;
+
+    await (await start()).close();
+    expect(ctl.embedCalls).toBe(calls);
+    expect(rows('SELECT DISTINCT provider_key FROM embedding_cache')).toEqual([
+      { provider_key: geminiProviderKey('gemini-embedding-001') },
+    ]);
   });
 });

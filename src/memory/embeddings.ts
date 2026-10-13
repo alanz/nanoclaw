@@ -1,7 +1,7 @@
 import { EmbeddingRateLimitError } from './embedding-errors.js';
+import { GEMINI_BASE_URL as BASE_URL } from './embedding-identity.js';
 
 export const DEFAULT_GEMINI_EMBEDDING_MODEL = 'gemini-embedding-001';
-const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 export type EmbeddingProvider = {
   id: string;

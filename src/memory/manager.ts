@@ -106,6 +106,7 @@ import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.
 import { workspaceIndexDirs } from './workspace-dirs.js';
 import { CHUNKER_VERSION, chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
+import { GEMINI_EMBEDDING_DIMS, geminiProviderKey } from './embedding-identity.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
 import { TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
 import {
@@ -116,6 +117,8 @@ import {
   insertChunk,
   upsertFileRecord,
   getIndexFingerprint,
+  setLastFullReindex,
+  adoptUnkeyedCacheRows,
   getVectorState,
   repairVectors,
   setIndexFingerprint,
@@ -127,6 +130,9 @@ import {
 const ALLOWED_EXTENSIONS = new Set(['.md', '.org']);
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'venv', '__pycache__', '.venv']);
 const WATCH_DEBOUNCE_MS = 3000;
+
+/** How a pass ended: every file done, some left for the next sync, or stopped part-way. */
+type SyncOutcome = 'completed' | 'incomplete' | 'interrupted';
 const BATCH_SIZE = 100;
 
 /** The rate limiter's estimate: a token per four characters. */
@@ -247,6 +253,11 @@ export class MemoryIndexManager {
   private dirty = false;
   /** Set until a full re-index under the current settings has completed. */
   private forcePending = false;
+  /** Why the pending full re-index runs: the settings that changed. */
+  private reindexReason: string | null = null;
+  /** The full re-index under way, for stats. */
+  private reindex: { reason: string; startedAt: string; done: number; total: number } | null = null;
+  private providerKey = '';
   private syncLock: Promise<void> = Promise.resolve();
   private periodicTimer: ReturnType<typeof setInterval> | null = null;
   private rpdResumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -267,7 +278,9 @@ export class MemoryIndexManager {
   async init(): Promise<void> {
     fsSync.mkdirSync(path.dirname(this.dbPath), { recursive: true });
 
-    this.index = await openIndexDb(this.dbPath, this.model);
+    this.providerKey = geminiProviderKey(this.model);
+    this.index = await openIndexDb(this.dbPath, this.model, GEMINI_EMBEDDING_DIMS);
+    adoptUnkeyedCacheRows(this.index.db, 'gemini', geminiProviderKey);
 
     const { provider } = { provider: createGeminiEmbeddingProvider({ apiKey: this.apiKey, model: this.model }) };
     this.provider = provider;
@@ -315,7 +328,15 @@ export class MemoryIndexManager {
     // since it was last fully built; otherwise only changed files are
     // re-indexed. Re-indexing everything on every start rewrote the whole
     // index.db (~1.6 GB of backup delta per host restart) for no change.
-    this.forcePending = getIndexFingerprint(this.index.db) !== this.fingerprint();
+    const stored = getIndexFingerprint(this.index.db);
+    this.forcePending = stored !== this.fingerprint();
+    if (this.forcePending) {
+      this.reindexReason = this.fingerprintChanges(stored);
+      log.warn('Memory index: settings changed since the last full build; re-indexing every file', {
+        groupId: this.groupId,
+        changes: this.reindexReason,
+      });
+    }
     this.dirty = true;
     void this.sync();
 
@@ -346,12 +367,37 @@ export class MemoryIndexManager {
    * forces one, so no file keeps chunks from an older model or chunker.
    */
   private fingerprint(): string {
-    return JSON.stringify({
+    return JSON.stringify(this.fingerprintFields());
+  }
+
+  private fingerprintFields(): Record<string, string | number> {
+    return {
       model: this.model,
       chunkTokens: MEMORY_CONFIG.chunk_tokens,
       chunkOverlap: MEMORY_CONFIG.chunk_overlap_tokens,
       chunker: CHUNKER_VERSION,
-    });
+      provider: 'gemini',
+      providerKey: this.providerKey,
+      vectorDims: GEMINI_EMBEDDING_DIMS,
+    };
+  }
+
+  /** "field: old → new" for each setting that differs from the stored fingerprint. */
+  private fingerprintChanges(stored: string | null): string {
+    if (stored === null) return 'first full build (no settings recorded)';
+    let old: Record<string, unknown> = {};
+    try {
+      old = JSON.parse(stored) as Record<string, unknown>;
+    } catch {}
+    const current = this.fingerprintFields();
+    const keys = [...new Set([...Object.keys(old), ...Object.keys(current)])];
+    return keys
+      .filter((k) => JSON.stringify(old[k]) !== JSON.stringify(current[k]))
+      .map(
+        (k) =>
+          `${k}: ${old[k] === undefined ? '(none)' : String(old[k])} → ${current[k] === undefined ? '(none)' : String(current[k])}`,
+      )
+      .join('; ');
   }
 
   private repairVectors(): void {
@@ -372,6 +418,42 @@ export class MemoryIndexManager {
 
   private async _doSync(force: boolean): Promise<void> {
     if (!force && !this.dirty) return;
+    if (!force) {
+      await this.syncFiles(false);
+      return;
+    }
+
+    // A full re-index: logged, recorded in meta, and its progress reported
+    // (stats) while it runs.
+    const reason = this.reindexReason ?? 'requested';
+    const startedAt = new Date().toISOString();
+    this.reindex = { reason, startedAt, done: 0, total: 0 };
+    log.info('Memory index: full re-index started', { groupId: this.groupId, reason });
+    try {
+      setLastFullReindex(this.index.db, { reason, startedAt, finishedAt: null, files: 0, result: 'running' });
+    } catch {}
+    let outcome: SyncOutcome = 'interrupted';
+    try {
+      outcome = await this.syncFiles(true);
+    } finally {
+      const files = this.reindex?.done ?? 0;
+      this.reindex = null;
+      const finishedAt = new Date().toISOString();
+      try {
+        if (!this.closed) setLastFullReindex(this.index.db, { reason, startedAt, finishedAt, files, result: outcome });
+      } catch {}
+      if (outcome === 'completed') this.reindexReason = null;
+      log[outcome === 'completed' ? 'info' : 'warn']('Memory index: full re-index finished', {
+        groupId: this.groupId,
+        reason,
+        files,
+        result: outcome,
+      });
+    }
+  }
+
+  /** One pass over every indexed file; force re-indexes unchanged files too. */
+  private async syncFiles(force: boolean): Promise<SyncOutcome> {
     this.dirty = false;
     this._syncing = true;
 
@@ -388,6 +470,7 @@ export class MemoryIndexManager {
     }
 
     log.info('Memory sync: starting', { groupId: this.groupId, count: fileEntries.length, force });
+    if (this.reindex) this.reindex.total = fileEntries.length;
 
     let indexed = 0,
       skipped = 0,
@@ -399,6 +482,7 @@ export class MemoryIndexManager {
 
     for (const { absPath, source: fileSource, dir, pathPrefix } of fileEntries) {
       if (this.closed) break;
+      if (this.reindex) this.reindex.done++;
 
       let content: string;
       let stat: Awaited<ReturnType<typeof fs.stat>>;
@@ -446,7 +530,7 @@ export class MemoryIndexManager {
       for (let ci = 0; ci < chunks.length; ci++) {
         const chunk = chunks[ci];
         if (!chunk) continue;
-        const cached = getCachedEmbedding(this.index.db, this.model, chunk.hash);
+        const cached = getCachedEmbedding(this.index.db, this.model, this.providerKey, chunk.hash);
         if (cached) {
           embeddings[ci] = cached;
         } else {
@@ -475,7 +559,7 @@ export class MemoryIndexManager {
               const vec = vecs[j];
               if (!item || !vec) continue;
               embeddings[item.idx] = vec;
-              saveCachedEmbedding(this.index.db, this.model, item.chunk.hash, vec);
+              saveCachedEmbedding(this.index.db, this.model, this.providerKey, item.chunk.hash, vec);
             }
             consecutiveRlFailures = 0;
           } catch (err) {
@@ -489,7 +573,7 @@ export class MemoryIndexManager {
               this.dirty = true;
               this._syncing = false;
               this.scheduleRpdResume(resumeInMs);
-              return;
+              return 'interrupted';
             }
             if (isEmbeddingRateLimitError(err)) {
               this.rateLimiter.depleteQuotaForType(err.quotaType, err.retryDelayMs);
@@ -501,7 +585,7 @@ export class MemoryIndexManager {
                 });
                 this.dirty = true;
                 this._syncing = false;
-                return;
+                return 'interrupted';
               }
             }
             log.warn('Memory sync: embedding batch failed, skipping file', {
@@ -574,7 +658,7 @@ export class MemoryIndexManager {
     // stale pass below would drop every file not yet visited.
     if (this.closed) {
       this._syncing = false;
-      return;
+      return 'interrupted';
     }
 
     // Remove stale files no longer on disk
@@ -613,6 +697,7 @@ export class MemoryIndexManager {
     this._syncing = false;
     this._lastSyncAt = Date.now();
     log.info('Memory sync complete', { groupId: this.groupId, indexed, skipped, removed });
+    return incomplete === 0 ? 'completed' : 'incomplete';
   }
 
   /**

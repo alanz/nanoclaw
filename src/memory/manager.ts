@@ -508,34 +508,52 @@ export class MemoryIndexManager {
         continue;
       }
 
-      deleteFileChunks(this.index.db, repoPath, this.index.vecAvailable);
+      // One transaction per file: its chunk, keyword and vector rows and its
+      // files row change together, so a reader (the container mounts this
+      // file read-only) sees the file before or after, never half-written, and
+      // a failure part-way leaves the old entries whole.
+      try {
+        this.index.db.transaction(() => {
+          deleteFileChunks(this.index.db, repoPath, this.index.vecAvailable);
 
-      for (let ci = 0; ci < chunks.length; ci++) {
-        const chunk = chunks[ci];
-        const vec = embeddings[ci];
-        if (!chunk || !vec) continue;
-        const chunkId = `${repoPath}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`;
-        insertChunk(this.index.db, {
-          id: chunkId,
-          path: repoPath,
-          source: fileSource,
-          startLine: chunk.startLine,
-          endLine: chunk.endLine,
-          hash: chunk.hash,
-          model: this.model,
-          text: chunk.text,
-          embedding: vec,
-          vecAvailable: this.index.vecAvailable,
+          for (let ci = 0; ci < chunks.length; ci++) {
+            const chunk = chunks[ci];
+            const vec = embeddings[ci];
+            if (!chunk || !vec) continue;
+            const chunkId = `${repoPath}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}`;
+            insertChunk(this.index.db, {
+              id: chunkId,
+              path: repoPath,
+              source: fileSource,
+              startLine: chunk.startLine,
+              endLine: chunk.endLine,
+              hash: chunk.hash,
+              model: this.model,
+              text: chunk.text,
+              embedding: vec,
+              vecAvailable: this.index.vecAvailable,
+            });
+          }
+
+          upsertFileRecord(this.index.db, {
+            path: repoPath,
+            source: fileSource,
+            hash: contentHash,
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+          });
+        })();
+      } catch (err) {
+        if (this.closed) break;
+        log.warn('Memory sync: writing file failed, kept its previous entries', {
+          groupId: this.groupId,
+          file: repoPath,
+          err,
         });
+        this.dirty = true;
+        incomplete++;
+        continue;
       }
-
-      upsertFileRecord(this.index.db, {
-        path: repoPath,
-        source: fileSource,
-        hash: contentHash,
-        mtimeMs: stat.mtimeMs,
-        size: stat.size,
-      });
       indexed++;
     }
 
@@ -552,8 +570,16 @@ export class MemoryIndexManager {
     );
     for (const p of allPaths) {
       if (!seenPaths.has(p)) {
-        deleteFileChunks(this.index.db, p, this.index.vecAvailable);
-        this.index.db.prepare('DELETE FROM files WHERE path = ?').run(p);
+        try {
+          this.index.db.transaction(() => {
+            deleteFileChunks(this.index.db, p, this.index.vecAvailable);
+            this.index.db.prepare('DELETE FROM files WHERE path = ?').run(p);
+          })();
+        } catch (err) {
+          log.warn('Memory sync: removing a deleted file failed', { groupId: this.groupId, file: p, err });
+          this.dirty = true;
+          continue;
+        }
         if (isRepoPath(p)) handleWorkspaceFileRemoved({ group_id: this.groupId, path: p });
         removed++;
       }

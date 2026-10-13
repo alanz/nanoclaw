@@ -116,6 +116,8 @@ import {
   insertChunk,
   upsertFileRecord,
   getIndexFingerprint,
+  getVectorState,
+  repairVectors,
   setIndexFingerprint,
   searchIndex,
   type IndexDb,
@@ -352,6 +354,17 @@ export class MemoryIndexManager {
     });
   }
 
+  private repairVectors(): void {
+    try {
+      const repair = repairVectors(this.index);
+      if (!repair) return;
+      const level = repair.failed > 0 ? 'warn' : 'info';
+      log[level]('Memory index: vector rows repaired', { groupId: this.groupId, ...repair });
+    } catch (err) {
+      log.warn('Memory index: vector repair failed', { groupId: this.groupId, err });
+    }
+  }
+
   async sync(opts?: { force?: boolean }): Promise<void> {
     this.syncLock = this.syncLock.then(() => this._doSync((opts?.force ?? false) || this.forcePending)).catch(() => {});
     return this.syncLock;
@@ -584,6 +597,11 @@ export class MemoryIndexManager {
         removed++;
       }
     }
+
+    // Vector rows that drifted from the chunks — a failed or impossible vector
+    // write, or an index never checked — are put right from the stored
+    // embeddings, no embedding calls.
+    if (getVectorState(this.index.db) !== 'clean') this.repairVectors();
 
     // A file left incomplete still holds its old entries under an unchanged
     // hash, so only a forced pass that reached every file clears the debt.

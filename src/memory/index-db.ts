@@ -286,6 +286,72 @@ export function insertChunk(
   ).run(params.text, params.id, params.path, params.source, params.model, params.startLine, params.endLine);
 }
 
+export type VectorRepair = { removed: number; added: number; failed: number };
+
+/**
+ * Bring the vector rows back in line with the chunks, from data already in
+ * the index (no embedding calls): delete vector rows whose chunk is gone, and
+ * write the missing vector of any chunk from its stored embedding. Marks the
+ * index clean only when every row was put right. Needs sqlite-vec.
+ */
+export function repairVectors(index: IndexDb): VectorRepair | null {
+  const { db } = index;
+  if (!index.vecAvailable) return null;
+  const result: VectorRepair = { removed: 0, added: 0, failed: 0 };
+  db.transaction(() => {
+    // vec0 keeps its ids in the chunks_vec_rowids shadow table; reading it
+    // there avoids a scan of the vectors themselves.
+    const orphans = db
+      .prepare(`SELECT r.id FROM ${VECTOR_TABLE}_rowids r WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = r.id)`)
+      .all() as Array<{ id: string }>;
+    const remove = db.prepare(`DELETE FROM ${VECTOR_TABLE} WHERE id = ?`);
+    for (const { id } of orphans) {
+      try {
+        remove.run(id);
+        result.removed++;
+      } catch (err) {
+        result.failed++;
+        vectorFailed(db, 'delete', id, err);
+      }
+    }
+
+    const missing = db
+      .prepare(
+        `SELECT c.id, c.embedding FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM ${VECTOR_TABLE}_rowids r WHERE r.id = c.id)`,
+      )
+      .all() as Array<{ id: string; embedding: string }>;
+    const insert = db.prepare(`INSERT INTO ${VECTOR_TABLE} (id, embedding) VALUES (?, ?)`);
+    for (const { id, embedding } of missing) {
+      try {
+        insert.run(id, vectorToBuffer(JSON.parse(embedding) as number[]));
+        result.added++;
+      } catch (err) {
+        result.failed++;
+        vectorFailed(db, 'insert', id, err);
+      }
+    }
+
+    if (result.failed === 0) setVectorState(db, 'clean');
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(
+      LAST_REPAIR_KEY,
+      JSON.stringify({ at: new Date().toISOString(), ...result }),
+    );
+  })();
+  return result;
+}
+
+const LAST_REPAIR_KEY = 'last_vector_repair';
+
+export function getLastVectorRepair(db: Database.Database): (VectorRepair & { at: string }) | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(LAST_REPAIR_KEY) as { value: string } | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as VectorRepair & { at: string };
+  } catch {
+    return null;
+  }
+}
+
 export function upsertFileRecord(
   db: Database.Database,
   params: { path: string; source: string; hash: string; mtimeMs: number; size: number },

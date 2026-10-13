@@ -7,6 +7,12 @@ export type MemoryChunk = {
   hash: string;
 };
 
+/**
+ * Bump when a chunker change would split an unchanged file differently: the
+ * index fingerprint carries it, so the next host start re-indexes everything.
+ */
+export const CHUNKER_VERSION = 1;
+
 export function hashText(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
 }

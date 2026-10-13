@@ -227,6 +227,18 @@ export function upsertFileRecord(
   );
 }
 
+const FINGERPRINT_KEY = 'index_fingerprint_v2';
+
+/** The settings the index was last fully built with (see MemoryIndexManager.init). */
+export function getIndexFingerprint(db: Database.Database): string | null {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(FINGERPRINT_KEY) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setIndexFingerprint(db: Database.Database, fingerprint: string): void {
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, fingerprint);
+}
+
 export type { FileSearchResult };
 
 export function searchIndex(

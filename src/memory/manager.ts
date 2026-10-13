@@ -104,7 +104,7 @@ export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
 }
 import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
 import { workspaceIndexDirs } from './workspace-dirs.js';
-import { chunkFile, type MemoryChunk } from './chunking.js';
+import { CHUNKER_VERSION, chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
 import { TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
@@ -115,6 +115,8 @@ import {
   deleteFileChunks,
   insertChunk,
   upsertFileRecord,
+  getIndexFingerprint,
+  setIndexFingerprint,
   searchIndex,
   type IndexDb,
   type FileSearchResult,
@@ -241,6 +243,8 @@ export class MemoryIndexManager {
   private rateLimiter!: TokenBucketRateLimiter;
   private watchers: parcelWatcher.AsyncSubscription[] = [];
   private dirty = false;
+  /** Set until a full re-index under the current settings has completed. */
+  private forcePending = false;
   private syncLock: Promise<void> = Promise.resolve();
   private periodicTimer: ReturnType<typeof setInterval> | null = null;
   private rpdResumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -305,9 +309,13 @@ export class MemoryIndexManager {
       24 * 60 * 60 * 1000,
     );
 
-    // Force initial sync
+    // A full re-index only when the settings that shape the index changed
+    // since it was last fully built; otherwise only changed files are
+    // re-indexed. Re-indexing everything on every start rewrote the whole
+    // index.db (~1.6 GB of backup delta per host restart) for no change.
+    this.forcePending = getIndexFingerprint(this.index.db) !== this.fingerprint();
     this.dirty = true;
-    void this.sync({ force: true });
+    void this.sync();
 
     log.info('Memory index manager initialized', {
       groupId: this.groupId,
@@ -330,9 +338,22 @@ export class MemoryIndexManager {
     this.rpdResumeTimer.unref?.();
   }
 
+  /**
+   * What an unchanged file's index entries depend on besides its content.
+   * Recorded once a full re-index under it completes; a mismatch at start
+   * forces one, so no file keeps chunks from an older model or chunker.
+   */
+  private fingerprint(): string {
+    return JSON.stringify({
+      model: this.model,
+      chunkTokens: MEMORY_CONFIG.chunk_tokens,
+      chunkOverlap: MEMORY_CONFIG.chunk_overlap_tokens,
+      chunker: CHUNKER_VERSION,
+    });
+  }
+
   async sync(opts?: { force?: boolean }): Promise<void> {
-    const force = opts?.force ?? false;
-    this.syncLock = this.syncLock.then(() => this._doSync(force)).catch(() => {});
+    this.syncLock = this.syncLock.then(() => this._doSync((opts?.force ?? false) || this.forcePending)).catch(() => {});
     return this.syncLock;
   }
 
@@ -358,6 +379,7 @@ export class MemoryIndexManager {
     let indexed = 0,
       skipped = 0,
       removed = 0;
+    let incomplete = 0;
     let consecutiveRlFailures = 0;
     const MAX_CONSECUTIVE_RL = 3;
     const seenPaths = new Set<string>();
@@ -389,10 +411,11 @@ export class MemoryIndexManager {
       }
 
       // Check if already indexed with same hash
-      const existing = this.index.db.prepare('SELECT hash FROM files WHERE path = ?').get(repoPath) as
-        | { hash: string }
+      // The source too: a folder relabelled keeps its paths and content.
+      const existing = this.index.db.prepare('SELECT hash, source FROM files WHERE path = ?').get(repoPath) as
+        | { hash: string; source: string }
         | undefined;
-      if (existing?.hash === contentHash && !force) {
+      if (existing?.hash === contentHash && existing.source === fileSource && !force) {
         skipped++;
         continue;
       }
@@ -481,6 +504,7 @@ export class MemoryIndexManager {
       if (!complete) {
         // Unrecorded, so the next sync takes it up again.
         this.dirty = true;
+        incomplete++;
         continue;
       }
 
@@ -533,6 +557,13 @@ export class MemoryIndexManager {
         if (isRepoPath(p)) handleWorkspaceFileRemoved({ group_id: this.groupId, path: p });
         removed++;
       }
+    }
+
+    // A file left incomplete still holds its old entries under an unchanged
+    // hash, so only a forced pass that reached every file clears the debt.
+    if (force && incomplete === 0) {
+      setIndexFingerprint(this.index.db, this.fingerprint());
+      this.forcePending = false;
     }
 
     this._syncing = false;

@@ -750,7 +750,11 @@ export class MemoryIndexManager {
     let queryVec: number[] = [];
     try {
       await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms);
-      queryVec = await this.provider.embedQuery(query);
+      const vec: number[] = await this.provider.embedQuery(query);
+      if (!isUsableEmbedding(vec, GEMINI_EMBEDDING_DIMS)) {
+        throw new Error(`unusable query embedding (${(vec as number[]).length} values)`);
+      }
+      queryVec = vec;
     } catch (err) {
       log.warn('Memory search: query embed failed, falling back to FTS', { groupId: this.groupId, err });
     }

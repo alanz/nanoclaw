@@ -139,9 +139,14 @@ chunks(hash)`. Rows under an old `provider_key` become unreachable after a
 
 ### 6. Gemini calls: timeouts and transient retries
 
-- `AbortSignal.timeout`: 60 s for a query embed, 120 s for a batch.
-- Retry 5xx and network errors up to 3 times, backoff 0.5 s → 8 s with jitter.
-  429 handling (token bucket, RPD stop) unchanged.
+- `AbortSignal.timeout`: 120 s for an indexing batch; 10 s for a query embed
+  (a search falls back to keyword-only rather than wait — upstream caps query
+  waits at 8 s).
+- An indexing batch is retried after a 5xx, a network error or a timeout, up to
+  3 times, backoff 0.5 s → 8 s with jitter. A query is not retried. 429 handling
+  (token bucket, RPD stop) unchanged.
+- The client no longer turns non-finite values into zeros, so §5's check
+  refuses such a vector instead of storing it.
 
 ### 7. One-off cleanup (falls out of 3 and 5, plus two small steps)
 

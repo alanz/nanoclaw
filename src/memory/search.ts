@@ -1,4 +1,3 @@
-import { findMemoryFile, getAllMemoryFiles, type MemoryFile } from './db.js';
 import { MEMORY_CONFIG, type MemoryConfig } from './config.js';
 import { getMemoryManager } from './manager.js';
 
@@ -47,30 +46,4 @@ export async function handleMemorySearch(
     source: params.source || undefined,
     embedWaitMs: config.search_embed_wait_ms,
   });
-}
-
-export async function handleMemoryGet(
-  params: { session: Session; group_id: string; path: string; parse_frontmatter?: boolean },
-  config: MemoryConfig = MEMORY_CONFIG,
-): Promise<MemoryFile> {
-  assertSearchEnabled(config);
-  assertSessionMatchesGroup(params.session, params.group_id);
-
-  const file = await findMemoryFile({ group_id: params.group_id, path: params.path });
-  if (!file || file.status !== 'indexed') {
-    throw new Error(`File not found or not indexed: ${params.path}`);
-  }
-
-  return file;
-}
-
-export async function handleMemoryList(
-  params: { session: Session; group_id: string; list_params?: unknown },
-  config: MemoryConfig = MEMORY_CONFIG,
-): Promise<MemoryFile[]> {
-  assertSearchEnabled(config);
-  assertSessionMatchesGroup(params.session, params.group_id);
-
-  const files = await getAllMemoryFiles();
-  return files.filter((f) => f.group_id === params.group_id && f.status !== 'removed');
 }

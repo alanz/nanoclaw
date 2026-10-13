@@ -58,11 +58,6 @@ export function isMemoryGroupExcluded(groupId: string): boolean {
  * until the next full sync removed them.) A folder inside the group's
  * workspace has no prefix: it is stored repo-relative, like memory/.
  */
-/** In the repo, as the central DB's workspace-file tracking means it — not an indexed mount, not outside. */
-function isRepoPath(p: string): boolean {
-  return !p.startsWith('..') && !p.startsWith('extra/');
-}
-
 export interface IndexedDir {
   dir: string;
   source: string;
@@ -102,7 +97,6 @@ export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
   }
   return dirs;
 }
-import { handleWorkspaceFileChanged, handleWorkspaceFileRemoved } from './rules.js';
 import { workspaceIndexDirs } from './workspace-dirs.js';
 import { CHUNKER_VERSION, chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
@@ -523,11 +517,6 @@ export class MemoryIndexManager {
 
       const contentHash = hashFile(content);
 
-      // Update central DB (spec compliance) — only for in-repo paths
-      if (isRepoPath(repoPath)) {
-        handleWorkspaceFileChanged({ group_id: this.groupId, path: repoPath, content_hash: contentHash });
-      }
-
       // Check if already indexed with same hash
       // The source too: a folder relabelled keeps its paths and content.
       const existing = this.index.db.prepare('SELECT hash, source FROM files WHERE path = ?').get(repoPath) as
@@ -705,7 +694,6 @@ export class MemoryIndexManager {
           this.dirty = true;
           continue;
         }
-        if (isRepoPath(p)) handleWorkspaceFileRemoved({ group_id: this.groupId, path: p });
         counts.removed++;
       }
     }

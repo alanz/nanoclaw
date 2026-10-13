@@ -1,7 +1,7 @@
 /**
  * `ncl groups delete` on groups the fork's modules have written to.
  *
- * The core cascade knew only core tables, so a group with indexed memory,
+ * The core cascade knew only core tables, so a group with
  * Zotero state or specialist history hit a foreign key on the final
  * `DELETE FROM agent_groups` and rolled back. The archive cascaded those
  * tables inline; the rebuild onto upstream dropped it. Module steps now remove
@@ -38,7 +38,6 @@ import './db/migrations/module-specialists.js';
 import './db/migrations/module-specialists-file-handover.js';
 import './db/migrations/module-specialists-processing-state.js';
 import './db/migrations/module-zotero.js';
-import './modules/memory/group-delete.js';
 import './modules/specialists/group-delete.js';
 import './modules/zotero/group-delete.js';
 
@@ -79,7 +78,7 @@ async function session(id: string, group: string): Promise<void> {
  *
  * Each task has an invocation in its specialist's session; the sub-task's
  * result transfer goes from the coder's invocation back to the researcher's
- * session. The main group also has memory, Zotero state and a message policy.
+ * session. The main group also has Zotero state and a message policy.
  */
 async function seed(): Promise<void> {
   for (const [id, folder] of [
@@ -141,16 +140,6 @@ async function seed(): Promise<void> {
   });
   await insert('transfer_files', { id: 'tf-1', transfer_id: 'xfer-sub', original_name: 'a.md', host_path: '/a' });
 
-  await insert('memory_files', { id: 'mf-1', group_id: MAIN, path: 'memory/a.md', content_hash: 'h', created_at: T });
-  await insert('memory_chunks', {
-    id: 'mc-1',
-    file_id: 'mf-1',
-    start_line: 1,
-    end_line: 2,
-    content: 'x',
-    hash: 'h',
-    indexed_at: T,
-  });
   await insert('zotero_sync_state', { agent_group_id: MAIN, updated_at: T });
   await insert('agent_message_policies', {
     from_agent_group_id: MAIN,
@@ -176,13 +165,11 @@ afterEach(async () => {
 });
 
 describe('groups delete across module tables', () => {
-  it('deletes the main group with its memory, Zotero state, requested tasks and policies', async () => {
+  it('deletes the main group with its Zotero state, requested tasks and policies', async () => {
     const resp = await deleteGroup(MAIN);
     expect(resp.ok).toBe(true);
 
     expect(await count('agent_groups', 'id = ?', MAIN)).toBe(0);
-    expect(await count('memory_files')).toBe(0);
-    expect(await count('memory_chunks')).toBe(0);
     expect(await count('zotero_sync_state')).toBe(0);
     expect(await count('agent_message_policies')).toBe(0);
     // The root task it requested goes, with the invocation that ran it in the
@@ -196,7 +183,7 @@ describe('groups delete across module tables', () => {
     expect(await count('agent_groups', 'id IN (?, ?)', RESEARCHER, CODER)).toBe(2);
 
     const removed = (resp as { ok: true; data: { removed: { modules: Record<string, number> } } }).data.removed;
-    expect(removed.modules).toMatchObject({ memory: 2, zotero: 1, agent_message_policies: 1 });
+    expect(removed.modules).toMatchObject({ zotero: 1, agent_message_policies: 1 });
     expect(removed.modules.specialists).toBeGreaterThan(0);
   });
 
@@ -214,9 +201,8 @@ describe('groups delete across module tables', () => {
     expect(await count('transfer_files')).toBe(0);
     expect(await count('ipc_out_mounts')).toBe(0);
     expect(await count('ipc_in_mounts')).toBe(0);
-    // Untouched: the other groups, and main's own memory.
+    // Untouched: the other groups.
     expect(await count('agent_groups', 'id IN (?, ?)', MAIN, CODER)).toBe(2);
-    expect(await count('memory_files')).toBe(1);
   });
 
   it('deletes a sub-task specialist, leaving its requester waiting on nothing', async () => {

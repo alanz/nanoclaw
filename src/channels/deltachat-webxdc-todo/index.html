@@ -16,7 +16,7 @@
       color: #1a1a1a;
     }
     #status { font-size: 11px; color: #666; padding: 4px 10px; background: #f8f8f8; font-family: monospace; border-bottom: 1px solid #e0e0e0; }
-    #list { padding: 8px 12px 120px; }
+    #list { padding: 8px 12px 150px; }
     .section { margin-top: 10px; }
     .section-head {
       display: flex; align-items: center; gap: 6px;
@@ -39,15 +39,19 @@
     .item .edit { flex: 1; font: inherit; padding: 2px 4px; border: 1px solid #0066cc; border-radius: 4px; }
     #empty { text-align: center; color: #aaa; padding: 50px 20px; }
     #toggle-done { display: block; margin: 14px auto 0; background: none; border: none; color: #0066cc; font-size: 14px; cursor: pointer; }
+    /* Item on its own row; section and Add below it. */
     #add {
       position: fixed; left: 0; right: 0; bottom: 0;
-      display: flex; gap: 6px; padding: 10px; background: #fff; border-top: 1px solid #e0e0e0; flex-wrap: wrap;
+      display: flex; flex-direction: column; gap: 6px; padding: 10px; background: #fff; border-top: 1px solid #e0e0e0;
     }
-    #add input, #add select { font: inherit; padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 6px; }
-    #new-text { flex: 1 1 60%; min-width: 0; }
-    #new-section { flex: 0 1 35%; min-width: 0; background: #fff; }
-    #new-section-name { flex: 1 1 60%; display: none; }
-    #add button { font: inherit; padding: 8px 16px; background: #0066cc; color: #fff; border: none; border-radius: 6px; }
+    #add .row { display: flex; gap: 6px; }
+    #add input, #add select { font: inherit; padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 6px; min-width: 0; }
+    #new-text { width: 100%; }
+    #new-section { flex: 1 1 auto; background: #fff; }
+    #new-section-name { flex: 1 1 auto; display: none; }
+    #add button { font: inherit; padding: 8px 16px; background: #0066cc; color: #fff; border: none; border-radius: 6px; flex: 0 0 auto; }
+    #add-hint { font-size: 13px; color: #c05600; min-height: 0; }
+    #add-hint:empty { display: none; }
     #footer { font-size: 11px; color: #888; text-align: right; padding: 4px 12px 0; }
     @media (prefers-color-scheme: dark) {
       body { background: #1a1a1a; color: #e8e8e8; }
@@ -65,10 +69,13 @@
   <div id="list"><div id="empty">Nothing on the list yet.</div></div>
   <div id="footer"></div>
   <form id="add" autocomplete="off">
-    <input id="new-text" placeholder="Add an item…" maxlength="500">
-    <select id="new-section" aria-label="Section"></select>
-    <input id="new-section-name" placeholder="New section name" maxlength="60">
-    <button type="submit">Add</button>
+    <input id="new-text" placeholder="Add an item…" maxlength="500" aria-label="Item">
+    <div class="row">
+      <select id="new-section" aria-label="Section"></select>
+      <input id="new-section-name" placeholder="Section name" maxlength="60" aria-label="New section name">
+      <button type="submit">Add</button>
+    </div>
+    <div id="add-hint" role="status"></div>
   </form>
 
   <script>
@@ -291,11 +298,25 @@
       sectionName.style.display = sectionSel.value === '\u0000new' ? 'block' : 'none';
       if (sectionSel.value === '\u0000new') sectionName.focus();
     };
+    const hint = document.getElementById('add-hint');
+    document.getElementById('new-text').addEventListener('input', () => { hint.textContent = ''; });
+    sectionName.addEventListener('input', () => { hint.textContent = ''; });
     document.getElementById('add').onsubmit = (e) => {
       e.preventDefault();
       const input = document.getElementById('new-text');
       const text = input.value.trim();
-      if (!text) return;
+      // Never fail silently: say what is missing and put the cursor there.
+      if (!text) {
+        hint.textContent = 'Type the item first (the top box).';
+        input.focus();
+        return;
+      }
+      if (sectionSel.value === '\u0000new' && !sectionName.value.trim()) {
+        hint.textContent = 'Name the new section, or pick another.';
+        sectionName.focus();
+        return;
+      }
+      hint.textContent = '';
       const section = sectionSel.value === '\u0000new' ? sectionName.value.trim() : sectionSel.value;
       send(newId(), { text, done: false, section });
       input.value = '';

@@ -92,6 +92,14 @@ const PROGRESS_EDIT_MS = 10_000;
 /** Status reactions on an incoming message, in the only order they move. */
 const STATUS_STEPS = ['👀', '💭', '✅'];
 
+/**
+ * Margin past the second boundary when a status reaction has to wait for it.
+ * A reaction's timestamp is whole seconds, and a client shows the newest by
+ * timestamp: two steps sent in the same second can show in either order (a
+ * fast reply left 💭 showing over ✅).
+ */
+const STATUS_SECOND_MARGIN_MS = 50;
+
 /** Wait this long for additional messages from the same chat before routing to agent. */
 const DEBOUNCE_MS = 1500;
 
@@ -196,6 +204,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   const lastMsgId = new Map<string, number>();
   /** The reaction the bot last put on each platformId's last incoming message. */
   const shownReaction = new Map<string, { msgId: number; emoji: string }>();
+  /** When each platformId's last status reaction went out, and the queue its next one waits in. */
+  const statusSentAt = new Map<string, number>();
+  const statusQueue = new Map<string, Promise<void>>();
   /** Debounce state: accumulate rapid messages per chat before routing. */
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const debounceEntries = new Map<string, DebounceEntry>();
@@ -384,14 +395,29 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       if (at === -1 || at >= STATUS_STEPS.indexOf(emoji)) return;
     }
     // Recorded before the send so a concurrent refresh tick sees it.
-    shownReaction.set(platformId, { msgId, emoji });
-    try {
-      await dc.rpc.sendReaction(accountId, msgId, [emoji]);
-    } catch (err) {
-      if (shown) shownReaction.set(platformId, shown);
-      else shownReaction.delete(platformId);
-      log.warn(`DeltaChat: failed to send ${emoji} reaction`, { err, platformId });
-    }
+    const next = { msgId, emoji };
+    shownReaction.set(platformId, next);
+    // One send at a time per chat, in order, each in a later second than the
+    // one before it.
+    const send = (statusQueue.get(platformId) ?? Promise.resolve()).then(async () => {
+      const prev = statusSentAt.get(platformId);
+      const now = Date.now();
+      if (prev !== undefined && Math.floor(prev / 1000) === Math.floor(now / 1000)) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 - (now % 1000) + STATUS_SECOND_MARGIN_MS));
+      }
+      try {
+        await dc!.rpc.sendReaction(accountId!, msgId, [emoji]);
+        statusSentAt.set(platformId, Date.now());
+      } catch (err) {
+        if (shownReaction.get(platformId) === next) {
+          if (shown) shownReaction.set(platformId, shown);
+          else shownReaction.delete(platformId);
+        }
+        log.warn(`DeltaChat: failed to send ${emoji} reaction`, { err, platformId });
+      }
+    });
+    statusQueue.set(platformId, send);
+    await send;
   }
 
   /** Show what the agent is doing, once the turn has run long enough to be worth it. */
@@ -616,6 +642,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           shownReaction.set(platformId, { msgId, emoji: '👀' });
           try {
             await dcRef.rpc.sendReaction(aid, msgId, ['👀']);
+            statusSentAt.set(platformId, Date.now());
           } catch (err) {
             log.warn('DeltaChat: failed to send 👀 reaction', { err, msgId });
           }

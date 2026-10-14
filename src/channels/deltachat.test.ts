@@ -536,6 +536,32 @@ describe('DeltaChat channel adapter', () => {
       expect(dc.rpc.sendReaction).toHaveBeenCalledWith(ACCOUNT_ID, MSG_ID, ['💭']);
     });
 
+    it('sends each status step in a later second than the one before, however fast the reply', async () => {
+      // Whole-second reaction timestamps: two steps in one second can show in
+      // either order, which left 💭 over ✅ after a sub-second "Session cleared.".
+      vi.setSystemTime(new Date('2026-10-14T19:47:07.100Z'));
+      const { adapter, dc } = await buildSetupAdapter();
+      const sentAt: Array<[string, number]> = [];
+      dc.rpc.sendReaction.mockImplementation(async (_a: number, _m: number, [emoji]: string[]) => {
+        sentAt.push([emoji, Date.now()]);
+      });
+      dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());
+      dc.rpc.getBasicChatInfo.mockResolvedValueOnce(makeChat());
+      dc.rpc.getContact.mockResolvedValueOnce(makeContact());
+      emitIncomingMsg();
+      await flush();
+
+      const typing = adapter.setTyping!(PLATFORM_ID, null);
+      const reply = adapter.deliver(PLATFORM_ID, null, { kind: 'chat', content: { text: 'Session cleared.' } });
+      await vi.advanceTimersByTimeAsync(3000);
+      await Promise.all([typing, reply]);
+
+      expect(sentAt.map(([emoji]) => emoji)).toEqual(['👀', '💭', '✅']);
+      const seconds = sentAt.map(([, t]) => Math.floor(t / 1000));
+      expect(seconds[1]).toBeGreaterThan(seconds[0]);
+      expect(seconds[2]).toBeGreaterThan(seconds[1]);
+    });
+
     it('does not put 💭 back over ✅ once a reply is delivered', async () => {
       const { adapter, dc } = await buildSetupAdapter();
       dc.rpc.getMessage.mockResolvedValueOnce(makeMsg());

@@ -42,8 +42,8 @@ import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/i
 import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { createSession, getSession, updateSession } from '../../db/sessions.js';
-import { openOutboundDbRw } from '../../mailbox/sqlite/session-db.js';
-import { outboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { openInboundDb, openOutboundDbRw } from '../../mailbox/sqlite/session-db.js';
+import { inboundDbPath, outboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder, withExistingMailboxSession } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import type { SessionResetConfig } from './config.js';
@@ -52,6 +52,8 @@ import {
   archiveEndedConversations,
   dailyResetCheck,
   freshConversationEnv,
+  handoverSweep,
+  handoverText,
   observeSession,
   summarySweep,
 } from './engine.js';
@@ -67,6 +69,7 @@ const CONFIG: SessionResetConfig = {
   minIdleMs: 60 * 60_000,
   maxSummaryAttempts: 3,
   sessionsIndexEntries: 7,
+  handoverMaxChars: 4000,
 };
 
 let session: Session;
@@ -338,5 +341,115 @@ describe('archive and summary', () => {
 
     await summarySweep(CONFIG, at('2026-10-05T22:11:00Z'));
     expect(fakes.delivered).toHaveLength(1);
+  });
+});
+
+describe('hand-over to the next conversation', () => {
+  const SUMMARY = [
+    '---',
+    'type: session-summary',
+    'session: sess-chat',
+    '---',
+    '',
+    '## Summary',
+    'Planned the week and booked a dentist visit.',
+    '',
+    '## Decisions',
+    '- Writing goes on Tuesday.',
+    '',
+    '## Facts learned',
+    '- The dentist is on the high street.',
+    '',
+    '## Open questions',
+    '- Is Friday free?',
+    '',
+  ].join('\n');
+
+  /** conv-1 ends by `reason`, is archived, and its summary is written and settled. */
+  async function summariseConversationOne(): Promise<void> {
+    setConversation('conv-1');
+    writeTranscript('conv-1', [['Plan the week', 'Monday: review.']]);
+    await observeSession(session, at('2026-10-05T20:00:00Z'));
+    setConversation('conv-2'); // a /clear: the container is already in the next conversation
+    await observeSession(session, at('2026-10-05T21:30:00Z'));
+    await archiveEndedConversations(at('2026-10-05T21:30:00Z'));
+    await summarySweep(CONFIG, at('2026-10-05T21:31:00Z'));
+    const row = (await getConversation(session.id, 'conv-1'))!;
+    fs.writeFileSync(path.join(GROUP_DIR, row.summary_target!), SUMMARY);
+    await updateSession(row.summary_task_session_id!, { status: 'closed' });
+    await summarySweep(CONFIG, at('2026-10-05T21:35:00Z'));
+  }
+
+  function handoverRows(): Array<{ id: string; trigger: number; channel_type: string; content: string }> {
+    const db = openInboundDb(inboundDbPath(AG, session.id));
+    try {
+      return db
+        .prepare(`SELECT id, "trigger", channel_type, content FROM messages_in WHERE id LIKE '%:handover:%'`)
+        .all() as Array<{ id: string; trigger: number; channel_type: string; content: string }>;
+    } finally {
+      db.close();
+    }
+  }
+
+  it('gives the next conversation the summary once, as context that does not wake the agent', async () => {
+    await summariseConversationOne();
+    await handoverSweep(CONFIG, at('2026-10-05T21:36:00Z'));
+
+    const rows = handoverRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ trigger: 0, channel_type: 'session-echo' });
+    const content = JSON.parse(rows[0].content);
+    expect(content.echo.surface).toBe('conversation-handover');
+    expect(content.text).toContain('2026-10-05 21:30, cleared');
+    expect(content.text).toContain('Planned the week');
+    expect(content.text).toContain('Is Friday free?');
+    expect(content.text).not.toContain('high street');
+    expect(content.text).toContain('Full summary: /workspace/agent/memory/sessions/2026-10-05-2130.md');
+    expect(content.text).toContain('Whole conversation: /workspace/agent/conversations/2026-10-05-2130-cleared.md');
+    expect((await getConversation(session.id, 'conv-1'))!.handed_over_at).toBe('2026-10-05T21:36:00.000Z');
+
+    await handoverSweep(CONFIG, at('2026-10-05T21:37:00Z'));
+    expect(handoverRows()).toHaveLength(1);
+  });
+
+  it('waits while a running container is still in the summarised conversation', async () => {
+    await summariseConversationOne();
+    setConversation('conv-1');
+    fakes.running.add(session.id);
+    await handoverSweep(CONFIG, at('2026-10-05T21:36:00Z'));
+    expect(handoverRows()).toHaveLength(0);
+    expect((await getConversation(session.id, 'conv-1'))!.handed_over_at).toBeNull();
+
+    // A reset's fresh start: the runner dropped the old id.
+    setConversation(null);
+    await handoverSweep(CONFIG, at('2026-10-05T21:40:00Z'));
+    expect(handoverRows()).toHaveLength(1);
+  });
+
+  it('hands over nothing for a failed summary', async () => {
+    setConversation('conv-x');
+    await observeSession(session, at('2026-10-05T20:00:00Z'));
+    setConversation(null);
+    await observeSession(session, at('2026-10-05T21:30:00Z'));
+    await archiveEndedConversations(at('2026-10-05T21:30:00Z'));
+    expect((await getConversation(session.id, 'conv-x'))!.summary_status).toBe('failed');
+    await handoverSweep(CONFIG, at('2026-10-05T21:36:00Z'));
+    expect(handoverRows()).toHaveLength(0);
+  });
+
+  it('keeps Summary, Decisions and Open questions, and trims to the limit', () => {
+    const text = handoverText(SUMMARY, 4000);
+    expect(text.startsWith('## Summary')).toBe(true);
+    expect(text).toContain('## Decisions');
+    expect(text).toContain('## Open questions');
+    expect(text).not.toContain('Facts learned');
+    expect(text).not.toContain('type: session-summary');
+
+    const trimmed = handoverText(SUMMARY, 40);
+    expect(trimmed).toContain('[… trimmed — the full summary has the rest]');
+    expect(trimmed.length).toBeLessThan(100);
+
+    // A summary without the usual sections is handed over whole.
+    expect(handoverText('---\ntype: session-summary\n---\nJust prose.', 4000)).toBe('Just prose.');
   });
 });

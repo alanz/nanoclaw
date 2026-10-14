@@ -300,6 +300,12 @@ function formatEchoMessage(msg: MessageInRow): string {
   const label = content.echo?.label || 'another conversation';
   const sender = content.sender || 'Unknown';
   const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
+  // The host's hand-over of the summary of this chat's previous conversation
+  // (session reset module): first-class context the new conversation
+  // continues from, not an ambient echo.
+  if (content.echo?.surface === 'conversation-handover') {
+    return `<previous-conversation>${escapeXml(content.text || '')}</previous-conversation>`;
+  }
   // Timeline rows are the conversation's own preceding history — FIRST-CLASS
   // context this thread continues from (the agent's own posts render as
   // sender="you"), unlike cross-session-context ambient echoes from other

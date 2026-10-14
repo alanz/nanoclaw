@@ -50,3 +50,17 @@ registerMigration({
     `);
   },
 });
+
+registerMigration({
+  version: 61,
+  name: 'module:session-reset:handover',
+  sqliteOnly: true,
+  up(db: Database.Database) {
+    // When a finished summary was handed to the session's next conversation.
+    db.exec('ALTER TABLE session_conversations ADD COLUMN handed_over_at TEXT');
+    // Summaries written before hand-over existed are old news: never replay them.
+    db.prepare("UPDATE session_conversations SET handed_over_at = ? WHERE summary_status = 'done'").run(
+      new Date().toISOString(),
+    );
+  },
+});

@@ -21,6 +21,7 @@ export interface ConversationRow {
   summary_task_id: string | null;
   summary_task_session_id: string | null;
   summary_path: string | null;
+  handed_over_at: string | null;
 }
 
 export interface ResetRow {
@@ -131,6 +132,25 @@ export async function setSummarySettled(
      WHERE session_id = ? AND conversation_id = ?`,
     status,
     summaryPath,
+    row.session_id,
+    row.conversation_id,
+  );
+}
+
+/** Summarised conversations whose summary has not reached the next conversation yet. */
+export async function getPendingHandovers(): Promise<ConversationRow[]> {
+  return getDb().all<ConversationRow>(
+    `SELECT * FROM session_conversations
+     WHERE summary_status = 'done' AND handed_over_at IS NULL
+     ORDER BY ended_at`,
+  );
+}
+
+export async function setHandedOver(row: ConversationRow, at: string): Promise<void> {
+  await getDb().run(
+    `UPDATE session_conversations SET handed_over_at = ?
+     WHERE session_id = ? AND conversation_id = ?`,
+    at,
     row.session_id,
     row.conversation_id,
   );

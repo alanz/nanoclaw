@@ -15,7 +15,8 @@
 --
 -- Scope: conversation observation, the daily reset, the fresh-conversation
 --        hand-off at the next spawn, archiving, summary scheduling, retry and
---        failure, and the sessions index.
+--        failure, the sessions index, and handing each finished summary to
+--        the conversation that follows.
 -- Includes: Conversation, SessionReset, the opt-in group list.
 -- Excludes:
 --   - Session creation, closure and container processing (sessions.allium).
@@ -56,6 +57,8 @@ config {
     max_summary_attempts: Integer = 3
     -- Entries kept in memory/sessions/index.md, newest first.
     sessions_index_entries: Integer = 7
+    -- Characters of an ended conversation's summary handed to the next one.
+    handover_max_chars: Integer = 4000
 }
 
 ------------------------------------------------------------
@@ -76,6 +79,8 @@ entity Conversation {
     summary_attempts: Integer
     -- memory/sessions/<date>-<HHmm>.md once summarised (or -failed.md).
     summary_path: String?
+    -- When the summary was handed to the session's next conversation.
+    handed_over_at: Timestamp?
 
     transitions status {
         active -> ended
@@ -255,6 +260,32 @@ rule SummaryFailed {
         -- hand. The owner is told once, through the normal delivery path.
 }
 
+-- Whatever ended a conversation — the daily reset, a /clear, a transcript
+-- rotation — the conversation that follows starts without it. Once its
+-- summary is written, the summary is handed to the session's next
+-- conversation, so that conversation knows what came before.
+rule SummaryHandedOver {
+    when: SummarySweep(c)
+    requires: c.summary_status = done
+    requires: c.handed_over_at = null
+    requires: not ContainerRunningConversation(c.session, c)
+    ensures: c.handed_over_at = now
+    ensures: HandOverSummary(c.session, c)
+
+    @guidance
+        -- The host adds one context-only message (it does not wake the agent
+        -- by itself) to the session's inbound mailbox. The next turn — the
+        -- fresh conversation's first after a reset, or the next turn after a
+        -- /clear — sees it with the user's message, and it stays in that
+        -- conversation's transcript. It carries the summary's Summary,
+        -- Decisions and Open questions inline, trimmed to handover_max_chars,
+        -- and names the full summary and the archive. A failed summary is
+        -- not handed over. The guard keeps it out of the very conversation it
+        -- summarises, should that conversation's container still be running.
+        -- Conversations summarised before this rule existed count as handed
+        -- over.
+}
+
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
@@ -276,6 +307,11 @@ invariant AtMostOnePendingResetPerSession {
 invariant SummaryOnlyAfterArchive {
     for c in Conversations:
         c.summary_status != not_started implies c.archive_path != null
+}
+
+invariant HandOverOnlyAfterSummary {
+    for c in Conversations:
+        c.handed_over_at != null implies c.summary_status = done
 }
 
 ------------------------------------------------------------

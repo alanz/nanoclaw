@@ -10,6 +10,8 @@ export interface SessionResetConfig {
   minIdleMs: number;
   maxSummaryAttempts: number;
   sessionsIndexEntries: number;
+  /** Characters of an ended conversation's summary handed to the next one. */
+  handoverMaxChars: number;
 }
 
 function setting(key: (typeof SETTINGS)[number]): string | undefined {
@@ -30,5 +32,6 @@ export function loadSessionResetConfig(): SessionResetConfig {
     minIdleMs: (Number.isFinite(idle) && idle >= 0 ? idle : 60) * 60_000,
     maxSummaryAttempts: 3,
     sessionsIndexEntries: 7,
+    handoverMaxChars: 4000,
   };
 }

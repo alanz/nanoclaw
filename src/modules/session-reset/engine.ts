@@ -9,6 +9,8 @@
  * Archive: every ended conversation's transcript → conversations/.
  * Summarise: a one-shot task per archive writes memory/sessions/; retried by
  *   later ticks, a failed placeholder after the last attempt.
+ * Hand over: a finished summary goes to the session's next conversation as
+ *   a context-only mailbox row, so a reset or /clear does not start from nothing.
  */
 import fs from 'fs';
 import path from 'path';
@@ -25,6 +27,7 @@ import { log } from '../../log.js';
 import { heartbeatPath, withExistingMailboxSession } from '../../session-manager.js';
 import { formatLocalStamp } from '../../timezone.js';
 import type { AgentGroup, Session } from '../../types.js';
+import { ECHO_CHANNEL_TYPE } from '../cross-session-context/index.js';
 import { createScheduledTask, prepareScheduledTask } from '../scheduling/create.js';
 import type { SessionResetConfig } from './config.js';
 import {
@@ -35,6 +38,7 @@ import {
   getConversation,
   getLastCheckedOn,
   getOpenSummaries,
+  getPendingHandovers,
   getPendingReset,
   getUnarchivedConversations,
   insertConversation,
@@ -42,6 +46,7 @@ import {
   markResetApplied,
   reactivateConversation,
   setArchived,
+  setHandedOver,
   setLastCheckedOn,
   setSummaryScheduled,
   setSummarySettled,
@@ -375,6 +380,115 @@ export async function summarySweep(config: SessionResetConfig, now: Date): Promi
       sessionId: row.session_id,
       taskId: task.id,
       attempt: row.summary_attempts + 1,
+    });
+  }
+}
+
+// ── Hand over ────────────────────────────────────────────────────────────────
+
+/** The mailbox echo surface the runner renders as a previous-conversation block. */
+export const HANDOVER_SURFACE = 'conversation-handover';
+
+const HANDED_OVER_SECTIONS = ['summary', 'decisions', 'open questions'];
+
+const END_REASON_TEXT: Record<string, string> = {
+  reset: 'ended by the daily reset',
+  cleared: 'cleared',
+  rotated: 'its transcript was rotated',
+};
+
+/**
+ * The part of a summary the next conversation gets inline: its Summary,
+ * Decisions and Open questions sections (the whole body when it has none of
+ * them), trimmed to `maxChars`. Facts and tasks stay in the linked file.
+ */
+export function handoverText(summary: string, maxChars: number): string {
+  const body = summary.replace(/^---\n[\s\S]*?\n---\n/, '').trim();
+  const sections = body.split(/^(?=## )/m);
+  const kept = sections.filter((s) => {
+    const heading = s
+      .match(/^## (.+)/)?.[1]
+      .trim()
+      .toLowerCase();
+    return heading !== undefined && HANDED_OVER_SECTIONS.includes(heading);
+  });
+  const text = (kept.length > 0 ? kept.join('\n') : body).trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars).trimEnd()}\n[… trimmed — the full summary has the rest]`;
+}
+
+/** Is this conversation the one a running container is still in? */
+function stillRunning(session: Session, row: ConversationRow): boolean {
+  if (!containerRunning(session)) return false;
+  return (
+    readSessionActivity(session.agent_group_id, session.id, SUPPORTED_PROVIDER)?.conversationId === row.conversation_id
+  );
+}
+
+export async function handoverSweep(config: SessionResetConfig, now: Date): Promise<void> {
+  for (const row of await getPendingHandovers()) {
+    const at = now.toISOString();
+    const session = await getSession(row.session_id);
+    const group = await getAgentGroup(row.agent_group_id);
+    if (!session || session.status !== 'active' || !group || !row.summary_path) {
+      // Nowhere to hand it to.
+      await setHandedOver(row, at);
+      continue;
+    }
+    if (stillRunning(session, row)) continue;
+
+    let summary: string;
+    try {
+      summary = fs.readFileSync(path.join(GROUPS_DIR, group.folder, row.summary_path), 'utf-8');
+    } catch (err) {
+      log.warn('Session hand-over: summary unreadable, not handed over', { summary: row.summary_path, err });
+      await setHandedOver(row, at);
+      continue;
+    }
+
+    const tz = await resolveGroupTimezone(group.id);
+    const ended = row.ended_at ? formatLocalStamp(new Date(row.ended_at), tz) : 'earlier';
+    const text = [
+      `The previous conversation in this chat (${ended}, ${END_REASON_TEXT[row.end_reason ?? 'cleared']}) is not in your context any more. Its summary:`,
+      '',
+      handoverText(summary, config.handoverMaxChars),
+      '',
+      `Full summary: /workspace/agent/${row.summary_path}`,
+      ...(row.archive_path ? [`Whole conversation: /workspace/agent/${row.archive_path}`] : []),
+    ].join('\n');
+
+    const written = await withExistingMailboxSession(row.agent_group_id, row.session_id, async (mailbox) => {
+      try {
+        await mailbox.insertMessage({
+          id: `${row.session_id}:handover:${row.conversation_id}`,
+          kind: 'chat',
+          timestamp: at,
+          platformId: null,
+          channelType: ECHO_CHANNEL_TYPE,
+          threadId: null,
+          content: JSON.stringify({
+            text,
+            sender: 'NanoClaw',
+            echo: { surface: HANDOVER_SURFACE, label: 'the previous conversation' },
+          }),
+          processAfter: null,
+          recurrence: null,
+          trigger: false,
+          sourceSessionId: null,
+          onWake: false,
+        });
+      } catch (err) {
+        // Already written by a tick that stopped before recording it.
+        if (!String(err).includes('UNIQUE')) throw err;
+      }
+      return true;
+    });
+    if (written === undefined) continue; // Mailbox not there yet; try next tick.
+    await setHandedOver(row, at);
+    log.info('Session summary handed over', {
+      sessionId: row.session_id,
+      conversationId: row.conversation_id,
+      summary: row.summary_path,
     });
   }
 }

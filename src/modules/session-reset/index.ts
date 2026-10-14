@@ -16,6 +16,7 @@ import {
   archiveEndedConversations,
   dailyResetCheck,
   freshConversationEnv,
+  handoverSweep,
   isResetSession,
   observeSession,
   resetSessions,
@@ -43,6 +44,7 @@ export async function sessionResetTick(cfg: SessionResetConfig, now = new Date()
     }
     await archiveEndedConversations(now);
     await summarySweep(cfg, now);
+    await handoverSweep(cfg, now);
   } finally {
     ticking = false;
   }

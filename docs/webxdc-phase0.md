@@ -35,3 +35,16 @@ against the bot's own account (DeltaChat core 2.62.0 via
   Simon-Laux/hermes-deltachat-platform's skill reference): `sendUpdateInterval`
   1000 ms (burst of 3), `sendUpdateMaxSize` ~22 MB, pending updates packed into
   ≤ ~100 KiB messages, serials have gaps and differ per device.
+
+## Realtime (checked in phase 1, 2026-10-14)
+
+Realtime **works** on Alan's Android with core 2.62 (`webxdc_realtime_enabled`
+= 1 on the bot): the agent's progress for instance 2068 went entirely over the
+realtime channel — no stored status updates — and showed live in the app.
+The difference from OpenClaw/v1, where it "never fired": the bot **joins the
+channel itself** (`send_webxdc_realtime_advertisement`) when it sends the app
+and whenever the app's ordinary ping says it was opened, instead of waiting
+for `WebxdcRealtimeAdvertisementReceived`. The app pings over realtime every
+15 s while visible; without a ping for 45 s the bot falls back to status
+updates. So: ephemeral things (progress) go over realtime; state (replies,
+question cards, 👀/💭/✅ marks) stays in status updates.

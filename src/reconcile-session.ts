@@ -283,10 +283,17 @@ async function maintainSessionMailbox(
   // MODULE-HOOK:cross-session-echo-prune:end
 }
 
-/** The agent is between turns: no container, or one with nothing claimed, no tool running and no recent activity. */
+/**
+ * The agent is between turns: no container, or one with nothing claimed, no
+ * tool running, no turn in progress and no recent activity. The turn flag
+ * matters for a long model call with no tool running: no stream event
+ * touches the heartbeat, which alone made that look like the end of the turn
+ * (✅ before the reply).
+ */
 function isSessionQuiet(mailbox: OutboundMailbox, session: Session, agentGroupId: string): boolean {
   if (!isContainerRunning(session.id)) return true;
   if (mailbox.getProcessingClaims().length > 0 || mailbox.getContainerState()?.currentTool) return false;
+  if (mailbox.isTurnInProgress()) return false;
   return Date.now() - heartbeatMtimeMs(agentGroupId, session.id) > TURN_QUIET_MS;
 }
 
@@ -458,3 +465,5 @@ function resetStuckProcessingRows(
 }
 
 export const _dispatchInboundCompletedForTesting = dispatchInboundCompleted;
+
+export const _isSessionQuietForTesting = isSessionQuiet;

@@ -8,6 +8,10 @@ export function clearContainerToolInFlight(): void {
   getAgentMailbox().operations.clearContainerToolInFlight();
 }
 
+export function setTurnInProgress(active: boolean): void {
+  getAgentMailbox().operations.setTurnInProgress(active);
+}
+
 export function clearStaleProcessingAcks(): void {
   getAgentMailbox().operations.clearStaleProcessingAcks();
 }

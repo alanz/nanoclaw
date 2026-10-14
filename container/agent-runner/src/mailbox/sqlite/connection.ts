@@ -109,9 +109,19 @@ export function getOutboundDb(): Database {
         current_tool             TEXT,
         tool_declared_timeout_ms INTEGER,
         tool_started_at          TEXT,
-        updated_at               TEXT NOT NULL
+        updated_at               TEXT NOT NULL,
+        turn_started_at          TEXT
       );
     `);
+    // turn_started_at: set while the agent is answering a turn, so the host
+    // does not read a long silent model call (no tool, no stream event) as
+    // the turn having ended. Forward-compat for older outbound.db files.
+    const stateCols = new Set(
+      (_outbound.prepare("PRAGMA table_info('container_state')").all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    if (!stateCols.has('turn_started_at')) {
+      _outbound.exec('ALTER TABLE container_state ADD COLUMN turn_started_at TEXT');
+    }
   }
   return _outbound;
 }
@@ -150,6 +160,23 @@ export function sqliteClearContainerToolInFlight(): void {
          updated_at = excluded.updated_at`,
     )
     .run(now);
+}
+
+/**
+ * Record whether the agent is answering a turn (between taking a prompt and
+ * its result). The host reads it as "not quiet": the turn is not over yet.
+ */
+export function sqliteSetTurnInProgress(active: boolean): void {
+  const now = new Date().toISOString();
+  getOutboundDb()
+    .prepare(
+      `INSERT INTO container_state (id, updated_at, turn_started_at)
+       VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         turn_started_at = excluded.turn_started_at,
+         updated_at = excluded.updated_at`,
+    )
+    .run(now, active ? now : null);
 }
 
 /**
@@ -231,7 +258,8 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       current_tool             TEXT,
       tool_declared_timeout_ms INTEGER,
       tool_started_at          TEXT,
-      updated_at               TEXT NOT NULL
+      updated_at               TEXT NOT NULL,
+      turn_started_at          TEXT
     );
   `);
 

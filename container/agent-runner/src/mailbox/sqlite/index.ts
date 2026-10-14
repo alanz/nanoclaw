@@ -2,6 +2,7 @@ import {
   closeSessionDb,
   getInboundDb,
   sqliteClearContainerToolInFlight,
+  sqliteSetTurnInProgress,
   sqliteClearStaleProcessingAcks,
   sqliteSetContainerToolInFlight,
 } from './connection.js';
@@ -90,16 +91,39 @@ function parseInboundMessage(row: MessageInRow): InboundMessage | undefined {
   }
 }
 
+function isCorruptRead(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('database disk image is malformed') ||
+    message.includes('SQLITE_CORRUPT') ||
+    message.includes('file is not a database')
+  );
+}
+
+/**
+ * A lookup that a caller polls until a deadline (a host reply to a request).
+ *
+ * File locks do not cross the VirtioFS mount, so a read that lands while the
+ * host is committing to inbound.db can see a half-written page and fail as
+ * "malformed". The next poll reads the committed file, so such a failure means
+ * "not there yet". The poll loop gives up only after a run of them; one
+ * failed lookup must not fail a tool call whose reply has already arrived.
+ */
+export function pollLookup<T>(read: () => T | undefined, what: string): T | undefined {
+  try {
+    return read();
+  } catch (error) {
+    if (!isCorruptRead(error)) throw error;
+    console.error(`[agent-runner] Torn inbound read while waiting for a ${what}; retrying: ${String(error)}`);
+    return undefined;
+  }
+}
+
 export class SqliteAgentMailbox implements AgentMailbox {
   readonly operations: MailboxOperations = this;
 
   shouldRestartAfter(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    return (
-      message.includes('database disk image is malformed') ||
-      message.includes('SQLITE_CORRUPT') ||
-      message.includes('file is not a database')
-    );
+    return isCorruptRead(error);
   }
 
   async start(_key: MailboxSessionKey | null): Promise<void> {}
@@ -136,12 +160,12 @@ export class SqliteAgentMailbox implements AgentMailbox {
   }
 
   findQuestionResponse(questionId: string): InboundMessage | undefined {
-    const row = sqliteFindQuestionResponse(questionId);
+    const row = pollLookup(() => sqliteFindQuestionResponse(questionId), 'question response');
     return row && inboundMessage(row);
   }
 
   findCliResponse(requestId: string): InboundMessage | undefined {
-    const row = sqliteFindCliResponse(requestId);
+    const row = pollLookup(() => sqliteFindCliResponse(requestId), 'host response');
     return row && inboundMessage(row);
   }
 
@@ -223,5 +247,6 @@ export class SqliteAgentMailbox implements AgentMailbox {
   }
 
   clearContainerToolInFlight = sqliteClearContainerToolInFlight;
+  setTurnInProgress = sqliteSetTurnInProgress;
   clearStaleProcessingAcks = sqliteClearStaleProcessingAcks;
 }

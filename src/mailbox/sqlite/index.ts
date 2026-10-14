@@ -9,6 +9,7 @@ import {
   deleteOrphanProcessingClaims,
   ensureSchema,
   getContainerState,
+  getTurnInProgress,
   getDeliveredIds,
   getDueOutboundMessages,
   getInboundSourceSessionId,
@@ -346,6 +347,7 @@ export function wrapSqliteOutbound(
         return { messageId: record.messageId, statusChanged: record.statusChanged };
       }),
     deleteOrphanProcessingClaims: () => deleteOrphanProcessingClaims(writable()),
+    isTurnInProgress: () => getTurnInProgress(readable()),
     getContainerState: () => {
       const row = getContainerState(readable());
       if (!row) return null;

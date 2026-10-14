@@ -7,7 +7,7 @@ import {
   type MessageInRow,
 } from './db/messages-in.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
-import { clearContainerToolInFlight, clearStaleProcessingAcks } from './db/container-state.js';
+import { clearContainerToolInFlight, clearStaleProcessingAcks, setTurnInProgress } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
 import {
@@ -131,6 +131,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // and a stale current_tool makes the host read every later idle container
   // in this session as busy (reaped as "work outstanding", not as idle).
   clearContainerToolInFlight();
+  // And a turn the killed container never finished.
+  publishTurnInProgress(false);
 
   let pollCount = 0;
   let isFirstPoll = true;
@@ -496,6 +498,9 @@ export async function processQuery(
   // push order (including retries) and advance at every result, mirroring
   // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
   let answering = initialPrompt !== '';
+  // Published so the host does not take a long silent model call (no tool
+  // running, no stream event to touch the heartbeat) for the end of the turn.
+  publishTurnInProgress(answering);
   type QueuedTurn = {
     routing: RoutingContext;
     unwrappedNudged: boolean;
@@ -508,6 +513,7 @@ export async function processQuery(
     taskBlockNudged = next.taskBlockNudged;
     publishReplyRoute(routing);
     answering = true;
+    publishTurnInProgress(true);
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
@@ -779,7 +785,10 @@ export async function processQuery(
         midTurnTail = '';
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
-        else answering = false;
+        else {
+          answering = false;
+          publishTurnInProgress(false);
+        }
         // The stream stays open between turns for follow-ups; a specialist
         // that asked to exit must not sit here waiting for one. Only once no
         // turn (queued or a nudge retry) is still owed an answer.
@@ -858,6 +867,7 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    publishTurnInProgress(false);
   }
 
   return { continuation: queryContinuation };
@@ -1369,4 +1379,13 @@ function publishReplyRoute(routing: RoutingContext): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Best effort: a failed write only costs the host's turn-end timing, never the turn. */
+function publishTurnInProgress(active: boolean): void {
+  try {
+    setTurnInProgress(active);
+  } catch (err) {
+    log(`Could not record turn state: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }

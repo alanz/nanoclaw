@@ -30,7 +30,7 @@ covers it), **obsolete** (not worth porting, or never real).
 
 ---
 
-## 1. Scheduled tasks — partly done (commit scan, session reset); synthesis scan and user profile open
+## 1. Scheduled tasks — partly done (commit scan, session reset, synthesis scan); user profile open
 
 `setup/migrate-v2/tasks.ts` skips a task whose `group_folder` has no v2 agent
 group. v1's `main` became `dm-with-alanz`, so every active task was skipped,
@@ -39,12 +39,12 @@ scheduled tasks in v2.
 
 Active in v1 (all on the main chat):
 
-| v1 task                     | Schedule                  | What                                                                                                                                                                                                 | Port                                                                                                                                        |
-| --------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `task-1776367857282-67z2x4` | `3 9 * * 6` (Sat)         | Synthesis-candidate scan: tag clusters ≥15 notes, notes ≥12 inbound links → `memory/digests/YYYY-MM-DD-synthesis-scan.md`, message the user. Bash gate script counts `tags:`/`links:` in `MEM-*.md`. | `ncl tasks create --script …` with the v1 prompt/script; `/workspace/group` → `/workspace/agent`, `memory_get` → `memory_get_file_content`. |
-| `task-1776511133337-5u8wle` | `47 1 * * *`              | Nightly NanoClaw commit scan: watermark file + `git log` gate, digest to `memory/digests/`, `MEM-` note for architectural commits, message only for significant ones.                                | **Done 2026-10-04** as `nanoclaw change scan` (below).                                                                                      |
-| `task-1776012215818-uahgqr` | `0 4 * * *`, idle ≥60 min | `task_type=session_reset`: archive and summarise the session into `memory/sessions/YYYY-MM-DD-HHmm.md` (`reset-prompt.md`), then clear it. Last v2-visible summary 2026-05-06.                       | **Done 2026-10-06** by the host module `src/modules/session-reset/` (§3).                                                                   |
-| `task-1776625382556-zq1qam` | `7 9 * * 0`               | `task_type=user_profile`: synthesise `memory/USER.md` (<2000 tokens, `user-profile-prompt.md`), injected at session start.                                                                           | No v2 task type; pairs with §2.                                                                                                             |
+| v1 task                     | Schedule                  | What                                                                                                                                                                                                 | Port                                                                      |
+| --------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `task-1776367857282-67z2x4` | `3 9 * * 6` (Sat)         | Synthesis-candidate scan: tag clusters ≥15 notes, notes ≥12 inbound links → `memory/digests/YYYY-MM-DD-synthesis-scan.md`, message the user. Bash gate script counts `tags:`/`links:` in `MEM-*.md`. | **Done 2026-10-14** as `synthesis-scan-a72c` (below).                     |
+| `task-1776511133337-5u8wle` | `47 1 * * *`              | Nightly NanoClaw commit scan: watermark file + `git log` gate, digest to `memory/digests/`, `MEM-` note for architectural commits, message only for significant ones.                                | **Done 2026-10-04** as `nanoclaw change scan` (below).                    |
+| `task-1776012215818-uahgqr` | `0 4 * * *`, idle ≥60 min | `task_type=session_reset`: archive and summarise the session into `memory/sessions/YYYY-MM-DD-HHmm.md` (`reset-prompt.md`), then clear it. Last v2-visible summary 2026-05-06.                       | **Done 2026-10-06** by the host module `src/modules/session-reset/` (§3). |
+| `task-1776625382556-zq1qam` | `7 9 * * 0`               | `task_type=user_profile`: synthesise `memory/USER.md` (<2000 tokens, `user-profile-prompt.md`), injected at session start.                                                                           | No v2 task type; pairs with §2.                                           |
 
 Paused in v1, superseded by the researcher specialist — **obsolete**: the
 Moltbook intake digest (`deltachat_intake`) and its copy-to-digests task.
@@ -71,11 +71,17 @@ the prompt; a task session has the group's memory tools and may
 August, before the rebuild onto upstream — prove the recurring, script-gated
 path with `ncl tasks run <id>` before relying on it.
 
-- **Synthesis scan — supported.** The v1 gate script, with
-  `/workspace/group` → `/workspace/agent`, runs unchanged against today's notes
-  (339 MEM, 3 SYN, wakes). Prompt edits: paths, `memory_get` →
-  `memory_get_file_content`. (`memory_search` has been hybrid since
-  2026-10-11, §6.) Not yet created.
+- **Synthesis scan — done 2026-10-14, as `synthesis-scan-a72c`** (`3 9 * * 6`,
+  main group). The v1 gate no longer filtered (at 368 notes, 17 tags ≥15 and
+  30 hubs ≥12 — it would wake every week and repeat itself), so the gate was
+  rewritten: it ranks tag clusters (case-folded, ≥10 notes) and link hubs (≥8
+  inbound links) in `zettel/notes/` and offers the top 5 not yet settled.
+  `.synthesis-scan-state.json` in the group folder records each candidate's
+  disposition — `surfaced` (by the gate, once that run's digest exists),
+  `declined` (Andy, on Alan's "drop it"; never offered again), `synthesised`
+  (a SYN note names the hub, or Andy records it) — and a surfaced or
+  synthesised candidate returns only after growing by half. Seeded with v1's
+  ten surfaced candidates. Digest `zettel/digests/YYYY-MM-DD-synthesis-scan.md`.
 - **Commit scan — done 2026-10-04, as the `nanoclaw change scan` task**
   (`47 1 * * *`, main group). Purpose: keep the agent aware of how the host
   platform it runs on is changing — what is running, not upstream's live
@@ -320,7 +326,7 @@ subjects; hashes change when the patch stack is folded).
 
 ## Priority order (suggested)
 
-1. **Synthesis scan** (§1) — a recurring task; the v1 gate script runs as is.
+1. ~~**Synthesis scan** (§1)~~ — done 2026-10-14.
 2. **User profile + warm-start** (§1, §2) — continuity.
 3. **RSS** (§4) — self-contained; add the Guix Planet feed.
 4. **WebXDC todo/app** (§5).

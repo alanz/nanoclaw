@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoClaw</title>
+  <script src="webxdc.js"></script>
+  <script src="marked.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      /* DeltaChat's own message text: 16 sp, tight leading (2026-10-14, by screenshot) */
+      font-size: 16px;
+      line-height: 1.25;
+      background: #f5f5f5;
+      color: #1a1a1a;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1a1a; color: #e8e8e8; }
+      .card { background: #2a2a2a; border-color: #3a3a3a; }
+      .card-meta { color: #888; }
+      code { background: #333; color: #e8e8e8; }
+      pre { background: #2d2d2d; border-color: #3a3a3a; }
+      table td, table th { border-color: #444; }
+      table th { background: #333; }
+      table tr:nth-child(even) { background: #2d2d2d; }
+      #empty { color: #555; }
+      #input-area { background: #222; border-color: #333; }
+      #footer { background: #222; }
+      #message-input { background: #2a2a2a; color: #e8e8e8; border-color: #444; }
+    }
+
+    #feed {
+      width: 100%;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-sizing: border-box;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 10px;
+      padding: 14px 16px;
+      word-break: break-word;
+      min-width: 0;
+    }
+
+    .card-meta {
+      font-size: 11px;
+      color: #999;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .card-body h1, .card-body h2, .card-body h3 {
+      margin: 0.8em 0 0.4em;
+      line-height: 1.3;
+    }
+    .card-body h1 { font-size: 1.3em; }
+    .card-body h2 { font-size: 1.15em; }
+    .card-body h3 { font-size: 1em; }
+    .card-body h1:first-child,
+    .card-body h2:first-child,
+    .card-body h3:first-child { margin-top: 0; }
+
+    .card-body p { margin: 0.5em 0; }
+    .card-body p:first-child { margin-top: 0; }
+    .card-body p:last-child { margin-bottom: 0; }
+
+    .card-body ul, .card-body ol {
+      padding-left: 1.4em;
+      margin: 0.4em 0;
+    }
+    .card-body li { margin: 0.2em 0; }
+
+    .card-body code {
+      background: #f0f0f0;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 0.88em;
+      font-family: "SF Mono", "Fira Code", Consolas, monospace;
+    }
+
+    .card-body pre {
+      background: #f6f6f6;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      margin: 0.6em 0;
+    }
+    .card-body pre code {
+      background: none;
+      padding: 0;
+      font-size: 0.85em;
+    }
+
+    .card-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0.6em 0;
+      font-size: 0.9em;
+      display: block;
+      overflow-x: auto;
+    }
+    .card-body th, .card-body td {
+      border: 1px solid #ddd;
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .card-body th {
+      background: #f0f0f0;
+      font-weight: 600;
+    }
+    .card-body tr:nth-child(even) { background: #fafafa; }
+
+    .card-body blockquote {
+      border-left: 3px solid #ccc;
+      margin: 0.5em 0;
+      padding: 0.3em 0.8em;
+      color: #666;
+    }
+
+    .card-body hr {
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      margin: 0.8em 0;
+    }
+
+    .card-body .link {
+      color: #0066cc;
+      text-decoration: underline;
+      cursor: pointer;
+      -webkit-user-select: text;
+      user-select: text;
+      word-break: break-all;
+    }
+    .card-body .link.raw { text-decoration: none; }
+    .card.user-message .link { color: #cfe8ff; }
+    @media (prefers-color-scheme: dark) { .card-body .link { color: #6cb4ff; } }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 90px;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      padding: 8px 14px;
+      border-radius: 16px;
+      font-size: 14px;
+      pointer-events: none;
+    }
+
+    .card-body img, .card-body svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0.4em 0;
+    }
+
+    #empty {
+      text-align: center;
+      color: #aaa;
+      padding: 60px 20px;
+      font-size: 0.95em;
+    }
+
+    #empty .icon { font-size: 2em; margin-bottom: 10px; }
+
+    /* Chat interface */
+    #chat-container {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    #feed {
+      flex: 1;
+      overflow-y: auto;
+      padding-bottom: 12px;
+    }
+
+    .card.user-message {
+      background: #0066cc;
+      color: white;
+      border-color: #0052a3;
+      align-self: flex-end;
+      width: fit-content;
+      max-width: 70%;
+    }
+
+    .card.user-message .card-meta {
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    .card.user-message a { color: #66d9ff; }
+
+    .card.user-message .mark {
+      text-align: right;
+      font-size: 20px;
+      line-height: 1;
+      margin-top: 6px;
+    }
+    .card.user-message .mark:empty { display: none; }
+
+    .progress {
+      color: #888;
+      font-style: italic;
+      font-size: 15px;
+      padding: 2px 6px;
+    }
+
+    #input-area {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      background: #fff;
+      border-top: 1px solid #e0e0e0;
+      flex-shrink: 0;
+    }
+
+    #footer {
+      padding: 4px 12px;
+      font-size: 11px;
+      color: #888;
+      text-align: right;
+      background: #fff;
+    }
+
+    #message-input {
+      flex: 1;
+      padding: 10px 12px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 16px;
+      font-family: inherit;
+    }
+
+    #message-input:focus {
+      outline: none;
+      border-color: #0066cc;
+      box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+    }
+
+    #send-btn {
+      padding: 10px 18px;
+      background: #0066cc;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    #send-btn:hover { background: #0052a3; }
+    #send-btn:active { background: #004399; }
+    #send-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+    /* Interactive component cards */
+    .card.interactive .card-components {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .card.interactive .comp-button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .card.interactive .comp-btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .card.interactive .comp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .card.interactive .comp-btn.primary { background: #0066cc; color: white; }
+    .card.interactive .comp-btn.primary:hover { background: #0052a3; }
+    .card.interactive .comp-btn.secondary { background: #e8e8e8; color: #333; }
+    .card.interactive .comp-btn.secondary:hover { background: #d8d8d8; }
+    .card.interactive .comp-btn.danger { background: #dc2626; color: white; }
+    .card.interactive .comp-btn.danger:hover { background: #b91c1c; }
+
+    .card.interactive .comp-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: #555;
+      margin-bottom: 2px;
+    }
+
+    .card.interactive .comp-input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 15px;
+      font-family: inherit;
+    }
+    .card.interactive .comp-input:focus {
+      outline: none;
+      border-color: #0066cc;
+      box-shadow: 0 0 0 2px rgba(0,102,204,0.15);
+    }
+
+    .card.interactive .comp-select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      font-size: 15px;
+      font-family: inherit;
+      background: white;
+    }
+
+    .card.interactive.responded {
+      opacity: 0.65;
+    }
+    .card.interactive .comp-response-note {
+      font-size: 12px;
+      color: #888;
+      margin-top: 6px;
+      font-style: italic;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .card.interactive .comp-label { color: #aaa; }
+      .card.interactive .comp-input,
+      .card.interactive .comp-select { background: #2a2a2a; color: #e8e8e8; border-color: #444; }
+      .card.interactive .comp-btn.secondary { background: #3a3a3a; color: #e0e0e0; }
+    }
+  </style>
+</head>
+<body>
+  <div id="chat-container">
+    <div id="status" style="font-size:11px;color:#666;padding:4px 10px;background:#f8f8f8;font-family:monospace;border-bottom:1px solid #e0e0e0">initialising…</div>
+    <div id="feed">
+      <div id="empty">
+        <div class="icon">🐾</div>
+        Waiting for NanoClaw output…
+      </div>
+    </div>
+    <div id="input-area">
+      <input id="message-input" type="text" placeholder="Type a message…" />
+      <button id="send-btn">Send</button>
+    </div>
+    <div id="footer"></div>
+  </div>
+
+  <script>
+    // NanoClaw chat surface (WebXDC). Ported from v1 (~/nanoclaw/webxdc-src):
+    // its startup lore is kept on purpose — cache restore before the API is
+    // up, polling for window.webxdc, a realtime "ready" and pings after
+    // replay / on becoming visible / every 30 s — because it was learned on
+    // real devices (home-screen launch, slow start). See
+    // docs/webxdc-phase0.md before removing any of it.
+    //
+    // Protocol (src/channels/deltachat-webxdc.ts):
+    //   bot → app  message | interactive | resolved | status | meta | clear
+    //   app → bot  user_message | action | ping
+    // Every update, ours included, comes back through setUpdateListener: the
+    // feed is rebuilt from that replay, deduplicated by payload id.
+    const feed = document.getElementById('feed');
+    const empty = document.getElementById('empty');
+    const statusEl = document.getElementById('status');
+    const footer = document.getElementById('footer');
+    const shown = new Set(); // payload ids already in the feed
+    const surfaces = new Map(); // surfaceId → card element
+    // The chat's 👀 → 💭 → ✅ for the user's own messages, shown on the bubble.
+    const MARKS = ['👀', '💭', '✅'];
+    const marks = new Map(); // user message id → mark
+    const userCards = new Map(); // user message id → card element
+
+    window.addEventListener('error', (e) => setStatus('⚠️ ' + e.message));
+    window.addEventListener('unhandledrejection', (e) => setStatus('⚠️ ' + e.reason));
+
+    // --- Safe Markdown: the model's text never becomes live HTML ---
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    }
+    marked.use({
+      breaks: true,
+      gfm: true,
+      renderer: {
+        html(token) { return escapeHtml(token.raw ?? token.text ?? ''); },
+        // The app has no web access, so a link cannot open here: it is text
+        // that looks like a link, stays selectable, and copies its address
+        // when tapped (see copyLink) for opening elsewhere.
+        link(token) {
+          const text = this.parser.parseInline(token.tokens);
+          return /^(https?:|mailto:)/i.test(token.href)
+            ? `<span class="link" data-href="${escapeHtml(token.href)}">${text}</span>`
+            : text;
+        },
+        image(token) {
+          return /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(token.href)
+            ? `<img src="${token.href}" alt="${escapeHtml(token.text)}">`
+            : escapeHtml(token.text ? `[image: ${token.text}]` : '[image]');
+        },
+      },
+    });
+    function renderMarkdown(text) { return marked.parse(String(text).replace(/\\n/g, '\n')); }
+
+    function toast(msg) {
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 1600);
+    }
+
+    async function copyLink(el) {
+      const href = el.dataset.href;
+      try {
+        await navigator.clipboard.writeText(href);
+        toast('🔗 Link copied');
+      } catch {
+        // No clipboard here: show the address itself, selected, to copy by hand.
+        el.textContent = href;
+        el.classList.add('raw');
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest?.('.link');
+      // A tap copies; a selection being made (long-press) is left alone.
+      if (el && !String(window.getSelection())) copyLink(el);
+    });
+
+    // --- localStorage cache: shows the feed at once, before the API is up ---
+    const STORAGE_KEY = 'nanoclaw-chat-v2';
+    const MAX_STORED = 100;
+    let stored = [];
+    function save() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(stored.slice(-MAX_STORED))); } catch { /* quota */ }
+    }
+    function load() {
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; }
+    }
+
+    function formatTime(ts) {
+      return ts ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    }
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    let sendAction = null; // set once the API is up
+
+    function renderButtons(components, card, surfaceId) {
+      const container = document.createElement('div');
+      container.className = 'card-components';
+      const row = document.createElement('div');
+      row.className = 'comp-button-row';
+      for (const comp of components) {
+        if (comp.type !== 'button') continue;
+        const btn = document.createElement('button');
+        btn.className = `comp-btn ${comp.style || 'primary'}`;
+        btn.textContent = comp.label || comp.id;
+        btn.onclick = () => {
+          if (!sendAction) return;
+          sendAction({ actionId: comp.id, value: comp.label || comp.id, surfaceId });
+          markResponded(card, `✓ "${comp.label || comp.id}" sent`);
+        };
+        row.appendChild(btn);
+      }
+      container.appendChild(row);
+      return container;
+    }
+
+    function markResponded(card, note) {
+      card.classList.add('responded');
+      card.querySelectorAll('.comp-btn').forEach((el) => { el.disabled = true; });
+      card.querySelectorAll('.comp-response-note').forEach((el) => el.remove());
+      const n = document.createElement('div');
+      n.className = 'comp-response-note';
+      n.textContent = note;
+      card.appendChild(n);
+    }
+
+    function addCard(p, fromCache) {
+      const isUser = p.type === 'user_message';
+      const id = p.id || `${p.type}:${p.timestamp}:${(p.content || '').slice(0, 40)}`;
+      if (shown.has(id)) return;
+      if (!p.content && p.type !== 'interactive') return;
+      shown.add(id);
+      if (empty) empty.style.display = 'none';
+
+      const card = document.createElement('div');
+      card.className = 'card' + (isUser ? ' user-message' : '') + (p.type === 'interactive' ? ' interactive' : '');
+      const meta = document.createElement('div');
+      meta.className = 'card-meta';
+      const who = document.createElement('span');
+      who.textContent = isUser ? (p.name || 'You') : (p.title || 'NanoClaw');
+      const when = document.createElement('span');
+      when.textContent = formatTime(p.timestamp);
+      meta.append(who, when);
+      const body = document.createElement('div');
+      body.className = 'card-body';
+      if (isUser) body.textContent = p.content;
+      else body.innerHTML = renderMarkdown(p.content || '');
+      card.append(meta, body);
+      if (isUser) {
+        // Where DeltaChat shows a reaction: under the message, at the right.
+        const mark = document.createElement('div');
+        mark.className = 'mark';
+        mark.textContent = marks.get(id) || '';
+        card.appendChild(mark);
+        userCards.set(id, card);
+      }
+      if (p.type === 'interactive' && p.components?.length) {
+        card.appendChild(renderButtons(p.components, card, p.surfaceId));
+      }
+      if (p.surfaceId) surfaces.set(p.surfaceId, card);
+      feed.appendChild(card);
+      window.scrollTo(0, document.body.scrollHeight);
+      if (!fromCache) { stored.push(p); save(); }
+    }
+
+    // What the agent is doing, as the chat shows it: a line at the end of the
+    // conversation ("⏳ Searching the web…") that goes when the reply comes.
+    let progressEl = null;
+    function showProgress(text) {
+      if (!text) {
+        progressEl?.remove();
+        progressEl = null;
+        return;
+      }
+      if (!progressEl) {
+        progressEl = document.createElement('div');
+        progressEl.className = 'progress';
+      }
+      progressEl.textContent = `⏳ ${text.charAt(0).toUpperCase()}${text.slice(1)}…`;
+      feed.appendChild(progressEl); // (re)placed last
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function applyMark(p) {
+      const prev = marks.get(p.id);
+      if (prev && MARKS.indexOf(prev) >= MARKS.indexOf(p.mark)) return;
+      marks.set(p.id, p.mark);
+      const el = userCards.get(p.id)?.querySelector('.mark');
+      if (el) el.textContent = p.mark;
+    }
+
+    function resolve(p) {
+      const card = surfaces.get(p.surfaceId);
+      if (card) markResponded(card, p.content || '✓ answered');
+      stored.push(p); save();
+    }
+
+    function clearFeed() {
+      feed.querySelectorAll('.card').forEach((c) => c.remove());
+      if (empty) empty.style.display = '';
+      shown.clear(); surfaces.clear(); marks.clear(); userCards.clear(); stored = []; save();
+    }
+
+    (function restoreCache() {
+      const cached = load();
+      for (const p of cached) {
+        if (p.type === 'resolved') resolve(p);
+        else if (p.type === 'mark') applyMark(p);
+        else addCard(p, true);
+      }
+      stored = cached;
+      if (cached.length) setStatus(`📋 ${cached.length} from cache — connecting…`);
+    })();
+
+    // live: false while setUpdateListener replays history, so an old
+    // "typing" status is not shown as current.
+    function handle(p, live) {
+      if (!p || typeof p !== 'object') return;
+      switch (p.type) {
+        case 'clear': clearFeed(); break;
+        case 'message':
+        case 'interactive':
+        case 'user_message':
+          if (p.type !== 'user_message') showProgress(null);
+          addCard(p, false);
+          if (p.type !== 'user_message') setStatus(`✅ ${formatTime(p.timestamp || Date.now())}`);
+          break;
+        case 'resolved': resolve(p); break;
+        case 'mark': applyMark(p); stored.push(p); save(); break;
+        case 'status':
+          if (live) showProgress(p.text);
+          break;
+        case 'meta':
+          footer.textContent = `ID: ${p.msgId}`;
+          break;
+      }
+    }
+
+    let attempts = 0;
+    function initWebxdc() {
+      attempts++;
+      if (typeof window.webxdc === 'undefined') {
+        setStatus(`waiting for webxdc API… (attempt ${attempts})`);
+        if (attempts < 20) setTimeout(initWebxdc, 300);
+        else setStatus('❌ webxdc API not available — not running inside DeltaChat?');
+        return;
+      }
+      const maxSize = window.webxdc.sendUpdateMaxSize || 128000;
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      const ping = () => window.webxdc.sendUpdate({ payload: { type: 'ping' } }, '');
+
+      // Realtime: best effort only; the bot reads status updates.
+      let rt = null;
+      try {
+        rt = window.webxdc.joinRealtimeChannel();
+        rt.setListener((data) => { try { handle(JSON.parse(dec.decode(data)), true); } catch {} });
+        rt.send(enc.encode(JSON.stringify({ type: 'ready' })));
+      } catch { /* not supported */ }
+      // Tells the bot this app is open and listening on realtime, where it
+      // sends progress (ephemeral) rather than storing it as an update.
+      const rtPing = () => { try { rt?.send(enc.encode(JSON.stringify({ type: 'ping' }))); } catch {} };
+      setInterval(() => { if (document.visibilityState === 'visible') rtPing(); }, 15000);
+
+      let replaying = true;
+      setStatus('🔄 loading…');
+      window.webxdc.setUpdateListener((u) => {
+        handle(u.payload, !replaying || u.serial === u.max_serial);
+      }, 0).then(() => {
+        replaying = false;
+        setStatus('✅ up to date');
+        ping();
+      }).catch(() => { replaying = false; });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') { ping(); rtPing(); }
+      });
+      setInterval(ping, 30000);
+
+      sendAction = ({ actionId, value, surfaceId }) => {
+        const update = { payload: { type: 'action', actionId, value, surfaceId, timestamp: Date.now() } };
+        if (JSON.stringify(update).length <= maxSize) window.webxdc.sendUpdate(update, '');
+        setStatus('📤 sent — waiting for a reply…');
+      };
+
+      const input = document.getElementById('message-input');
+      const sendBtn = document.getElementById('send-btn');
+      function sendMessage() {
+        const text = input.value.trim();
+        if (!text) return;
+        const payload = {
+          type: 'user_message',
+          id: `u:${window.webxdc.selfAddr}:${Date.now()}`,
+          content: text,
+          name: window.webxdc.selfName,
+          timestamp: Date.now(),
+        };
+        if (JSON.stringify({ payload }).length > maxSize) {
+          setStatus('❌ message too long');
+          return;
+        }
+        addCard(payload, false); // at once; the replayed copy has the same id
+        window.webxdc.sendUpdate({ payload }, '');
+        input.value = '';
+        sendBtn.disabled = true;
+        setStatus('📤 sent — waiting for a reply…');
+        setTimeout(() => { sendBtn.disabled = false; }, 1000);
+      }
+      sendBtn.addEventListener('click', sendMessage);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+      });
+    }
+    initWebxdc();
+  </script>
+</body>
+</html>

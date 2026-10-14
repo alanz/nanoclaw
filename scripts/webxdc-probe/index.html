@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <script src="webxdc.js"></script>
+    <style>
+      body {
+        font:
+          15px system-ui,
+          sans-serif;
+        margin: 12px;
+        color: #222;
+        background: #fff;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          color: #eee;
+          background: #111;
+        }
+      }
+      li {
+        margin: 6px 0;
+      }
+      .meta {
+        opacity: 0.65;
+        font-size: 12px;
+      }
+      button {
+        font-size: 15px;
+        padding: 8px 14px;
+        margin: 8px 0;
+      }
+      #err {
+        color: #c00;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>NanoClaw probe</h3>
+    <p class="meta">Listens only. It sends nothing unless you tap the button.</p>
+    <p id="status">Waiting for webxdc…</p>
+    <ol id="list"></ol>
+    <button id="ping">Send ping (step 2 only)</button>
+    <p id="err"></p>
+    <script>
+      function show(id, t) {
+        document.getElementById(id).textContent = t;
+      }
+      window.addEventListener('error', function (e) {
+        show('err', 'Error: ' + e.message);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        show('err', 'Error: ' + e.reason);
+      });
+      var tries = 0;
+      function init() {
+        if (typeof window.webxdc === 'undefined') {
+          if (++tries < 20) return setTimeout(init, 300);
+          return show('status', 'webxdc API not available');
+        }
+        var n = 0;
+        window.webxdc
+          .setUpdateListener(function (u) {
+            var p = u.payload || {},
+              li = document.createElement('li');
+            var now = new Date(),
+              lag = p.sentAt ? Math.round((now - new Date(p.sentAt)) / 1000) + ' s after sending' : '';
+            li.textContent = (p.from || '?') + ': ' + (p.text || JSON.stringify(p));
+            var m = document.createElement('div');
+            m.className = 'meta';
+            m.textContent = 'serial ' + u.serial + ' · received ' + now.toLocaleTimeString() + (lag ? ' · ' + lag : '');
+            li.appendChild(m);
+            document.getElementById('list').appendChild(li);
+            n++;
+            show('status', n + ' update(s) received');
+          }, 0)
+          .then(function () {
+            show('status', n + ' update(s) after replay; listening');
+          });
+        document.getElementById('ping').onclick = function () {
+          window.webxdc.sendUpdate(
+            { payload: { from: 'app', text: 'ping from ' + window.webxdc.selfName, sentAt: new Date().toISOString() } },
+            '',
+          );
+        };
+      }
+      init();
+    </script>
+  </body>
+</html>

@@ -34,7 +34,6 @@ import path from 'path';
 import { startDeltaChat } from '@deltachat/stdio-rpc-server';
 import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 
-import { ASSISTANT_NAME } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerInboundCompletedHook } from '../reconcile-session.js';
@@ -50,6 +49,22 @@ import {
   renderDisplayCard,
   renderQuestion,
 } from './deltachat-cards.js';
+import {
+  APP_SOURCE_DIR,
+  APP_MARKS,
+  APP_SURFACE_NOTE,
+  type AppMark,
+  type BotPayload,
+  WebxdcBook,
+  actionText,
+  buildXdc,
+  inlineImage,
+  instanceOfThread,
+  parseAppUpdate,
+  questionPayload,
+  statusUpdate,
+  xdcThread,
+} from './deltachat-webxdc.js';
 import { resolveQuestionRender } from './question-render-registry.js';
 import {
   fingerprintFromHandle,
@@ -88,6 +103,17 @@ function attachmentType(viewType: string): string {
 }
 /** Each edit is a message to the chat, so the progress line changes at most this often. */
 const PROGRESS_EDIT_MS = 10_000;
+/** The app's status line changes at most this often (DeltaChat sends about one update a second). */
+const APP_STATUS_MIN_MS = 2_000;
+/** Over realtime (ephemeral, not stored) progress can change faster. */
+const APP_REALTIME_MIN_MS = 500;
+/** The app sends a realtime ping every 15 s while visible; this long without one, it is not listening there. */
+const APP_REALTIME_LIVE_MS = 45_000;
+/** Re-join an instance's realtime channel no more often than this. */
+const APP_REALTIME_REJOIN_MS = 120_000;
+
+/** The assistant's display name, read from .env (config's re-export of it is being retired). */
+const ASSISTANT_NAME = process.env.ASSISTANT_NAME || readEnvFile(['ASSISTANT_NAME']).ASSISTANT_NAME || 'Andy';
 
 /** Status reactions on an incoming message, in the only order they move. */
 const STATUS_STEPS = ['👀', '💭', '✅'];
@@ -215,6 +241,18 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   const processedMsgIds = new Set<number>();
   /** Question cards delivered to chats, for answering by reply. */
   let cards = new CardBook(null);
+  /** WebXDC app instances the bot sent (`/app`), and question cards pending in them. */
+  let apps = new WebxdcBook(null);
+  /** The status line last pushed to each app instance, so it is pushed only on change. */
+  const appStatus = new Map<number, { text: string | null; at: number }>();
+  /** Inbound update reads in flight per instance: one at a time, in order. */
+  const appReads = new Map<number, Promise<void>>();
+  /** The user's app messages awaiting ✅, per instance, with the mark each shows. */
+  const appPending = new Map<number, Array<{ id: string; mark: AppMark }>>();
+  /** When each instance last spoke over its realtime channel: open and listening there. */
+  const appRealtimeAt = new Map<number, number>();
+  /** When the bot last joined each instance's realtime channel. */
+  const appRealtimeJoinedAt = new Map<number, number>();
   /** Resolved sender handle per DeltaChat contact id, and fingerprint → contact id for openDM. */
   const senderByContact = new Map<number, { handle: string; name: string }>();
   const contactByFingerprint = new Map<string, number>();
@@ -381,6 +419,247 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     });
   }
 
+  // ── WebXDC chat surface (/app) ─────────────────────────────────────────────
+
+  /** Push one update into an app instance; `notify` raises a phone notification for content. */
+  async function pushToApp(msgId: number, payload: BotPayload, notifyName: string = ASSISTANT_NAME): Promise<void> {
+    if (!dc || accountId === null) return;
+    await dc.rpc.sendWebxdcStatusUpdate(accountId, msgId, statusUpdate(payload, notifyName), '');
+  }
+
+  /** Send a fresh instance of the chat surface app to a DM and record it. */
+  async function sendApp(platformId: string): Promise<void> {
+    const chatId = chatIdFromPlatformId(platformId);
+    if (chatId === null || !dc || accountId === null) return;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-xdc-'));
+    try {
+      const file = path.join(tmpDir, 'nanoclaw.xdc');
+      fs.writeFileSync(file, buildXdc(APP_SOURCE_DIR));
+      const msgId = await dc.rpc.sendMsg(accountId, chatId, {
+        text: `${ASSISTANT_NAME} app: open it to chat here with full formatting and buttons.`,
+        html: null,
+        viewtype: null,
+        file,
+        filename: 'nanoclaw.xdc',
+        location: null,
+        overrideSenderName: null,
+        quotedMessageId: null,
+        quotedText: null,
+      });
+      apps.addInstance({ msgId, platformId, app: 'nanoclaw', createdAt: new Date().toISOString(), lastSerial: 0 });
+      await pushToApp(msgId, { type: 'meta', msgId });
+      log.info('DeltaChat: WebXDC app sent', { platformId, msgId });
+      void joinRealtime(msgId, 'app sent');
+    } catch (err) {
+      log.error('DeltaChat: failed to send WebXDC app', { err, platformId });
+      await sendText(platformId, "Couldn't send the app; see the host log.");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  /** The DM peer an app instance talks for, or null when its chat is not a DM. */
+  async function appPeer(platformId: string): Promise<{ handle: string; name: string } | null> {
+    const chatId = chatIdFromPlatformId(platformId);
+    if (chatId === null || !dc || accountId === null) return null;
+    const chat = await dc.rpc.getBasicChatInfo(accountId, chatId);
+    if (chat.chatType !== 'Single') return null;
+    const peer = (await dc.rpc.getChatContacts(accountId, chatId)).find((id) => id !== 1);
+    return peer === undefined ? null : resolveSender(peer);
+  }
+
+  /**
+   * Read every update an instance received after the last one read, and act
+   * on the app's own payloads (the bot's come back too, and are skipped).
+   * One read per instance at a time, so serials are never read twice.
+   */
+  function readAppUpdates(msgId: number): Promise<void> {
+    const prev = appReads.get(msgId) ?? Promise.resolve();
+    const next = prev.then(async () => {
+      const rec = apps.instance(msgId);
+      if (!rec || !dc || accountId === null || !channelSetup) return;
+      const raw = await dc.rpc.getWebxdcStatusUpdates(accountId, msgId, rec.lastSerial);
+      const updates = JSON.parse(raw) as Array<{ payload: unknown; serial: number }>;
+      if (updates.length === 0) return;
+      let peer: { handle: string; name: string } | null | undefined;
+      for (const u of updates) {
+        const parsed = parseAppUpdate(u.payload);
+        if (parsed && parsed.kind !== 'ping') {
+          peer ??= await appPeer(rec.platformId);
+          if (!peer) {
+            log.warn('DeltaChat: WebXDC update from an instance outside a DM ignored', { msgId });
+            break;
+          }
+          const threadId = xdcThread(msgId);
+          const question = parsed.kind === 'action' && parsed.surfaceId ? apps.question(parsed.surfaceId) : undefined;
+          if (parsed.kind === 'action' && question) {
+            const option = question.options.find((o) => o.value === parsed.actionId);
+            if (option) {
+              apps.removeQuestion(question.questionId);
+              channelSetup.onAction(question.questionId, option.value, `dc:${peer.handle}`, {
+                messageId: String(msgId),
+                platformId: rec.platformId,
+                threadId,
+              });
+              await pushToApp(msgId, {
+                type: 'resolved',
+                surfaceId: question.questionId,
+                content: `✓ ${option.selectedLabel}`,
+              });
+              log.info('DeltaChat: question answered in the app', { questionId: question.questionId, msgId });
+            }
+          } else {
+            const text = parsed.kind === 'message' ? parsed.text : actionText(parsed);
+            await channelSetup.onInbound(rec.platformId, threadId, {
+              id: `xdc-${msgId}-${u.serial}`,
+              kind: 'chat',
+              content: { text: `${APP_SURFACE_NOTE}\n${text}`, sender: peer.name, senderId: `dc:${peer.handle}` },
+              timestamp: new Date().toISOString(),
+            });
+            if (parsed.kind === 'message' && parsed.id) {
+              const pending = appPending.get(msgId) ?? [];
+              pending.push({ id: parsed.id, mark: '👀' });
+              appPending.set(msgId, pending);
+              await pushToApp(msgId, { type: 'mark', id: parsed.id, mark: '👀' });
+            }
+          }
+        }
+        if (parsed?.kind === 'ping') void joinRealtime(msgId, 'app opened');
+        apps.setLastSerial(msgId, u.serial);
+      }
+    });
+    const settled = next.catch((err) => log.error('DeltaChat: failed to read WebXDC updates', { err, msgId }));
+    appReads.set(msgId, settled);
+    return settled;
+  }
+
+  /**
+   * Move the marks on the user's pending app messages forward to `mark`
+   * (the chat's 👀 → 💭 → ✅, never backwards); ✅ settles them.
+   */
+  async function markApp(msgId: number, mark: AppMark): Promise<void> {
+    const pending = appPending.get(msgId);
+    if (!pending?.length) return;
+    const step = APP_MARKS.indexOf(mark);
+    for (const p of pending) {
+      if (APP_MARKS.indexOf(p.mark) >= step) continue;
+      p.mark = mark;
+      try {
+        await pushToApp(msgId, { type: 'mark', id: p.id, mark });
+      } catch (err) {
+        log.warn('DeltaChat: failed to push WebXDC mark', { err, msgId });
+      }
+    }
+    if (mark === '✅') appPending.delete(msgId);
+  }
+
+  /** Show what the agent is doing in the app's status line, pushed only on change. */
+  async function appTyping(msgId: number, status: string | undefined): Promise<void> {
+    await markApp(msgId, '💭');
+    const text = status ?? 'thinking';
+    const last = appStatus.get(msgId);
+    const now = Date.now();
+    const realtime = now - (appRealtimeAt.get(msgId) ?? 0) < APP_REALTIME_LIVE_MS;
+    // Progress is ephemeral: over the realtime channel while the app is open
+    // there; otherwise as a status update (stored, but the app shows only a
+    // live one). Every change goes, a little apart; one skipped here is
+    // caught by the typing refresh's next tick.
+    const minGap = realtime ? APP_REALTIME_MIN_MS : APP_STATUS_MIN_MS;
+    if (last?.text === text || (last && now - last.at < minGap)) return;
+    appStatus.set(msgId, { text, at: now });
+    try {
+      if (realtime) await sendRealtime(msgId, { type: 'status', text });
+      else await pushToApp(msgId, { type: 'status', text });
+    } catch (err) {
+      log.warn('DeltaChat: failed to send WebXDC status', { err, msgId, realtime });
+    }
+  }
+
+  async function sendRealtime(msgId: number, payload: BotPayload): Promise<void> {
+    if (!dc || accountId === null) return;
+    await dc.rpc.sendWebxdcRealtimeData(accountId, msgId, [...Buffer.from(JSON.stringify(payload), 'utf-8')]);
+  }
+
+  /** Join an instance's realtime channel, at most once per APP_REALTIME_REJOIN_MS. */
+  async function joinRealtime(msgId: number, why: string): Promise<void> {
+    if (!dc || accountId === null) return;
+    const now = Date.now();
+    if (now - (appRealtimeJoinedAt.get(msgId) ?? 0) < APP_REALTIME_REJOIN_MS) return;
+    appRealtimeJoinedAt.set(msgId, now);
+    try {
+      await dc.rpc.sendWebxdcRealtimeAdvertisement(accountId, msgId);
+      log.info('DeltaChat: joined WebXDC realtime channel', { msgId, why });
+    } catch (err) {
+      log.warn('DeltaChat: failed to join WebXDC realtime channel', { err, msgId });
+    }
+  }
+
+  /** Deliver an outbound message addressed to an app instance's thread. */
+  async function deliverToApp(
+    msgId: number,
+    platformId: string,
+    content: Record<string, unknown>,
+    files: OutboundMessage['files'],
+  ): Promise<string | undefined> {
+    const rec = apps.instance(msgId);
+    if (!rec) {
+      // An app this bot no longer knows about: say it in the chat instead.
+      log.warn('DeltaChat: reply to an unknown WebXDC instance, sending to the chat', { msgId });
+      const text = typeof content.text === 'string' ? content.text : '';
+      return text ? ((await sendText(platformId, text)) ?? undefined) : undefined;
+    }
+    // Edits and reactions address chat messages; an app has none.
+    if (content.operation === 'edit' || content.operation === 'reaction') return undefined;
+
+    const sender = typeof content.sender === 'string' && content.sender ? content.sender : undefined;
+    const title = sender ?? ASSISTANT_NAME;
+    const id = `b:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    if (!sender) appStatus.delete(msgId); // a reply ends the turn's status line
+
+    const question = parseQuestionContent(content);
+    if (question) {
+      apps.addQuestion({ questionId: question.questionId, msgId, options: question.options, title: question.title });
+      await pushToApp(
+        msgId,
+        questionPayload(
+          id,
+          question.sender ? `${question.sender}: ${question.title}` : question.title,
+          question.question,
+          question.questionId,
+          question.options,
+        ),
+        title,
+      );
+      return id;
+    }
+
+    const parts: string[] = [];
+    const text =
+      typeof content.text === 'string' ? content.text : content.type === 'card' ? renderDisplayCard(content) : '';
+    if (text) parts.push(text);
+    for (const file of files ?? []) {
+      const inline = inlineImage(file.filename, file.data);
+      if (inline) {
+        parts.push(inline);
+        continue;
+      }
+      // Too big or not an image: it goes to the chat as an attachment.
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-out-'));
+      try {
+        const tmpPath = path.join(tmpDir, file.filename);
+        fs.writeFileSync(tmpPath, file.data);
+        await sendFileTmp(platformId, tmpPath, undefined);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+      parts.push(`📎 *${file.filename}* is in the chat as an attachment.`);
+    }
+    if (parts.length === 0) return undefined;
+    await pushToApp(msgId, { type: 'message', id, title, content: parts.join('\n\n'), timestamp: Date.now() }, title);
+    if (!sender) await markApp(msgId, '✅');
+    return id;
+  }
+
   /**
    * Move the last incoming message's status reaction forward to `emoji`.
    * No-op when it is already there or further on, or when the reaction
@@ -492,7 +771,10 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   const adapter: ChannelAdapter = {
     name: 'deltachat',
     channelType: 'deltachat',
-    supportsThreads: false,
+    // Chat messages carry no thread; a WebXDC app instance is the one thread
+    // (`xdc:<msgId>`). In a DM the router keeps one session and uses the
+    // thread only as the reply address, so app replies go back to the app.
+    supportsThreads: true,
 
     async setup(config: ChannelSetup): Promise<void> {
       channelSetup = config;
@@ -503,6 +785,12 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           // Inbound ids are `<platform msg id>:<agent group id>` (router).
           const suffix = `:${session.agent_group_id}`;
           if (!c.id.endsWith(suffix)) continue;
+          // From the app (`xdc-<instance>-<serial>`): a turn that ended without a reply.
+          const fromApp = /^xdc-(\d+)-\d+$/.exec(c.id.slice(0, -suffix.length));
+          if (fromApp) {
+            await markApp(Number(fromApp[1]), '✅');
+            continue;
+          }
           const msgId = Number(c.id.slice(0, -suffix.length));
           if (lastMsgId.get(c.platformId) !== msgId) continue;
           await clearProgress(c.platformId);
@@ -511,6 +799,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       });
       fs.mkdirSync(dataDir, { recursive: true });
       cards = new CardBook(path.join(dataDir, 'nanoclaw-cards.json'));
+      apps = new WebxdcBook(path.join(dataDir, 'nanoclaw-webxdc.json'));
 
       // DeltaChat requires accounts.toml on startup
       const accountsToml = path.join(dataDir, 'accounts.toml');
@@ -564,7 +853,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
       const selfAddr = await dc.rpc.getConfig(account.id, 'addr');
       const inviteQr = await dc.rpc.getChatSecurejoinQrCode(account.id, null);
-      log.info('DeltaChat ready', { addr: selfAddr, inviteQr });
+      const realtimeEnabled = await dc.rpc.getConfig(account.id, 'webxdc_realtime_enabled').catch(() => null);
+      log.info('DeltaChat ready', { addr: selfAddr, inviteQr, webxdcRealtime: realtimeEnabled });
       fs.writeFileSync(path.join(dataDir, 'invite-url'), inviteQr, 'utf8');
 
       const emitter = dc.getContextEvents(account.id);
@@ -625,6 +915,11 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           }
           if (text.trim() === '/chatid') {
             await sendText(platformId, `Chat ID: ${platformId}`);
+            return;
+          }
+          if (text.trim() === '/app') {
+            if (isGroup) await sendText(platformId, 'The app works in a direct chat only.');
+            else await sendApp(platformId);
             return;
           }
 
@@ -714,6 +1009,28 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           );
         } catch (err) {
           log.error('DeltaChat: failed to process IncomingMsg', { err, chatId, msgId });
+        }
+      });
+
+      // --- WebXDC app updates (from the app, and the bot's own echoed back) ---
+      emitter.on('WebxdcStatusUpdate', ({ msgId }: { msgId: number }) => {
+        if (!apps.instance(msgId)) return; // only instances this bot sent
+        void readAppUpdates(msgId);
+      });
+
+      // --- WebXDC realtime: the ephemeral channel, used for progress only ---
+      // In OpenClaw and v1 the advertisement event never fired, so the bot
+      // also joins when the app's ordinary ping says it was opened.
+      emitter.on('WebxdcRealtimeAdvertisementReceived', ({ msgId }: { msgId: number }) => {
+        if (apps.instance(msgId)) void joinRealtime(msgId, 'advertisement');
+      });
+      emitter.on('WebxdcRealtimeData', ({ msgId, data }: { msgId: number; data: number[] }) => {
+        if (!apps.instance(msgId)) return;
+        try {
+          const p = JSON.parse(Buffer.from(data).toString('utf-8')) as { type?: unknown };
+          if (p.type === 'ready' || p.type === 'ping') appRealtimeAt.set(msgId, Date.now());
+        } catch {
+          // not ours to read
         }
       });
 
@@ -860,12 +1177,16 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       return _connected;
     },
 
-    async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
+    async deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
       if (!platformId.startsWith('dc:')) return undefined;
       const chatId = chatIdFromPlatformId(platformId);
       if (chatId === null || !dc || accountId === null) return undefined;
 
       const content = message.content as Record<string, unknown>;
+
+      // A reply to something said in the app goes back into the app.
+      const appInstance = instanceOfThread(threadId);
+      if (appInstance !== null) return deliverToApp(appInstance, platformId, content, message.files);
 
       // edit_message: { operation: 'edit', messageId: platformMsgId, text }
       // or an approval card's terminal state: { ..., terminalCard: { title, question, resolution } }
@@ -974,7 +1295,10 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       return platformIdForChat(await dc.rpc.createChatByContactId(accountId, contactId));
     },
 
-    async setTyping(platformId: string, _threadId: string | null, status?: string): Promise<void> {
+    async setTyping(platformId: string, threadId: string | null, status?: string): Promise<void> {
+      // Working on something said in the app: show it in the app's status line.
+      const appInstance = instanceOfThread(threadId);
+      if (appInstance !== null) return appTyping(appInstance, status);
       // The typing module re-fires this every few seconds while the agent
       // works; only the first call per message reaches the chat.
       await advanceStatus(platformId, '💭');

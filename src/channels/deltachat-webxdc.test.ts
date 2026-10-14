@@ -79,6 +79,12 @@ describe('the app source', () => {
     expect(fs.existsSync(path.join(APP_SOURCE_DIR, 'webxdc.js'))).toBe(false);
   });
 
+  it('names the app with a top-level manifest key (a [webxdc] table is ignored, and the filename shows)', () => {
+    const manifest = fs.readFileSync(path.join(APP_SOURCE_DIR, 'manifest.toml'), 'utf-8');
+    expect(manifest).toMatch(/^name = "NanoClaw"$/m);
+    expect(manifest).not.toMatch(/^\[/m);
+  });
+
   it('loads nothing from the network', () => {
     expect(html).not.toMatch(/<(script|img|link|iframe)\b[^>]*\b(src|href)=["']?(https?:)?\/\//i);
     expect(html).not.toMatch(/@import|url\(\s*["']?(https?:)?\/\//i);

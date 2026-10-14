@@ -1819,6 +1819,57 @@ describe('DeltaChat channel adapter', () => {
       expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
     });
 
+    it("marks the user's app message 👀 → 💭 → ✅, like the chat's reactions", async () => {
+      const { adapter, dc } = await withApp();
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([{ serial: 2, payload: { type: 'user_message', id: 'u7', content: 'question?' } }]),
+      );
+      emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: APP_MSG, statusUpdateSerial: 2 });
+      await settle();
+      await adapter.setTyping!(PLATFORM_ID, `xdc:${APP_MSG}`);
+      await adapter.setTyping!(PLATFORM_ID, `xdc:${APP_MSG}`);
+      await adapter.deliver(PLATFORM_ID, `xdc:${APP_MSG}`, { kind: 'chat', content: { text: 'answer' } });
+
+      const marks = pushed(dc)
+        .map((u) => u.payload)
+        .filter((p) => p.type === 'mark');
+      expect(marks).toEqual([
+        { type: 'mark', id: 'u7', mark: '👀' },
+        { type: 'mark', id: 'u7', mark: '💭' },
+        { type: 'mark', id: 'u7', mark: '✅' },
+      ]);
+      expect(pushed(dc).every((u) => u.payload.type !== 'mark' || u.notify === undefined)).toBe(true);
+    });
+
+    it('marks ✅ when the turn ends without a reply', async () => {
+      const { dc } = await withApp();
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([{ serial: 2, payload: { type: 'user_message', id: 'u8', content: 'noted' } }]),
+      );
+      emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: APP_MSG, statusUpdateSerial: 2 });
+      await settle();
+      await completedHooks.at(-1)!(
+        [
+          {
+            id: `xdc-${APP_MSG}-2:ag-test`,
+            kind: 'chat',
+            platformId: PLATFORM_ID,
+            channelType: 'deltachat',
+            threadId: `xdc:${APP_MSG}`,
+          },
+        ],
+        { agent_group_id: 'ag-test' },
+      );
+      expect(
+        pushed(dc)
+          .map((u) => u.payload)
+          .filter((p) => p.type === 'mark'),
+      ).toEqual([
+        { type: 'mark', id: 'u8', mark: '👀' },
+        { type: 'mark', id: 'u8', mark: '✅' },
+      ]);
+    });
+
     it('puts a small image into the app inline and a document into the chat', async () => {
       const { adapter, dc } = await withApp();
       dc.rpc.sendMsg.mockClear();

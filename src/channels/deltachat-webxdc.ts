@@ -201,10 +201,28 @@ export type BotPayload =
     }
   | { type: 'resolved'; surfaceId: string; content: string }
   | { type: 'status'; text: string | null }
+  | { type: 'mark'; id: string; mark: AppMark }
   | { type: 'meta'; msgId: number };
 
+/**
+ * The status of one message the user sent from the app, shown on its bubble:
+ * the chat's 👀 → 💭 → ✅ reactions, for parity. Moves forward only.
+ */
+export type AppMark = '👀' | '💭' | '✅';
+export const APP_MARKS: AppMark[] = ['👀', '💭', '✅'];
+
 /** Payload types the bot sends. Updates of these types are the bot's own echo. */
-const BOT_TYPES = new Set(['message', 'interactive', 'resolved', 'status', 'meta', 'clear', 'user_echo', 'up_to_date']);
+const BOT_TYPES = new Set([
+  'message',
+  'interactive',
+  'resolved',
+  'status',
+  'mark',
+  'meta',
+  'clear',
+  'user_echo',
+  'up_to_date',
+]);
 
 /** The status-update JSON for a payload: `notify` makes a phone notification for content. */
 export function statusUpdate(payload: BotPayload, notifyName: string): string {
@@ -261,7 +279,7 @@ export function inlineImage(filename: string, data: Buffer): string | null {
 // ── App → bot updates ────────────────────────────────────────────────────────
 
 export type AppUpdate =
-  | { kind: 'message'; text: string }
+  | { kind: 'message'; text: string; id: string | null }
   | { kind: 'action'; actionId: string; value: unknown; surfaceId: string | null }
   | { kind: 'ping' };
 
@@ -275,7 +293,7 @@ export function parseAppUpdate(payload: unknown): AppUpdate | null {
   const p = payload as Record<string, unknown>;
   if (typeof p.type !== 'string' || BOT_TYPES.has(p.type)) return null;
   if (p.type === 'user_message' && typeof p.content === 'string' && p.content.trim()) {
-    return { kind: 'message', text: p.content };
+    return { kind: 'message', text: p.content, id: typeof p.id === 'string' ? p.id : null };
   }
   if (p.type === 'action' && typeof p.actionId === 'string') {
     return {

@@ -145,7 +145,12 @@ describe('WebxdcBook', () => {
 
 describe('parseAppUpdate', () => {
   it("reads the app's messages, actions and pings", () => {
-    expect(parseAppUpdate({ type: 'user_message', content: 'hi' })).toEqual({ kind: 'message', text: 'hi' });
+    expect(parseAppUpdate({ type: 'user_message', id: 'u1', content: 'hi' })).toEqual({
+      kind: 'message',
+      text: 'hi',
+      id: 'u1',
+    });
+    expect(parseAppUpdate({ type: 'user_message', content: 'hi' })).toEqual({ kind: 'message', text: 'hi', id: null });
     expect(parseAppUpdate({ type: 'action', actionId: 'a', value: 'Yes', surfaceId: 's' })).toEqual({
       kind: 'action',
       actionId: 'a',
@@ -156,7 +161,7 @@ describe('parseAppUpdate', () => {
   });
 
   it("ignores the bot's own updates (the echo) and anything malformed", () => {
-    for (const type of ['message', 'interactive', 'resolved', 'status', 'meta', 'clear', 'user_echo']) {
+    for (const type of ['message', 'interactive', 'resolved', 'status', 'mark', 'meta', 'clear', 'user_echo']) {
       expect(parseAppUpdate({ type, content: 'x' })).toBeNull();
     }
     expect(parseAppUpdate({ type: 'user_message', content: '   ' })).toBeNull();

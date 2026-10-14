@@ -51,7 +51,9 @@ import {
 } from './deltachat-cards.js';
 import {
   APP_SOURCE_DIR,
+  APP_MARKS,
   APP_SURFACE_NOTE,
+  type AppMark,
   type BotPayload,
   WebxdcBook,
   actionText,
@@ -237,6 +239,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   const appStatus = new Map<number, { text: string | null; at: number }>();
   /** Inbound update reads in flight per instance: one at a time, in order. */
   const appReads = new Map<number, Promise<void>>();
+  /** The user's app messages awaiting ✅, per instance, with the mark each shows. */
+  const appPending = new Map<number, Array<{ id: string; mark: AppMark }>>();
   /** Resolved sender handle per DeltaChat contact id, and fingerprint → contact id for openDM. */
   const senderByContact = new Map<number, { handle: string; name: string }>();
   const contactByFingerprint = new Map<string, number>();
@@ -499,6 +503,12 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
               content: { text: `${APP_SURFACE_NOTE}\n${text}`, sender: peer.name, senderId: `dc:${peer.handle}` },
               timestamp: new Date().toISOString(),
             });
+            if (parsed.kind === 'message' && parsed.id) {
+              const pending = appPending.get(msgId) ?? [];
+              pending.push({ id: parsed.id, mark: '👀' });
+              appPending.set(msgId, pending);
+              await pushToApp(msgId, { type: 'mark', id: parsed.id, mark: '👀' });
+            }
           }
         }
         apps.setLastSerial(msgId, u.serial);
@@ -509,8 +519,29 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     return settled;
   }
 
+  /**
+   * Move the marks on the user's pending app messages forward to `mark`
+   * (the chat's 👀 → 💭 → ✅, never backwards); ✅ settles them.
+   */
+  async function markApp(msgId: number, mark: AppMark): Promise<void> {
+    const pending = appPending.get(msgId);
+    if (!pending?.length) return;
+    const step = APP_MARKS.indexOf(mark);
+    for (const p of pending) {
+      if (APP_MARKS.indexOf(p.mark) >= step) continue;
+      p.mark = mark;
+      try {
+        await pushToApp(msgId, { type: 'mark', id: p.id, mark });
+      } catch (err) {
+        log.warn('DeltaChat: failed to push WebXDC mark', { err, msgId });
+      }
+    }
+    if (mark === '✅') appPending.delete(msgId);
+  }
+
   /** Show what the agent is doing in the app's status line, pushed only on change. */
   async function appTyping(msgId: number, status: string | undefined): Promise<void> {
+    await markApp(msgId, '💭');
     const text = status ?? 'thinking';
     const last = appStatus.get(msgId);
     const now = Date.now();
@@ -585,6 +616,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     }
     if (parts.length === 0) return undefined;
     await pushToApp(msgId, { type: 'message', id, title, content: parts.join('\n\n'), timestamp: Date.now() }, title);
+    if (!sender) await markApp(msgId, '✅');
     return id;
   }
 
@@ -713,6 +745,12 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
           // Inbound ids are `<platform msg id>:<agent group id>` (router).
           const suffix = `:${session.agent_group_id}`;
           if (!c.id.endsWith(suffix)) continue;
+          // From the app (`xdc-<instance>-<serial>`): a turn that ended without a reply.
+          const fromApp = /^xdc-(\d+)-\d+$/.exec(c.id.slice(0, -suffix.length));
+          if (fromApp) {
+            await markApp(Number(fromApp[1]), '✅');
+            continue;
+          }
           const msgId = Number(c.id.slice(0, -suffix.length));
           if (lastMsgId.get(c.platformId) !== msgId) continue;
           await clearProgress(c.platformId);

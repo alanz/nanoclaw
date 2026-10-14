@@ -342,6 +342,10 @@
     const footer = document.getElementById('footer');
     const shown = new Set(); // payload ids already in the feed
     const surfaces = new Map(); // surfaceId → card element
+    // The chat's 👀 → 💭 → ✅ for the user's own messages, shown on the bubble.
+    const MARKS = ['👀', '💭', '✅'];
+    const marks = new Map(); // user message id → mark
+    const userCards = new Map(); // user message id → card element
 
     window.addEventListener('error', (e) => setStatus('⚠️ ' + e.message));
     window.addEventListener('unhandledrejection', (e) => setStatus('⚠️ ' + e.reason));
@@ -435,6 +439,13 @@
       who.textContent = isUser ? (p.name || 'You') : (p.title || 'NanoClaw');
       const when = document.createElement('span');
       when.textContent = formatTime(p.timestamp);
+      if (isUser) {
+        const mark = document.createElement('span');
+        mark.className = 'mark';
+        mark.textContent = marks.get(id) ? ` ${marks.get(id)}` : '';
+        when.appendChild(mark);
+        userCards.set(id, card);
+      }
       meta.append(who, when);
       const body = document.createElement('div');
       body.className = 'card-body';
@@ -450,6 +461,14 @@
       if (!fromCache) { stored.push(p); save(); }
     }
 
+    function applyMark(p) {
+      const prev = marks.get(p.id);
+      if (prev && MARKS.indexOf(prev) >= MARKS.indexOf(p.mark)) return;
+      marks.set(p.id, p.mark);
+      const el = userCards.get(p.id)?.querySelector('.mark');
+      if (el) el.textContent = ` ${p.mark}`;
+    }
+
     function resolve(p) {
       const card = surfaces.get(p.surfaceId);
       if (card) markResponded(card, p.content || '✓ answered');
@@ -459,13 +478,14 @@
     function clearFeed() {
       feed.querySelectorAll('.card').forEach((c) => c.remove());
       if (empty) empty.style.display = '';
-      shown.clear(); surfaces.clear(); stored = []; save();
+      shown.clear(); surfaces.clear(); marks.clear(); userCards.clear(); stored = []; save();
     }
 
     (function restoreCache() {
       const cached = load();
       for (const p of cached) {
         if (p.type === 'resolved') resolve(p);
+        else if (p.type === 'mark') applyMark(p);
         else addCard(p, true);
       }
       stored = cached;
@@ -485,6 +505,7 @@
           if (p.type !== 'user_message') setStatus(`✅ ${formatTime(p.timestamp || Date.now())}`);
           break;
         case 'resolved': resolve(p); break;
+        case 'mark': applyMark(p); stored.push(p); save(); break;
         case 'status':
           if (live) setStatus(p.text ? `⏳ ${p.text}…` : '✅ up to date');
           break;

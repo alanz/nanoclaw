@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 
 import { closeSessionDb, initTestSessionDb } from './connection.js';
-import { SqliteAgentMailbox } from './index.js';
+import { SqliteAgentMailbox, pollLookup } from './index.js';
 import { parseIsoTimestamp } from '../model.generated.js';
 
 afterEach(() => closeSessionDb());
@@ -14,6 +14,20 @@ describe('SQLite runner mailbox canonical serialization', () => {
     expect(mailbox.shouldRestartAfter('file is not a database')).toBe(true);
     expect(mailbox.shouldRestartAfter('database is locked')).toBe(false);
     expect(mailbox.shouldRestartAfter('no such table: messages_in')).toBe(false);
+  });
+
+  test('a torn read while polling for a reply counts as not there yet', () => {
+    expect(
+      pollLookup(() => {
+        throw new Error('database disk image is malformed');
+      }, 'host response'),
+    ).toBeUndefined();
+    expect(pollLookup(() => 'row', 'host response')).toBe('row');
+    expect(() =>
+      pollLookup(() => {
+        throw new Error('no such table: messages_in');
+      }, 'host response'),
+    ).toThrow('no such table');
   });
 
   test('round-trips full inbound and outbound lifecycle records', async () => {

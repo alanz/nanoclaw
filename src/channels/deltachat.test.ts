@@ -54,6 +54,12 @@ vi.mock('../modules/permissions/db/users.js', () => ({
   mergeUsersInto: vi.fn().mockResolvedValue([]),
 }));
 
+// The app archive is built from real files (deltachat-webxdc.test.ts covers it).
+vi.mock('./deltachat-webxdc.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./deltachat-webxdc.js')>()),
+  buildXdc: vi.fn(() => Buffer.from('xdc')),
+}));
+
 // Question liveness: by default every card's question is still waiting.
 const waiting = vi.hoisted(() => ({ ids: null as Set<string> | null }));
 vi.mock('./question-render-registry.js', () => ({
@@ -107,6 +113,9 @@ function makeDcMock() {
       getContactIds: vi.fn().mockResolvedValue([]),
       lookupContactIdByAddr: vi.fn().mockResolvedValue(null),
       createChatByContactId: vi.fn().mockResolvedValue(77),
+      sendWebxdcStatusUpdate: vi.fn().mockResolvedValue(undefined),
+      getWebxdcStatusUpdates: vi.fn().mockResolvedValue('[]'),
+      getChatContacts: vi.fn().mockResolvedValue([5]),
     },
     getContextEvents: vi.fn(() => emitterRef.current!),
   };
@@ -1665,6 +1674,167 @@ describe('DeltaChat channel adapter', () => {
       } as OutboundMessage);
       const sent = dc.rpc.sendMsg.mock.calls.at(-1)![2] as { text: string };
       expect(sent.text).toBe('Build\nAll green\nLogs: https://x.test');
+    });
+  });
+  describe('WebXDC app (/app)', () => {
+    const APP_MSG = 900;
+
+    /** A DM where /app was sent: returns the adapter with the instance recorded. */
+    async function withApp() {
+      const ctx = await buildSetupAdapter();
+      const { dc } = ctx;
+      dc.rpc.getMessage.mockResolvedValue(makeMsg({ text: '/app' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Single' }));
+      dc.rpc.getContact.mockResolvedValue(makeContact());
+      dc.rpc.sendMsg.mockResolvedValueOnce(APP_MSG);
+      emitIncomingMsg();
+      await settle();
+      dc.rpc.sendWebxdcStatusUpdate.mockClear();
+      return ctx;
+    }
+
+    /** The payloads pushed into the app, in order. */
+    function pushed(dc: NonNullable<typeof dcRef.current>) {
+      return dc.rpc.sendWebxdcStatusUpdate.mock.calls.map(
+        (c: unknown[]) =>
+          JSON.parse(c[2] as string) as { payload: Record<string, unknown>; notify?: Record<string, string> },
+      );
+    }
+
+    it('/app in a DM sends the app and tells it its id; nothing reaches the agent', async () => {
+      const { dc, received } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValue(makeMsg({ text: '/app' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Single' }));
+      dc.rpc.getContact.mockResolvedValue(makeContact());
+      dc.rpc.sendMsg.mockResolvedValueOnce(APP_MSG);
+      emitIncomingMsg();
+      await flush();
+
+      const sent = dc.rpc.sendMsg.mock.calls.at(-1)![2] as { filename: string };
+      expect(sent.filename).toBe('nanoclaw.xdc');
+      expect(pushed(dc).map((u) => u.payload)).toEqual([{ type: 'meta', msgId: APP_MSG }]);
+      expect(received).toHaveLength(0);
+    });
+
+    it('/app in a group is refused', async () => {
+      const { dc } = await buildSetupAdapter();
+      dc.rpc.getMessage.mockResolvedValue(makeMsg({ text: '/app' }));
+      dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Group' }));
+      dc.rpc.getContact.mockResolvedValue(makeContact());
+      emitIncomingMsg();
+      await settle();
+      const sent = dc.rpc.sendMsg.mock.calls.at(-1)![2] as { text: string; filename: string | null };
+      expect(sent.text).toBe('The app works in a direct chat only.');
+      expect(sent.filename).not.toBe('nanoclaw.xdc');
+    });
+
+    it("routes the app's messages to the agent on the app's thread, skipping the bot's own echo", async () => {
+      const { dc, received } = await withApp();
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([
+          { serial: 3, payload: { type: 'meta', msgId: APP_MSG } },
+          { serial: 4, payload: { type: 'ping' } },
+          { serial: 5, payload: { type: 'user_message', id: 'u1', content: 'hello from the app' } },
+          { serial: 6, payload: { type: 'user_message', id: 'u2', content: 'and again' } },
+        ]),
+      );
+      emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: APP_MSG, statusUpdateSerial: 6 });
+      await settle();
+
+      expect(dc.rpc.getWebxdcStatusUpdates).toHaveBeenLastCalledWith(ACCOUNT_ID, APP_MSG, 0);
+      expect(received.map((r) => r.threadId)).toEqual([`xdc:${APP_MSG}`, `xdc:${APP_MSG}`]);
+      const first = received[0].message;
+      expect(first.id).toBe(`xdc-${APP_MSG}-5`);
+      expect((first.content as { text: string }).text).toMatch(/NanoClaw app[\s\S]*\nhello from the app$/);
+      expect((first.content as { senderId: string }).senderId).toBe('dc:alice@example.com');
+
+      // The next read starts after the last serial seen: nothing is read twice.
+      emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: APP_MSG, statusUpdateSerial: 7 });
+      await settle();
+      expect(dc.rpc.getWebxdcStatusUpdates).toHaveBeenLastCalledWith(ACCOUNT_ID, APP_MSG, 6);
+    });
+
+    it('ignores updates from an app instance the bot did not send', async () => {
+      const { dc, received } = await withApp();
+      emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: 12345, statusUpdateSerial: 1 });
+      await settle();
+      expect(dc.rpc.getWebxdcStatusUpdates).not.toHaveBeenCalled();
+      expect(received).toHaveLength(0);
+    });
+
+    it('delivers a reply on the app thread into the app, with a notification, not into the chat', async () => {
+      const { adapter, dc } = await withApp();
+      dc.rpc.sendMsg.mockClear();
+      const id = await adapter.deliver(PLATFORM_ID, `xdc:${APP_MSG}`, {
+        kind: 'chat',
+        content: { text: 'Hi **there**' },
+      });
+
+      expect(dc.rpc.sendMsg).not.toHaveBeenCalled();
+      const [update] = pushed(dc);
+      expect(update.payload).toMatchObject({ type: 'message', id, title: 'Andy', content: 'Hi **there**' });
+      expect(update.notify).toEqual({ '*': 'Andy: Hi **there**' });
+    });
+
+    it('turns a question card into buttons, and a tap answers the question', async () => {
+      const { adapter, dc, config } = await withApp();
+      await adapter.deliver(PLATFORM_ID, `xdc:${APP_MSG}`, {
+        kind: 'chat-sdk',
+        content: {
+          type: 'ask_question',
+          questionId: 'q9',
+          title: 'Pick one',
+          question: 'Which?',
+          options: ['Red', 'Blue'],
+        },
+      });
+      const card = pushed(dc)[0].payload;
+      expect(card).toMatchObject({ type: 'interactive', surfaceId: 'q9' });
+      expect((card.components as Array<{ label: string }>).map((c) => c.label)).toEqual(['Red', 'Blue']);
+      const blue = (card.components as Array<{ id: string; label: string }>)[1];
+
+      dc.rpc.sendWebxdcStatusUpdate.mockClear();
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(
+        JSON.stringify([{ serial: 8, payload: { type: 'action', actionId: blue.id, value: 'Blue', surfaceId: 'q9' } }]),
+      );
+      emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: APP_MSG, statusUpdateSerial: 8 });
+      await settle();
+
+      expect(config.onAction).toHaveBeenCalledWith('q9', blue.id, 'dc:alice@example.com', {
+        messageId: String(APP_MSG),
+        platformId: PLATFORM_ID,
+        threadId: `xdc:${APP_MSG}`,
+      });
+      expect(pushed(dc).map((u) => u.payload)).toEqual([{ type: 'resolved', surfaceId: 'q9', content: '✓ Blue' }]);
+    });
+
+    it('shows typing in the app status line, once per change, and never reacts in the chat', async () => {
+      const { adapter, dc } = await withApp();
+      dc.rpc.sendReaction.mockClear();
+      await adapter.setTyping!(PLATFORM_ID, `xdc:${APP_MSG}`);
+      await adapter.setTyping!(PLATFORM_ID, `xdc:${APP_MSG}`);
+      await adapter.setTyping!(PLATFORM_ID, `xdc:${APP_MSG}`, 'thinking');
+      expect(pushed(dc).map((u) => u.payload)).toEqual([{ type: 'status', text: 'thinking' }]);
+      expect(pushed(dc)[0].notify).toBeUndefined();
+      expect(dc.rpc.sendReaction).not.toHaveBeenCalled();
+    });
+
+    it('puts a small image into the app inline and a document into the chat', async () => {
+      const { adapter, dc } = await withApp();
+      dc.rpc.sendMsg.mockClear();
+      await adapter.deliver(PLATFORM_ID, `xdc:${APP_MSG}`, {
+        kind: 'chat',
+        content: { text: 'Here you go' },
+        files: [
+          { filename: 'chart.png', data: Buffer.from('png-bytes') },
+          { filename: 'report.pdf', data: Buffer.from('pdf-bytes') },
+        ],
+      });
+      const content = pushed(dc)[0].payload.content as string;
+      expect(content).toContain('![chart.png](data:image/png;base64,');
+      expect(content).toContain('*report.pdf* is in the chat as an attachment');
+      expect(dc.rpc.sendMsg).toHaveBeenCalledTimes(1);
+      expect((dc.rpc.sendMsg.mock.calls[0][2] as { filename: string }).filename).toBe('report.pdf');
     });
   });
 });

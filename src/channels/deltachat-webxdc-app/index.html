@@ -134,7 +134,30 @@
       margin: 0.8em 0;
     }
 
-    .card-body a { color: #0066cc; }
+    .card-body .link {
+      color: #0066cc;
+      text-decoration: underline;
+      cursor: pointer;
+      -webkit-user-select: text;
+      user-select: text;
+      word-break: break-all;
+    }
+    .card-body .link.raw { text-decoration: none; }
+    .card.user-message .link { color: #cfe8ff; }
+    @media (prefers-color-scheme: dark) { .card-body .link { color: #6cb4ff; } }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 90px;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      padding: 8px 14px;
+      border-radius: 16px;
+      font-size: 14px;
+      pointer-events: none;
+    }
 
     .card-body img, .card-body svg {
       max-width: 100%;
@@ -375,10 +398,13 @@
       gfm: true,
       renderer: {
         html(token) { return escapeHtml(token.raw ?? token.text ?? ''); },
+        // The app has no web access, so a link cannot open here: it is text
+        // that looks like a link, stays selectable, and copies its address
+        // when tapped (see copyLink) for opening elsewhere.
         link(token) {
           const text = this.parser.parseInline(token.tokens);
           return /^(https?:|mailto:)/i.test(token.href)
-            ? `<a href="${escapeHtml(token.href)}" rel="noopener noreferrer">${text}</a>`
+            ? `<span class="link" data-href="${escapeHtml(token.href)}">${text}</span>`
             : text;
         },
         image(token) {
@@ -389,6 +415,36 @@
       },
     });
     function renderMarkdown(text) { return marked.parse(String(text).replace(/\\n/g, '\n')); }
+
+    function toast(msg) {
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 1600);
+    }
+
+    async function copyLink(el) {
+      const href = el.dataset.href;
+      try {
+        await navigator.clipboard.writeText(href);
+        toast('🔗 Link copied');
+      } catch {
+        // No clipboard here: show the address itself, selected, to copy by hand.
+        el.textContent = href;
+        el.classList.add('raw');
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest?.('.link');
+      // A tap copies; a selection being made (long-press) is left alone.
+      if (el && !String(window.getSelection())) copyLink(el);
+    });
 
     // --- localStorage cache: shows the feed at once, before the API is up ---
     const STORAGE_KEY = 'nanoclaw-chat-v2';

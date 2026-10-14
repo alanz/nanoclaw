@@ -110,9 +110,13 @@ describe('the app source', () => {
     expect(render('<script>alert(1)</script>hi')).toBe('&lt;script&gt;alert(1)&lt;/script&gt;hi');
     expect(render('<img src=x onerror=alert(1)>')).not.toContain('<img');
     expect(render('[click](javascript:alert(1))')).toBe('<p>click</p>');
+    // No live links (there is no web access): tap-to-copy text instead.
     expect(render('[ok](https://example.com)')).toContain(
-      '<a href="https://example.com" rel="noopener noreferrer">ok</a>',
+      '<span class="link" data-href="https://example.com">ok</span>',
     );
+    expect(render('see https://example.com/x?a=1&b=2')).toContain('data-href="https://example.com/x?a=1&amp;b=2"');
+    expect(render('[x](https://e.com/"onmouseover="alert(1))')).not.toMatch(/data-href="[^"]*"\s*onmouseover/);
+    expect(render('[ok](https://example.com) and https://x.org')).not.toContain('<a ');
     expect(render('![x](https://evil.example/p.png)')).toBe('<p>[image: x]</p>');
     expect(render('![c](data:image/png;base64,iVBORw0KGgo=)')).toContain(
       '<img src="data:image/png;base64,iVBORw0KGgo="',

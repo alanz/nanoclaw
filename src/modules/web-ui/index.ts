@@ -17,9 +17,10 @@ import { getAgentGroup } from '../../db/agent-groups.js';
 import { getActiveSessions } from '../../db/sessions.js';
 import { readEnvFile } from '../../env.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
+import { registerSessionContributor } from '../../container-runner.js';
 import { log } from '../../log.js';
-import { registerSessionCreatedHook } from '../../router.js';
 import { sessionDir } from '../../session-manager.js';
+import type { AgentGroup } from '../../types.js';
 import { startWebUi } from '../../web-ui.js';
 
 const SETTINGS = ['WEB_UI_PORT', 'WEB_UI_BASE_URL', 'DASHBOARD_SECRET', 'DASHBOARD_PORT'] as const;
@@ -50,16 +51,13 @@ export function webUiBaseUrl(): string | null {
  * out of container env. Written per session because that directory IS the
  * container's /workspace.
  */
-async function writeSessionMeta(agentGroupId: string, sessionId: string): Promise<void> {
-  const baseUrl = webUiBaseUrl();
+function writeSessionMeta(group: Pick<AgentGroup, 'id' | 'folder'>, sessionId: string): void {
   try {
-    const group = await getAgentGroup(agentGroupId);
-    if (!group) return;
-    const dir = sessionDir(agentGroupId, sessionId);
+    const dir = sessionDir(group.id, sessionId);
     if (!fs.existsSync(dir)) return;
     fs.writeFileSync(
       path.join(dir, 'nanoclaw_meta.json'),
-      JSON.stringify({ webUiBaseUrl: baseUrl, groupFolder: group.folder }, null, 2),
+      JSON.stringify({ webUiBaseUrl: webUiBaseUrl(), groupFolder: group.folder }, null, 2),
     );
   } catch (err) {
     // Advisory metadata: a session that cannot read it simply has no
@@ -68,7 +66,13 @@ async function writeSessionMeta(agentGroupId: string, sessionId: string): Promis
   }
 }
 
-registerSessionCreatedHook((event) => writeSessionMeta(event.session.agent_group_id, event.session.id));
+// At every spawn, whatever created the session. A session-created hook is not
+// enough: only the chat router fires it, so task and specialist sessions never
+// got the file and their agents could not link to workspace files.
+registerSessionContributor(({ agentGroup, session }) => {
+  writeSessionMeta(agentGroup, session.id);
+  return undefined;
+});
 
 let servers: Array<{ close(cb: () => void): void }> = [];
 
@@ -78,7 +82,8 @@ onHostStart(async () => {
   // Refresh existing sessions so a changed WEB_UI_BASE_URL takes effect on
   // restart — which is when a .env change takes effect anyway.
   for (const session of await getActiveSessions()) {
-    await writeSessionMeta(session.agent_group_id, session.id);
+    const group = await getAgentGroup(session.agent_group_id);
+    if (group) writeSessionMeta(group, session.id);
   }
 
   const secret = setting('DASHBOARD_SECRET');

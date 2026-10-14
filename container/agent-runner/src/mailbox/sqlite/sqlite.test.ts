@@ -30,6 +30,26 @@ describe('SQLite runner mailbox canonical serialization', () => {
     ).toThrow('no such table');
   });
 
+  test('records a turn in progress without disturbing the tool in flight', () => {
+    const { outbound } = initTestSessionDb();
+    const mailbox = new SqliteAgentMailbox();
+    const read = () =>
+      outbound.prepare('SELECT current_tool, turn_started_at FROM container_state').get() as {
+        current_tool: string | null;
+        turn_started_at: string | null;
+      };
+
+    mailbox.setTurnInProgress(true);
+    expect(read().turn_started_at).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+    mailbox.setContainerToolInFlight('Bash', null);
+    expect(read()).toMatchObject({ current_tool: 'Bash' });
+    expect(read().turn_started_at).not.toBeNull();
+    mailbox.clearContainerToolInFlight();
+    expect(read().turn_started_at).not.toBeNull();
+    mailbox.setTurnInProgress(false);
+    expect(read()).toEqual({ current_tool: null, turn_started_at: null });
+  });
+
   test('round-trips full inbound and outbound lifecycle records', async () => {
     const { inbound, outbound } = initTestSessionDb();
     inbound

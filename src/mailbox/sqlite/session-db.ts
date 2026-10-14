@@ -211,6 +211,22 @@ export interface ContainerState {
  * active. Host sweep reads this to widen stuck-detection tolerance while
  * Bash is running with a long declared timeout.
  */
+/**
+ * Whether the container is answering a turn (container_state.turn_started_at,
+ * written by the runner). False for a container too old to record it, so the
+ * turn-end check falls back to heartbeat and tool state alone.
+ */
+export function getTurnInProgress(outDb: Database.Database): boolean {
+  try {
+    const row = outDb.prepare('SELECT turn_started_at FROM container_state WHERE id = 1').get() as
+      | { turn_started_at: string | null }
+      | undefined;
+    return Boolean(row?.turn_started_at);
+  } catch {
+    return false;
+  }
+}
+
 export function getContainerState(outDb: Database.Database): ContainerState | null {
   try {
     const row = outDb

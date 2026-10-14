@@ -63,6 +63,8 @@ export interface MailboxOperations {
   findDestinationByRouting(channelType: string, platformId: string): Destination | undefined;
   setContainerToolInFlight(tool: string, declaredTimeoutMs: number | null): void;
   clearContainerToolInFlight(): void;
+  /** Whether the agent is answering a turn; the host holds turn-end signals while it is. */
+  setTurnInProgress(active: boolean): void;
   clearStaleProcessingAcks(): void;
 }
 

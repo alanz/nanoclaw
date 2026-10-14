@@ -159,6 +159,8 @@ export interface OutboundMailbox {
   getProcessingClaims(): ProcessingClaim[];
   deleteOrphanProcessingClaims(): number;
   getContainerState(): ContainerState | null;
+  /** The container is answering a turn: not quiet, whatever the heartbeat says. */
+  isTurnInProgress(): boolean;
   getDueMessages(excludeIds?: ReadonlySet<string>): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];

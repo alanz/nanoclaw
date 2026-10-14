@@ -103,6 +103,8 @@ function attachmentType(viewType: string): string {
 }
 /** Each edit is a message to the chat, so the progress line changes at most this often. */
 const PROGRESS_EDIT_MS = 10_000;
+/** The app's status line changes at most this often (DeltaChat sends about one update a second). */
+const APP_STATUS_MIN_MS = 2_000;
 
 /** The assistant's display name, read from .env (config's re-export of it is being retired). */
 const ASSISTANT_NAME = process.env.ASSISTANT_NAME || readEnvFile(['ASSISTANT_NAME']).ASSISTANT_NAME || 'Andy';
@@ -545,7 +547,10 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     const text = status ?? 'thinking';
     const last = appStatus.get(msgId);
     const now = Date.now();
-    if (last?.text === text || (last && last.text !== null && now - last.at < PROGRESS_EDIT_MS)) return;
+    // Unlike the chat's progress message (an edit is a message), a status
+    // update is cheap: push every change, a little apart. A change skipped
+    // here is caught by the typing refresh's next tick.
+    if (last?.text === text || (last && now - last.at < APP_STATUS_MIN_MS)) return;
     appStatus.set(msgId, { text, at: now });
     try {
       await pushToApp(msgId, { type: 'status', text });

@@ -187,6 +187,13 @@
     }
     .card.user-message .mark:empty { display: none; }
 
+    .progress {
+      color: #888;
+      font-style: italic;
+      font-size: 15px;
+      padding: 2px 6px;
+    }
+
     #input-area {
       display: flex;
       gap: 8px;
@@ -470,6 +477,24 @@
       if (!fromCache) { stored.push(p); save(); }
     }
 
+    // What the agent is doing, as the chat shows it: a line at the end of the
+    // conversation ("⏳ Searching the web…") that goes when the reply comes.
+    let progressEl = null;
+    function showProgress(text) {
+      if (!text) {
+        progressEl?.remove();
+        progressEl = null;
+        return;
+      }
+      if (!progressEl) {
+        progressEl = document.createElement('div');
+        progressEl.className = 'progress';
+      }
+      progressEl.textContent = `⏳ ${text.charAt(0).toUpperCase()}${text.slice(1)}…`;
+      feed.appendChild(progressEl); // (re)placed last
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
     function applyMark(p) {
       const prev = marks.get(p.id);
       if (prev && MARKS.indexOf(prev) >= MARKS.indexOf(p.mark)) return;
@@ -510,13 +535,14 @@
         case 'message':
         case 'interactive':
         case 'user_message':
+          if (p.type !== 'user_message') showProgress(null);
           addCard(p, false);
           if (p.type !== 'user_message') setStatus(`✅ ${formatTime(p.timestamp || Date.now())}`);
           break;
         case 'resolved': resolve(p); break;
         case 'mark': applyMark(p); stored.push(p); save(); break;
         case 'status':
-          if (live) setStatus(p.text ? `⏳ ${p.text}…` : '✅ up to date');
+          if (live) showProgress(p.text);
           break;
         case 'meta':
           footer.textContent = `ID: ${p.msgId}`;

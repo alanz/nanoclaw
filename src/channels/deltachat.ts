@@ -35,6 +35,7 @@ import { startDeltaChat } from '@deltachat/stdio-rpc-server';
 import type { DeltaChatOverJsonRpcServer } from '@deltachat/stdio-rpc-server';
 
 import { readEnvFile } from '../env.js';
+import { registerTodoTransport, todoSnapshotFor, todoUpdatesFromApp } from '../modules/todo/index.js';
 import { log } from '../log.js';
 import { registerInboundCompletedHook } from '../reconcile-session.js';
 import { mergeUsersInto } from '../modules/permissions/db/users.js';
@@ -51,6 +52,8 @@ import {
 } from './deltachat-cards.js';
 import {
   APP_SOURCE_DIR,
+  type AppKind,
+  TODO_APP_SOURCE_DIR,
   APP_MARKS,
   APP_SURFACE_NOTE,
   type AppMark,
@@ -428,28 +431,53 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   }
 
   /** Send a fresh instance of the chat surface app to a DM and record it. */
-  async function sendApp(platformId: string): Promise<void> {
+  /** Push a payload the chat app's types don't cover (todo ops): stored, no notification. */
+  async function pushRaw(msgId: number, payload: unknown): Promise<void> {
+    if (!dc || accountId === null) return;
+    await dc.rpc.sendWebxdcStatusUpdate(accountId, msgId, JSON.stringify({ payload }), '');
+  }
+
+  const APPS: Record<AppKind, { dir: string; filename: string; text: () => string }> = {
+    nanoclaw: {
+      dir: APP_SOURCE_DIR,
+      filename: 'nanoclaw.xdc',
+      text: () => `${ASSISTANT_NAME} app: open it to chat here with full formatting and buttons.`,
+    },
+    todo: {
+      dir: TODO_APP_SOURCE_DIR,
+      filename: 'todo.xdc',
+      text: () => `Your todo list. ${ASSISTANT_NAME} can read it and change it too.`,
+    },
+  };
+
+  async function sendApp(platformId: string, app: AppKind = 'nanoclaw'): Promise<void> {
     const chatId = chatIdFromPlatformId(platformId);
     if (chatId === null || !dc || accountId === null) return;
+    const spec = APPS[app];
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-xdc-'));
     try {
-      const file = path.join(tmpDir, 'nanoclaw.xdc');
-      fs.writeFileSync(file, buildXdc(APP_SOURCE_DIR));
+      const file = path.join(tmpDir, spec.filename);
+      fs.writeFileSync(file, buildXdc(spec.dir));
       const msgId = await dc.rpc.sendMsg(accountId, chatId, {
-        text: `${ASSISTANT_NAME} app: open it to chat here with full formatting and buttons.`,
+        text: spec.text(),
         html: null,
         viewtype: null,
         file,
-        filename: 'nanoclaw.xdc',
+        filename: spec.filename,
         location: null,
         overrideSenderName: null,
         quotedMessageId: null,
         quotedText: null,
       });
-      apps.addInstance({ msgId, platformId, app: 'nanoclaw', createdAt: new Date().toISOString(), lastSerial: 0 });
+      apps.addInstance({ msgId, platformId, app, createdAt: new Date().toISOString(), lastSerial: 0 });
       await pushToApp(msgId, { type: 'meta', msgId });
-      log.info('DeltaChat: WebXDC app sent', { platformId, msgId });
-      void joinRealtime(msgId, 'app sent');
+      if (app === 'todo') {
+        // A new instance starts empty: give it the list as it stands.
+        await pushRaw(msgId, await todoSnapshotFor('deltachat', platformId));
+      } else {
+        void joinRealtime(msgId, 'app sent');
+      }
+      log.info('DeltaChat: WebXDC app sent', { platformId, msgId, app });
     } catch (err) {
       log.error('DeltaChat: failed to send WebXDC app', { err, platformId });
       await sendText(platformId, "Couldn't send the app; see the host log.");
@@ -481,6 +509,21 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       const raw = await dc.rpc.getWebxdcStatusUpdates(accountId, msgId, rec.lastSerial);
       const updates = JSON.parse(raw) as Array<{ payload: unknown; serial: number }>;
       if (updates.length === 0) return;
+      if (rec.app === 'todo') {
+        // The list is the update log itself: every op counts, the bot's own
+        // echo included (merging is idempotent). Only from a DM.
+        if (!(await appPeer(rec.platformId))) {
+          log.warn('DeltaChat: todo update from an instance outside a DM ignored', { msgId });
+        } else {
+          await todoUpdatesFromApp(
+            'deltachat',
+            rec.platformId,
+            updates.map((u) => u.payload),
+          );
+        }
+        apps.setLastSerial(msgId, Math.max(...updates.map((u) => u.serial)));
+        return;
+      }
       let peer: { handle: string; name: string } | null | undefined;
       for (const u of updates) {
         const parsed = parseAppUpdate(u.payload);
@@ -800,6 +843,14 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       fs.mkdirSync(dataDir, { recursive: true });
       cards = new CardBook(path.join(dataDir, 'nanoclaw-cards.json'));
       apps = new WebxdcBook(path.join(dataDir, 'nanoclaw-webxdc.json'));
+      registerTodoTransport('deltachat', {
+        async push(platformId, payloads) {
+          const rec = apps.latest(platformId, 'todo');
+          if (!rec) return false;
+          for (const p of payloads) await pushRaw(rec.msgId, p);
+          return true;
+        },
+      });
 
       // DeltaChat requires accounts.toml on startup
       const accountsToml = path.join(dataDir, 'accounts.toml');
@@ -917,9 +968,9 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
             await sendText(platformId, `Chat ID: ${platformId}`);
             return;
           }
-          if (text.trim() === '/app') {
+          if (text.trim() === '/app' || text.trim() === '/todo') {
             if (isGroup) await sendText(platformId, 'The app works in a direct chat only.');
-            else await sendApp(platformId);
+            else await sendApp(platformId, text.trim() === '/todo' ? 'todo' : 'nanoclaw');
             return;
           }
 

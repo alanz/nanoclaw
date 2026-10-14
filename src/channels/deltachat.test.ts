@@ -54,6 +54,21 @@ vi.mock('../modules/permissions/db/users.js', () => ({
   mergeUsersInto: vi.fn().mockResolvedValue([]),
 }));
 
+// The todo list module: its merging is tested on its own; here only the hand-off.
+const todo = vi.hoisted(() => ({
+  transport: null as null | { push(platformId: string, payloads: unknown[]): Promise<boolean> },
+  fromApp: [] as Array<{ platformId: string; payloads: unknown[] }>,
+}));
+vi.mock('../modules/todo/index.js', () => ({
+  registerTodoTransport: (_c: string, t: typeof todo.transport) => {
+    todo.transport = t;
+  },
+  todoUpdatesFromApp: async (_c: string, platformId: string, payloads: unknown[]) => {
+    todo.fromApp.push({ platformId, payloads });
+  },
+  todoSnapshotFor: async () => ({ type: 'todo_snapshot', items: [{ id: 'a1' }] }),
+}));
+
 // The app archive is built from real files (deltachat-webxdc.test.ts covers it).
 vi.mock('./deltachat-webxdc.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./deltachat-webxdc.js')>()),
@@ -1912,6 +1927,64 @@ describe('DeltaChat channel adapter', () => {
       emitterRef.current!.emit('WebxdcRealtimeAdvertisementReceived', { msgId: 4242 });
       await settle();
       expect(dc.rpc.sendWebxdcRealtimeAdvertisement).toHaveBeenCalledTimes(2);
+    });
+
+    describe('todo app (/todo)', () => {
+      const TODO_MSG = 950;
+
+      async function withTodo() {
+        const ctx = await buildSetupAdapter();
+        const { dc } = ctx;
+        todo.fromApp.length = 0;
+        dc.rpc.getMessage.mockResolvedValue(makeMsg({ text: '/todo' }));
+        dc.rpc.getBasicChatInfo.mockResolvedValue(makeChat({ chatType: 'Single' }));
+        dc.rpc.getContact.mockResolvedValue(makeContact());
+        dc.rpc.sendMsg.mockResolvedValueOnce(TODO_MSG);
+        emitIncomingMsg();
+        await settle();
+        return ctx;
+      }
+
+      it('sends the todo app and seeds it with the list, without notifications or realtime', async () => {
+        const { dc, received } = await withTodo();
+        expect((dc.rpc.sendMsg.mock.calls.at(-1)![2] as { filename: string }).filename).toBe('todo.xdc');
+        const updates = dc.rpc.sendWebxdcStatusUpdate.mock.calls.map((c: unknown[]) => JSON.parse(c[2] as string));
+        expect(updates.map((u: { payload: { type: string } }) => u.payload.type)).toEqual(['meta', 'todo_snapshot']);
+        expect(updates.every((u: { notify?: unknown }) => u.notify === undefined)).toBe(true);
+        expect(dc.rpc.sendWebxdcRealtimeAdvertisement).not.toHaveBeenCalled();
+        expect(received).toHaveLength(0);
+      });
+
+      it("hands every op from the list app to the todo module, not to the agent's conversation", async () => {
+        const { dc, received } = await withTodo();
+        const ops = [
+          { serial: 3, payload: { type: 'todo', id: 'x1', set: { text: 'milk' }, ts: 1, by: 'me' } },
+          { serial: 4, payload: { type: 'todo', id: 'x1', set: { done: true }, ts: 2, by: 'me' } },
+        ];
+        dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(JSON.stringify(ops));
+        emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: TODO_MSG, statusUpdateSerial: 4 });
+        await settle();
+        expect(todo.fromApp).toEqual([{ platformId: PLATFORM_ID, payloads: ops.map((o) => o.payload) }]);
+        expect(received).toHaveLength(0);
+
+        emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: TODO_MSG, statusUpdateSerial: 5 });
+        await settle();
+        expect(dc.rpc.getWebxdcStatusUpdates).toHaveBeenLastCalledWith(ACCOUNT_ID, TODO_MSG, 4);
+      });
+
+      it("pushes the agent's ops to the chat's newest list app, and says when there is none", async () => {
+        const { dc } = await withTodo();
+        dc.rpc.sendWebxdcStatusUpdate.mockClear();
+        const op = { type: 'todo', id: 'y1', set: { text: 'bread' }, ts: 5, by: 'agent:ag' };
+        expect(await todo.transport!.push(PLATFORM_ID, [op])).toBe(true);
+        expect(dc.rpc.sendWebxdcStatusUpdate).toHaveBeenCalledWith(
+          ACCOUNT_ID,
+          TODO_MSG,
+          JSON.stringify({ payload: op }),
+          '',
+        );
+        expect(await todo.transport!.push('dc:999', [op])).toBe(false);
+      });
     });
 
     it('puts a small image into the app inline and a document into the chat', async () => {

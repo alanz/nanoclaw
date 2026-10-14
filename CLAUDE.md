@@ -244,10 +244,11 @@ Modules this fork adds on top of trunk. All self-register through
 | `src/modules/session-reset/` | Daily conversation reset + archive + session summaries (`SESSION_RESET_GROUPS`) |
 | `src/modules/memory/` + `src/memory/` | Semantic index over `memory/`, hybrid search |
 | `src/modules/zotero/` | Zotero library sync into an agent group's folder |
+| `src/modules/todo/` | Alan's todo list: a WebXDC app (`/todo`, DeltaChat) whose update log is the list; merged state + readable copy in `groups/<folder>/todo/`; the agent's `todo` tool |
 | `src/modules/web-ui/` + `src/web-ui.ts` | Read-only dashboard, memory graph |
 | `src/drivers/apple-driver.ts` | Apple Container as a runtime dialect |
 | `src/gateway-providers/native-proxy.ts` | `.env` credentials instead of the OneCLI vault |
-| `src/channels/deltachat.ts`, `null-channel.ts` | Fork-owned channel adapters |
+| `src/channels/deltachat.ts`, `null-channel.ts` | Fork-owned channel adapters. DeltaChat also carries WebXDC apps (`/app` chat surface, `/todo` list; `deltachat-webxdc*`) — an app instance is the thread `xdc:<msgId>`; see docs/webxdc-phase0.md |
 
 Two runtime facts that are easy to trip over:
 

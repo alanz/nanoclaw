@@ -55,7 +55,7 @@ OpenClaw crons never ported to v1:
   upcoming events. Was failing in OpenClaw (20 consecutive errors). **Open**, if
   still wanted.
 - **RSS scan (blogwatcher)**: one feed, Guix Planet
-  `https://planet.guix.gnu.org/atom.xml` — not in v1's feed list. **Open**, with §4.
+  `https://planet.guix.gnu.org/atom.xml` — not in v1's feed list. **Done** with §4.
 - Memory index status, per-sender session check, Zotero enrich, Six Nations
   briefing — **obsolete**.
 
@@ -175,17 +175,34 @@ Now written by `src/modules/session-reset/` for every ended chat conversation
 wrote no summaries; the module now does both. The list/retry tools are not
 ported (§8).
 
-## 4. RSS feed monitoring — open
+## 4. RSS feed monitoring — done 2026-10-14
 
 **v1:** `src/rss-monitor.ts` — per-feed polling, isolated summarising run,
 append to the group's `rss-digest.md` (`## {ISO} — {feed}`), 500-GUID seen
-list, tools `subscribe_rss` / `unsubscribe_rss` / `list_rss_feeds`. One feed:
-Mozilla.ai `https://blog.mozilla.ai/feed/`, daily, no interest filter (the
-interest matching existed but was never used). Last digest entry 2026-05-06.
+list, tools `subscribe_rss` / `unsubscribe_rss` / `list_rss_feeds`. Feeds:
+Mozilla.ai daily (and Simon Willison's Weblog in March), no interest filter
+(the interest matching existed but was never used). Last digest entry
+2026-05-06; the file also held ~100 entries v1's tests wrote into the real
+group folder.
 
-**v2:** nothing. Either a module, or one gated `ncl tasks` task per feed (script
-fetches and diffs GUIDs into a state file; prompt summarises and appends to
-`rss-digest.md`). Add the OpenClaw Guix Planet feed (§1).
+**Done as a gated task, no host code:** `rss-scan-35bb` (`13 9 * * *`, main
+group).
+
+- Feeds: `rss/feeds.json` in the group folder — Mozilla.ai and Planet Guix
+  (OpenClaw's blogwatcher feed). Andy edits it to subscribe or unsubscribe
+  (replaces v1's three tools).
+- Gate: Python in the container (RSS 2.0 and Atom via ElementTree, 10 s per
+  feed); per-feed seen IDs (500) in `rss/state.json`; an offer counts as seen
+  only once that day's digest exists, so a failed run re-offers; a feed's
+  first scan offers its newest 3 posts (catch-up) and baselines the rest; a
+  feed failing 3 scans in a row is reported once, and again when it recovers.
+- Andy writes `memory/digests/YYYY-MM-DD-rss.md`, messages Alan every item
+  (Alan's choice for these low-volume feeds), and offers research for items
+  matching his interests (`memory/people/alan.md`).
+- v1's digest moved to `memory/digests/rss-digest-v1.md`, test entries removed.
+- Prior art checked first: upstream has none (its `self-customize` skill
+  suggests an RSS MCP server); of 515 surveyed forks none tracks seen items
+  across runs; OpenClaw ran blogwatcher daily, ungated, with delivery off.
 
 ## 5. WebXDC apps — open
 
@@ -347,7 +364,7 @@ subjects; hashes change when the patch stack is folded).
 
 1. ~~**Synthesis scan** (§1)~~ — done 2026-10-14.
 2. ~~**User profile + warm-start** (§1, §2)~~ — done 2026-10-14.
-3. **RSS** (§4) — self-contained; add the Guix Planet feed.
+3. ~~**RSS** (§4)~~ — done 2026-10-14.
 4. **WebXDC todo/app** (§5).
 5. **Session transcript pruning** (§11).
 6. **Smaller search gaps** — `include_content`, Zotero filters, the memory

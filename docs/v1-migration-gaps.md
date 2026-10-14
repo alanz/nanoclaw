@@ -30,7 +30,7 @@ covers it), **obsolete** (not worth porting, or never real).
 
 ---
 
-## 1. Scheduled tasks — partly done (commit scan, session reset, synthesis scan); user profile open
+## 1. Scheduled tasks — done (commit scan, session reset, synthesis scan; user profile replaced, §2)
 
 `setup/migrate-v2/tasks.ts` skips a task whose `group_folder` has no v2 agent
 group. v1's `main` became `dm-with-alanz`, so every active task was skipped,
@@ -98,7 +98,8 @@ path with `ncl tasks run <id>` before relying on it.
     a newer upstream), as the range now running.
   - The gate keeps a seen list in `/workspace/agent/.nanoclaw-changes-state.json`;
     the first run reports the last 7 days as a baseline.
-- **User profile — the task is portable, the injection is not there.** A
+- **User profile — replaced 2026-10-14, not ported (see §2).** The 2026-10-04
+  analysis, kept as the record: a
   prompt task can rewrite `memory/USER.md` (v1 prompt; add the backup to
   `USER-<date>.md` the v1 host did). But v2 loads only `memory/index.md` and
   `memory/system/definition.md` at session start; the index's Core Memory is
@@ -133,13 +134,31 @@ path with `ncl tasks run <id>` before relying on it.
   message kind beside `/clear`, plus `/clear` archiving first. Design first —
   this touches `sessions.allium`.
 
-## 2. Session warm-start & user profile — open
+## 2. Session warm-start & user profile — done 2026-10-14 (upstream memory model, no profile task)
 
 **v1:** `src/session-warm-start.ts`: user profile (`memory/USER.md`, 8-day
 staleness), recent A-MEM notes by recency, prior-session tail.
 
 **v2:** SessionStart injects only `memory/index.md` and
 `system/definition.md` (`container/agent-runner/src/memory/context.ts`).
+
+**Done, Alan's decisions:**
+
+- **No generated profile, no weekly task.** Upstream's memory model already
+  has the place for user facts: Core Memory in `index.md` (loaded in every
+  session) and linked concepts the agent keeps current in place. It had been
+  empty since the move, so it was seeded once from v1's last profile:
+  `memory/people/alan.md` (`type: person`, durable facts only) and one Core
+  Memory entry. The five v1 `USER*.md` files are in `memory/people/history/`,
+  indexed as superseded.
+- **Warm-start = summary hand-over.** Every ended chat conversation (reset,
+  `/clear`, rotation) hands its finished summary to the next one: a
+  context-only mailbox row, rendered `<previous-conversation>`, with Summary,
+  Decisions and Open questions inline (≤ 4000 chars) and the summary and
+  archive paths (`src/modules/session-reset/`, rule `SummaryHandedOver` in
+  `specs/session-reset.allium`).
+- **Not ported:** v1's recent-notes block (hybrid `memory_search` covers it on
+  demand) and the datetime block (the runtime header has it).
 
 ## 3. Session summaries (throwaway sessions) — done 2026-10-06
 
@@ -327,7 +346,7 @@ subjects; hashes change when the patch stack is folded).
 ## Priority order (suggested)
 
 1. ~~**Synthesis scan** (§1)~~ — done 2026-10-14.
-2. **User profile + warm-start** (§1, §2) — continuity.
+2. ~~**User profile + warm-start** (§1, §2)~~ — done 2026-10-14.
 3. **RSS** (§4) — self-contained; add the Guix Planet feed.
 4. **WebXDC todo/app** (§5).
 5. **Session transcript pruning** (§11).

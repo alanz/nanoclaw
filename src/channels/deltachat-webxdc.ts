@@ -27,6 +27,11 @@ export const XDC_THREAD_PREFIX = 'xdc:';
  */
 export const APP_SOURCE_DIR = path.resolve(process.cwd(), 'src', 'channels', 'deltachat-webxdc-app');
 
+/** The todo list app (`/todo`); its list lives in src/modules/todo. */
+export const TODO_APP_SOURCE_DIR = path.resolve(process.cwd(), 'src', 'channels', 'deltachat-webxdc-todo');
+
+export type AppKind = 'nanoclaw' | 'todo';
+
 export function xdcThread(msgId: number): string {
   return `${XDC_THREAD_PREFIX}${msgId}`;
 }
@@ -87,6 +92,13 @@ export class WebxdcBook {
 
   instance(msgId: number): InstanceRecord | undefined {
     return this.data.instances.find((i) => i.msgId === msgId);
+  }
+
+  /** The newest instance of an app in a chat: the one updates go to. */
+  latest(platformId: string, app: string): InstanceRecord | undefined {
+    return this.data.instances
+      .filter((i) => i.platformId === platformId && i.app === app)
+      .reduce<InstanceRecord | undefined>((a, b) => (!a || b.msgId > a.msgId ? b : a), undefined);
   }
 
   setLastSerial(msgId: number, serial: number): void {

@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Todo</title>
+  <script src="webxdc.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      /* DeltaChat's own message text (as the chat app) */
+      font-size: 16px;
+      line-height: 1.25;
+      background: #f5f5f5;
+      color: #1a1a1a;
+    }
+    #status { font-size: 11px; color: #666; padding: 4px 10px; background: #f8f8f8; font-family: monospace; border-bottom: 1px solid #e0e0e0; }
+    #list { padding: 8px 12px 150px; }
+    .section { margin-top: 10px; }
+    .section-head {
+      display: flex; align-items: center; gap: 6px;
+      font-weight: 600; font-size: 14px; color: #555; padding: 6px 2px; cursor: pointer; user-select: none;
+    }
+    .section-head .count { font-weight: 400; color: #999; }
+    .section.collapsed .items { display: none; }
+    .item {
+      display: flex; align-items: flex-start; gap: 10px;
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+      padding: 10px 10px; margin: 6px 0;
+    }
+    .item input[type=checkbox] { width: 20px; height: 20px; margin-top: 1px; flex-shrink: 0; }
+    .item .text { flex: 1; word-break: break-word; }
+    .item.done .text { text-decoration: line-through; color: #999; }
+    .item .del { border: none; background: none; color: #bbb; font-size: 18px; line-height: 1; padding: 0 2px; cursor: pointer; }
+    .item .confirm { display: flex; gap: 6px; }
+    .item .confirm button { font-size: 13px; padding: 3px 8px; border-radius: 5px; border: 1px solid #ccc; background: #fff; }
+    .item .confirm .yes { background: #dc2626; color: #fff; border-color: #dc2626; }
+    .item .edit { flex: 1; font: inherit; padding: 2px 4px; border: 1px solid #0066cc; border-radius: 4px; }
+    #empty { text-align: center; color: #aaa; padding: 50px 20px; }
+    #toggle-done { display: block; margin: 14px auto 0; background: none; border: none; color: #0066cc; font-size: 14px; cursor: pointer; }
+    /* Item on its own row; section and Add below it. */
+    #add {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      display: flex; flex-direction: column; gap: 6px; padding: 10px; background: #fff; border-top: 1px solid #e0e0e0;
+    }
+    #add .row { display: flex; gap: 6px; }
+    #add input, #add select { font: inherit; padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 6px; min-width: 0; }
+    #new-text { width: 100%; }
+    #new-section { flex: 1 1 auto; background: #fff; }
+    #new-section-name { flex: 1 1 auto; display: none; }
+    #add button { font: inherit; padding: 8px 16px; background: #0066cc; color: #fff; border: none; border-radius: 6px; flex: 0 0 auto; }
+    #add-hint { font-size: 13px; color: #c05600; min-height: 0; }
+    #add-hint:empty { display: none; }
+    #footer { font-size: 11px; color: #888; text-align: right; padding: 4px 12px 0; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1a1a; color: #e8e8e8; }
+      #status { background: #222; color: #aaa; border-color: #333; }
+      .item { background: #2a2a2a; border-color: #3a3a3a; }
+      .section-head { color: #bbb; }
+      #add { background: #222; border-color: #333; }
+      #add input, #add select, .item .edit { background: #2a2a2a; color: #e8e8e8; border-color: #444; }
+      .item .confirm button { background: #2a2a2a; color: #e8e8e8; border-color: #444; }
+    }
+  </style>
+</head>
+<body>
+  <div id="status">initialising…</div>
+  <div id="list"><div id="empty">Nothing on the list yet.</div></div>
+  <div id="footer"></div>
+  <form id="add" autocomplete="off">
+    <input id="new-text" placeholder="Add an item…" maxlength="500" aria-label="Item">
+    <div class="row">
+      <select id="new-section" aria-label="Section"></select>
+      <input id="new-section-name" placeholder="Section name" maxlength="60" aria-label="New section name">
+      <button type="submit">Add</button>
+    </div>
+    <div id="add-hint" role="status"></div>
+  </form>
+
+  <script>
+    // NanoClaw Todo (WebXDC). The list is this app's update log: every change
+    // is an op {type:'todo', id, set, ts, by}; every device — and NanoClaw's
+    // host, which keeps the agent's copy — rebuilds the list by merging the
+    // ops. Startup lore from the chat app is kept (cache restore before the
+    // API is up, polling for window.webxdc, a ping after replay); see
+    // docs/webxdc-phase0.md.
+
+    // <todo-model> — the same merge as src/modules/todo/model.ts (a test runs both).
+    function newer(a, b) { return a.ts > b.ts || (a.ts === b.ts && a.by > b.by); }
+    function blank(id, created) {
+      const none = { ts: 0, by: '' };
+      return { id, created, text: { v: '', ...none }, section: { v: '', ...none }, done: { v: false, ...none }, deleted: { v: false, ...none } };
+    }
+    const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+    function parseOp(o) {
+      if (!o || typeof o !== 'object' || o.type !== 'todo' || typeof o.id !== 'string' || !ID_RE.test(o.id)) return null;
+      if (typeof o.ts !== 'number' || !Number.isFinite(o.ts) || typeof o.by !== 'string' || o.by.length > 100) return null;
+      const s = o.set;
+      if (!s || typeof s !== 'object') return null;
+      const set = {};
+      if (typeof s.text === 'string') set.text = s.text.slice(0, 500);
+      if (typeof s.section === 'string') set.section = s.section.slice(0, 60);
+      if (typeof s.done === 'boolean') set.done = s.done;
+      if (typeof s.deleted === 'boolean') set.deleted = s.deleted;
+      if (Object.keys(set).length === 0) return null;
+      return { type: 'todo', id: o.id, set, ts: o.ts, by: o.by };
+    }
+    function applyOp(state, op) {
+      const item = state[op.id] || (state[op.id] = blank(op.id, op.ts));
+      let changed = false;
+      if (op.ts < item.created) { item.created = op.ts; changed = true; }
+      for (const key of ['text', 'section', 'done', 'deleted']) {
+        const v = op.set[key];
+        if (v === undefined) continue;
+        if (newer(op, item[key])) { item[key] = { v, ts: op.ts, by: op.by }; changed = true; }
+      }
+      return changed;
+    }
+    function applySnapshot(state, items) {
+      if (!Array.isArray(items)) return false;
+      let changed = false;
+      for (const it of items) {
+        if (!it || typeof it.id !== 'string' || !ID_RE.test(it.id) || typeof it.created !== 'number') continue;
+        for (const key of ['text', 'section', 'done', 'deleted']) {
+          const f = it[key];
+          if (!f || typeof f.ts !== 'number' || typeof f.by !== 'string' || f.ts === 0) continue;
+          const ok = key === 'text' || key === 'section' ? typeof f.v === 'string' : typeof f.v === 'boolean';
+          if (!ok) continue;
+          if (applyOp(state, { type: 'todo', id: it.id, set: { [key]: f.v }, ts: f.ts, by: f.by })) changed = true;
+        }
+        const item = state[it.id];
+        if (item && it.created < item.created) { item.created = it.created; changed = true; }
+      }
+      return changed;
+    }
+    function applyPayload(state, p) {
+      const op = parseOp(p);
+      if (op) return applyOp(state, op);
+      if (p && p.type === 'todo_snapshot') return applySnapshot(state, p.items);
+      return false;
+    }
+    function visibleItems(state) {
+      return Object.values(state)
+        .filter((i) => !i.deleted.v && i.text.v.trim())
+        .map((i) => ({ id: i.id, text: i.text.v, section: i.section.v, done: i.done.v, created: i.created }))
+        .sort((a, b) => a.section.localeCompare(b.section) || a.created - b.created || a.id.localeCompare(b.id));
+    }
+    // </todo-model>
+
+    const listEl = document.getElementById('list');
+    const statusEl = document.getElementById('status');
+    const footer = document.getElementById('footer');
+    const setStatus = (m) => { statusEl.textContent = m; };
+    window.addEventListener('error', (e) => setStatus('⚠️ ' + e.message));
+    window.addEventListener('unhandledrejection', (e) => setStatus('⚠️ ' + e.reason));
+
+    // Per device: the cached list (shown before the API is up) and view preferences.
+    const store = {
+      get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+      set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+    };
+    let state = store.get('todo-state-v1', {});
+    let showDone = store.get('todo-show-done', true);
+    let collapsed = new Set(store.get('todo-collapsed', []));
+    let api = null; // window.webxdc once ready
+    let editing = null; // id of the item being edited
+    let confirming = null; // id of the item asking "delete?"
+
+    function persist() { store.set('todo-state-v1', state); }
+
+    function send(id, set) {
+      if (!api) { setStatus('not connected yet'); return; }
+      const op = { type: 'todo', id, set, ts: Date.now(), by: api.selfAddr };
+      applyOp(state, op); // at once; the replayed copy merges to the same
+      persist();
+      render();
+      const open = visibleItems(state).filter((i) => !i.done).length;
+      api.sendUpdate({ payload: op, summary: `${open} open` }, '');
+    }
+    const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+    function render() {
+      const items = visibleItems(state);
+      const sections = [...new Set(items.map((i) => i.section))];
+      listEl.textContent = '';
+      const shown = items.filter((i) => showDone || !i.done);
+      if (shown.length === 0) {
+        const e = document.createElement('div');
+        e.id = 'empty';
+        e.textContent = items.length ? 'Everything is done.' : 'Nothing on the list yet.';
+        listEl.appendChild(e);
+      }
+      for (const section of sections) {
+        const inSection = shown.filter((i) => i.section === section);
+        if (inSection.length === 0) continue;
+        const box = document.createElement('div');
+        box.className = 'section' + (collapsed.has(section) ? ' collapsed' : '');
+        if (section) {
+          const head = document.createElement('div');
+          head.className = 'section-head';
+          const open = items.filter((i) => i.section === section && !i.done).length;
+          head.textContent = `${collapsed.has(section) ? '▸' : '▾'} ${section} `;
+          const c = document.createElement('span');
+          c.className = 'count';
+          c.textContent = `(${open} open)`;
+          head.appendChild(c);
+          head.onclick = () => {
+            collapsed.has(section) ? collapsed.delete(section) : collapsed.add(section);
+            store.set('todo-collapsed', [...collapsed]);
+            render();
+          };
+          box.appendChild(head);
+        }
+        const list = document.createElement('div');
+        list.className = 'items';
+        for (const it of inSection) list.appendChild(renderItem(it));
+        box.appendChild(list);
+        listEl.appendChild(box);
+      }
+      const doneCount = items.filter((i) => i.done).length;
+      if (doneCount) {
+        const t = document.createElement('button');
+        t.id = 'toggle-done';
+        t.textContent = showDone ? `Hide done (${doneCount})` : `Show done (${doneCount})`;
+        t.onclick = () => { showDone = !showDone; store.set('todo-show-done', showDone); render(); };
+        listEl.appendChild(t);
+      }
+      fillSections(sections.filter(Boolean));
+    }
+
+    function renderItem(it) {
+      const row = document.createElement('div');
+      row.className = 'item' + (it.done ? ' done' : '');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = it.done;
+      box.onchange = () => send(it.id, { done: box.checked });
+      row.appendChild(box);
+      if (editing === it.id) {
+        const input = document.createElement('input');
+        input.className = 'edit';
+        input.value = it.text;
+        input.maxLength = 500;
+        const finish = (save) => {
+          editing = null;
+          const v = input.value.trim();
+          if (save && v && v !== it.text) send(it.id, { text: v });
+          else render();
+        };
+        input.onkeydown = (e) => { if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); };
+        input.onblur = () => finish(true);
+        row.appendChild(input);
+        setTimeout(() => input.focus(), 0);
+      } else {
+        const text = document.createElement('div');
+        text.className = 'text';
+        text.textContent = it.text;
+        text.onclick = () => { editing = it.id; confirming = null; render(); };
+        row.appendChild(text);
+      }
+      if (confirming === it.id) {
+        // Not window.confirm, which the webview may not show: ask in the page.
+        const c = document.createElement('div');
+        c.className = 'confirm';
+        const yes = document.createElement('button');
+        yes.className = 'yes';
+        yes.textContent = 'Delete';
+        yes.onclick = () => { confirming = null; send(it.id, { deleted: true }); };
+        const no = document.createElement('button');
+        no.textContent = 'Keep';
+        no.onclick = () => { confirming = null; render(); };
+        c.append(yes, no);
+        row.appendChild(c);
+      } else {
+        const del = document.createElement('button');
+        del.className = 'del';
+        del.textContent = '✕';
+        del.title = 'Delete';
+        del.onclick = () => { confirming = it.id; editing = null; render(); };
+        row.appendChild(del);
+      }
+      return row;
+    }
+
+    const sectionSel = document.getElementById('new-section');
+    const sectionName = document.getElementById('new-section-name');
+    function fillSections(sections) {
+      const keep = sectionSel.value;
+      sectionSel.textContent = '';
+      const opt = (value, label) => { const o = document.createElement('option'); o.value = value; o.textContent = label; sectionSel.appendChild(o); };
+      opt('', 'No section');
+      for (const s of sections) opt(s, s);
+      opt('\u0000new', 'New section…');
+      sectionSel.value = [...sectionSel.options].some((o) => o.value === keep) ? keep : '';
+    }
+    sectionSel.onchange = () => {
+      sectionName.style.display = sectionSel.value === '\u0000new' ? 'block' : 'none';
+      if (sectionSel.value === '\u0000new') sectionName.focus();
+    };
+    const hint = document.getElementById('add-hint');
+    document.getElementById('new-text').addEventListener('input', () => { hint.textContent = ''; });
+    sectionName.addEventListener('input', () => { hint.textContent = ''; });
+    document.getElementById('add').onsubmit = (e) => {
+      e.preventDefault();
+      const input = document.getElementById('new-text');
+      const text = input.value.trim();
+      // Never fail silently: say what is missing and put the cursor there.
+      if (!text) {
+        hint.textContent = 'Type the item first (the top box).';
+        input.focus();
+        return;
+      }
+      if (sectionSel.value === '\u0000new' && !sectionName.value.trim()) {
+        hint.textContent = 'Name the new section, or pick another.';
+        sectionName.focus();
+        return;
+      }
+      hint.textContent = '';
+      const section = sectionSel.value === '\u0000new' ? sectionName.value.trim() : sectionSel.value;
+      send(newId(), { text, done: false, section });
+      input.value = '';
+      if (sectionSel.value === '\u0000new' && section) {
+        fillSections([...new Set([...visibleItems(state).map((i) => i.section).filter(Boolean)])]);
+        sectionSel.value = section;
+        sectionName.value = '';
+        sectionName.style.display = 'none';
+      }
+    };
+
+    render();
+    if (visibleItems(state).length) setStatus('📋 from cache — connecting…');
+
+    let attempts = 0;
+    function initWebxdc() {
+      attempts++;
+      if (typeof window.webxdc === 'undefined') {
+        setStatus(`waiting for webxdc API… (attempt ${attempts})`);
+        if (attempts < 20) setTimeout(initWebxdc, 300);
+        else setStatus('❌ webxdc API not available — not running inside DeltaChat?');
+        return;
+      }
+      api = window.webxdc;
+      setStatus('🔄 loading…');
+      api.setUpdateListener((u) => {
+        const p = u.payload;
+        if (p && p.type === 'meta') footer.textContent = `ID: ${p.msgId}`;
+        if (applyPayload(state, p)) { persist(); render(); }
+      }, 0).then(() => {
+        setStatus('✅ up to date');
+        api.sendUpdate({ payload: { type: 'ping' } }, '');
+      }).catch(() => {});
+    }
+    initWebxdc();
+  </script>
+</body>
+</html>

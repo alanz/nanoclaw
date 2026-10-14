@@ -30,6 +30,7 @@ import './memory/index.js';
 import './specialists/index.js';
 import './session-reset/index.js';
 import './zotero/index.js';
+import './todo/index.js';
 import './web-ui/index.js';
 import './web-search/index.js';
 import './community-portal/index.js';

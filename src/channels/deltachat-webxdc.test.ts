@@ -13,8 +13,10 @@ import zlib from 'zlib';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { type TodoState, applyPayload, visibleItems } from '../modules/todo/model.js';
 import {
   APP_SOURCE_DIR,
+  TODO_APP_SOURCE_DIR,
   WebxdcBook,
   buildXdc,
   inlineImage,
@@ -204,5 +206,68 @@ describe('threads and images', () => {
     expect(inlineImage('a.png', Buffer.from('x'))).toMatch(/^!\[a\.png\]\(data:image\/png;base64,/);
     expect(inlineImage('a.pdf', Buffer.from('x'))).toBeNull();
     expect(inlineImage('big.jpg', Buffer.alloc(1024 * 1024 + 1))).toBeNull();
+  });
+});
+
+describe('the todo app source', () => {
+  const html = fs.readFileSync(path.join(TODO_APP_SOURCE_DIR, 'index.html'), 'utf-8');
+
+  it('packages, loads webxdc.js first, names itself, and loads nothing from the network', () => {
+    const files = unzip(buildXdc(TODO_APP_SOURCE_DIR));
+    expect([...files.keys()].sort()).toEqual(['icon.png', 'index.html', 'manifest.toml']);
+    const scripts = [...html.matchAll(/<script(?: src="([^"]+)")?>/g)].map((m) => m[1] ?? 'inline');
+    expect(scripts[0]).toBe('webxdc.js');
+    expect(files.get('manifest.toml')!.toString()).toMatch(/^name = "Todo"$/m);
+    expect(html).not.toMatch(/<(script|img|link|iframe)\b[^>]*\b(src|href)=["']?(https?:)?\/\//i);
+    expect(html).not.toMatch(/innerHTML/);
+    expect(html).not.toMatch(/\bconfirm\(|\balert\(|\bprompt\(/);
+  });
+
+  it("merges exactly as the host's model does, whatever the order", () => {
+    const start = html.indexOf('// <todo-model>');
+    const end = html.indexOf('// </todo-model>');
+    expect(start).toBeGreaterThan(0);
+    const ctx: Record<string, unknown> = {};
+    vm.createContext(ctx);
+    vm.runInContext(
+      html.slice(start, end) + '\nthis.applyPayload = applyPayload; this.visibleItems = visibleItems;',
+      ctx,
+    );
+    const appApply = ctx.applyPayload as (s: object, p: unknown) => boolean;
+    const appVisible = ctx.visibleItems as (s: object) => unknown[];
+
+    const payloads: unknown[] = [
+      { type: 'todo', id: 'a', set: { text: 'milk', done: false }, ts: 1, by: 'phone' },
+      { type: 'todo', id: 'b', set: { text: 'bread', section: 'Shop' }, ts: 2, by: 'agent:x' },
+      { type: 'todo', id: 'a', set: { done: true }, ts: 3, by: 'laptop' },
+      { type: 'todo', id: 'a', set: { done: false }, ts: 3, by: 'agent:x' },
+      { type: 'todo', id: 'c', set: { text: 'gone' }, ts: 4, by: 'phone' },
+      { type: 'todo', id: 'c', set: { deleted: true }, ts: 6, by: 'phone' },
+      { type: 'todo', id: 'c', set: { text: 'back?' }, ts: 5, by: 'laptop' },
+      { type: 'ping' },
+      { type: 'todo', id: 'bad id', set: { text: 'x' }, ts: 7, by: 'me' },
+    ];
+    const orders = [payloads, [...payloads].reverse(), [3, 0, 6, 2, 8, 5, 1, 4, 7].map((i) => payloads[i])];
+    const hostResult = (order: unknown[]) => {
+      const s: TodoState = {};
+      for (const p of order) applyPayload(s, p);
+      return visibleItems(s);
+    };
+    const appResult = (order: unknown[]) => {
+      const s = {};
+      for (const p of order) appApply(s, p);
+      return JSON.parse(JSON.stringify(appVisible(s)));
+    };
+    const expected = hostResult(payloads);
+    for (const order of orders) {
+      expect(hostResult(order)).toEqual(expected);
+      expect(appResult(order)).toEqual(expected);
+    }
+    // And a snapshot of the host's state seeds the app to the same list.
+    const hostState: TodoState = {};
+    for (const p of payloads) applyPayload(hostState, p);
+    const seeded = {};
+    appApply(seeded, { type: 'todo_snapshot', items: JSON.parse(JSON.stringify(Object.values(hostState))) });
+    expect(JSON.parse(JSON.stringify(appVisible(seeded)))).toEqual(expected);
   });
 });

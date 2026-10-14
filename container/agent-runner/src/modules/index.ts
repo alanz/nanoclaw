@@ -17,3 +17,6 @@ import '../mcp-tools/specialists.js';
 // backing configuration, so importing them unconditionally is safe.
 import '../mcp-tools/search.js';
 import '../mcp-tools/workspace.js';
+
+// Alan's todo list (host module src/modules/todo; a DeltaChat WebXDC app).
+import '../mcp-tools/todo.js';

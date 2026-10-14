@@ -179,6 +179,14 @@
 
     .card.user-message a { color: #66d9ff; }
 
+    .card.user-message .mark {
+      text-align: right;
+      font-size: 20px;
+      line-height: 1;
+      margin-top: 6px;
+    }
+    .card.user-message .mark:empty { display: none; }
+
     #input-area {
       display: flex;
       gap: 8px;
@@ -439,19 +447,20 @@
       who.textContent = isUser ? (p.name || 'You') : (p.title || 'NanoClaw');
       const when = document.createElement('span');
       when.textContent = formatTime(p.timestamp);
-      if (isUser) {
-        const mark = document.createElement('span');
-        mark.className = 'mark';
-        mark.textContent = marks.get(id) ? ` ${marks.get(id)}` : '';
-        when.appendChild(mark);
-        userCards.set(id, card);
-      }
       meta.append(who, when);
       const body = document.createElement('div');
       body.className = 'card-body';
       if (isUser) body.textContent = p.content;
       else body.innerHTML = renderMarkdown(p.content || '');
       card.append(meta, body);
+      if (isUser) {
+        // Where DeltaChat shows a reaction: under the message, at the right.
+        const mark = document.createElement('div');
+        mark.className = 'mark';
+        mark.textContent = marks.get(id) || '';
+        card.appendChild(mark);
+        userCards.set(id, card);
+      }
       if (p.type === 'interactive' && p.components?.length) {
         card.appendChild(renderButtons(p.components, card, p.surfaceId));
       }
@@ -466,7 +475,7 @@
       if (prev && MARKS.indexOf(prev) >= MARKS.indexOf(p.mark)) return;
       marks.set(p.id, p.mark);
       const el = userCards.get(p.id)?.querySelector('.mark');
-      if (el) el.textContent = ` ${p.mark}`;
+      if (el) el.textContent = p.mark;
     }
 
     function resolve(p) {

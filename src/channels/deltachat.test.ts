@@ -116,6 +116,8 @@ function makeDcMock() {
       sendWebxdcStatusUpdate: vi.fn().mockResolvedValue(undefined),
       getWebxdcStatusUpdates: vi.fn().mockResolvedValue('[]'),
       getChatContacts: vi.fn().mockResolvedValue([5]),
+      sendWebxdcRealtimeData: vi.fn().mockResolvedValue(null),
+      sendWebxdcRealtimeAdvertisement: vi.fn().mockResolvedValue(null),
     },
     getContextEvents: vi.fn(() => emitterRef.current!),
   };
@@ -1868,6 +1870,48 @@ describe('DeltaChat channel adapter', () => {
         { type: 'mark', id: 'u8', mark: '👀' },
         { type: 'mark', id: 'u8', mark: '✅' },
       ]);
+    });
+
+    it('sends progress over realtime while the app is open there, and does not store it', async () => {
+      const { adapter, dc } = await withApp();
+      const rt = (p: object) => [...Buffer.from(JSON.stringify(p), 'utf-8')];
+      emitterRef.current!.emit('WebxdcRealtimeData', { msgId: APP_MSG, data: rt({ type: 'ping' }) });
+      await settle();
+
+      await adapter.setTyping!(PLATFORM_ID, `xdc:${APP_MSG}`, 'searching the web');
+      expect(pushed(dc)).toEqual([]);
+      const sent = dc.rpc.sendWebxdcRealtimeData.mock.calls.map((c: unknown[]) =>
+        JSON.parse(Buffer.from(c[2] as number[]).toString('utf-8')),
+      );
+      expect(sent).toEqual([{ type: 'status', text: 'searching the web' }]);
+      expect(dc.rpc.sendWebxdcRealtimeData.mock.calls[0][1]).toBe(APP_MSG);
+    });
+
+    it('falls back to a status update when the app is not on realtime', async () => {
+      const { adapter, dc } = await withApp();
+      await adapter.setTyping!(PLATFORM_ID, `xdc:${APP_MSG}`, 'searching memory');
+      expect(dc.rpc.sendWebxdcRealtimeData).not.toHaveBeenCalled();
+      expect(pushed(dc).map((u) => u.payload)).toEqual([{ type: 'status', text: 'searching memory' }]);
+    });
+
+    it('joins the realtime channel when the app is sent, opened, or advertises — not more than every 2 minutes', async () => {
+      const { dc } = await withApp();
+      expect(dc.rpc.sendWebxdcRealtimeAdvertisement).toHaveBeenCalledWith(ACCOUNT_ID, APP_MSG);
+
+      dc.rpc.getWebxdcStatusUpdates.mockResolvedValueOnce(JSON.stringify([{ serial: 2, payload: { type: 'ping' } }]));
+      emitterRef.current!.emit('WebxdcStatusUpdate', { msgId: APP_MSG, statusUpdateSerial: 2 });
+      emitterRef.current!.emit('WebxdcRealtimeAdvertisementReceived', { msgId: APP_MSG });
+      await settle();
+      expect(dc.rpc.sendWebxdcRealtimeAdvertisement).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(121_000);
+      emitterRef.current!.emit('WebxdcRealtimeAdvertisementReceived', { msgId: APP_MSG });
+      await settle();
+      expect(dc.rpc.sendWebxdcRealtimeAdvertisement).toHaveBeenCalledTimes(2);
+
+      emitterRef.current!.emit('WebxdcRealtimeAdvertisementReceived', { msgId: 4242 });
+      await settle();
+      expect(dc.rpc.sendWebxdcRealtimeAdvertisement).toHaveBeenCalledTimes(2);
     });
 
     it('puts a small image into the app inline and a document into the chat', async () => {

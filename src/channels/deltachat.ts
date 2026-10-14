@@ -105,6 +105,12 @@ function attachmentType(viewType: string): string {
 const PROGRESS_EDIT_MS = 10_000;
 /** The app's status line changes at most this often (DeltaChat sends about one update a second). */
 const APP_STATUS_MIN_MS = 2_000;
+/** Over realtime (ephemeral, not stored) progress can change faster. */
+const APP_REALTIME_MIN_MS = 500;
+/** The app sends a realtime ping every 15 s while visible; this long without one, it is not listening there. */
+const APP_REALTIME_LIVE_MS = 45_000;
+/** Re-join an instance's realtime channel no more often than this. */
+const APP_REALTIME_REJOIN_MS = 120_000;
 
 /** The assistant's display name, read from .env (config's re-export of it is being retired). */
 const ASSISTANT_NAME = process.env.ASSISTANT_NAME || readEnvFile(['ASSISTANT_NAME']).ASSISTANT_NAME || 'Andy';
@@ -243,6 +249,10 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
   const appReads = new Map<number, Promise<void>>();
   /** The user's app messages awaiting ✅, per instance, with the mark each shows. */
   const appPending = new Map<number, Array<{ id: string; mark: AppMark }>>();
+  /** When each instance last spoke over its realtime channel: open and listening there. */
+  const appRealtimeAt = new Map<number, number>();
+  /** When the bot last joined each instance's realtime channel. */
+  const appRealtimeJoinedAt = new Map<number, number>();
   /** Resolved sender handle per DeltaChat contact id, and fingerprint → contact id for openDM. */
   const senderByContact = new Map<number, { handle: string; name: string }>();
   const contactByFingerprint = new Map<string, number>();
@@ -439,6 +449,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       apps.addInstance({ msgId, platformId, app: 'nanoclaw', createdAt: new Date().toISOString(), lastSerial: 0 });
       await pushToApp(msgId, { type: 'meta', msgId });
       log.info('DeltaChat: WebXDC app sent', { platformId, msgId });
+      void joinRealtime(msgId, 'app sent');
     } catch (err) {
       log.error('DeltaChat: failed to send WebXDC app', { err, platformId });
       await sendText(platformId, "Couldn't send the app; see the host log.");
@@ -513,6 +524,7 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
             }
           }
         }
+        if (parsed?.kind === 'ping') void joinRealtime(msgId, 'app opened');
         apps.setLastSerial(msgId, u.serial);
       }
     });
@@ -547,15 +559,38 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
     const text = status ?? 'thinking';
     const last = appStatus.get(msgId);
     const now = Date.now();
-    // Unlike the chat's progress message (an edit is a message), a status
-    // update is cheap: push every change, a little apart. A change skipped
-    // here is caught by the typing refresh's next tick.
-    if (last?.text === text || (last && now - last.at < APP_STATUS_MIN_MS)) return;
+    const realtime = now - (appRealtimeAt.get(msgId) ?? 0) < APP_REALTIME_LIVE_MS;
+    // Progress is ephemeral: over the realtime channel while the app is open
+    // there; otherwise as a status update (stored, but the app shows only a
+    // live one). Every change goes, a little apart; one skipped here is
+    // caught by the typing refresh's next tick.
+    const minGap = realtime ? APP_REALTIME_MIN_MS : APP_STATUS_MIN_MS;
+    if (last?.text === text || (last && now - last.at < minGap)) return;
     appStatus.set(msgId, { text, at: now });
     try {
-      await pushToApp(msgId, { type: 'status', text });
+      if (realtime) await sendRealtime(msgId, { type: 'status', text });
+      else await pushToApp(msgId, { type: 'status', text });
     } catch (err) {
-      log.warn('DeltaChat: failed to push WebXDC status', { err, msgId });
+      log.warn('DeltaChat: failed to send WebXDC status', { err, msgId, realtime });
+    }
+  }
+
+  async function sendRealtime(msgId: number, payload: BotPayload): Promise<void> {
+    if (!dc || accountId === null) return;
+    await dc.rpc.sendWebxdcRealtimeData(accountId, msgId, [...Buffer.from(JSON.stringify(payload), 'utf-8')]);
+  }
+
+  /** Join an instance's realtime channel, at most once per APP_REALTIME_REJOIN_MS. */
+  async function joinRealtime(msgId: number, why: string): Promise<void> {
+    if (!dc || accountId === null) return;
+    const now = Date.now();
+    if (now - (appRealtimeJoinedAt.get(msgId) ?? 0) < APP_REALTIME_REJOIN_MS) return;
+    appRealtimeJoinedAt.set(msgId, now);
+    try {
+      await dc.rpc.sendWebxdcRealtimeAdvertisement(accountId, msgId);
+      log.info('DeltaChat: joined WebXDC realtime channel', { msgId, why });
+    } catch (err) {
+      log.warn('DeltaChat: failed to join WebXDC realtime channel', { err, msgId });
     }
   }
 
@@ -818,7 +853,8 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
 
       const selfAddr = await dc.rpc.getConfig(account.id, 'addr');
       const inviteQr = await dc.rpc.getChatSecurejoinQrCode(account.id, null);
-      log.info('DeltaChat ready', { addr: selfAddr, inviteQr });
+      const realtimeEnabled = await dc.rpc.getConfig(account.id, 'webxdc_realtime_enabled').catch(() => null);
+      log.info('DeltaChat ready', { addr: selfAddr, inviteQr, webxdcRealtime: realtimeEnabled });
       fs.writeFileSync(path.join(dataDir, 'invite-url'), inviteQr, 'utf8');
 
       const emitter = dc.getContextEvents(account.id);
@@ -980,6 +1016,22 @@ function createAdapter(opts: DeltaChatCreateOpts): ChannelAdapter {
       emitter.on('WebxdcStatusUpdate', ({ msgId }: { msgId: number }) => {
         if (!apps.instance(msgId)) return; // only instances this bot sent
         void readAppUpdates(msgId);
+      });
+
+      // --- WebXDC realtime: the ephemeral channel, used for progress only ---
+      // In OpenClaw and v1 the advertisement event never fired, so the bot
+      // also joins when the app's ordinary ping says it was opened.
+      emitter.on('WebxdcRealtimeAdvertisementReceived', ({ msgId }: { msgId: number }) => {
+        if (apps.instance(msgId)) void joinRealtime(msgId, 'advertisement');
+      });
+      emitter.on('WebxdcRealtimeData', ({ msgId, data }: { msgId: number; data: number[] }) => {
+        if (!apps.instance(msgId)) return;
+        try {
+          const p = JSON.parse(Buffer.from(data).toString('utf-8')) as { type?: unknown };
+          if (p.type === 'ready' || p.type === 'ping') appRealtimeAt.set(msgId, Date.now());
+        } catch {
+          // not ours to read
+        }
       });
 
       // --- Message edits ---

@@ -571,6 +571,10 @@
         rt.setListener((data) => { try { handle(JSON.parse(dec.decode(data)), true); } catch {} });
         rt.send(enc.encode(JSON.stringify({ type: 'ready' })));
       } catch { /* not supported */ }
+      // Tells the bot this app is open and listening on realtime, where it
+      // sends progress (ephemeral) rather than storing it as an update.
+      const rtPing = () => { try { rt?.send(enc.encode(JSON.stringify({ type: 'ping' }))); } catch {} };
+      setInterval(() => { if (document.visibilityState === 'visible') rtPing(); }, 15000);
 
       let replaying = true;
       setStatus('🔄 loading…');
@@ -583,7 +587,7 @@
       }).catch(() => { replaying = false; });
 
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') ping();
+        if (document.visibilityState === 'visible') { ping(); rtPing(); }
       });
       setInterval(ping, 30000);
 

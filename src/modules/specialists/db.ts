@@ -2,6 +2,7 @@ import { getDb } from '../../db/connection.js';
 // The module owns these tables, so it owns registering their migrations.
 import '../../db/migrations/module-specialists.js';
 import '../../db/migrations/module-specialists-file-handover.js';
+import '../../db/migrations/module-specialists-transfer-routed-message.js';
 import '../../db/migrations/module-specialists-processing-state.js';
 // agent_groups.is_main is created by the concurrency module and read here.
 // Import it so this module's tables and the column it depends on always

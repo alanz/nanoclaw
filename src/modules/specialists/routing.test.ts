@@ -340,3 +340,38 @@ describe('last-turn parent notice', () => {
     );
   });
 });
+
+// Whether a main-agent transfer's files are done with is decided by the
+// message that carried them, so routing records that message on the transfer
+// — chosen before the message is written, so a fast container cannot handle
+// it before the link exists.
+describe('a root result with staged files', () => {
+  it('records the message that carries it on the transfer', async () => {
+    const { task, requesterSessionId } = await makeFailedRootTask();
+    const completed = { ...task, status: 'completed' as const, result: 'r', failure_kind: null, failure_detail: null };
+    await getDb().run(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
+       VALUES ('inv-x', ?, NULL, '/x/out', '/x/in', ?)`,
+      requesterSessionId,
+      now(),
+    );
+    await getDb().run(
+      `INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status)
+       VALUES ('xfer-root', ?, 'inv-x', 'see the report', 0, 1, ?, 'pending')`,
+      task.id,
+      now(),
+    );
+    const transfer = (await getDb().get("SELECT * FROM container_transfers WHERE id = 'xfer-root'")) as Parameters<
+      typeof routeResult
+    >[1];
+
+    await routeResult(completed, transfer);
+
+    const [, sessionId, message] = vi.mocked(writeSessionMessage).mock.calls.at(-1)!;
+    expect(sessionId).toBe(requesterSessionId);
+    const row = (await getDb().get("SELECT routed_message_id FROM container_transfers WHERE id = 'xfer-root'")) as {
+      routed_message_id: string;
+    };
+    expect(row.routed_message_id).toBe((message as { id: string }).id);
+  });
+});

@@ -4,6 +4,7 @@ import fs from 'fs';
 import { DATA_DIR } from '../../config.js';
 import { getDb } from '../../db/connection.js';
 import { log } from '../../log.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import type { ContainerTransfer, Invocation, TransferFile } from './types.js';
 import type { VolumeMount } from '../../providers/provider-container-registry.js';
@@ -315,37 +316,26 @@ export async function endInvocationById(invocationId: string): Promise<void> {
 
   const taskAlive = taskRow != null && taskRow.status !== 'completed' && taskRow.status !== 'failed';
 
-  if (taskAlive) {
-    await db.run(
-      `UPDATE transfer_files SET status = 'owned'
-       WHERE transfer_id IN (
-         SELECT id FROM container_transfers
-         WHERE status = 'in_transit' AND recipient_session_id = ?
-       )`,
-      inv.session_id,
-    );
-    await db.run(
-      "UPDATE container_transfers SET status = 'pending' WHERE status = 'in_transit' AND recipient_session_id = ?",
-      inv.session_id,
-    );
-  } else {
-    const expiring = (await db.all(
-      "SELECT id FROM container_transfers WHERE status = 'in_transit' AND recipient_session_id = ?",
-      inv.session_id,
-    )) as { id: string }[];
-    await db.run(
-      `UPDATE transfer_files SET status = 'expired'
-       WHERE transfer_id IN (
-         SELECT id FROM container_transfers
-         WHERE status = 'in_transit' AND recipient_session_id = ?
-       )`,
-      inv.session_id,
-    );
-    await db.run(
-      "UPDATE container_transfers SET status = 'expired' WHERE status = 'in_transit' AND recipient_session_id = ?",
-      inv.session_id,
-    );
-    for (const { id } of expiring) reclaimTransferStaging(id);
+  const inTransit = (await db.all(
+    "SELECT id, routed_message_id FROM container_transfers WHERE status = 'in_transit' AND recipient_session_id = ?",
+    inv.session_id,
+  )) as { id: string; routed_message_id: string | null }[];
+
+  // A main-agent session (no task) expires a transfer once the message that
+  // carried it has been handled; one the container exited before reaching is
+  // still owed to the turn that will read it, so it is kept like a live task's
+  // (spec: TransferExpiredOnRoutedMessage*, TransferResetOnMainRecipientExit).
+  const owed = taskRow == null ? await unhandledRoutedMessages(inv.session_id, inTransit) : new Set<string>();
+
+  for (const t of inTransit) {
+    if (taskAlive || owed.has(t.id)) {
+      await db.run("UPDATE transfer_files SET status = 'owned' WHERE transfer_id = ? AND status = 'placed'", t.id);
+      await db.run("UPDATE container_transfers SET status = 'pending' WHERE id = ?", t.id);
+    } else {
+      await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", t.id);
+      await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", t.id);
+      reclaimTransferStaging(t.id);
+    }
   }
 
   // Clean up ipc directories — and the per-invocation directory holding them,
@@ -361,6 +351,36 @@ export async function endInvocationById(invocationId: string): Promise<void> {
   } catch {}
 
   log.debug('specialists: invocation ended', { invocationId, sessionId: inv.session_id });
+}
+
+/**
+ * The transfers, among those given, whose routed message a main-agent session
+ * has not handled yet: still pending or processing on the host's side, and
+ * not acked done by the container (whose ack the host may not have synced).
+ * A transfer with no routed message (written before it was recorded), or a
+ * session with no mailbox, counts as handled — expiring is the old behaviour.
+ */
+async function unhandledRoutedMessages(
+  sessionId: string,
+  transfers: { id: string; routed_message_id: string | null }[],
+): Promise<Set<string>> {
+  const routed = transfers.filter((t) => t.routed_message_id != null);
+  if (routed.length === 0) return new Set();
+  const session = (await getDb().get('SELECT agent_group_id FROM sessions WHERE id = ?', sessionId)) as
+    | { agent_group_id: string }
+    | undefined;
+  if (!session) return new Set();
+  const owed = await withExistingMailboxSession(session.agent_group_id, sessionId, (mailbox) => {
+    const done = new Set(mailbox.getTerminalProcessingAcks().map((a) => a.messageId));
+    return routed
+      .filter((t) => {
+        const id = t.routed_message_id!;
+        if (done.has(id)) return false;
+        return Boolean(mailbox.getMessageForRetry(id, 'pending') ?? mailbox.getMessageForRetry(id, 'processing'));
+      })
+      .map((t) => t.id);
+  });
+  return new Set(owed ?? []);
 }
 
 /**

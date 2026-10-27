@@ -42,9 +42,15 @@ async function lastTurnParentNotice(task: SpecialistTask): Promise<string> {
   return `\n\n${specialist?.last_turn_parent_notice ?? SPECIALISTS_CONFIG.defaultLastTurnParentNotice}`;
 }
 
-async function sendToSession(agentGroupId: string, sessionId: string, text: string, taskId: string): Promise<void> {
+async function sendToSession(
+  agentGroupId: string,
+  sessionId: string,
+  text: string,
+  taskId: string,
+  messageId: string = generateId(),
+): Promise<void> {
   writeSessionMessage(agentGroupId, sessionId, {
-    id: generateId(),
+    id: messageId,
     kind: 'chat',
     timestamp: new Date().toISOString(),
     content: JSON.stringify({
@@ -76,6 +82,9 @@ async function routeResultToMain(
   }
 
   let content: string;
+  // Chosen up front: a staged transfer records it before the message exists,
+  // so a container that handles the message at once is already matched to it.
+  const messageId = generateId();
 
   if (transfer) {
     if (transfer.commit_to_memory === 1) {
@@ -151,19 +160,27 @@ async function routeResultToMain(
       // Stage for ipc-in delivery when requester container starts.
       // Also populate into the active ipc-in if the container is already running —
       // _populateIpcIn at spawn time may have run before this transfer was created.
+      // The message carrying the result decides when these files are done
+      // with: expired once it is handled, re-placed if the container exits
+      // first (endInvocationById; spec TransferExpiredOnRoutedMessage*).
       await getDb().run(
-        'UPDATE container_transfers SET recipient_session_id = ? WHERE id = ?',
+        'UPDATE container_transfers SET recipient_session_id = ?, routed_message_id = ? WHERE id = ?',
         session.id,
+        messageId,
         transfer.id,
       );
-      await placeTransferIntoActiveIpcIn(session.id, { ...transfer, recipient_session_id: session.id });
+      await placeTransferIntoActiveIpcIn(session.id, {
+        ...transfer,
+        recipient_session_id: session.id,
+        routed_message_id: messageId,
+      });
       content = transfer.result_text;
     }
   } else {
     content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
   }
 
-  await sendToSession(session.agent_group_id, session.id, content, task.id);
+  await sendToSession(session.agent_group_id, session.id, content, task.id, messageId);
 }
 
 /** Route a sub-task result to the parent specialist's per-task session, resuming the parent. */

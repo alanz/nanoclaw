@@ -34,6 +34,8 @@ export interface ContainerTransfer {
   sent_at: string;
   status: TransferStatus;
   recipient_session_id: string | null;
+  /** The inbound message that carried a root task's result to the main agent; null otherwise. */
+  routed_message_id?: string | null;
 }
 
 export interface TransferFile {

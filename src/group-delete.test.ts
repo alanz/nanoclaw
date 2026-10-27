@@ -178,10 +178,9 @@ describe('groups delete across module tables', () => {
     // researcher's session.
     expect(await count('specialist_tasks', "id = 'task-root'")).toBe(0);
     expect(await count('invocations', "id = 'inv-rsrch'")).toBe(0);
-    // The sub-task belongs to the coder and survives, minus its requester pointer.
-    expect(await getDb().get("SELECT requester_task_id FROM specialist_tasks WHERE id = 'task-sub'")).toEqual({
-      requester_task_id: null,
-    });
+    // The sub-task ran in the coder, but below a deleted task: it goes too,
+    // rather than survive with no requester (spec: ExactlyOneRequester).
+    expect(await count('specialist_tasks', "id = 'task-sub'")).toBe(0);
     expect(await count('agent_groups', 'id IN (?, ?)', RESEARCHER, CODER)).toBe(2);
 
     const removed = (resp as { ok: true; data: { removed: { modules: Record<string, number> } } }).data.removed;

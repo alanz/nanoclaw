@@ -627,24 +627,23 @@ obligation('when-presence.SpecialistTask.failure', async () => {
 
 // ── SpecialistTask: entity invariants ────────────────────────────────────────
 
-divergence(
-  'invariant.SpecialistTask.ExactlyOneRequester',
-  'deleting a group clears requester_task_id on surviving tasks (group-delete.ts deleteSpecialistRowsForGroup, "UPDATE specialist_tasks SET requester_task_id = NULL"), leaving a sub-task of a deleted root with neither requester; the spec says requester links are never cleared',
-  async () => {
-    // Main requests a root task in ag-a, which delegates to ag-b. The main group is deleted.
-    const root = await dispatchRoot('ag-a');
-    const child = (await dispatchSub(root, 'ag-b'))!;
-    await failTasksOfDeletedGroup('ag-main');
-    await deleteSpecialistRowsForGroup(getDb(), 'ag-main');
+obligation('invariant.SpecialistTask.ExactlyOneRequester', async () => {
+  // Main requests a root task in ag-a, which delegates to ag-b. The main group is deleted.
+  const root = await dispatchRoot('ag-a');
+  const child = (await dispatchSub(root, 'ag-b'))!;
+  await failTasksOfDeletedGroup('ag-main');
+  await deleteSpecialistRowsForGroup(getDb(), 'ag-main');
 
-    const survivor = await getTask(child.id);
-    expect(survivor).toBeDefined();
+  // The child ran in a surviving group but below a deleted task: it goes
+  // with it rather than survive with no requester (owner decision 2026-10-27).
+  expect(await getTask(child.id)).toBeUndefined();
+  for (const t of await allTasks()) {
     expect(
-      (survivor!.requester_group_id != null) !== (survivor!.requester_task_id != null),
-      'exactly one of requester_group / requester_task',
+      (t.requester_group_id != null) !== (t.requester_task_id != null),
+      `${t.id}: exactly one of requester_group / requester_task`,
     ).toBe(true);
-  },
-);
+  }
+});
 
 obligation('invariant.SpecialistTask.DepthMatchesAncestorCount', async () => {
   await busyWorld(async (step) => {
@@ -913,27 +912,24 @@ obligation('entity-optional.TransferFile.memory_path', async () => {
 
 // ── Global invariants ────────────────────────────────────────────────────────
 
-divergence(
-  'invariant.SpecialistDispatchMainGroupOnly',
-  'deleting a group clears requester_task_id on surviving tasks (group-delete.ts deleteSpecialistRowsForGroup), so a sub-task of a deleted root is left with requester_task = null and requester_group = null',
-  async () => {
-    const root = await dispatchRoot('ag-a');
-    const child = (await dispatchSub(root, 'ag-b'))!;
-    await failTasksOfDeletedGroup('ag-main');
-    await deleteSpecialistRowsForGroup(getDb(), 'ag-main');
+obligation('invariant.SpecialistDispatchMainGroupOnly', async () => {
+  const root = await dispatchRoot('ag-a');
+  const child = (await dispatchSub(root, 'ag-b'))!;
+  await failTasksOfDeletedGroup('ag-main');
+  await deleteSpecialistRowsForGroup(getDb(), 'ag-main');
 
-    for (const t of await allTasks()) {
-      if (t.requester_task_id != null) continue;
-      expect(t.requester_group_id, t.id).not.toBeNull();
-      const g = await getDb().get<{ is_main: number }>(
-        'SELECT is_main FROM agent_groups WHERE id = ?',
-        t.requester_group_id,
-      );
-      expect(g?.is_main, t.id).toBe(1);
-    }
-    expect(await getTask(child.id)).toBeDefined();
-  },
-);
+  for (const t of await allTasks()) {
+    if (t.requester_task_id != null) continue;
+    expect(t.requester_group_id, t.id).not.toBeNull();
+    const g = await getDb().get<{ is_main: number }>(
+      'SELECT is_main FROM agent_groups WHERE id = ?',
+      t.requester_group_id,
+    );
+    expect(g?.is_main, t.id).toBe(1);
+  }
+  // No orphaned sub-task left behind to be a requester-less "root".
+  expect(await getTask(child.id)).toBeUndefined();
+});
 
 obligation('invariant.MemoryProviderDoesNotDelegate', async () => {
   await busyWorld(async (step) => {

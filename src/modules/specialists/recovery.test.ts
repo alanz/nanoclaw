@@ -543,7 +543,9 @@ describe('crash detection — container that cannot start', () => {
 
     const fresh = (await getTask(task.id))!;
     expect(fresh.status).toBe('failed');
-    expect(fresh.failure_kind).toBe('host_restart');
+    expect(fresh.failure_kind).toBe('boot_failure');
+    // It never ran, so it consumed no restarts (spec: QueuedTaskHasNoRestartAttempts).
+    expect(fresh.restart_attempt_count).toBe(0);
     // The reason must reach the requester, not just the host log.
     expect(fresh.failure_detail).toContain('EROFS');
     expect(routeResult).toHaveBeenCalled();
@@ -578,7 +580,7 @@ describe('crash detection — container that cannot start', () => {
 
     const fresh = (await getTask(task.id))!;
     expect(fresh.status).toBe('failed');
-    expect(fresh.failure_kind).toBe('host_restart');
+    expect(fresh.failure_kind).toBe('boot_failure');
   });
 
   // awaiting_sub_task's container is legitimately stopped; path 2 owns it.

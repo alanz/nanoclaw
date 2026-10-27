@@ -61,7 +61,9 @@ export type SpecialistFailureKind =
   | 'same_type_limit_exceeded'
   | 'timeout'
   | 'execution_error'
-  | 'host_restart';
+  | 'host_restart'
+  | 'boot_failure'
+  | 'group_deleted';
 
 export interface TaskFailure {
   kind: SpecialistFailureKind;

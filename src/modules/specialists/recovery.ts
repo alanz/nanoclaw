@@ -243,11 +243,12 @@ async function sweepTask(
     const detail = `container failed to start (${bootCrash.count} consecutive boot crashes): ${
       bootCrash.stderrTail.slice(-3).join(' | ') || 'no stderr captured'
     }`;
+    // Its own kind (spec: SpecialistBootFailed), and no restart count: the
+    // container never ran, so no restart was consumed.
     await updateTaskStatus(task.id, 'failed', {
-      failure_kind: 'host_restart',
+      failure_kind: 'boot_failure',
       failure_detail: detail,
       closed_at: ts,
-      restart_attempt_count: bootCrash.count,
       pending_sub_task_id: null,
     });
     if (task.pending_sub_task_id) await cancelSubtree(task.pending_sub_task_id);
@@ -255,7 +256,7 @@ async function sweepTask(
     await routeResult({
       ...task,
       status: 'failed' as const,
-      failure_kind: 'host_restart',
+      failure_kind: 'boot_failure',
       failure_detail: detail,
       closed_at: ts,
       pending_sub_task_id: null,

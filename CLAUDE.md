@@ -223,10 +223,10 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 Two traps worth knowing:
 
 - **Scope boundaries are deliberate and stated in each header.** `agent-to-agent.allium` explicitly *excludes* specialists (they live in `specialists.allium`), so searching the wrong file yields a confident wrong answer.
-- **Specialist results reach the caller via a directory, not just text.** The specialist writes to `/workspace/ipc-out`, then `deliver_specialist_result(file_paths, commit_to_memory)` hands ownership to the host, which either commits the files into the *requester's* workspace under `memory/reports/` (recorded as `committed_files` on the task) or stages them into the requester's `/workspace/ipc-in`. Files land in the **requester's** group folder — not the specialist's. See `specialists.allium:195-303`.
+- **Specialist results reach the caller via a directory, not just text.** The specialist writes to `/workspace/ipc-out`, then `deliver_specialist_result(file_paths, commit_to_memory)` hands ownership to the host, which either commits the files into the *requester's* workspace under `zettel/reports/` (recorded as `committed_files` on the task) or stages them into the requester's `/workspace/ipc-in`. Files land in the **requester's** group folder — not the specialist's. See the file-handover section of `specialists.allium`.
 
 ```bash
-allium check specs/            # currently 0 errors; 4 warnings in routing.allium
+allium check specs/            # currently 0 errors; 6 warnings in routing.allium
 ```
 
 `allium check` is read-only and always safe to run. The `/allium` skill family (`tend`, `weed`, `distill`, `propagate`) can *write* to specs — use it to report drift, and get approval before letting it edit anything under `specs/`.

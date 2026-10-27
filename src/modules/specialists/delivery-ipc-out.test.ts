@@ -193,3 +193,23 @@ describe('deliver_specialist_result file names', () => {
     );
   });
 });
+
+// The stored task.result kept the specialist's ipc-out paths: only the
+// transfer's copy of the text was rewritten. The web UI and any later read of
+// the task showed paths that exist nowhere for the requester.
+describe('the stored result of a delivery with files', () => {
+  it('is the rewritten text the requester reads', async () => {
+    const { updateTaskStatus } = await import('./db.js');
+    vi.mocked(updateTaskStatus).mockClear();
+    await handleDeliverSpecialistResult(
+      { result_text: 'See /workspace/ipc-out/report.md', file_paths: ['/workspace/ipc-out/report.md', 'nope.md'] },
+      { id: 'sess-1', agent_group_id: 'ag-spec' } as Session,
+    );
+
+    const [, transfer] = vi.mocked(routeResult).mock.calls[0];
+    const completed = vi.mocked(updateTaskStatus).mock.calls.find(([, status]) => status === 'completed')!;
+    expect((completed[2] as { result: string }).result).toBe(transfer!.result_text);
+    expect(transfer!.result_text).toContain('/workspace/ipc-in/');
+    expect(transfer!.result_text).toContain('[Not delivered: nope.md');
+  });
+});

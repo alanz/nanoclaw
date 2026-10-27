@@ -73,7 +73,8 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
   if (filePaths.length > 0 && (await getDb().hasTable('invocations'))) {
     ({ transfer, refused } = await _buildTransfer(session, task.id, resultText, filePaths, effectiveCommit));
   }
-  const finalText = resultText + refusalNote(refused);
+  // The text the requester reads: path-rewritten, with any refusal note.
+  const finalText = transfer ? transfer.result_text : resultText + refusalNote(refused);
 
   const now = new Date().toISOString();
   await updateTaskStatus(task.id, 'completed', {

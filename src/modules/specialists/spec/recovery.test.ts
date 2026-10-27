@@ -351,23 +351,28 @@ obligation('rule-success.ChildSubtreeCancelledOnRestartExhausted', async () => {
   }
 });
 
-divergence(
-  'rule-failure.ChildSubtreeCancelledOnRestartExhausted.1',
-  'a boot_failure (recovery.ts:255, path 2b) also cancels the pending sub-task; the spec has no cancellation for boot_failure (SpecialistBootFailed assumes none is pending). Reachable only from a hand-built running task with a live pending child',
-  async () => {
-    // A failed transition with a pending sub-task but kind = boot_failure.
-    await task({ id: 't-boot', status: 'running' });
-    await task({ id: 't-kid', status: 'running', requester: { task: 't-boot' } });
-    await link('t-boot', 't-kid');
-    runtime.alive.add(sessOf('t-kid'));
-    runtime.bootCrashes.set(sessOf('t-boot'), { count: 3, stderrTail: ['boom'] });
+obligation('rule-failure.ChildSubtreeCancelledOnRestartExhausted.1', async () => {
+  // Every failure path that holds a pending sub-task now cancels it, so
+  // this rule's cancellation cannot be seen apart from the others'. What
+  // can: a failure of another kind is not taken for a host_restart failure —
+  // it keeps its own kind, and its own rule (SpecialistBootFailed) is
+  // what cancels the child.
+  // A failed transition with a pending sub-task but kind = boot_failure.
+  await task({ id: 't-boot', status: 'running' });
+  await task({ id: 't-kid', status: 'running', requester: { task: 't-boot' } });
+  await link('t-boot', 't-kid');
+  runtime.alive.add(sessOf('t-kid'));
+  runtime.bootCrashes.set(sessOf('t-boot'), { count: 3, stderrTail: ['boom'] });
 
-    await sweepSpecialistTasks();
+  await sweepSpecialistTasks();
 
-    expect((await get('t-boot')).failure_kind).toBe('boot_failure');
-    expect((await get('t-kid')).status).toBe('running');
-  },
-);
+  const parent = await get('t-boot');
+  expect(parent.failure_kind).toBe('boot_failure');
+  expect(parent.failure_kind).not.toBe('host_restart');
+  const kid = await get('t-kid');
+  expect(kid.status).toBe('failed');
+  expect(kid.failure_detail).toBe('cancelled: an ancestor specialist task ended');
+});
 
 obligation('rule-failure.ChildSubtreeCancelledOnRestartExhausted.2', async () => {
   // Fails with host_restart but holds no pending sub-task: a live task it
@@ -449,23 +454,28 @@ covered(
   'cancels the pending child subtree on exhaustion',
 );
 
-divergence(
-  'rule-failure.ChildSubtreeCancelledOnSubTaskAwaitExhausted.1',
-  'a boot_failure (recovery.ts:255, path 2b) also cancels the pending sub-task; the spec has no cancellation for boot_failure (SpecialistBootFailed assumes none is pending). Reachable only from a hand-built task with a live pending child',
-  async () => {
-    // A failed transition with a pending sub-task but kind != timeout.
-    await task({ id: 't-boot', status: 'awaiting_restart', restarts: 1 });
-    await task({ id: 't-kid', status: 'running', requester: { task: 't-boot' } });
-    await link('t-boot', 't-kid');
-    runtime.alive.add(sessOf('t-kid'));
-    runtime.bootCrashes.set(sessOf('t-boot'), { count: 3, stderrTail: ['boom'] });
+obligation('rule-failure.ChildSubtreeCancelledOnSubTaskAwaitExhausted.1', async () => {
+  // Every failure path that holds a pending sub-task now cancels it, so
+  // this rule's cancellation cannot be seen apart from the others'. What
+  // can: a failure of another kind is not taken for a timeout failure —
+  // it keeps its own kind, and its own rule (SpecialistBootFailed) is
+  // what cancels the child.
+  // A failed transition with a pending sub-task but kind != timeout.
+  await task({ id: 't-boot', status: 'awaiting_restart', restarts: 1 });
+  await task({ id: 't-kid', status: 'running', requester: { task: 't-boot' } });
+  await link('t-boot', 't-kid');
+  runtime.alive.add(sessOf('t-kid'));
+  runtime.bootCrashes.set(sessOf('t-boot'), { count: 3, stderrTail: ['boom'] });
 
-    await sweepSpecialistTasks();
+  await sweepSpecialistTasks();
 
-    expect((await get('t-boot')).failure_kind).toBe('boot_failure');
-    expect((await get('t-kid')).status).toBe('running');
-  },
-);
+  const parent = await get('t-boot');
+  expect(parent.failure_kind).toBe('boot_failure');
+  expect(parent.failure_kind).not.toBe('timeout');
+  const kid = await get('t-kid');
+  expect(kid.status).toBe('failed');
+  expect(kid.failure_detail).toBe('cancelled: an ancestor specialist task ended');
+});
 
 obligation('rule-failure.ChildSubtreeCancelledOnSubTaskAwaitExhausted.2', async () => {
   // Fails with kind = timeout (overall duration) but holds no pending

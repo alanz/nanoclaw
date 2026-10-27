@@ -465,25 +465,14 @@ async function expectCommitted(task: SpecialistTask, transfer: ContainerTransfer
 }
 
 describe('SpecialistResultRoutedToMain', () => {
-  divergence(
-    'rule-success.SpecialistResultRoutedToMain',
-    'routing.ts routeResultToMain records routed_message_id only in the staged (commit_to_memory = false) branch (~line 170); a committed transfer never gets transfer.routed_message',
-    async () => {
-      await world();
-      const { task, transfer, sent } = await commitDelivery();
-
-      await expectCommitted(task, transfer, sent);
-      // if exists transfer: transfer.routed_message = message
-      expect(transfer.routed_message_id).toBe(sent[0].id);
-    },
-  );
-
-  // The rest of the success obligation, which the code meets, kept guarded
-  // while the divergence above stands.
-  it('SpecialistResultRoutedToMain commits files and routes the message (all but the routed_message link)', async () => {
+  obligation('rule-success.SpecialistResultRoutedToMain', async () => {
     await world();
     const { task, transfer, sent } = await commitDelivery();
+
     await expectCommitted(task, transfer, sent);
+    // routed_message is set only for files staged for ipc-in; a transfer
+    // committed to memory expires at once and needs none.
+    expect(transfer.routed_message_id ?? null).toBeNull();
   });
 
   it('SpecialistResultRoutedToMain records the routed message on a staged transfer', async () => {

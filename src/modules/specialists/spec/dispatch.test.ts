@@ -528,40 +528,38 @@ describe('SpecialistDispatchesSubTask', () => {
   // The last allowed dispatch to a group: is_last_same_type_dispatch is set and
   // the trigger carries the last-turn notice (format_task_prompt), but the
   // task's prompt field is the prompt as given.
-  divergence(
-    'rule-entity-creation.SpecialistDispatchesSubTask.1',
-    'dispatch.ts:388-391 stores the prompt with the last-turn notice appended as task.prompt; the spec keeps prompt as given and adds the notice only to the trigger message',
-    async () => {
-      const s = await parent();
-      await priorChildren('ag-b', MAX_SAME - 1);
-      const before = await parentTask();
-      const t0 = now();
-      const made = await created(() => dispatchSub(s, 'ag-b', 'final chunk'));
-      const t1 = now();
+  obligation('rule-entity-creation.SpecialistDispatchesSubTask.1', async () => {
+    const s = await parent();
+    await priorChildren('ag-b', MAX_SAME - 1);
+    const before = await parentTask();
+    const t0 = now();
+    const made = await created(() => dispatchSub(s, 'ag-b', 'final chunk'));
+    const t1 = now();
 
-      expect(made).toHaveLength(1);
-      const child = made[0];
-      const cs = (await taskSession(child.id))!;
-      expect(h.writes.filter((w) => w.sessionId === cs.id).map((w) => w.text)).toEqual([
-        `final chunk\n\n${SPECIALISTS_CONFIG.defaultLastTurnSubNotice}`,
-      ]);
-      expect(child.dispatched_at >= t0 && child.dispatched_at <= t1).toBe(true);
-      expect(JSON.parse(child.ancestor_group_ids)).toEqual([...JSON.parse(before.ancestor_group_ids), 'ag-a']);
-      expect(child).toMatchObject({
-        specialist_group_id: 'ag-b',
-        requester_group_id: null,
-        requester_task_id: 'task-parent',
-        requester_session_id: 'sess-parent',
-        depth: before.depth + 1,
-        chain_delegation_count: before.chain_delegation_count + 1,
-        is_last_same_type_dispatch: 1,
-        status: 'queued',
-        restart_attempt_count: 0,
-        closed_at: null,
-      });
-      expect(child.prompt).toBe('final chunk');
-    },
-  );
+    expect(made).toHaveLength(1);
+    const child = made[0];
+    const cs = (await taskSession(child.id))!;
+    expect(h.writes.filter((w) => w.sessionId === cs.id).map((w) => w.text)).toEqual([
+      `final chunk\n\n${SPECIALISTS_CONFIG.defaultLastTurnSubNotice}`,
+    ]);
+    expect(child.dispatched_at >= t0 && child.dispatched_at <= t1).toBe(true);
+    expect(JSON.parse(child.ancestor_group_ids)).toEqual([...JSON.parse(before.ancestor_group_ids), 'ag-a']);
+    expect(child).toMatchObject({
+      specialist_group_id: 'ag-b',
+      requester_group_id: null,
+      requester_task_id: 'task-parent',
+      requester_session_id: 'sess-parent',
+      depth: before.depth + 1,
+      chain_delegation_count: before.chain_delegation_count + 1,
+      is_last_same_type_dispatch: 1,
+      status: 'queued',
+      restart_attempt_count: 0,
+      closed_at: null,
+    });
+    // The notice is part of the stored prompt (with_last_turn_notice), so a
+    // restarted child is sent it again with its prompt.
+    expect(child.prompt).toBe(`final chunk\n\n${SPECIALISTS_CONFIG.defaultLastTurnSubNotice}`);
+  });
 });
 
 // ── SubTaskRejectedDepth ─────────────────────────────────────────────────────

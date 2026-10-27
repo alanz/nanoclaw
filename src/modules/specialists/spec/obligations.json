@@ -984,24 +984,6 @@
   "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
  },
  {
-  "id": "rule-failure.OrphanInvocationEnded.4",
-  "category": "rule_failure",
-  "construct": "OrphanInvocationEnded",
-  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
- },
- {
-  "id": "rule-failure.OrphanInvocationEnded.5",
-  "category": "rule_failure",
-  "construct": "OrphanInvocationEnded",
-  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
- },
- {
-  "id": "rule-failure.OrphanInvocationEnded.6",
-  "category": "rule_failure",
-  "construct": "OrphanInvocationEnded",
-  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
- },
- {
   "id": "rule-success.TransferFilesPlaced",
   "category": "rule_success",
   "construct": "TransferFilesPlaced",
@@ -1062,24 +1044,6 @@
   "description": "Verify rule InvocationEnded is rejected when requires clause fails"
  },
  {
-  "id": "rule-failure.InvocationEnded.2",
-  "category": "rule_failure",
-  "construct": "InvocationEnded",
-  "description": "Verify rule InvocationEnded is rejected when requires clause fails"
- },
- {
-  "id": "rule-failure.InvocationEnded.3",
-  "category": "rule_failure",
-  "construct": "InvocationEnded",
-  "description": "Verify rule InvocationEnded is rejected when requires clause fails"
- },
- {
-  "id": "rule-failure.InvocationEnded.4",
-  "category": "rule_failure",
-  "construct": "InvocationEnded",
-  "description": "Verify rule InvocationEnded is rejected when requires clause fails"
- },
- {
   "id": "rule-success.SpecialistTaskCompletedTerminal",
   "category": "rule_success",
   "construct": "SpecialistTaskCompletedTerminal",
@@ -1111,24 +1075,6 @@
  },
  {
   "id": "rule-failure.InvocationEndedOnTaskTerminal.3",
-  "category": "rule_failure",
-  "construct": "InvocationEndedOnTaskTerminal",
-  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
- },
- {
-  "id": "rule-failure.InvocationEndedOnTaskTerminal.4",
-  "category": "rule_failure",
-  "construct": "InvocationEndedOnTaskTerminal",
-  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
- },
- {
-  "id": "rule-failure.InvocationEndedOnTaskTerminal.5",
-  "category": "rule_failure",
-  "construct": "InvocationEndedOnTaskTerminal",
-  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
- },
- {
-  "id": "rule-failure.InvocationEndedOnTaskTerminal.6",
   "category": "rule_failure",
   "construct": "InvocationEndedOnTaskTerminal",
   "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"

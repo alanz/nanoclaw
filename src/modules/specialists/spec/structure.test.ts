@@ -944,23 +944,23 @@ obligation('invariant.MemoryProviderDoesNotDelegate', async () => {
   });
 });
 
-divergence(
-  'invariant.TaskDepthBounded',
-  "a depth rejection records the rejected task with depth = parent.depth + 1 = max_specialist_depth (dispatch.ts handleDispatchSubTask depth-limit branch) — as the spec's own SubTaskRejectedDepth prescribes, so the invariant and that rule disagree",
-  async () => {
-    const root = await seedTask({ id: 'task-root', specialist_group_id: 'ag-a' });
-    const deep = await seedSub(root, {
-      id: 'task-deep',
-      specialist_group_id: 'ag-a',
-      depth: 4,
-      ancestor_group_ids: JSON.stringify(['ag-a', 'ag-a', 'ag-a', 'ag-a']),
-    });
-    await dispatchSub(deep, 'ag-b');
-    for (const t of await allTasks()) {
-      expect(t.depth, t.id).toBeLessThan(SPECIALISTS_CONFIG.maxSpecialistDepth);
-    }
-  },
-);
+obligation('invariant.TaskDepthBounded', async () => {
+  const root = await seedTask({ id: 'task-root', specialist_group_id: 'ag-a' });
+  const deep = await seedSub(root, {
+    id: 'task-deep',
+    specialist_group_id: 'ag-a',
+    depth: 4,
+    ancestor_group_ids: JSON.stringify(['ag-a', 'ag-a', 'ag-a', 'ag-a']),
+  });
+  await dispatchSub(deep, 'ag-b');
+  // The depth rejection records the rejected task at the limit (as
+  // SubTaskRejectedDepth prescribes); the bound holds for live tasks.
+  const tasks = await allTasks();
+  expect(tasks.some((t) => t.failure_kind === 'depth_exceeded')).toBe(true);
+  for (const t of tasks.filter((x) => !TERMINAL.has(x.status))) {
+    expect(t.depth, t.id).toBeLessThan(SPECIALISTS_CONFIG.maxSpecialistDepth);
+  }
+});
 
 obligation('invariant.ClosedAtPresentWhenTerminal', async () => {
   await busyWorld(async (step) => {

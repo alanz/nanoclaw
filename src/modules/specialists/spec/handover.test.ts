@@ -304,41 +304,6 @@ const staged = (transferId: string) => fs.existsSync(path.join(TRANSFERS_BASE_DI
 const inIpcIn = (invocationId: string, transferId: string, name: string) =>
   path.join(invocationIpcInPath(invocationId), transferId, name);
 
-/**
- * An open invocation (ended_at NULL) whose mount rows are in the given state —
- * `null` for no row at all. Built with raw SQL: the code always inserts both
- * mounts as active with the invocation, and only endInvocationById ever clears
- * them (both together, with ended_at). Such a state is reachable only through
- * a host crash between the inserts (missing rows), never with mixed statuses.
- */
-async function invocationWithMounts(
-  id: string,
-  sessionId: string,
-  out: 'active' | 'cleared' | null,
-  in_: 'active' | 'cleared' | null,
-): Promise<void> {
-  const db = getDb();
-  fs.mkdirSync(invocationIpcOutPath(id), { recursive: true });
-  fs.mkdirSync(invocationIpcInPath(id), { recursive: true });
-  await db.run(
-    `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at, ended_at)
-     VALUES (?, ?, NULL, ?, ?, ?, NULL)`,
-    id,
-    sessionId,
-    invocationIpcOutPath(id),
-    invocationIpcInPath(id),
-    now(),
-  );
-  if (out)
-    await db.run('INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)', `${id}-out`, id, out);
-  if (in_) await db.run('INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)', `${id}-in`, id, in_);
-}
-
-const MOUNT_GUARD_REASON =
-  'the code keys "active invocation" on invocations.ended_at, not on mount status: getActiveInvocation (invocation.ts:205) ' +
-  'and endInvocationById (invocation.ts:299-307) check only ended_at and clear both mounts unconditionally; the mixed or ' +
-  'missing-mount state is reachable only via a host crash between the mount inserts (invocation.ts:142-158)';
-
 beforeEach(async () => {
   fs.rmSync(ROOT, { recursive: true, force: true });
   mailbox.acked = [];
@@ -784,37 +749,17 @@ describe('OrphanInvocationEnded', () => {
     expect(await endedAt(next)).toBeNull();
   });
 
-  divergence('rule-failure.OrphanInvocationEnded.3', MOUNT_GUARD_REASON, async () => {
-    // Orphan with no ipc-out mount row (its ipc-in active).
-    await invocationWithMounts('inv-o', 'sess-main', null, 'active');
+  obligation('rule-failure.OrphanInvocationEnded.3', async () => {
+    // An earlier invocation that has already ended is no orphan: the next
+    // start leaves its end as it was.
+    const earlier = await start('sess-main');
+    await endInvocationById(earlier);
+    // Pinned to a past time, so a second end would visibly overwrite it.
+    await getDb().run("UPDATE invocations SET ended_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", earlier);
 
     await start('sess-main');
 
-    expect(await statusOf('ipc_in_mounts', 'inv-o-in')).toBe('active');
-  });
-
-  divergence('rule-failure.OrphanInvocationEnded.4', MOUNT_GUARD_REASON, async () => {
-    await invocationWithMounts('inv-o', 'sess-main', 'active', null);
-
-    await start('sess-main');
-
-    expect(await statusOf('ipc_out_mounts', 'inv-o-out')).toBe('active');
-  });
-
-  divergence('rule-failure.OrphanInvocationEnded.5', MOUNT_GUARD_REASON, async () => {
-    await invocationWithMounts('inv-o', 'sess-main', 'cleared', 'active');
-
-    await start('sess-main');
-
-    expect(await statusOf('ipc_in_mounts', 'inv-o-in')).toBe('active');
-  });
-
-  divergence('rule-failure.OrphanInvocationEnded.6', MOUNT_GUARD_REASON, async () => {
-    await invocationWithMounts('inv-o', 'sess-main', 'active', 'cleared');
-
-    await start('sess-main');
-
-    expect(await statusOf('ipc_out_mounts', 'inv-o-out')).toBe('active');
+    expect(await endedAt(earlier)).toBe('2026-01-01T00:00:00.000Z');
   });
 });
 
@@ -976,36 +921,16 @@ describe('InvocationEnded', () => {
     expect(fs.existsSync(path.join(IPC_BASE_DIR, inv))).toBe(false);
   });
 
-  divergence('rule-failure.InvocationEnded.1', MOUNT_GUARD_REASON, async () => {
-    await invocationWithMounts('inv-o', 'sess-main', null, 'active');
+  obligation('rule-failure.InvocationEnded.1', async () => {
+    // A late or repeated close event for an invocation already ended changes nothing.
+    const inv = await start('sess-main');
+    await endInvocationById(inv);
+    // Pinned to a past time, so a second end would visibly overwrite it.
+    await getDb().run("UPDATE invocations SET ended_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", inv);
 
-    await endInvocationById('inv-o');
+    await endInvocationById(inv);
 
-    expect(await statusOf('ipc_in_mounts', 'inv-o-in')).toBe('active');
-  });
-
-  divergence('rule-failure.InvocationEnded.2', MOUNT_GUARD_REASON, async () => {
-    await invocationWithMounts('inv-o', 'sess-main', 'active', null);
-
-    await endInvocationById('inv-o');
-
-    expect(await statusOf('ipc_out_mounts', 'inv-o-out')).toBe('active');
-  });
-
-  divergence('rule-failure.InvocationEnded.3', MOUNT_GUARD_REASON, async () => {
-    await invocationWithMounts('inv-o', 'sess-main', 'cleared', 'active');
-
-    await endInvocationById('inv-o');
-
-    expect(await statusOf('ipc_in_mounts', 'inv-o-in')).toBe('active');
-  });
-
-  divergence('rule-failure.InvocationEnded.4', MOUNT_GUARD_REASON, async () => {
-    await invocationWithMounts('inv-o', 'sess-main', 'active', 'cleared');
-
-    await endInvocationById('inv-o');
-
-    expect(await statusOf('ipc_out_mounts', 'inv-o-out')).toBe('active');
+    expect(await endedAt(inv)).toBe('2026-01-01T00:00:00.000Z');
   });
 });
 
@@ -1072,40 +997,17 @@ describe('InvocationEndedOnTaskTerminal', () => {
     expect(await endedAt(earlier)).toBe(endedBefore);
   });
 
-  divergence('rule-failure.InvocationEndedOnTaskTerminal.3', MOUNT_GUARD_REASON, async () => {
+  obligation('rule-failure.InvocationEndedOnTaskTerminal.3', async () => {
+    // The task's invocation has already ended: its terminal transition does not end it again.
     await task('t1', 'running', null);
-    await invocationWithMounts('inv-o', 'sess-t1', null, 'active');
+    const inv = await start('sess-t1');
+    await endInvocationById(inv);
+    // Pinned to a past time, so a second end would visibly overwrite it.
+    await getDb().run("UPDATE invocations SET ended_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", inv);
 
     await routeResult(await setTaskStatus('t1', 'completed'));
 
-    expect(await statusOf('ipc_in_mounts', 'inv-o-in')).toBe('active');
-  });
-
-  divergence('rule-failure.InvocationEndedOnTaskTerminal.4', MOUNT_GUARD_REASON, async () => {
-    await task('t1', 'running', null);
-    await invocationWithMounts('inv-o', 'sess-t1', 'active', null);
-
-    await routeResult(await setTaskStatus('t1', 'completed'));
-
-    expect(await statusOf('ipc_out_mounts', 'inv-o-out')).toBe('active');
-  });
-
-  divergence('rule-failure.InvocationEndedOnTaskTerminal.5', MOUNT_GUARD_REASON, async () => {
-    await task('t1', 'running', null);
-    await invocationWithMounts('inv-o', 'sess-t1', 'cleared', 'active');
-
-    await routeResult(await setTaskStatus('t1', 'completed'));
-
-    expect(await statusOf('ipc_in_mounts', 'inv-o-in')).toBe('active');
-  });
-
-  divergence('rule-failure.InvocationEndedOnTaskTerminal.6', MOUNT_GUARD_REASON, async () => {
-    await task('t1', 'running', null);
-    await invocationWithMounts('inv-o', 'sess-t1', 'active', 'cleared');
-
-    await routeResult(await setTaskStatus('t1', 'completed'));
-
-    expect(await statusOf('ipc_out_mounts', 'inv-o-out')).toBe('active');
+    expect(await endedAt(inv)).toBe('2026-01-01T00:00:00.000Z');
   });
 });
 

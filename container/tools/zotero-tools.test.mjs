@@ -21,6 +21,7 @@ import {
 import { fetchWithRetry, OutOfBudget } from './zotero-enrich.mjs';
 import { forgetNotFound, runBacklogPass } from './zotero-abstracts.mjs';
 import { backoffFromResponse } from './zotero-extract-abstracts.mjs';
+import { syncLibrary } from './zotero-sync.mjs';
 
 const FM = `---
 title: Test Paper
@@ -338,4 +339,67 @@ describe('backoffFromResponse (Zotero)', () => {
     assert.equal(backoffFromResponse(401, {}, T), Infinity);
   });
   it('ignores Retry-After on other statuses', () => assert.equal(backoffFromResponse(200, { 'retry-after': '5' }, T), 0));
+});
+
+// ── syncLibrary ───────────────────────────────────────────────────────────────
+
+describe('syncLibrary', () => {
+  // A library at version 12 that, since version 10, changed item NEW1 and
+  // deleted item GONE.
+  function zotero({ deletedFails }) {
+    return async (url) => {
+      const json = (body) => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => '12' },
+        json: async () => body,
+      });
+      if (url.includes('/deleted')) {
+        if (deletedFails) return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) };
+        return json({ items: ['GONE'] });
+      }
+      if (url.includes('start=0')) return json([{ key: 'NEW1', data: { title: 'New paper', itemType: 'journalArticle' } }]);
+      return json([]);
+    };
+  }
+
+  async function run(deletedFails) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zotero-sync-'));
+    const output = path.join(dir, 'zotero-md');
+    fs.mkdirSync(output);
+    fs.writeFileSync(path.join(output, 'GONE.md'), 'deleted in Zotero\n');
+    const stateFile = path.join(dir, 'zotero-state.json');
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = zotero({ deletedFails });
+    try {
+      const result = await syncLibrary({ since: 10, output, stateFile, apiBase: 'https://z', userId: 'u', apiKey: 'k' })
+        .then((r) => ({ ok: true, r }))
+        .catch((err) => ({ ok: false, err }));
+      return { dir, output, stateFile, result };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it('applies changes and deletions, and records the new version', async () => {
+    const { output, stateFile, result } = await run(false);
+    assert.equal(result.ok, true);
+    assert.equal(fs.existsSync(path.join(output, 'NEW1.md')), true);
+    assert.equal(fs.existsSync(path.join(output, 'GONE.md')), false);
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    assert.equal(state.newVersion, 12);
+    assert.equal(state.deletedCount, 1);
+  });
+
+  // The deletions used to be fetched best-effort: on a failure the run still
+  // recorded version 12, the next run asked only for deletions since 12, and
+  // GONE.md stayed for good.
+  it('fails the whole run, writing nothing, when the deletions cannot be fetched', async () => {
+    const { output, stateFile, result } = await run(true);
+    assert.equal(result.ok, false);
+    assert.match(result.err.message, /deleted/);
+    assert.equal(fs.existsSync(stateFile), false);
+    assert.equal(fs.existsSync(path.join(output, 'GONE.md')), true);
+    assert.equal(fs.existsSync(path.join(output, 'NEW1.md')), false);
+  });
 });

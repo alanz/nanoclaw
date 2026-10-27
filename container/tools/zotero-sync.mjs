@@ -15,6 +15,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 
 // ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -148,13 +149,16 @@ function buildMarkdown(item) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-async function main() {
-  const { since, output } = parseArgs();
-  const { apiKey, userId } = getCredentials();
-  const apiBase = process.env.ZOTERO_API_BASE || 'https://api.zotero.org';
+/**
+ * Fetch the changes since `since`, apply them to `output`, and record the
+ * result in `stateFile`. Throws on any API failure before touching a file —
+ * the deletions included: a run that skipped them but still advanced the
+ * version would never ask for them again, and the deleted items' files would
+ * stay (and stay searchable) for good. A failed run writes no state, so the
+ * host keeps its version and the next check retries the whole sync.
+ */
+export async function syncLibrary({ since, output, stateFile, apiBase, userId, apiKey }) {
   const base = `${apiBase}/users/${userId}`;
-
-  fs.mkdirSync(output, { recursive: true });
 
   // Fetch new/modified items (exclude attachments)
   const sinceParam = since > 0 ? `&since=${since}` : '';
@@ -164,16 +168,11 @@ async function main() {
   // Fetch deletions (only meaningful when we have a baseline version)
   let deletedKeys = [];
   if (since > 0) {
-    try {
-      const { data: deleted } = await fetchZotero(
-        `${base}/deleted?since=${since}`,
-        apiKey,
-      );
-      deletedKeys = Array.isArray(deleted.items) ? deleted.items : [];
-    } catch {
-      // Non-fatal — worst case we keep stale files
-    }
+    const { data: deleted } = await fetchZotero(`${base}/deleted?since=${since}`, apiKey);
+    deletedKeys = Array.isArray(deleted.items) ? deleted.items : [];
   }
+
+  fs.mkdirSync(output, { recursive: true });
 
   // Write markdown for new/modified items
   const writtenItems = [];
@@ -198,7 +197,6 @@ async function main() {
 
   // Write extended state file so the host process can update its DB and
   // send notifications with the right change counts and item titles.
-  const stateFile = '/workspace/agent/zotero-state.json';
   fs.writeFileSync(
     stateFile,
     JSON.stringify({
@@ -212,18 +210,33 @@ async function main() {
     'utf-8',
   );
 
-  const result = {
+  return {
     newCount: items.length,
     deletedCount: deleteCount,
     newVersion,
     totalItems,
     items: writtenItems.slice(0, 20),
   };
+}
 
+async function main() {
+  const { since, output } = parseArgs();
+  const { apiKey, userId } = getCredentials();
+  const result = await syncLibrary({
+    since,
+    output,
+    stateFile: '/workspace/agent/zotero-state.json',
+    apiBase: process.env.ZOTERO_API_BASE || 'https://api.zotero.org',
+    userId,
+    apiKey,
+  });
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 
-main().catch((err) => {
-  process.stderr.write(`zotero-sync error: ${err.message}\n`);
-  process.exit(1);
-});
+const isMain = import.meta.url === pathToFileURL(process.argv[1] || '').href;
+if (isMain) {
+  main().catch((err) => {
+    process.stderr.write(`zotero-sync error: ${err.message}\n`);
+    process.exit(1);
+  });
+}

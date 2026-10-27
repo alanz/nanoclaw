@@ -235,9 +235,20 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
     await closeSpecialistSession(specialistSession);
   }
 
+  await routeToRequester(task, transfer, postMortem);
+  // After routing, which claims this task's own just-delivered transfer; and
+  // whether or not anyone was waiting, so transfers addressed to this task
+  // are reclaimed however it ended.
+  await expireTransfersForTerminalTask(task.id);
+}
+
+async function routeToRequester(
+  task: SpecialistTask,
+  transfer: ContainerTransfer | null,
+  postMortem: string | null,
+): Promise<void> {
   if (task.requester_group_id) {
     await routeResultToMain(task, transfer, postMortem);
-    await expireTransfersForTerminalTask(task.id);
     return;
   }
   if (!task.requester_task_id) return;
@@ -252,5 +263,4 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
   }
   if (parent.status !== 'awaiting_sub_task') return;
   await routeResultToParent(task, parent, transfer, postMortem);
-  await expireTransfersForTerminalTask(task.id);
 }

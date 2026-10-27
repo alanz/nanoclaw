@@ -376,11 +376,13 @@ export async function expireTransfersForTerminalTask(taskId: string): Promise<vo
   if (!(await db.hasTable('container_transfers'))) return;
 
   // Expire transfers WHERE the delivering task's requester_task_id = taskId
-  // (i.e. the delivery was for a sub-task of this task that became terminal)
+  // (i.e. the delivery was for a sub-task of this task that became terminal).
+  // Pending ones too: files that never reached this task never will now, and
+  // left pending they would keep their staging copy for good.
   const transfersToExpire = (await db.all(
     `SELECT ct.id FROM container_transfers ct
        JOIN specialist_tasks st ON st.id = ct.task_id
-       WHERE ct.status IN ('in_transit', 'committed')
+       WHERE ct.status IN ('pending', 'in_transit', 'committed')
          AND st.requester_task_id = ?`,
     taskId,
   )) as { id: string }[];

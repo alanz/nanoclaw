@@ -43,9 +43,15 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
     });
     return;
   }
-  // Accept queued/running/awaiting_restart: a fast container may deliver before
-  // the 60s recovery sweep has advanced the status to 'running'.
-  if (!['queued', 'running', 'awaiting_restart'].includes(task.status)) {
+  // A fast container may deliver before the 60s recovery sweep has advanced
+  // its task to running. The delivery itself proves the container is up, so
+  // the task passes through running first, as a dispatch_sub_task call does.
+  if (task.status === 'queued' || task.status === 'awaiting_restart') {
+    log.info('specialists: task advanced to running by its own delivery', { taskId: task.id, from: task.status });
+    await updateTaskStatus(task.id, 'running');
+    task.status = 'running';
+  }
+  if (task.status !== 'running') {
     log.warn('specialists: deliver_specialist_result — task not in a deliverable state', {
       taskId: task.id,
       status: task.status,

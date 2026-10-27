@@ -86,7 +86,8 @@ value MemorySearchLocation {
 -- All fields are optional; the host fills in defaults from config when absent.
 value MemorySearchParams {
     limit: Integer?                     -- cap on results returned (defaults to config.search_top_k)
-    min_score: Decimal?                 -- minimum hybrid score (defaults to config.min_search_score)
+    min_score: Decimal?                 -- minimum score (defaults by mode: config.min_search_score hybrid,
+                                        -- config.min_keyword_score keyword-only)
     path_prefix: String?                -- restrict search to files under this path prefix
     source: String?                     -- restrict search to files from a named source
     include_content: Boolean?           -- whether to include full chunk content alongside snippets
@@ -118,7 +119,9 @@ value MemoryListParams {
 --     weighted by config.vector_score_weight and config.keyword_score_weight. When the
 --     vector index is unavailable (sqlite-vec not loaded) the vector half is an in-process
 --     cosine scan over the stored chunk embeddings — still hybrid. Keyword-only applies
---     when the query itself cannot be embedded (see MemorySearched).
+--     when the query itself cannot be embedded (see MemorySearched); its results are
+--     scored by keyword match alone, unweighted, and a null params.min_score means
+--     config.min_keyword_score there (config.min_search_score when hybrid).
 --
 --   memory_get_file_content(group: identity/AgentGroup, path: String, parse_frontmatter: Boolean)
 --     → file content (optionally with parsed frontmatter metadata)
@@ -207,6 +210,7 @@ config {
     search_top_k: Integer = 6                -- files per search
     search_locations_per_file: Integer = 3
     min_search_score: Decimal = 0.35
+    min_keyword_score: Decimal = 0.1             -- floor for keyword-only results, scored by keyword alone
     search_host_timeout: Duration = 15.seconds   -- container waits this long for the host's answer
     search_embed_wait: Duration = 3.seconds      -- host waits this long for an embedding permit before keyword-only
     vector_score_weight: Decimal = 0.7
@@ -400,7 +404,8 @@ rule IndexBuilt {
 -- ---- Search ----
 
 -- An agent queries its group's memory with a natural language string.
--- Results are ranked by hybrid vector + keyword score and filtered by min_search_score.
+-- Results are ranked by hybrid vector + keyword score and filtered by min_search_score
+-- (keyword-only: by keyword score, filtered by min_keyword_score).
 rule MemorySearched {
     when: AgentMemorySearch(session, group, query, top_k?, path_prefix?, source?, min_score?)
 
@@ -411,7 +416,7 @@ rule MemorySearched {
 
     let params = MemorySearchParams{
         limit: top_k ?? config.search_top_k,
-        min_score: min_score ?? config.min_search_score,
+        min_score: min_score,                -- null: the default for the mode the search runs in
         path_prefix: path_prefix,
         source: source,
         include_content: null
@@ -437,6 +442,9 @@ rule MemorySearched {
         -- The query embedding counts against the shared embedding budget. If no permit is
         -- granted within config.search_embed_wait (RPM/TPM cool-down, or the daily stop
         -- in force), the search runs keyword-only rather than waiting.
+        -- Keyword-only results are scored by keyword match alone — weighted by
+        -- config.keyword_score_weight they could never reach config.min_search_score —
+        -- and an unset min_score defaults to config.min_keyword_score.
         -- If the host does not answer within config.search_host_timeout (host down,
         -- restarting, or busy), the container runs the keyword-only search itself against
         -- the read-only index mount, with the same filters. Either way the response says

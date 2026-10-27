@@ -34,7 +34,8 @@
     "chat": "tsx scripts/chat.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
-    "test": "vitest run",
+    "test": "sh -c 'vitest run \"$@\" && pnpm run -s test:tools' sh",
+    "test:tools": "node --test 'container/tools/**/*.test.mjs'",
     "test:watch": "vitest",
     "test:live": "vitest run src/drivers/runtime.live.test.ts",
     "check-migrations": "tsx scripts/check-migrations.ts"

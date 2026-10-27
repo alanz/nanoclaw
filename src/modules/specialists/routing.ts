@@ -76,8 +76,12 @@ async function routeResultToMain(
   postMortem: string | null,
 ): Promise<void> {
   const session = await getSession(task.requester_session_id);
-  if (!session) {
-    log.warn('specialists: cannot route result to main — requester session not found', { taskId: task.id });
+  if (!session || session.status !== 'active') {
+    // Not written into, or woken from, a session that has been closed.
+    log.warn('specialists: cannot route result to main — requester session not found or not active', {
+      taskId: task.id,
+      status: session?.status,
+    });
     return;
   }
 
@@ -223,7 +227,7 @@ async function routeResultToParent(
 
 /**
  * Route the result of a terminal task to its requester.
- * Immediately-rejected sub-tasks (cycle/depth/count/same-type) are skipped:
+ * Immediately-rejected sub-tasks (depth/count/same-type) are skipped:
  * the parent never entered awaiting_sub_task, and AgentNotified was already
  * sent by the rejection handler.
  *
@@ -240,7 +244,7 @@ export async function routeResult(
   // This is more reliable than relying on the container close event, which
   // may not fire promptly on all runtimes (e.g. Apple Container).
   const specialistSession = await findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
-  // Read before the session closes. Rejections (cycle, depth…) never ran,
+  // Read before the session closes. Rejections (depth, count…) never ran,
   // so there is nothing to read.
   const postMortem =
     task.status === 'failed' && specialistSession

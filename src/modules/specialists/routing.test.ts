@@ -375,3 +375,17 @@ describe('a root result with staged files', () => {
     expect(row.routed_message_id).toBe((message as { id: string }).id);
   });
 });
+
+// The spec routes a root result only to an active main session. Routing
+// checked only that the session existed, so it would write into, and wake,
+// a session already closed.
+describe('a root result for a closed main session', () => {
+  it('is not written to it', async () => {
+    const { task, requesterSessionId } = await makeFailedRootTask();
+    await getDb().run("UPDATE sessions SET status = 'closed' WHERE id = ?", requesterSessionId);
+
+    await routeResult(task);
+
+    expect(vi.mocked(writeSessionMessage).mock.calls.filter(([, s]) => s === requesterSessionId)).toEqual([]);
+  });
+});

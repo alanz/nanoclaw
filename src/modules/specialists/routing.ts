@@ -196,8 +196,10 @@ async function routeResultToParent(
     await placeTransferIntoActiveIpcIn(parentSession.id, { ...transfer, recipient_session_id: parentSession.id });
     content = transfer.result_text;
   } else {
-    content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
+    content = formatOutcome(task, postMortem);
   }
+  // A last child that returns files is as final as one that returns text.
+  content += await lastTurnParentNotice(task);
 
   await sendToSession(parentSession.agent_group_id, parentSession.id, content, task.id);
 }

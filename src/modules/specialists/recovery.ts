@@ -73,7 +73,7 @@ async function owedAWake(task: SpecialistTask & { session_id: string }): Promise
  * Recursively cancel a sub-task subtree rooted at taskId.
  * Implements SubtreeCancellationApplied from specialists.allium.
  */
-async function cancelSubtree(taskId: string): Promise<void> {
+export async function cancelSubtree(taskId: string): Promise<void> {
   const task = await getTask(taskId);
   if (!task) return;
   if (task.status === 'completed' || task.status === 'failed') return;
@@ -81,12 +81,13 @@ async function cancelSubtree(taskId: string): Promise<void> {
   const ts = new Date().toISOString();
   const failure = {
     failure_kind: 'execution_error',
-    failure_detail: 'cancelled: ancestor specialist container crashed',
+    // Ancestors end for several reasons (crash, retries, timeout, deletion).
+    failure_detail: 'cancelled: an ancestor specialist task ended',
     closed_at: ts,
     pending_sub_task_id: null,
   };
   await updateTaskStatus(task.id, 'failed', failure);
-  log.info('specialists: sub-task cancelled due to ancestor crash', { taskId: task.id });
+  log.info('specialists: sub-task cancelled — an ancestor ended', { taskId: task.id });
 
   // A cancelled task is terminal like any other (the spec's
   // SpecialistResultReady), so it goes through routeResult: that ends its

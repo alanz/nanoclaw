@@ -14,7 +14,7 @@ import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
-import { runGroupDeleteSteps } from '../../group-delete.js';
+import { announceGroupDeletion, runGroupDeleteSteps } from '../../group-delete.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import {
@@ -252,6 +252,11 @@ registerResource({
         // genericDelete behaviour of throwing "not found" for unknown IDs.
         const exists = await db.get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
         if (!exists) throw new Error(`group not found: ${id}`);
+
+        // Before the transaction: modules react to the group going (a waiting
+        // requester is told, its work stopped) with side effects a rollback
+        // could not undo.
+        await announceGroupDeletion(id);
 
         const hasAgentDestinations = await hasTable(db, 'agent_destinations');
         const hasPendingApprovals = await hasTable(db, 'pending_approvals');

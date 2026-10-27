@@ -15,7 +15,8 @@
 import fs from 'fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./container-runner.js', () => ({
+vi.mock('./container-runner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./container-runner.js')>()),
   wakeContainer: vi.fn().mockResolvedValue(undefined),
   isContainerRunning: vi.fn().mockReturnValue(false),
   getActiveContainerCount: vi.fn().mockReturnValue(0),
@@ -59,12 +60,12 @@ async function count(table: string, where = '1=1', ...params: unknown[]): Promis
   return row.n;
 }
 
-async function session(id: string, group: string): Promise<void> {
+async function session(id: string, group: string, thread: string | null = null): Promise<void> {
   await createSession({
     id,
     agent_group_id: group,
     messaging_group_id: null,
-    thread_id: null,
+    thread_id: thread,
     agent_provider: null,
     status: 'active',
     container_status: 'stopped',
@@ -92,8 +93,9 @@ async function seed(): Promise<void> {
     await insert('specialists', { agent_group_id: id, is_memory_provider: 0, created_at: T });
   }
   await session('s-main', MAIN);
-  await session('s-rsrch', RESEARCHER);
-  await session('s-coder', CODER);
+  // A task session's thread is its task id, as createSpecialistSession sets it.
+  await session('s-rsrch', RESEARCHER, 'task-root');
+  await session('s-coder', CODER, 'task-sub');
 
   await insert('specialist_tasks', {
     id: 'task-root',
@@ -205,14 +207,17 @@ describe('groups delete across module tables', () => {
     expect(await count('agent_groups', 'id IN (?, ?)', MAIN, CODER)).toBe(2);
   });
 
-  it('deletes a sub-task specialist, leaving its requester waiting on nothing', async () => {
+  // The requester used to be left in awaiting_sub_task with its pointer
+  // cleared, waiting out the 4h task timeout. The sub-task is now failed as
+  // group_deleted before the rows go, and the requester resumes with that.
+  it('deletes a sub-task specialist, and its waiting requester resumes', async () => {
     const resp = await deleteGroup(CODER);
     expect(resp.ok).toBe(true);
 
     expect(await count('specialist_tasks', "id = 'task-sub'")).toBe(0);
-    expect(await getDb().get("SELECT pending_sub_task_id FROM specialist_tasks WHERE id = 'task-root'")).toEqual({
-      pending_sub_task_id: null,
-    });
+    expect(
+      await getDb().get("SELECT status, pending_sub_task_id FROM specialist_tasks WHERE id = 'task-root'"),
+    ).toEqual({ status: 'running', pending_sub_task_id: null });
     expect(await count('container_transfers')).toBe(0);
     expect(await count('invocations', "id = 'inv-rsrch'")).toBe(1);
   });

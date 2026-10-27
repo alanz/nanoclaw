@@ -9,11 +9,17 @@
  * referencing one of those rows goes first, leaves to roots.
  *
  * A task in a surviving group that pointed at a deleted one (its requester, or
- * its pending sub-task) keeps its own row and loses only that pointer.
+ * its pending sub-task) keeps its own row and loses only that pointer. By the
+ * time the rows go, failTasksOfDeletedGroup has already ended that work.
  */
-import { hasTable } from '../../db/connection.js';
+import { getDb, hasTable } from '../../db/connection.js';
 import type { DbDriver } from '../../db/driver.js';
-import { registerGroupDeleteStep } from '../../group-delete.js';
+import { registerGroupDeleteStep, registerGroupDeletionRequested } from '../../group-delete.js';
+import { log } from '../../log.js';
+import { getTask, updateTaskStatus } from './db.js';
+import { cancelSubtree } from './recovery.js';
+import { routeResult } from './routing.js';
+import type { SpecialistTask } from './types.js';
 
 /** The group's sessions. 1 param. */
 const SESSIONS = 'SELECT id FROM sessions WHERE agent_group_id = ?';
@@ -58,3 +64,55 @@ export async function deleteSpecialistRowsForGroup(db: DbDriver, id: string): Pr
 }
 
 registerGroupDeleteStep({ name: 'specialists', run: deleteSpecialistRowsForGroup });
+
+/**
+ * Before a group is deleted, end the specialist work that depends on it
+ * (spec: SpecialistTasksFailedOnGroupDeleted). Every live task the group runs,
+ * or (as a root) requested, fails with group_deleted. A surviving requester is
+ * told at once — a parent waiting on the task resumes with the failure rather
+ * than sitting out its sub-task await — and a surviving child chain below the
+ * task is cancelled. When the requester is itself in the deleted group the
+ * task still ends cleanly (its session closed, its transfers expired) but
+ * nothing is sent to, or wakes, a group that is going away. Clearing pointers
+ * instead, as the row delete alone did, left surviving parents waiting up to
+ * the 4h task timeout and surviving children with no requester.
+ */
+export async function failTasksOfDeletedGroup(agentGroupId: string): Promise<number> {
+  const db = getDb();
+  if (!(await hasTable(db, 'specialist_tasks'))) return 0;
+  const live = (await db.all(
+    `SELECT * FROM specialist_tasks
+       WHERE status IN ('queued', 'running', 'awaiting_sub_task', 'awaiting_restart')
+         AND (specialist_group_id = ? OR requester_group_id = ?)`,
+    agentGroupId,
+    agentGroupId,
+  )) as SpecialistTask[];
+  const ending = new Set(live.map((t) => t.id));
+
+  for (const task of live) {
+    const failure = {
+      failure_kind: 'group_deleted' as const,
+      failure_detail: 'specialist task ended: its agent group was deleted',
+      closed_at: new Date().toISOString(),
+      pending_sub_task_id: null,
+    };
+    await updateTaskStatus(task.id, 'failed', failure);
+
+    const child = task.pending_sub_task_id;
+    if (child && !ending.has(child)) await cancelSubtree(child);
+
+    const parent = task.requester_task_id ? await getTask(task.requester_task_id) : undefined;
+    const requesterGoing =
+      task.requester_group_id === agentGroupId || (parent !== undefined && parent.specialist_group_id === agentGroupId);
+    await routeResult({ ...task, status: 'failed', ...failure }, null, { notify: !requesterGoing });
+  }
+  if (live.length > 0) log.info('specialists: tasks ended by group deletion', { agentGroupId, tasks: live.length });
+  return live.length;
+}
+
+registerGroupDeletionRequested({
+  name: 'specialists',
+  run: async (agentGroupId) => {
+    await failTasksOfDeletedGroup(agentGroupId);
+  },
+});

@@ -214,7 +214,11 @@ async function routeResultToParent(
  *   Existing callers (recovery.ts, dispatch.ts) pass no transfer — the default
  *   null keeps them working unchanged.
  */
-export async function routeResult(task: SpecialistTask, transfer: ContainerTransfer | null = null): Promise<void> {
+export async function routeResult(
+  task: SpecialistTask,
+  transfer: ContainerTransfer | null = null,
+  opts: { notify?: boolean } = {},
+): Promise<void> {
   // End the specialist's active invocation now that the task is terminal.
   // This is more reliable than relying on the container close event, which
   // may not fire promptly on all runtimes (e.g. Apple Container).
@@ -237,7 +241,9 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
     await closeSpecialistSession(specialistSession);
   }
 
-  await routeToRequester(task, transfer, postMortem);
+  // notify: false when the requester is itself going away (its group is being
+  // deleted): the task still ends cleanly, but nothing is sent to, or wakes, it.
+  if (opts.notify !== false) await routeToRequester(task, transfer, postMortem);
   // After routing, which claims this task's own just-delivered transfer; and
   // whether or not anyone was waiting, so transfers addressed to this task
   // are reclaimed however it ended.

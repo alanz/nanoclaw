@@ -152,6 +152,46 @@ function copyNoFollow(src: string, dest: string): void {
   }
 }
 
+/** Where a delivered file is for the requester: its memory path, or its ipc-in path. */
+function deliveredPath(name: string, transferId: string, commitToMemory: boolean): string {
+  return commitToMemory
+    ? `${SPECIALISTS_CONFIG.memoryReportsSubpath}/${name}`
+    : `${SPECIALISTS_CONFIG.ipcInContainerPath}/${transferId}/${name}`;
+}
+
+/** `name`, or `name` numbered before its extension (report-2.md) if taken. */
+function uniqueName(name: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(name)) return name;
+  const ext = path.posix.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Map a listed path, and the absolute ipc-out form of it, to where the file went. */
+function addRewrites(rewrites: Map<string, string>, containerPath: string, to: string): void {
+  const prefix = SPECIALISTS_CONFIG.ipcOutContainerPath;
+  const normalized = path.posix.normalize(containerPath);
+  const rel = normalized.startsWith(prefix + '/') ? normalized.slice(prefix.length + 1) : normalized;
+  rewrites.set(containerPath, to);
+  rewrites.set(`${prefix}/${rel}`, to);
+}
+
+/**
+ * Rewrite every listed path in one pass, longest first, so a relative path is
+ * never rewritten inside the absolute form of itself (or of another file).
+ */
+function rewritePaths(text: string, rewrites: Map<string, string>): string {
+  if (rewrites.size === 0) return text;
+  const pattern = [...rewrites.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  return text.replace(new RegExp(pattern, 'g'), (match) => rewrites.get(match) ?? match);
+}
+
 /**
  * Copy files from ipc-out to host staging and create ContainerTransfer +
  * TransferFile rows. Returns the ContainerTransfer (status='pending'), or null
@@ -180,22 +220,30 @@ async function _buildTransfer(
   const transferId = genId('xfer');
   const now = new Date().toISOString();
 
-  // Rewrite result_text paths and copy files to staging
+  // Copy files to staging; collect how each path is rewritten in result_text
   const transferFiles: Array<{ id: string; originalName: string; hostPath: string }> = [];
-  let rewrittenText = resultText;
+  const rewrites = new Map<string, string>();
+  // Each file once, under a name unique in this transfer (the spec's
+  // IpcInPathsUniquePerTransfer): staging and ipc-in are keyed by name.
+  const delivered = new Map<string, string>(); // host path -> name it went under
+  const names = new Set<string>();
 
   const stagingDir = path.join(TRANSFERS_BASE_DIR, transferId);
   fs.mkdirSync(stagingDir, { recursive: true });
 
   for (const containerPath of filePaths) {
-    const basename = path.posix.basename(containerPath);
-
     const resolved = resolveIpcOutFile(invocation.ipc_out_host_path, containerPath);
     if ('error' in resolved) {
       log.warn('specialists: refused a delivered file', { taskId, path: containerPath, reason: resolved.error });
       refused.push({ path: containerPath, reason: resolved.error });
       continue;
     }
+    const already = delivered.get(resolved.hostPath);
+    if (already !== undefined) {
+      addRewrites(rewrites, containerPath, deliveredPath(already, transferId, commitToMemory));
+      continue;
+    }
+    const basename = uniqueName(path.posix.basename(containerPath), names);
     const destPath = hostStagingPath(transferId, basename);
 
     try {
@@ -212,16 +260,12 @@ async function _buildTransfer(
 
     const fileId = genId('tfile');
     transferFiles.push({ id: fileId, originalName: basename, hostPath: destPath });
-
-    // Rewrite path in result_text
-    if (commitToMemory) {
-      const memPath = `${SPECIALISTS_CONFIG.memoryReportsSubpath}/${basename}`;
-      rewrittenText = rewrittenText.split(containerPath).join(memPath);
-    } else {
-      const ipcInPath = `${SPECIALISTS_CONFIG.ipcInContainerPath}/${transferId}/${basename}`;
-      rewrittenText = rewrittenText.split(containerPath).join(ipcInPath);
-    }
+    delivered.set(resolved.hostPath, basename);
+    names.add(basename);
+    addRewrites(rewrites, containerPath, deliveredPath(basename, transferId, commitToMemory));
   }
+
+  let rewrittenText = rewritePaths(resultText, rewrites);
 
   if (transferFiles.length === 0) {
     // All files failed to copy — no transfer

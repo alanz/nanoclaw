@@ -138,3 +138,58 @@ describe('deliver_specialist_result file handover', () => {
     expect(completed.result).toContain('[Not delivered: /workspace/ipc-in/xfer-1/report.md');
   });
 });
+
+// Staging was keyed by base name: two delivered files with one name
+// overwrote each other, and a path listed twice made two records of one
+// file. Rewriting the result text path by path also let a relative path
+// match inside the absolute form of itself, garbling the text.
+describe('deliver_specialist_result file names', () => {
+  const session = { id: 'sess-1', agent_group_id: 'ag-spec' } as Session;
+
+  function stagedFiles(): Record<string, string> {
+    const [dir] = fs.readdirSync(path.join(env.root, 'staging'));
+    const base = path.join(env.root, 'staging', dir);
+    return Object.fromEntries(fs.readdirSync(base).map((f) => [f, fs.readFileSync(path.join(base, f), 'utf-8')]));
+  }
+
+  it('keeps both of two files that share a name', async () => {
+    fs.writeFileSync(path.join(out, 'sub', 'report.md'), 'the other report');
+
+    await handleDeliverSpecialistResult(
+      {
+        result_text: 'See /workspace/ipc-out/report.md and /workspace/ipc-out/sub/report.md',
+        file_paths: ['/workspace/ipc-out/report.md', '/workspace/ipc-out/sub/report.md'],
+      },
+      session,
+    );
+
+    expect(stagedFiles()).toEqual({ 'report.md': 'the report', 'report-2.md': 'the other report' });
+    const [, transfer] = vi.mocked(routeResult).mock.calls[0];
+    expect(transfer!.file_count).toBe(2);
+    expect(transfer!.result_text).toMatch(
+      /^See \/workspace\/ipc-in\/[^/]+\/report\.md and \/workspace\/ipc-in\/[^/]+\/report-2\.md$/,
+    );
+  });
+
+  it('delivers a file listed twice once', async () => {
+    await handleDeliverSpecialistResult(
+      { result_text: 'See report.md', file_paths: ['/workspace/ipc-out/report.md', 'report.md'] },
+      session,
+    );
+
+    expect(stagedFiles()).toEqual({ 'report.md': 'the report' });
+    expect(vi.mocked(routeResult).mock.calls[0][1]!.file_count).toBe(1);
+  });
+
+  it('rewrites a relative path without garbling the absolute form of it', async () => {
+    await handleDeliverSpecialistResult(
+      { result_text: 'Full: /workspace/ipc-out/report.md, short: report.md', file_paths: ['report.md'] },
+      session,
+    );
+
+    const text = vi.mocked(routeResult).mock.calls[0][1]!.result_text;
+    expect(text).toMatch(
+      /^Full: \/workspace\/ipc-in\/[^/]+\/report\.md, short: \/workspace\/ipc-in\/[^/]+\/report\.md$/,
+    );
+  });
+});

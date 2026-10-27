@@ -138,29 +138,32 @@ export async function buildInvocationForSession(
   // Populate ipc-in from pending transfers targeting this session
   await _populateIpcIn(db, session.id, ipcInPath);
 
-  await db.run(
-    `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-    invocationId,
-    session.id,
-    taskId,
-    ipcOutPath,
-    ipcInPath,
-    now,
-  );
-
-  await db.run(
-    'INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)',
-    genId('ipcout'),
-    invocationId,
-    'active',
-  );
-  await db.run(
-    'INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)',
-    genId('ipcin'),
-    invocationId,
-    'active',
-  );
+  // One step: an invocation with only one of its mounts (a host stopped
+  // between the inserts) is a state nothing else in the module expects.
+  await db.transaction(async () => {
+    await db.run(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+      invocationId,
+      session.id,
+      taskId,
+      ipcOutPath,
+      ipcInPath,
+      now,
+    );
+    await db.run(
+      'INSERT INTO ipc_out_mounts (id, invocation_id, status) VALUES (?, ?, ?)',
+      genId('ipcout'),
+      invocationId,
+      'active',
+    );
+    await db.run(
+      'INSERT INTO ipc_in_mounts (id, invocation_id, status) VALUES (?, ?, ?)',
+      genId('ipcin'),
+      invocationId,
+      'active',
+    );
+  });
 
   log.debug('specialists: invocation started', { invocationId, sessionId: session.id, taskId });
 

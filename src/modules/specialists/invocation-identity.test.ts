@@ -173,6 +173,19 @@ describe('specialist session identity in invocations', () => {
     expect(await transferState()).toEqual({ transfer: 'pending', file: 'owned' });
   });
 
+  // The invocation row and its two mount rows are written as one step, so a
+  // failure part-way leaves no invocation with only some of its mounts.
+  it('records an invocation with both its mounts, or not at all', async () => {
+    const session = await parentSession('running');
+    await getDb().run('DROP TABLE ipc_in_mounts'); // the last insert fails
+
+    await expect(buildInvocationForSession(session)).rejects.toThrow();
+
+    const n = async (t: string) => ((await getDb().get(`SELECT COUNT(*) AS n FROM ${t}`)) as { n: number }).n;
+    expect(await n('invocations')).toBe(0);
+    expect(await n('ipc_out_mounts')).toBe(0);
+  });
+
   it("expires a finished task's in-transit files", async () => {
     const session = await parentSession('completed');
     const built = await buildInvocationForSession(session);

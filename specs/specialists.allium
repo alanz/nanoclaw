@@ -323,6 +323,7 @@ entity TransferFile {
 
     transitions status {
         owned -> placed
+        owned -> expired            -- never placed: committed to memory, or its recipient ended first
         placed -> owned             -- recipient invocation ended before its task reached terminal; re-place on next invocation
         placed -> expired
         terminal: expired
@@ -400,8 +401,9 @@ rule MainGroupDispatchesSpecialist {
         -- nothing. The dispatch tool has already told the agent; a triggering
         -- note started a turn of its own after the agent replied. The task id
         -- stays in view with the agent's next message, so the result can be
-        -- matched to its dispatch. SpecialistDispatchesSubTask does the same
-        -- in the parent specialist's session.
+        -- matched to its dispatch. A sub-task dispatch writes no such note:
+        -- the parent specialist exits on dispatch and has one sub-task at a
+        -- time, and the result it resumes with names the task it answers.
 }
 
 ------------------------------------------------------------
@@ -464,14 +466,22 @@ rule SpecialistTaskStarted {
 -- fast failures (sessions-level bound; the boot-crash module's threshold) it
 -- stops respawning and drops the session's pending work.
 -- SpecialistContainerBootFailed(task) is emitted when that bound trips for
--- a specialist task's per-task session. The task has never run, so it fails
--- outright: it does not go to awaiting_restart and consumes no
--- restart_attempt_count (QueuedTaskHasNoRestartAttempts still holds).
--- SpecialistFailureRoutedToRequester then tells the requester at once.
+-- a specialist task's per-task session. Its container cannot get past boot,
+-- so the task fails outright: it does not go to awaiting_restart and
+-- consumes no restart_attempt_count (QueuedTaskHasNoRestartAttempts still
+-- holds). SpecialistFailureRoutedToRequester then tells the requester at once.
+--
+-- The task may read as running or awaiting_restart rather than queued: the
+-- host judges a container started by sampling whether it is alive, and one
+-- that dies a moment into boot is sampled alive (advancing the task to
+-- running) yet never seen dead, so crash detection never fires for it. The
+-- boot-crash bound is evidence gathered across spawns, not a snapshot, so it
+-- decides regardless of the status the sampling left. awaiting_sub_task is
+-- excluded: its container is legitimately stopped while the child runs.
 
 rule SpecialistBootFailed {
     when: SpecialistContainerBootFailed(task)
-    requires: task.status = queued
+    requires: task.status in {queued, running, awaiting_restart}
     ensures:
         task.status = failed
         task.failure = TaskFailure{
@@ -484,9 +494,9 @@ rule SpecialistBootFailed {
         -- The failure the requester sees carries the container's last
         -- words (the boot-crash bound records why it would not start), so
         -- a broken image or a bad mount is visible without the host logs.
-        -- A task in awaiting_restart whose container will not start again
-        -- is not covered here: it has already run, and the restart path
-        -- (SpecialistRestartExhausted) or the overall timeout bounds it.
+        -- If the task was awaiting a sub-task's result when it was last
+        -- running, it has none now (awaiting_sub_task is excluded), so no
+        -- subtree is left behind.
 }
 
 ------------------------------------------------------------
@@ -891,15 +901,21 @@ rule TransferFilesOwned {
     for path in file_paths:
         ensures: TransferFile.created(
             transfer: transfer,
-            original_name: basename(path),
+            original_name: delivered_name(transfer, path),
             host_path: host_storage_path(invocation, path),
             status: owned,
             memory_path: null
         )
 
     @guidance
-        -- basename and host_storage_path are black box functions that map an
-        -- ipc-out path to the file's basename and to a stable host-managed
+        -- file_paths here are the delivered files, each once: a path listed
+        -- twice (or two spellings of one file, absolute and relative) is one
+        -- file, and every listed spelling is rewritten to it in the result
+        -- text. delivered_name(transfer, path) is the file's basename, made
+        -- unique within the transfer by numbering a repeat before its
+        -- extension (report.md, report-2.md), so IpcInPathsUniquePerTransfer
+        -- holds and two files of one name both arrive. host_storage_path is
+        -- a black box mapping an ipc-out path to a stable host-managed
         -- storage path keyed on the originating invocation. Ownership passes
         -- by copy: the host does not remove the originals from ipc-out,
         -- because ipc-out is cleared at invocation end (see InvocationEnded)
@@ -1649,6 +1665,26 @@ rule PendingTransferExpiredOnDeliveringTaskFailed {
         ensures: t.status = expired
         for f in t.files:
             ensures: f.status = expired
+}
+
+-- A completed task's result can find no recipient: the requesting main
+-- session is gone or closed, or the parent is no longer awaiting it
+-- (cancelled, timed out). Its pending transfer then has no one to place
+-- into and expires rather than keeping its staging copy.
+-- result_has_recipient(task) is a black box, true exactly when
+-- SpecialistResultRoutedToMain or SpecialistResultRoutedToParent can route
+-- the result (their requires clauses), so this rule and those are exclusive.
+
+rule UnroutedTransferExpired {
+    when: SpecialistResultReady(task)
+    let transfer = ContainerTransfer{task: task}
+    requires: exists transfer
+    requires: transfer.status = pending
+    requires: not result_has_recipient(task)
+    ensures:
+        transfer.status = expired
+        for f in transfer.files:
+            f.status = expired
 }
 
 ------------------------------------------------------------

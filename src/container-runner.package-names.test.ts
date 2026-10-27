@@ -9,6 +9,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./log.js', () => ({
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
+// Never reach a real runtime: if the check regressed, this would otherwise run
+// a real image build of the malformed names.
+vi.mock('./drivers/cli.js', () => ({
+  realCli: () => {
+    throw new Error('test reached the runtime CLI');
+  },
+}));
 
 import { buildAgentGroupImage } from './container-runner.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';

@@ -54,6 +54,7 @@ export type SpecialistTaskStatus =
   | 'failed';
 
 export type SpecialistFailureKind =
+  // No longer produced (the cycle check is gone); kept so older rows type-check.
   | 'cycle_detected'
   | 'depth_exceeded'
   | 'count_exceeded'

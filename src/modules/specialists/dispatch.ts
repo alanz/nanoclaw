@@ -244,35 +244,10 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     return;
   }
 
-  // Cycle check
-  if (ancestorIds.includes(specialistGroupId)) {
-    const taskId = generateId();
-    const rejected: SpecialistTask = {
-      id: taskId,
-      specialist_group_id: specialistGroupId,
-      prompt,
-      requester_group_id: null,
-      requester_task_id: parentTask.id,
-      requester_session_id: session.id,
-      depth: parentTask.depth + 1,
-      chain_delegation_count: parentTask.chain_delegation_count + 1,
-      ancestor_group_ids: JSON.stringify([...ancestorIds, parentTask.specialist_group_id]),
-      is_last_same_type_dispatch: 0,
-      status: 'failed',
-      dispatched_at: now,
-      restart_attempt_count: 0,
-      closed_at: now,
-      result: null,
-      failure_kind: 'cycle_detected',
-      failure_detail: 'target specialist appears in dispatch chain',
-      pending_sub_task_id: null,
-      committed_files: null,
-    };
-    await createTask(rejected);
-    notifyAgent(session, 'sub-task rejected: cycle detected');
-    await routeResult(rejected);
-    return;
-  }
+  // No cycle check (specs/specialists.allium): a parent runs one sub-task at
+  // a time, so a chain is a single line, and the depth, chain-count and
+  // same-type limits below bound it — self-dispatch and returning to an
+  // earlier group included.
 
   // Depth limit
   if (parentTask.depth + 1 >= SPECIALISTS_CONFIG.maxSpecialistDepth) {

@@ -231,6 +231,8 @@ allium check specs/            # currently 0 errors; 4 warnings in routing.alliu
 
 `allium check` is read-only and always safe to run. The `/allium` skill family (`tend`, `weed`, `distill`, `propagate`) can *write* to specs — use it to report drift, and get approval before letting it edit anything under `specs/`.
 
+**After a behaviour change, check for drift.** Once a change that alters behaviour in an area a spec covers is committed, run `weed` in **check mode** (report only) against the spec(s) for that area, then `allium analyse` on them (read-only; exit 1 just means findings). Report each divergence with its proposed classification — spec bug, code bug, aspirational, intentional gap — and the owner confirms or overrides. Code bugs get fixed as code; spec bugs become proposed spec edits under the rule above. Refactors that change no behaviour, and areas no spec covers, skip this.
+
 ## This install's local modules
 
 Modules this fork adds on top of trunk. All self-register through

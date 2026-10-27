@@ -5,6 +5,7 @@
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { wakeContainer } from '../../container-runner.js';
 import { initSessionFolder, writeSessionMessage } from '../../session-manager.js';
+import { getNullMessagingGroupId } from '../../channels/null-channel.js';
 import { log } from '../../log.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
@@ -71,6 +72,23 @@ function formatTaskPrompt(task: SpecialistTask, specialist: Specialist | undefin
   if (!task.is_last_same_type_dispatch) return task.prompt;
   const notice = specialist?.last_turn_sub_notice ?? SPECIALISTS_CONFIG.defaultLastTurnSubNotice;
   return `${task.prompt}\n\n${notice}`;
+}
+
+/**
+ * Every task session lives on the null channel; without it the session cannot
+ * be created, and a task row written first would be stranded — queued with no
+ * session, invisible to the recovery sweep. So it is checked before anything
+ * is created (spec: requires exists null_mg).
+ */
+async function nullChannelReady(session: Session, tool: string): Promise<boolean> {
+  try {
+    await getNullMessagingGroupId();
+    return true;
+  } catch (err) {
+    log.error('specialists: cannot dispatch — no null channel for task sessions', { err });
+    notifyAgent(session, `${tool} failed: specialist sessions are unavailable (the null channel is not set up).`);
+    return false;
+  }
 }
 
 async function spawnTaskSession(task: SpecialistTask): Promise<void> {
@@ -145,6 +163,7 @@ export async function handleDispatchSpecialist(content: Record<string, unknown>,
     pending_sub_task_id: null,
     committed_files: null,
   };
+  if (!(await nullChannelReady(session, 'dispatch_specialist'))) return;
   await createTask(task);
   await spawnTaskSession(task);
 
@@ -215,6 +234,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
 
   // Memory provider — bypass chain checks, chain counters not incremented
   if (targetSpecialist.is_memory_provider) {
+    if (!(await nullChannelReady(session, 'dispatch_sub_task'))) return;
     const taskId = generateId();
     const child: SpecialistTask = {
       id: taskId,
@@ -371,6 +391,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     child.prompt = formatTaskPrompt(child, childSpecialist);
   }
 
+  if (!(await nullChannelReady(session, 'dispatch_sub_task'))) return;
   await createTask(child);
   await updateTaskStatus(parentTask.id, 'awaiting_sub_task', { pending_sub_task_id: taskId });
   await spawnTaskSession(child);

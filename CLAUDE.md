@@ -206,7 +206,7 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 
 `specs/` holds 13 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. They are the intent of record; the code is one realisation of it.
 
-> **Read them; do not edit them.** Consult the relevant spec before changing behaviour in the areas it covers. **Never modify a `.allium` file without the repo owner's explicit approval** — not to "keep it in sync" after a code change, not to silence a checker warning, not as part of a larger task. If your change makes the code diverge from a spec, say so and propose the spec edit; the owner decides. This applies to the `/allium` skills too: `tend` and `weed` both write to specs, so ask before running them in write mode.
+> **Read them; do not edit them.** Consult the relevant spec before changing behaviour in the areas it covers. **Never modify a `.allium` file without the repo owner's explicit approval** — not to "keep it in sync" after a code change, not to silence a checker warning, not as part of a larger task. If your change makes the code diverge from a spec, say so and propose the spec edit; the owner decides. This applies to the `/allium` skills too: `tend` and `weed` both write to specs, so ask before running them in write mode. The autonomous `/allium <goal>` loop is no exception: upstream lets it edit specs unattended, but here it must stop at every spec edit and get the owner's approval — and non-interactive `tend`/`weed` subagents, which park questions by writing them into the spec, count as spec edits too.
 
 | Spec | Covers |
 |------|--------|

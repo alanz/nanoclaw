@@ -763,8 +763,12 @@ export class MemoryIndexManager {
     }
     const mode = queryVec.length > 0 ? 'hybrid' : 'keyword';
 
+    // Keyword-only results are scored by keyword alone. Weighted as in
+    // hybrid mode they would top out below 0.3, under the hybrid floor, and
+    // every keyword-only search would come back empty.
+    const keywordOnly = mode === 'keyword';
     const maxResults = opts?.maxResults ?? MEMORY_CONFIG.search_top_k;
-    const minScore = opts?.minScore ?? MEMORY_CONFIG.min_search_score;
+    const minScore = opts?.minScore ?? (keywordOnly ? MEMORY_CONFIG.min_keyword_score : MEMORY_CONFIG.min_search_score);
     const includeContent = opts?.includeContent ?? false;
     const limited = Math.min(maxResults, includeContent ? 10 : maxResults);
 
@@ -773,8 +777,8 @@ export class MemoryIndexManager {
       minScore,
       pathPrefix: opts?.pathPrefix,
       source: opts?.source,
-      vectorWeight: VECTOR_WEIGHT,
-      textWeight: TEXT_WEIGHT,
+      vectorWeight: keywordOnly ? 0 : VECTOR_WEIGHT,
+      textWeight: keywordOnly ? 1 : TEXT_WEIGHT,
       candidatesMultiplier: CANDIDATES_MULTIPLIER,
       locationsPerFile: MEMORY_CONFIG.search_locations_per_file,
     });

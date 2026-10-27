@@ -4,6 +4,9 @@ export const MEMORY_CONFIG = {
   search_top_k: 6,
   search_locations_per_file: 3,
   min_search_score: 0.35,
+  // Keyword-only results are scored by keyword alone, so they need their own
+  // floor: the container's fallback search and the tool description use 0.1.
+  min_keyword_score: 0.1,
   search_embed_wait_ms: 3_000,
   vector_score_weight: 0.7,
   keyword_score_weight: 0.3,
@@ -21,6 +24,7 @@ export type MemoryConfig = {
   search_top_k: number;
   search_locations_per_file: number;
   min_search_score: number;
+  min_keyword_score: number;
   search_embed_wait_ms: number;
   vector_score_weight: number;
   keyword_score_weight: number;

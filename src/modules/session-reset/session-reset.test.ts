@@ -31,8 +31,10 @@ vi.mock('../../container-runner.js', async (importOriginal) => ({
 vi.mock('../../delivery.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../delivery.js')>()),
   getDeliveryAdapter: () => ({
-    deliver: async (_c: string, _p: string, _t: string | null, _k: string, text: string) => {
-      fakes.delivered.push(text);
+    // Parse the content as the registry adapter does (channel-registry.ts):
+    // a plain-prose body throws there, so it must throw here too.
+    deliver: async (_c: string, _p: string, _t: string | null, _k: string, content: string) => {
+      fakes.delivered.push((JSON.parse(content) as { text: string }).text);
       return null;
     },
   }),
@@ -338,6 +340,8 @@ describe('archive and summary', () => {
     });
     expect(fs.readFileSync(path.join(GROUP_DIR, row.summary_path!), 'utf-8')).toContain(row.archive_path!);
     expect(fakes.delivered).toHaveLength(1);
+    expect(fakes.delivered[0]).toContain('after 3 attempts');
+    expect(fakes.delivered[0]).toContain(row.summary_path!);
 
     await summarySweep(CONFIG, at('2026-10-05T22:11:00Z'));
     expect(fakes.delivered).toHaveLength(1);

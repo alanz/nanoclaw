@@ -146,6 +146,16 @@ export async function dispatch(
     return { id: req.id, ok: true, data: helpText, human: helpText };
   }
 
+  // Parse before any hold: a request whose args are rejected must not reach an
+  // admin as an approval card (it would fail on replay anyway, after the admin
+  // had been asked to vouch for it). An approved replay parses again here.
+  let parsed: unknown;
+  try {
+    parsed = cmd.parseArgs(req.args);
+  } catch (e) {
+    return err(req.id, 'invalid-args', errMsg(e));
+  }
+
   if (decision.effect === 'hold') {
     if (ctx.caller !== 'agent') {
       // Holds only arise for agent callers; anything else is a guard bug —
@@ -173,13 +183,6 @@ export async function dispatch(
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = cmd.parseArgs(req.args);
-  } catch (e) {
-    return err(req.id, 'invalid-args', errMsg(e));
   }
 
   try {

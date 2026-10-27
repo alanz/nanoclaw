@@ -188,6 +188,18 @@ register({
   },
 });
 
+register({
+  name: 'approval-validated-command',
+  description: 'approval command whose arg parsing rejects bad input',
+  resource: 'groups',
+  access: 'approval',
+  parseArgs: (raw) => {
+    if (raw.name === 'bad; rm -rf /') throw new Error('invalid name');
+    return raw;
+  },
+  handler: async () => ({ ran: true }),
+});
+
 // Commands that return data shaped like real resources (for post-handler filtering tests)
 register({
   name: 'groups-list-data',
@@ -645,6 +657,24 @@ describe('CLI scope enforcement', () => {
     });
 
     expect(approvalState.observedContexts).toEqual([ctx]);
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('args rejected by parsing never mint an approval card', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const bad = await dispatch(
+      { id: '1', command: 'approval-validated-command', args: { name: 'bad; rm -rf /' } },
+      agentCtx(),
+    );
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error.code).toBe('invalid-args');
+    expect(approvalState.requestApproval).not.toHaveBeenCalled();
+
+    const good = await dispatch({ id: '2', command: 'approval-validated-command', args: { name: 'ok' } }, agentCtx());
+    if (!good.ok) expect(good.error.code).toBe('approval-pending');
     expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
   });
 

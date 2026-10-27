@@ -24,7 +24,7 @@ import {
   INSTALL_SLUG,
   TIMEZONE,
 } from './config.js';
-import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import { CONTAINER_PLUGINS_DIR, isValidPackageName, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
@@ -1667,6 +1667,18 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   const npmPackages = JSON.parse(configRow.packages_npm) as string[];
   if (aptPackages.length === 0 && npmPackages.length === 0) {
     throw new Error('No packages to install. Use install_packages first.');
+  }
+  // The names go into RUN lines below. Every intake path validates them, but a
+  // row stored before that (or edited by hand) must not reach a shell.
+  const invalid = [
+    ...aptPackages.filter((p) => !isValidPackageName('apt', p)).map((p) => `apt ${JSON.stringify(p)}`),
+    ...npmPackages.filter((p) => !isValidPackageName('npm', p)).map((p) => `npm ${JSON.stringify(p)}`),
+  ];
+  if (invalid.length > 0) {
+    throw new Error(
+      `Invalid package name(s) in the group's config: ${invalid.join(', ')}. ` +
+        'Remove them with `ncl groups config remove-package` and rebuild.',
+    );
   }
 
   // Image building is not on the runtime path (drivers never build), but it

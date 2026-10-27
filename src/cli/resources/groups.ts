@@ -2,6 +2,7 @@ import { connectGatewayAccount } from '../../gateway-connections.js';
 import { randomUUID } from 'crypto';
 
 import {
+  isValidPackageName,
   mcpServerPluginOwner,
   parseMcpServerConfig,
   validateMcpServerName,
@@ -535,6 +536,16 @@ registerResource({
       access: 'approval',
       description:
         'Add a package to a group. Requires `ncl groups restart --rebuild` to take effect. Use --id <group-id> and --apt <pkg> or --npm <pkg>.',
+      // Names reach a Dockerfile RUN line on rebuild: hold them to the same
+      // shapes install_packages does, before any approval card is made.
+      validate: (args) => {
+        for (const kind of ['apt', 'npm'] as const) {
+          const name = args[kind];
+          if (name !== undefined && !isValidPackageName(kind, name)) {
+            throw new Error(`invalid ${kind} package name ${JSON.stringify(name)}`);
+          }
+        }
+      },
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');

@@ -329,6 +329,32 @@ describe('groups config (host-only)', () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
+  it('add-package refuses a package name that is not a package name', async () => {
+    const GID = 'ag-pkg';
+    await createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    for (const args of [{ apt: 'curl; rm -rf /' }, { npm: 'left-pad && id' }, { apt: 'jq\nRUN id' }]) {
+      const resp = await dispatch(
+        { id: 'r', command: 'groups-config-add-package', args: { id: GID, ...args } },
+        { caller: 'host' },
+      );
+      expect(resp.ok).toBe(false);
+      if (!resp.ok) expect(resp.error.code).toBe('invalid-args');
+    }
+    const row = (await getContainerConfig(GID))!;
+    expect(JSON.parse(row.packages_apt)).toEqual([]);
+    expect(JSON.parse(row.packages_npm)).toEqual([]);
+
+    const ok = await dispatch(
+      { id: 'r', command: 'groups-config-add-package', args: { id: GID, apt: 'jq', npm: '@scope/pkg' } },
+      { caller: 'host' },
+    );
+    expect(ok.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.packages_apt)).toEqual(['jq']);
+    expect(JSON.parse((await getContainerConfig(GID))!.packages_npm)).toEqual(['@scope/pkg']);
+  });
+
   it('adds a mount idempotently and removes it (host caller)', async () => {
     writeAllowlist();
     const GID = 'ag-mount';

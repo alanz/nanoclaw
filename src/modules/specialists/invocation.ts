@@ -327,6 +327,21 @@ export async function endInvocationById(invocationId: string): Promise<void> {
   // (spec: TransferExpiredOnRoutedMessage*, TransferResetOnMainRecipientExit).
   const owed = taskRow == null ? await unhandledRoutedMessages(inv.session_id, inTransit) : new Set<string>();
 
+  // A main session's transfer still pending when its message was handled never
+  // reached the agent and never will: done with, like a placed one.
+  if (taskRow == null) {
+    const waiting = (await db.all(
+      "SELECT id, routed_message_id FROM container_transfers WHERE status = 'pending' AND recipient_session_id = ? AND routed_message_id IS NOT NULL",
+      inv.session_id,
+    )) as { id: string; routed_message_id: string | null }[];
+    const stillOwed = await unhandledRoutedMessages(inv.session_id, waiting);
+    for (const t of waiting.filter((w) => !stillOwed.has(w.id))) {
+      await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", t.id);
+      await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", t.id);
+      reclaimTransferStaging(t.id);
+    }
+  }
+
   for (const t of inTransit) {
     if (taskAlive || owed.has(t.id)) {
       await db.run("UPDATE transfer_files SET status = 'owned' WHERE transfer_id = ? AND status = 'placed'", t.id);

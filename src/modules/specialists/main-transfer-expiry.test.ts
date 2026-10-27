@@ -94,19 +94,21 @@ async function mainWithInvocation(): Promise<string> {
   return built!.invocationId;
 }
 
-/** The root task's files, placed into the running main container's ipc-in. */
-async function placed(invocationId: string, routedMessageId: string | null): Promise<void> {
+/** The root task's files, placed into the running main container's ipc-in (or still waiting to be). */
+async function placed(invocationId: string, routedMessageId: string | null, waiting = false): Promise<void> {
   const db = getDb();
   await db.run(
     `INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id, routed_message_id)
-     VALUES ('xfer', 'task-root', ?, 'see report', 0, 1, ?, 'in_transit', 'sess-main', ?)`,
+     VALUES ('xfer', 'task-root', ?, 'see report', 0, 1, ?, ?, 'sess-main', ?)`,
     invocationId,
     now(),
+    waiting ? 'pending' : 'in_transit',
     routedMessageId,
   );
   await db.run(
     `INSERT INTO transfer_files (id, transfer_id, original_name, host_path, status, memory_path)
-     VALUES ('tf', 'xfer', 'report.md', '/x/report.md', 'placed', NULL)`,
+     VALUES ('tf', 'xfer', 'report.md', '/x/report.md', ?, NULL)`,
+    waiting ? 'owned' : 'placed',
   );
   fs.mkdirSync(path.join(TRANSFERS_BASE_DIR, 'xfer'), { recursive: true });
 }
@@ -182,5 +184,28 @@ describe('main agent exits holding delivered files', () => {
     await endInvocationById(inv);
 
     expect(await state()).toEqual(DONE);
+  });
+
+  // A transfer can still be pending when its message is handled (its files
+  // never reached this container's ipc-in). It was then placed into the next
+  // container's ipc-in for nothing; it is done with, like a placed one.
+  it('expires a transfer still waiting to be placed once its message was handled', async () => {
+    const inv = await mainWithInvocation();
+    await placed(inv, 'msg-result', true);
+    mailbox.acked = ['msg-result'];
+
+    await endInvocationById(inv);
+
+    expect(await state()).toEqual(DONE);
+  });
+
+  it('leaves a waiting transfer whose message is still to be read', async () => {
+    const inv = await mainWithInvocation();
+    await placed(inv, 'msg-result', true);
+    mailbox.pending = ['msg-result'];
+
+    await endInvocationById(inv);
+
+    expect(await state()).toEqual(OWED);
   });
 });

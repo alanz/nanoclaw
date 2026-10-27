@@ -73,6 +73,13 @@ async function owedAWake(task: SpecialistTask & { session_id: string }): Promise
  * Recursively cancel a sub-task subtree rooted at taskId.
  * Implements SubtreeCancellationApplied from specialists.allium.
  */
+/**
+ * The failure a task gets when its container crashed again after its last
+ * allowed restart (spec: SpecialistRestartExhausted). The count is not bumped
+ * for this crash: no restart follows it.
+ */
+const RESTART_EXHAUSTED_DETAIL = 'specialist container failed and maximum restart retries were exhausted';
+
 export async function cancelSubtree(taskId: string): Promise<void> {
   const task = await getTask(taskId);
   if (!task) return;
@@ -172,7 +179,9 @@ async function sweepTask(
     const child = await getTask(task.pending_sub_task_id);
     if (child) {
       const childAge = now - Date.parse(child.dispatched_at);
-      if (childAge > SPECIALISTS_CONFIG.maxSubTaskAwaitMs) {
+      // Overdue once the await window has fully elapsed (spec: dispatched_at +
+      // max_sub_task_await <= now).
+      if (childAge >= SPECIALISTS_CONFIG.maxSubTaskAwaitMs) {
         const pendingChildId = task.pending_sub_task_id;
         if (task.restart_attempt_count < SPECIALISTS_CONFIG.maxRestartRetries) {
           // SubTaskAwaitTimedOut: retries remain → awaiting_restart.
@@ -312,9 +321,8 @@ async function sweepTask(
       const ts = new Date().toISOString();
       await updateTaskStatus(task.id, 'failed', {
         failure_kind: 'host_restart',
-        failure_detail: `container crashed after ${task.restart_attempt_count} restart attempts`,
+        failure_detail: RESTART_EXHAUSTED_DETAIL,
         closed_at: ts,
-        restart_attempt_count: newRetryCount,
         pending_sub_task_id: null,
       });
       // ChildSubtreeCancelledOnRestartExhausted
@@ -323,7 +331,7 @@ async function sweepTask(
         ...task,
         status: 'failed' as const,
         failure_kind: 'host_restart',
-        failure_detail: `container crashed after ${task.restart_attempt_count} restart attempts`,
+        failure_detail: RESTART_EXHAUSTED_DETAIL,
         closed_at: ts,
         pending_sub_task_id: null,
       };

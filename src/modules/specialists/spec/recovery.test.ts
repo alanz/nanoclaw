@@ -275,24 +275,20 @@ obligation('rule-failure.SubtreeCancellationApplied.1', async () => {
 
 // ── SpecialistRestartExhausted ────────────────────────────────────────────────
 
-divergence(
-  'rule-success.SpecialistRestartExhausted',
-  'failure_detail is "container crashed after N restart attempts", not the spec\'s fixed detail (recovery.ts:315); the code also increments restart_attempt_count on this path (recovery.ts:317), which the rule does not (not asserted)',
-  async () => {
-    await task({ id: 't-ex', status: 'running', restarts: MAX });
-    const before = Date.now();
+obligation('rule-success.SpecialistRestartExhausted', async () => {
+  await task({ id: 't-ex', status: 'running', restarts: MAX });
+  const before = Date.now();
 
-    await sweepSpecialistTasks();
+  await sweepSpecialistTasks();
 
-    const t = await get('t-ex');
-    expect(t.status).toBe('failed');
-    expect(t.failure_kind).toBe('host_restart');
-    expect(Date.parse(t.closed_at!)).toBeGreaterThanOrEqual(before - 1000);
-    // SpecialistFailureRoutedToRequester: the main requester is told.
-    expect(sentTo('sess-main').join('\n')).toContain('host_restart');
-    expect(t.failure_detail).toBe('specialist container failed and maximum restart retries were exhausted');
-  },
-);
+  const t = await get('t-ex');
+  expect(t.status).toBe('failed');
+  expect(t.failure_kind).toBe('host_restart');
+  expect(Date.parse(t.closed_at!)).toBeGreaterThanOrEqual(before - 1000);
+  // SpecialistFailureRoutedToRequester: the main requester is told.
+  expect(sentTo('sess-main').join('\n')).toContain('host_restart');
+  expect(t.failure_detail).toBe('specialist container failed and maximum restart retries were exhausted');
+});
 
 obligation('rule-failure.SpecialistRestartExhausted.1', async () => {
   // No task behind the stuck session: nothing fails, nothing is routed.

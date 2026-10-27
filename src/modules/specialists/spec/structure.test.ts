@@ -774,29 +774,25 @@ obligation('derived.SpecialistTask.is_overdue', async () => {
   expect((await fresh(done)).status).toBe('completed');
 });
 
-divergence(
-  'derived.SpecialistTask.sub_task_await_overdue',
-  'the sweep tests childAge > max_sub_task_await (recovery.ts sweepTask path 2), so a child exactly max_sub_task_await old is not overdue; the spec says (pending_sub_task.dispatched_at + max_sub_task_await) <= now',
-  async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-10-27T12:00:00.000Z'));
-    const awaitMs = SPECIALISTS_CONFIG.maxSubTaskAwaitMs;
+obligation('derived.SpecialistTask.sub_task_await_overdue', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-27T12:00:00.000Z'));
+  const awaitMs = SPECIALISTS_CONFIG.maxSubTaskAwaitMs;
 
-    const parent = await seedTask({ id: 'task-parent', specialist_group_id: 'ag-a', status: 'awaiting_sub_task' });
-    const child = await seedSub(parent, { id: 'task-child', specialist_group_id: 'ag-b', status: 'queued' });
-    await getDb().run('UPDATE specialist_tasks SET pending_sub_task_id = ? WHERE id = ?', child.id, parent.id);
+  const parent = await seedTask({ id: 'task-parent', specialist_group_id: 'ag-a', status: 'awaiting_sub_task' });
+  const child = await seedSub(parent, { id: 'task-child', specialist_group_id: 'ag-b', status: 'queued' });
+  await getDb().run('UPDATE specialist_tasks SET pending_sub_task_id = ? WHERE id = ?', child.id, parent.id);
 
-    // Just inside the window: not overdue.
-    await getDb().run('UPDATE specialist_tasks SET dispatched_at = ? WHERE id = ?', ago(awaitMs - 1), child.id);
-    await sweepSpecialistTasks();
-    expect((await fresh(parent)).status).toBe('awaiting_sub_task');
+  // Just inside the window: not overdue.
+  await getDb().run('UPDATE specialist_tasks SET dispatched_at = ? WHERE id = ?', ago(awaitMs - 1), child.id);
+  await sweepSpecialistTasks();
+  expect((await fresh(parent)).status).toBe('awaiting_sub_task');
 
-    // At the boundary: overdue, so the parent is restarted.
-    await getDb().run('UPDATE specialist_tasks SET dispatched_at = ? WHERE id = ?', ago(awaitMs), child.id);
-    await sweepSpecialistTasks();
-    expect((await fresh(parent)).status).toBe('awaiting_restart');
-  },
-);
+  // At the boundary: overdue, so the parent is restarted.
+  await getDb().run('UPDATE specialist_tasks SET dispatched_at = ? WHERE id = ?', ago(awaitMs), child.id);
+  await sweepSpecialistTasks();
+  expect((await fresh(parent)).status).toBe('awaiting_restart');
+});
 
 // ── File handover entities ───────────────────────────────────────────────────
 

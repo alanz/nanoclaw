@@ -1,0 +1,1442 @@
+[
+ {
+  "id": "surface-actor.SpecialistMcpTools",
+  "category": "surface_actor",
+  "construct": "SpecialistMcpTools",
+  "description": "Verify surface SpecialistMcpTools is accessible only to the specified actor"
+ },
+ {
+  "id": "surface-provides.SpecialistMcpTools",
+  "category": "surface_provides",
+  "construct": "SpecialistMcpTools",
+  "description": "Verify provided operations on SpecialistMcpTools appear/hide based on when conditions"
+ },
+ {
+  "id": "enum-comparable.SpecialistTaskStatus",
+  "category": "enum_comparable",
+  "construct": "SpecialistTaskStatus",
+  "description": "Verify fields typed with enum SpecialistTaskStatus are comparable"
+ },
+ {
+  "id": "enum-comparable.SpecialistFailureKind",
+  "category": "enum_comparable",
+  "construct": "SpecialistFailureKind",
+  "description": "Verify fields typed with enum SpecialistFailureKind are comparable"
+ },
+ {
+  "id": "enum-comparable.IpcMountStatus",
+  "category": "enum_comparable",
+  "construct": "IpcMountStatus",
+  "description": "Verify fields typed with enum IpcMountStatus are comparable"
+ },
+ {
+  "id": "enum-comparable.TransferStatus",
+  "category": "enum_comparable",
+  "construct": "TransferStatus",
+  "description": "Verify fields typed with enum TransferStatus are comparable"
+ },
+ {
+  "id": "enum-comparable.TransferFileStatus",
+  "category": "enum_comparable",
+  "construct": "TransferFileStatus",
+  "description": "Verify fields typed with enum TransferFileStatus are comparable"
+ },
+ {
+  "id": "value-equality.TaskFailure",
+  "category": "value_equality",
+  "construct": "TaskFailure",
+  "description": "Verify value type TaskFailure has structural equality"
+ },
+ {
+  "id": "entity-fields.TaskFailure",
+  "category": "entity_fields",
+  "construct": "TaskFailure",
+  "description": "Verify all declared fields on TaskFailure are present with correct types"
+ },
+ {
+  "id": "value-equality.Invocation",
+  "category": "value_equality",
+  "construct": "Invocation",
+  "description": "Verify value type Invocation has structural equality"
+ },
+ {
+  "id": "entity-fields.Invocation",
+  "category": "entity_fields",
+  "construct": "Invocation",
+  "description": "Verify all declared fields on Invocation are present with correct types"
+ },
+ {
+  "id": "config-default.max_specialist_depth",
+  "category": "config_default",
+  "construct": "config.max_specialist_depth",
+  "description": "Verify config parameter max_specialist_depth has its declared default"
+ },
+ {
+  "id": "config-default.max_chain_delegations",
+  "category": "config_default",
+  "construct": "config.max_chain_delegations",
+  "description": "Verify config parameter max_chain_delegations has its declared default"
+ },
+ {
+  "id": "config-default.max_same_type_dispatches",
+  "category": "config_default",
+  "construct": "config.max_same_type_dispatches",
+  "description": "Verify config parameter max_same_type_dispatches has its declared default"
+ },
+ {
+  "id": "config-default.max_task_duration",
+  "category": "config_default",
+  "construct": "config.max_task_duration",
+  "description": "Verify config parameter max_task_duration has its declared default"
+ },
+ {
+  "id": "config-default.max_sub_task_await",
+  "category": "config_default",
+  "construct": "config.max_sub_task_await",
+  "description": "Verify config parameter max_sub_task_await has its declared default"
+ },
+ {
+  "id": "config-default.max_restart_retries",
+  "category": "config_default",
+  "construct": "config.max_restart_retries",
+  "description": "Verify config parameter max_restart_retries has its declared default"
+ },
+ {
+  "id": "config-default.default_last_turn_sub_notice",
+  "category": "config_default",
+  "construct": "config.default_last_turn_sub_notice",
+  "description": "Verify config parameter default_last_turn_sub_notice has its declared default"
+ },
+ {
+  "id": "config-default.default_last_turn_parent_notice",
+  "category": "config_default",
+  "construct": "config.default_last_turn_parent_notice",
+  "description": "Verify config parameter default_last_turn_parent_notice has its declared default"
+ },
+ {
+  "id": "config-default.ipc_out_container_path",
+  "category": "config_default",
+  "construct": "config.ipc_out_container_path",
+  "description": "Verify config parameter ipc_out_container_path has its declared default"
+ },
+ {
+  "id": "config-default.ipc_in_container_path",
+  "category": "config_default",
+  "construct": "config.ipc_in_container_path",
+  "description": "Verify config parameter ipc_in_container_path has its declared default"
+ },
+ {
+  "id": "config-default.memory_reports_subpath",
+  "category": "config_default",
+  "construct": "config.memory_reports_subpath",
+  "description": "Verify config parameter memory_reports_subpath has its declared default"
+ },
+ {
+  "id": "when-presence.SpecialistTask.pending_sub_task",
+  "category": "when_presence",
+  "construct": "SpecialistTask.pending_sub_task",
+  "description": "Verify SpecialistTask.pending_sub_task is present when status in {awaiting_sub_task} and absent otherwise"
+ },
+ {
+  "id": "when-presence.SpecialistTask.result",
+  "category": "when_presence",
+  "construct": "SpecialistTask.result",
+  "description": "Verify SpecialistTask.result is present when status in {completed} and absent otherwise"
+ },
+ {
+  "id": "when-presence.SpecialistTask.committed_files",
+  "category": "when_presence",
+  "construct": "SpecialistTask.committed_files",
+  "description": "Verify SpecialistTask.committed_files is present when status in {completed} and absent otherwise"
+ },
+ {
+  "id": "when-presence.SpecialistTask.failure",
+  "category": "when_presence",
+  "construct": "SpecialistTask.failure",
+  "description": "Verify SpecialistTask.failure is present when status in {failed} and absent otherwise"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.queued.running",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition queued -> running on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.queued.failed",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition queued -> failed on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.running.awaiting_sub_task",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition running -> awaiting_sub_task on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.running.awaiting_restart",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition running -> awaiting_restart on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.running.completed",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition running -> completed on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.running.failed",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition running -> failed on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.awaiting_sub_task.awaiting_restart",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition awaiting_sub_task -> awaiting_restart on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.awaiting_sub_task.running",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition awaiting_sub_task -> running on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.awaiting_sub_task.failed",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition awaiting_sub_task -> failed on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.awaiting_restart.running",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition awaiting_restart -> running on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.SpecialistTask.awaiting_restart.failed",
+  "category": "transition_edge",
+  "construct": "SpecialistTask.status",
+  "description": "Verify transition awaiting_restart -> failed on SpecialistTask.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-rejected.SpecialistTask.status",
+  "category": "transition_rejected",
+  "construct": "SpecialistTask.status",
+  "description": "Verify undeclared transitions on SpecialistTask.status are rejected"
+ },
+ {
+  "id": "transition-terminal.SpecialistTask.status",
+  "category": "transition_terminal",
+  "construct": "SpecialistTask.status",
+  "description": "Verify terminal states on SpecialistTask.status have no outbound transitions"
+ },
+ {
+  "id": "invariant.SpecialistTask.ExactlyOneRequester",
+  "category": "invariant",
+  "construct": "SpecialistTask.ExactlyOneRequester",
+  "description": "Verify invariant ExactlyOneRequester holds after any field mutation on SpecialistTask"
+ },
+ {
+  "id": "invariant.SpecialistTask.DepthMatchesAncestorCount",
+  "category": "invariant",
+  "construct": "SpecialistTask.DepthMatchesAncestorCount",
+  "description": "Verify invariant DepthMatchesAncestorCount holds after any field mutation on SpecialistTask"
+ },
+ {
+  "id": "invariant.SpecialistTask.SpecialistGroupMustBeSpecialist",
+  "category": "invariant",
+  "construct": "SpecialistTask.SpecialistGroupMustBeSpecialist",
+  "description": "Verify invariant SpecialistGroupMustBeSpecialist holds after any field mutation on SpecialistTask"
+ },
+ {
+  "id": "entity-fields.SpecialistTask",
+  "category": "entity_fields",
+  "construct": "SpecialistTask",
+  "description": "Verify all declared fields on SpecialistTask are present with correct types"
+ },
+ {
+  "id": "entity-optional.SpecialistTask.requester_group",
+  "category": "entity_optional",
+  "construct": "SpecialistTask.requester_group",
+  "description": "Verify optional field SpecialistTask.requester_group accepts null and non-null values"
+ },
+ {
+  "id": "entity-optional.SpecialistTask.requester_task",
+  "category": "entity_optional",
+  "construct": "SpecialistTask.requester_task",
+  "description": "Verify optional field SpecialistTask.requester_task accepts null and non-null values"
+ },
+ {
+  "id": "entity-optional.SpecialistTask.closed_at",
+  "category": "entity_optional",
+  "construct": "SpecialistTask.closed_at",
+  "description": "Verify optional field SpecialistTask.closed_at accepts null and non-null values"
+ },
+ {
+  "id": "entity-optional.SpecialistTask.committed_files",
+  "category": "entity_optional",
+  "construct": "SpecialistTask.committed_files",
+  "description": "Verify optional field SpecialistTask.committed_files accepts null and non-null values"
+ },
+ {
+  "id": "derived.SpecialistTask.is_overdue",
+  "category": "derived",
+  "construct": "SpecialistTask.is_overdue",
+  "description": "Verify derived value SpecialistTask.is_overdue computes correctly"
+ },
+ {
+  "id": "derived.SpecialistTask.sub_task_await_overdue",
+  "category": "derived",
+  "construct": "SpecialistTask.sub_task_await_overdue",
+  "description": "Verify derived value SpecialistTask.sub_task_await_overdue computes correctly"
+ },
+ {
+  "id": "transition-edge.IpcOutMount.active.cleared",
+  "category": "transition_edge",
+  "construct": "IpcOutMount.status",
+  "description": "Verify transition active -> cleared on IpcOutMount.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-rejected.IpcOutMount.status",
+  "category": "transition_rejected",
+  "construct": "IpcOutMount.status",
+  "description": "Verify undeclared transitions on IpcOutMount.status are rejected"
+ },
+ {
+  "id": "transition-terminal.IpcOutMount.status",
+  "category": "transition_terminal",
+  "construct": "IpcOutMount.status",
+  "description": "Verify terminal states on IpcOutMount.status have no outbound transitions"
+ },
+ {
+  "id": "entity-fields.IpcOutMount",
+  "category": "entity_fields",
+  "construct": "IpcOutMount",
+  "description": "Verify all declared fields on IpcOutMount are present with correct types"
+ },
+ {
+  "id": "transition-edge.IpcInMount.active.cleared",
+  "category": "transition_edge",
+  "construct": "IpcInMount.status",
+  "description": "Verify transition active -> cleared on IpcInMount.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-rejected.IpcInMount.status",
+  "category": "transition_rejected",
+  "construct": "IpcInMount.status",
+  "description": "Verify undeclared transitions on IpcInMount.status are rejected"
+ },
+ {
+  "id": "transition-terminal.IpcInMount.status",
+  "category": "transition_terminal",
+  "construct": "IpcInMount.status",
+  "description": "Verify terminal states on IpcInMount.status have no outbound transitions"
+ },
+ {
+  "id": "entity-fields.IpcInMount",
+  "category": "entity_fields",
+  "construct": "IpcInMount",
+  "description": "Verify all declared fields on IpcInMount are present with correct types"
+ },
+ {
+  "id": "transition-edge.ContainerTransfer.pending.in_transit",
+  "category": "transition_edge",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify transition pending -> in_transit on ContainerTransfer.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.ContainerTransfer.pending.committed",
+  "category": "transition_edge",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify transition pending -> committed on ContainerTransfer.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.ContainerTransfer.pending.expired",
+  "category": "transition_edge",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify transition pending -> expired on ContainerTransfer.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.ContainerTransfer.in_transit.pending",
+  "category": "transition_edge",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify transition in_transit -> pending on ContainerTransfer.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.ContainerTransfer.in_transit.expired",
+  "category": "transition_edge",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify transition in_transit -> expired on ContainerTransfer.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.ContainerTransfer.committed.expired",
+  "category": "transition_edge",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify transition committed -> expired on ContainerTransfer.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-rejected.ContainerTransfer.status",
+  "category": "transition_rejected",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify undeclared transitions on ContainerTransfer.status are rejected"
+ },
+ {
+  "id": "transition-terminal.ContainerTransfer.status",
+  "category": "transition_terminal",
+  "construct": "ContainerTransfer.status",
+  "description": "Verify terminal states on ContainerTransfer.status have no outbound transitions"
+ },
+ {
+  "id": "entity-fields.ContainerTransfer",
+  "category": "entity_fields",
+  "construct": "ContainerTransfer",
+  "description": "Verify all declared fields on ContainerTransfer are present with correct types"
+ },
+ {
+  "id": "entity-optional.ContainerTransfer.routed_message",
+  "category": "entity_optional",
+  "construct": "ContainerTransfer.routed_message",
+  "description": "Verify optional field ContainerTransfer.routed_message accepts null and non-null values"
+ },
+ {
+  "id": "entity-relationship.ContainerTransfer.files",
+  "category": "entity_relationship",
+  "construct": "ContainerTransfer.files",
+  "description": "Verify relationship ContainerTransfer.files navigates to the correct related entities"
+ },
+ {
+  "id": "transition-edge.TransferFile.owned.placed",
+  "category": "transition_edge",
+  "construct": "TransferFile.status",
+  "description": "Verify transition owned -> placed on TransferFile.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.TransferFile.owned.expired",
+  "category": "transition_edge",
+  "construct": "TransferFile.status",
+  "description": "Verify transition owned -> expired on TransferFile.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.TransferFile.placed.owned",
+  "category": "transition_edge",
+  "construct": "TransferFile.status",
+  "description": "Verify transition placed -> owned on TransferFile.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-edge.TransferFile.placed.expired",
+  "category": "transition_edge",
+  "construct": "TransferFile.status",
+  "description": "Verify transition placed -> expired on TransferFile.status is reachable via a witnessing rule"
+ },
+ {
+  "id": "transition-rejected.TransferFile.status",
+  "category": "transition_rejected",
+  "construct": "TransferFile.status",
+  "description": "Verify undeclared transitions on TransferFile.status are rejected"
+ },
+ {
+  "id": "transition-terminal.TransferFile.status",
+  "category": "transition_terminal",
+  "construct": "TransferFile.status",
+  "description": "Verify terminal states on TransferFile.status have no outbound transitions"
+ },
+ {
+  "id": "entity-fields.TransferFile",
+  "category": "entity_fields",
+  "construct": "TransferFile",
+  "description": "Verify all declared fields on TransferFile are present with correct types"
+ },
+ {
+  "id": "entity-optional.TransferFile.memory_path",
+  "category": "entity_optional",
+  "construct": "TransferFile.memory_path",
+  "description": "Verify optional field TransferFile.memory_path accepts null and non-null values"
+ },
+ {
+  "id": "rule-success.MainGroupDispatchesSpecialist",
+  "category": "rule_success",
+  "construct": "MainGroupDispatchesSpecialist",
+  "description": "Verify rule MainGroupDispatchesSpecialist succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.MainGroupDispatchesSpecialist.1",
+  "category": "rule_failure",
+  "construct": "MainGroupDispatchesSpecialist",
+  "description": "Verify rule MainGroupDispatchesSpecialist is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MainGroupDispatchesSpecialist.2",
+  "category": "rule_failure",
+  "construct": "MainGroupDispatchesSpecialist",
+  "description": "Verify rule MainGroupDispatchesSpecialist is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MainGroupDispatchesSpecialist.3",
+  "category": "rule_failure",
+  "construct": "MainGroupDispatchesSpecialist",
+  "description": "Verify rule MainGroupDispatchesSpecialist is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MainGroupDispatchesSpecialist.4",
+  "category": "rule_failure",
+  "construct": "MainGroupDispatchesSpecialist",
+  "description": "Verify rule MainGroupDispatchesSpecialist is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-entity-creation.MainGroupDispatchesSpecialist.1",
+  "category": "rule_entity_creation",
+  "construct": "MainGroupDispatchesSpecialist",
+  "description": "Verify entity creation in rule MainGroupDispatchesSpecialist ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.SpecialistTaskStarted",
+  "category": "rule_success",
+  "construct": "SpecialistTaskStarted",
+  "description": "Verify rule SpecialistTaskStarted succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistTaskStarted.1",
+  "category": "rule_failure",
+  "construct": "SpecialistTaskStarted",
+  "description": "Verify rule SpecialistTaskStarted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistBootFailed",
+  "category": "rule_success",
+  "construct": "SpecialistBootFailed",
+  "description": "Verify rule SpecialistBootFailed succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistBootFailed.1",
+  "category": "rule_failure",
+  "construct": "SpecialistBootFailed",
+  "description": "Verify rule SpecialistBootFailed is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistDispatchesSubTask",
+  "category": "rule_success",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.1",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.2",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.3",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.4",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.5",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.6",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.7",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.8",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.9",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.10",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDispatchesSubTask.11",
+  "category": "rule_failure",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify rule SpecialistDispatchesSubTask is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-entity-creation.SpecialistDispatchesSubTask.1",
+  "category": "rule_entity_creation",
+  "construct": "SpecialistDispatchesSubTask",
+  "description": "Verify entity creation in rule SpecialistDispatchesSubTask ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.SubTaskRejectedDepth",
+  "category": "rule_success",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.1",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.2",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.3",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.4",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.5",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.6",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.7",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedDepth.8",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify rule SubTaskRejectedDepth is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-entity-creation.SubTaskRejectedDepth.1",
+  "category": "rule_entity_creation",
+  "construct": "SubTaskRejectedDepth",
+  "description": "Verify entity creation in rule SubTaskRejectedDepth ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.SubTaskRejectedCount",
+  "category": "rule_success",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.1",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.2",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.3",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.4",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.5",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.6",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.7",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.8",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedCount.9",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify rule SubTaskRejectedCount is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-entity-creation.SubTaskRejectedCount.1",
+  "category": "rule_entity_creation",
+  "construct": "SubTaskRejectedCount",
+  "description": "Verify entity creation in rule SubTaskRejectedCount ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.SubTaskRejectedSameTypeLimit",
+  "category": "rule_success",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.1",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.2",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.3",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.4",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.5",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.6",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.7",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.8",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.9",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SubTaskRejectedSameTypeLimit.10",
+  "category": "rule_failure",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify rule SubTaskRejectedSameTypeLimit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-entity-creation.SubTaskRejectedSameTypeLimit.1",
+  "category": "rule_entity_creation",
+  "construct": "SubTaskRejectedSameTypeLimit",
+  "description": "Verify entity creation in rule SubTaskRejectedSameTypeLimit ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.MemoryProviderDispatched",
+  "category": "rule_success",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.1",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.2",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.3",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.4",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.5",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.6",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.7",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.MemoryProviderDispatched.8",
+  "category": "rule_failure",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify rule MemoryProviderDispatched is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-entity-creation.MemoryProviderDispatched.1",
+  "category": "rule_entity_creation",
+  "construct": "MemoryProviderDispatched",
+  "description": "Verify entity creation in rule MemoryProviderDispatched ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.SpecialistDeliveredResult",
+  "category": "rule_success",
+  "construct": "SpecialistDeliveredResult",
+  "description": "Verify rule SpecialistDeliveredResult succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistDeliveredResult.1",
+  "category": "rule_failure",
+  "construct": "SpecialistDeliveredResult",
+  "description": "Verify rule SpecialistDeliveredResult is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistDeliveredResult.2",
+  "category": "rule_failure",
+  "construct": "SpecialistDeliveredResult",
+  "description": "Verify rule SpecialistDeliveredResult is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.TransferFilesOwned",
+  "category": "rule_success",
+  "construct": "TransferFilesOwned",
+  "description": "Verify rule TransferFilesOwned succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-entity-creation.TransferFilesOwned.1",
+  "category": "rule_entity_creation",
+  "construct": "TransferFilesOwned",
+  "description": "Verify entity creation in rule TransferFilesOwned ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.SpecialistResultRoutedToMain",
+  "category": "rule_success",
+  "construct": "SpecialistResultRoutedToMain",
+  "description": "Verify rule SpecialistResultRoutedToMain succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistResultRoutedToMain.1",
+  "category": "rule_failure",
+  "construct": "SpecialistResultRoutedToMain",
+  "description": "Verify rule SpecialistResultRoutedToMain is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistResultRoutedToMain.2",
+  "category": "rule_failure",
+  "construct": "SpecialistResultRoutedToMain",
+  "description": "Verify rule SpecialistResultRoutedToMain is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistResultRoutedToParent",
+  "category": "rule_success",
+  "construct": "SpecialistResultRoutedToParent",
+  "description": "Verify rule SpecialistResultRoutedToParent succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistResultRoutedToParent.1",
+  "category": "rule_failure",
+  "construct": "SpecialistResultRoutedToParent",
+  "description": "Verify rule SpecialistResultRoutedToParent is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistResultRoutedToParent.2",
+  "category": "rule_failure",
+  "construct": "SpecialistResultRoutedToParent",
+  "description": "Verify rule SpecialistResultRoutedToParent is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistResultRoutedToParent.3",
+  "category": "rule_failure",
+  "construct": "SpecialistResultRoutedToParent",
+  "description": "Verify rule SpecialistResultRoutedToParent is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-entity-creation.SpecialistResultRoutedToParent.1",
+  "category": "rule_entity_creation",
+  "construct": "SpecialistResultRoutedToParent",
+  "description": "Verify entity creation in rule SpecialistResultRoutedToParent ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.SpecialistFailureRoutedToRequester",
+  "category": "rule_success",
+  "construct": "SpecialistFailureRoutedToRequester",
+  "description": "Verify rule SpecialistFailureRoutedToRequester succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.SpecialistTaskTimedOut",
+  "category": "rule_success",
+  "construct": "SpecialistTaskTimedOut",
+  "description": "Verify rule SpecialistTaskTimedOut succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistTaskTimedOut.1",
+  "category": "rule_failure",
+  "construct": "SpecialistTaskTimedOut",
+  "description": "Verify rule SpecialistTaskTimedOut is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.InvocationStarted",
+  "category": "rule_success",
+  "construct": "InvocationStarted",
+  "description": "Verify rule InvocationStarted succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-entity-creation.InvocationStarted.1",
+  "category": "rule_entity_creation",
+  "construct": "InvocationStarted",
+  "description": "Verify entity creation in rule InvocationStarted ensures clause produces the specified fields"
+ },
+ {
+  "id": "rule-success.OrphanInvocationEnded",
+  "category": "rule_success",
+  "construct": "OrphanInvocationEnded",
+  "description": "Verify rule OrphanInvocationEnded succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.OrphanInvocationEnded.1",
+  "category": "rule_failure",
+  "construct": "OrphanInvocationEnded",
+  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.OrphanInvocationEnded.2",
+  "category": "rule_failure",
+  "construct": "OrphanInvocationEnded",
+  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.OrphanInvocationEnded.3",
+  "category": "rule_failure",
+  "construct": "OrphanInvocationEnded",
+  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.OrphanInvocationEnded.4",
+  "category": "rule_failure",
+  "construct": "OrphanInvocationEnded",
+  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.OrphanInvocationEnded.5",
+  "category": "rule_failure",
+  "construct": "OrphanInvocationEnded",
+  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.OrphanInvocationEnded.6",
+  "category": "rule_failure",
+  "construct": "OrphanInvocationEnded",
+  "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.TransferFilesPlaced",
+  "category": "rule_success",
+  "construct": "TransferFilesPlaced",
+  "description": "Verify rule TransferFilesPlaced succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.TransferMovedToInTransit",
+  "category": "rule_success",
+  "construct": "TransferMovedToInTransit",
+  "description": "Verify rule TransferMovedToInTransit succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.TransferPlacedIntoLiveIpcIn",
+  "category": "rule_success",
+  "construct": "TransferPlacedIntoLiveIpcIn",
+  "description": "Verify rule TransferPlacedIntoLiveIpcIn succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.TransferPlacedIntoLiveIpcIn.1",
+  "category": "rule_failure",
+  "construct": "TransferPlacedIntoLiveIpcIn",
+  "description": "Verify rule TransferPlacedIntoLiveIpcIn is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.TransferPlacedIntoLiveIpcIn.2",
+  "category": "rule_failure",
+  "construct": "TransferPlacedIntoLiveIpcIn",
+  "description": "Verify rule TransferPlacedIntoLiveIpcIn is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.TransferPlacedIntoLiveIpcIn.3",
+  "category": "rule_failure",
+  "construct": "TransferPlacedIntoLiveIpcIn",
+  "description": "Verify rule TransferPlacedIntoLiveIpcIn is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.TransferPlacedIntoLiveIpcIn.4",
+  "category": "rule_failure",
+  "construct": "TransferPlacedIntoLiveIpcIn",
+  "description": "Verify rule TransferPlacedIntoLiveIpcIn is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.TransferPlacedIntoLiveIpcIn.5",
+  "category": "rule_failure",
+  "construct": "TransferPlacedIntoLiveIpcIn",
+  "description": "Verify rule TransferPlacedIntoLiveIpcIn is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.InvocationEnded",
+  "category": "rule_success",
+  "construct": "InvocationEnded",
+  "description": "Verify rule InvocationEnded succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.InvocationEnded.1",
+  "category": "rule_failure",
+  "construct": "InvocationEnded",
+  "description": "Verify rule InvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEnded.2",
+  "category": "rule_failure",
+  "construct": "InvocationEnded",
+  "description": "Verify rule InvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEnded.3",
+  "category": "rule_failure",
+  "construct": "InvocationEnded",
+  "description": "Verify rule InvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEnded.4",
+  "category": "rule_failure",
+  "construct": "InvocationEnded",
+  "description": "Verify rule InvocationEnded is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistTaskCompletedTerminal",
+  "category": "rule_success",
+  "construct": "SpecialistTaskCompletedTerminal",
+  "description": "Verify rule SpecialistTaskCompletedTerminal succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.SpecialistTaskFailedTerminal",
+  "category": "rule_success",
+  "construct": "SpecialistTaskFailedTerminal",
+  "description": "Verify rule SpecialistTaskFailedTerminal succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.InvocationEndedOnTaskTerminal",
+  "category": "rule_success",
+  "construct": "InvocationEndedOnTaskTerminal",
+  "description": "Verify rule InvocationEndedOnTaskTerminal succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.InvocationEndedOnTaskTerminal.1",
+  "category": "rule_failure",
+  "construct": "InvocationEndedOnTaskTerminal",
+  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEndedOnTaskTerminal.2",
+  "category": "rule_failure",
+  "construct": "InvocationEndedOnTaskTerminal",
+  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEndedOnTaskTerminal.3",
+  "category": "rule_failure",
+  "construct": "InvocationEndedOnTaskTerminal",
+  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEndedOnTaskTerminal.4",
+  "category": "rule_failure",
+  "construct": "InvocationEndedOnTaskTerminal",
+  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEndedOnTaskTerminal.5",
+  "category": "rule_failure",
+  "construct": "InvocationEndedOnTaskTerminal",
+  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.InvocationEndedOnTaskTerminal.6",
+  "category": "rule_failure",
+  "construct": "InvocationEndedOnTaskTerminal",
+  "description": "Verify rule InvocationEndedOnTaskTerminal is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistTaskSessionClosed",
+  "category": "rule_success",
+  "construct": "SpecialistTaskSessionClosed",
+  "description": "Verify rule SpecialistTaskSessionClosed succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistTaskSessionClosed.1",
+  "category": "rule_failure",
+  "construct": "SpecialistTaskSessionClosed",
+  "description": "Verify rule SpecialistTaskSessionClosed is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistTaskSessionClosed.2",
+  "category": "rule_failure",
+  "construct": "SpecialistTaskSessionClosed",
+  "description": "Verify rule SpecialistTaskSessionClosed is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.TransferExpiredOnRequesterTerminal",
+  "category": "rule_success",
+  "construct": "TransferExpiredOnRequesterTerminal",
+  "description": "Verify rule TransferExpiredOnRequesterTerminal succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.TransferExpiredOnRequesterFailed",
+  "category": "rule_success",
+  "construct": "TransferExpiredOnRequesterFailed",
+  "description": "Verify rule TransferExpiredOnRequesterFailed succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.TransferExpiredOnRoutedMessageCompleted",
+  "category": "rule_success",
+  "construct": "TransferExpiredOnRoutedMessageCompleted",
+  "description": "Verify rule TransferExpiredOnRoutedMessageCompleted succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.TransferExpiredOnRoutedMessageFailed",
+  "category": "rule_success",
+  "construct": "TransferExpiredOnRoutedMessageFailed",
+  "description": "Verify rule TransferExpiredOnRoutedMessageFailed succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.TransferResetOnRecipientCrash",
+  "category": "rule_success",
+  "construct": "TransferResetOnRecipientCrash",
+  "description": "Verify rule TransferResetOnRecipientCrash succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.TransferResetOnRecipientCrash.1",
+  "category": "rule_failure",
+  "construct": "TransferResetOnRecipientCrash",
+  "description": "Verify rule TransferResetOnRecipientCrash is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.TransferResetOnRecipientCrash.2",
+  "category": "rule_failure",
+  "construct": "TransferResetOnRecipientCrash",
+  "description": "Verify rule TransferResetOnRecipientCrash is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.TransferResetOnMainRecipientExit",
+  "category": "rule_success",
+  "construct": "TransferResetOnMainRecipientExit",
+  "description": "Verify rule TransferResetOnMainRecipientExit succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.TransferResetOnMainRecipientExit.1",
+  "category": "rule_failure",
+  "construct": "TransferResetOnMainRecipientExit",
+  "description": "Verify rule TransferResetOnMainRecipientExit is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.PendingTransferExpiredOnDeliveringTaskFailed",
+  "category": "rule_success",
+  "construct": "PendingTransferExpiredOnDeliveringTaskFailed",
+  "description": "Verify rule PendingTransferExpiredOnDeliveringTaskFailed succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-success.UnroutedTransferExpired",
+  "category": "rule_success",
+  "construct": "UnroutedTransferExpired",
+  "description": "Verify rule UnroutedTransferExpired succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.UnroutedTransferExpired.1",
+  "category": "rule_failure",
+  "construct": "UnroutedTransferExpired",
+  "description": "Verify rule UnroutedTransferExpired is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.UnroutedTransferExpired.2",
+  "category": "rule_failure",
+  "construct": "UnroutedTransferExpired",
+  "description": "Verify rule UnroutedTransferExpired is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.UnroutedTransferExpired.3",
+  "category": "rule_failure",
+  "construct": "UnroutedTransferExpired",
+  "description": "Verify rule UnroutedTransferExpired is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistContainerCrashed",
+  "category": "rule_success",
+  "construct": "SpecialistContainerCrashed",
+  "description": "Verify rule SpecialistContainerCrashed succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistContainerCrashed.1",
+  "category": "rule_failure",
+  "construct": "SpecialistContainerCrashed",
+  "description": "Verify rule SpecialistContainerCrashed is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistContainerCrashed.2",
+  "category": "rule_failure",
+  "construct": "SpecialistContainerCrashed",
+  "description": "Verify rule SpecialistContainerCrashed is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistContainerCrashed.3",
+  "category": "rule_failure",
+  "construct": "SpecialistContainerCrashed",
+  "description": "Verify rule SpecialistContainerCrashed is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.ChildSubtreeCancelledOnParentCrash",
+  "category": "rule_success",
+  "construct": "ChildSubtreeCancelledOnParentCrash",
+  "description": "Verify rule ChildSubtreeCancelledOnParentCrash succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.ChildSubtreeCancelledOnParentCrash.1",
+  "category": "rule_failure",
+  "construct": "ChildSubtreeCancelledOnParentCrash",
+  "description": "Verify rule ChildSubtreeCancelledOnParentCrash is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SubtreeCancellationApplied",
+  "category": "rule_success",
+  "construct": "SubtreeCancellationApplied",
+  "description": "Verify rule SubtreeCancellationApplied succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SubtreeCancellationApplied.1",
+  "category": "rule_failure",
+  "construct": "SubtreeCancellationApplied",
+  "description": "Verify rule SubtreeCancellationApplied is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistRestartExhausted",
+  "category": "rule_success",
+  "construct": "SpecialistRestartExhausted",
+  "description": "Verify rule SpecialistRestartExhausted succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SpecialistRestartExhausted.1",
+  "category": "rule_failure",
+  "construct": "SpecialistRestartExhausted",
+  "description": "Verify rule SpecialistRestartExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistRestartExhausted.2",
+  "category": "rule_failure",
+  "construct": "SpecialistRestartExhausted",
+  "description": "Verify rule SpecialistRestartExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.SpecialistRestartExhausted.3",
+  "category": "rule_failure",
+  "construct": "SpecialistRestartExhausted",
+  "description": "Verify rule SpecialistRestartExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.ChildSubtreeCancelledOnRestartExhausted",
+  "category": "rule_success",
+  "construct": "ChildSubtreeCancelledOnRestartExhausted",
+  "description": "Verify rule ChildSubtreeCancelledOnRestartExhausted succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.ChildSubtreeCancelledOnRestartExhausted.1",
+  "category": "rule_failure",
+  "construct": "ChildSubtreeCancelledOnRestartExhausted",
+  "description": "Verify rule ChildSubtreeCancelledOnRestartExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.ChildSubtreeCancelledOnRestartExhausted.2",
+  "category": "rule_failure",
+  "construct": "ChildSubtreeCancelledOnRestartExhausted",
+  "description": "Verify rule ChildSubtreeCancelledOnRestartExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SubTaskAwaitTimedOut",
+  "category": "rule_success",
+  "construct": "SubTaskAwaitTimedOut",
+  "description": "Verify rule SubTaskAwaitTimedOut succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SubTaskAwaitTimedOut.1",
+  "category": "rule_failure",
+  "construct": "SubTaskAwaitTimedOut",
+  "description": "Verify rule SubTaskAwaitTimedOut is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SubTaskAwaitExhausted",
+  "category": "rule_success",
+  "construct": "SubTaskAwaitExhausted",
+  "description": "Verify rule SubTaskAwaitExhausted succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.SubTaskAwaitExhausted.1",
+  "category": "rule_failure",
+  "construct": "SubTaskAwaitExhausted",
+  "description": "Verify rule SubTaskAwaitExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.ChildSubtreeCancelledOnSubTaskAwaitExhausted",
+  "category": "rule_success",
+  "construct": "ChildSubtreeCancelledOnSubTaskAwaitExhausted",
+  "description": "Verify rule ChildSubtreeCancelledOnSubTaskAwaitExhausted succeeds when all preconditions are met"
+ },
+ {
+  "id": "rule-failure.ChildSubtreeCancelledOnSubTaskAwaitExhausted.1",
+  "category": "rule_failure",
+  "construct": "ChildSubtreeCancelledOnSubTaskAwaitExhausted",
+  "description": "Verify rule ChildSubtreeCancelledOnSubTaskAwaitExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-failure.ChildSubtreeCancelledOnSubTaskAwaitExhausted.2",
+  "category": "rule_failure",
+  "construct": "ChildSubtreeCancelledOnSubTaskAwaitExhausted",
+  "description": "Verify rule ChildSubtreeCancelledOnSubTaskAwaitExhausted is rejected when requires clause fails"
+ },
+ {
+  "id": "rule-success.SpecialistTasksFailedOnGroupDeleted",
+  "category": "rule_success",
+  "construct": "SpecialistTasksFailedOnGroupDeleted",
+  "description": "Verify rule SpecialistTasksFailedOnGroupDeleted succeeds when all preconditions are met"
+ },
+ {
+  "id": "invariant.SpecialistDispatchMainGroupOnly",
+  "category": "invariant",
+  "construct": "SpecialistDispatchMainGroupOnly",
+  "description": "Verify invariant SpecialistDispatchMainGroupOnly holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.MemoryProviderDoesNotDelegate",
+  "category": "invariant",
+  "construct": "MemoryProviderDoesNotDelegate",
+  "description": "Verify invariant MemoryProviderDoesNotDelegate holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.TaskDepthBounded",
+  "category": "invariant",
+  "construct": "TaskDepthBounded",
+  "description": "Verify invariant TaskDepthBounded holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.ClosedAtPresentWhenTerminal",
+  "category": "invariant",
+  "construct": "ClosedAtPresentWhenTerminal",
+  "description": "Verify invariant ClosedAtPresentWhenTerminal holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.RunningTaskIsLeaf",
+  "category": "invariant",
+  "construct": "RunningTaskIsLeaf",
+  "description": "Verify invariant RunningTaskIsLeaf holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.CommitAndPlaceMutuallyExclusive",
+  "category": "invariant",
+  "construct": "CommitAndPlaceMutuallyExclusive",
+  "description": "Verify invariant CommitAndPlaceMutuallyExclusive holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.IpcInPathsUniquePerTransfer",
+  "category": "invariant",
+  "construct": "IpcInPathsUniquePerTransfer",
+  "description": "Verify invariant IpcInPathsUniquePerTransfer holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.TransferAndFilesInSync",
+  "category": "invariant",
+  "construct": "TransferAndFilesInSync",
+  "description": "Verify invariant TransferAndFilesInSync holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.AtMostOneActiveInvocationPerSession",
+  "category": "invariant",
+  "construct": "AtMostOneActiveInvocationPerSession",
+  "description": "Verify invariant AtMostOneActiveInvocationPerSession holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.QueuedTaskHasNoRestartAttempts",
+  "category": "invariant",
+  "construct": "QueuedTaskHasNoRestartAttempts",
+  "description": "Verify invariant QueuedTaskHasNoRestartAttempts holds after every state-changing rule that touches constrained entities"
+ },
+ {
+  "id": "invariant.TerminalTaskHasClosedSession",
+  "category": "invariant",
+  "construct": "TerminalTaskHasClosedSession",
+  "description": "Verify invariant TerminalTaskHasClosedSession holds after every state-changing rule that touches constrained entities"
+ }
+]

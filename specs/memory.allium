@@ -45,14 +45,35 @@
 --
 -- Specialist exclusion: memory indexing, watching and search are disabled for specialist
 -- agent groups (groups with an associated identity/Specialist row — see identity.allium).
--- Specialist containers do not mount the group's memory/ directory, do not run a watcher,
--- and do not register the memory MCP tools. The rules and surface in this module gate on
--- "not a specialist" via `group.specialist = null`. Specialists that need memory access
--- delegate to a memory-provider specialist via the agent-to-agent query_memory tool.
+-- The host does not begin indexing any group until every module that excludes groups
+-- from memory has loaded what it excludes, so a specialist group is never indexed
+-- because the host started before it knew the group was a specialist.
+-- A specialist group has no index of its own: nothing in its folder is watched or indexed.
+-- Read access to memory is by the session, not the group: memory_group_for(session)
+-- names the one group whose index a session may search, get and list -
+--   a non-specialist session      its own group;
+--   a memory-provider task session the root requester group of its task chain (the
+--                                  main group the chain serves), read-only;
+--   any other specialist session   none - no memory tools, no index mount.
+-- A specialist that needs memory dispatches a memory-provider specialist as a sub-task
+-- (specialists.allium MemoryProviderDispatched) and gets its answer as the result. The
+-- researcher in particular never reaches memory (memory-graph.allium
+-- ResearcherKnowledgeIsolation). The rules here gate on that session-to-group mapping,
+-- and indexing on `group.specialist = null`.
+--
+-- On/off switch: memory as a whole is active only when an embedding API key is configured
+-- (config.embedding_key_configured). There is no separate enable flag: without a key the
+-- host runs no index for any group — nothing is watched or indexed, and no group's
+-- containers get the memory MCP tools or the index mount.
 --
 -- Group allowlist: memory is only active for agent groups whose folder name appears in
 -- config.memory_search_groups (default: { "main" }). Groups not in the allowlist are
 -- silently inactive — no MemoryFile is created and no MCP tools are available to them.
+--
+-- Embedding budget: the embedding limits (config.embedding_rpm_limit, embedding_tpm_limit,
+-- embedding_rpd_budget) belong to the upstream account — one key, one upstream — not to a
+-- group. Every indexed group's indexing and every search's query embedding draw on the same
+-- shared budget, and a daily stop met by one group stops embedding for all of them.
 
 use "./identity.allium" as identity
 use "./sessions.allium" as sessions
@@ -91,6 +112,7 @@ value MemorySearchParams {
     path_prefix: String?                -- restrict search to files under this path prefix
     source: String?                     -- restrict search to files from a named source
     include_content: Boolean?           -- whether to include full chunk content alongside snippets
+    include_superseded: Boolean?        -- include superseded notes (default false: current knowledge only)
 }
 
 -- Caller-supplied parameters for memory_list_files.
@@ -164,6 +186,10 @@ entity MemoryFile {
     path: String                        -- groups/<folder>/zettel/notes/foo.md, or extra/<mount>/… for an indexed mount
     content_hash: String
     indexed_at: Timestamp?              -- null until first successful index
+    -- True when the file is a Zettelkasten note whose frontmatter names a
+    -- superseded_by (memory-graph.allium): read from the file when it is indexed,
+    -- like its chunks. Search leaves superseded notes out unless asked for them.
+    superseded: Boolean
     -- The triggering rules fire on WorkspaceFileChanged and WorkspaceFileRemoved — file-system
     -- watcher events emitted by the host process with no governing allium spec. They will always
     -- be external triggers. The checker cascades unreachable-trigger → unreachable-rule →
@@ -216,10 +242,13 @@ config {
     vector_score_weight: Decimal = 0.7
     keyword_score_weight: Decimal = 0.3
     embedding_provider: String = "gemini"
+    -- The three embedding limits are per upstream account, shared by every indexed group.
     embedding_rpm_limit: Integer = 50   -- requests per minute to embedding provider
     embedding_tpm_limit: Integer = 15_000
     embedding_rpd_budget: Integer = 900 -- requests per 24h window; exhausted → pause 24h, then resume
-    memory_search_enabled: Boolean = true
+    embedding_max_consecutive_refusals: Integer = 3 -- consecutive non-daily 429s that end a sync pass
+    periodic_sync_interval: Duration = 24.hours     -- a full sync runs this often without any trigger
+    embedding_key_configured: Boolean = true -- an embedding API key is set; the only on/off switch for memory
     memory_search_groups: Set<String> = { "main" } -- folder names of groups with memory active; comma-separated in env
 }
 
@@ -240,6 +269,7 @@ rule FileUpdated {
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: config.embedding_key_configured     -- no embedding key, no memory
     requires: exists file
     requires: content_hash != file.content_hash
 
@@ -253,18 +283,24 @@ rule FileDiscovered {
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: config.embedding_key_configured     -- no embedding key, no memory
     requires: not exists MemoryFile{group: group, path: path}
 
     ensures: MemoryFile.created(
         group: group,
         path: path,
         content_hash: content_hash,
-        status: pending
+        status: pending,
+        superseded: false
     )
 
     @guidance
         -- Includes a file created at the path of one removed earlier: FileRemoved deleted
         -- that record, so nothing of the old file stands in the way.
+        -- Includes the files of a registered workspace folder (zettel/, zotero-md/) that did
+        -- not exist when the host began indexing the group: every sync looks for such
+        -- folders again — and every search runs a sync first — so a folder created later
+        -- is watched and indexed from the next sync on, without a restart.
         -- Also fires when a specialist delivers a result with commit_to_memory = true
         -- (see specialists/AgentRequestsDeliverSpecialistResult). The host copies the
         -- file into the group's zettel/reports/ before WorkspaceFileChanged is emitted,
@@ -279,6 +315,7 @@ rule FileRemoved {
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: config.embedding_key_configured     -- no embedding key, no memory
     requires: exists file
 
     ensures:
@@ -306,12 +343,14 @@ rule FileSynced {
 
     requires: file.group.specialist = null  -- memory indexing is disabled for specialist groups
     requires: file.group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: config.embedding_key_configured     -- no embedding key, no memory
     requires: file.status = pending
 
     let new_chunks = chunk_file(file.path, config.chunk_tokens, config.chunk_overlap_tokens)
 
     ensures: file.status = indexed
     ensures: file.indexed_at = now
+    ensures: file.superseded = names_superseded_by(file.path)
     ensures:
         for chunk in file.chunks:
             not exists chunk
@@ -331,6 +370,15 @@ rule FileSynced {
         --   RPM  (requests per minute)   — causes in-session waiting; transparent to this rule
         --   TPM  (tokens per minute)     — causes in-session waiting; transparent to this rule
         --   RPD  (requests per day)      — aborts the sync; see below
+        -- All three are global: one budget per upstream account (one key), shared by every
+        -- indexed group's syncs and by search query embeddings, never one per group.
+        -- A refusal (429) that is not the daily quota skips the file it was embedding for
+        -- this pass: the file stays pending and the pass moves on to the next file. When
+        -- config.embedding_max_consecutive_refusals such refusals come in a row, the pass
+        -- ends as interrupted; every file not yet indexed stays pending until the next sync
+        -- is triggered — a watcher event, a search (which runs a sync), or the periodic sync
+        -- (config.periodic_sync_interval). An interrupted pass records no settings
+        -- (IndexBuilt).
         -- The RPD budget (config.embedding_rpd_budget) is tracked in memory and counted over
         -- a 24h window opened by the first request it counts. When it is exhausted — or when
         -- the Gemini API returns a 429 with quotaType "rpd" — the host aborts the current sync
@@ -355,6 +403,7 @@ rule MemoryIndexCreated {
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: config.embedding_key_configured     -- no embedding key, no memory
     requires: not exists MemoryIndex{group: group}
 
     ensures: MemoryIndex.created(group: group, built_with: null)
@@ -371,6 +420,7 @@ rule IndexSettingsChanged {
 
     requires: group.specialist = null       -- memory indexing is disabled for specialist groups
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
+    requires: config.embedding_key_configured     -- no embedding key, no memory
     requires: exists index
     requires: settings != index.built_with
 
@@ -389,7 +439,8 @@ rule IndexSettingsChanged {
 
 -- A full pass under the current settings has reached every file: the index records
 -- the settings it was built with. A pass stopped part-way (shutdown, the daily embedding
--- stop, a file that could not be embedded) records nothing, so the next open finds the
+-- stop, too many consecutive rate-limit refusals, a file that could not be embedded)
+-- records nothing, so the next open finds the
 -- settings still differ and the full pass runs again.
 rule IndexBuilt {
     when: MemoryIndexFullPassCompleted(group, settings)
@@ -407,19 +458,20 @@ rule IndexBuilt {
 -- Results are ranked by hybrid vector + keyword score and filtered by min_search_score
 -- (keyword-only: by keyword score, filtered by min_keyword_score).
 rule MemorySearched {
-    when: AgentMemorySearch(session, group, query, top_k?, path_prefix?, source?, min_score?)
+    when: AgentMemorySearch(session, group, query, top_k?, path_prefix?, source?, min_score?, include_superseded?)
 
-    requires: session.agent_group = group
-    requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
+    requires: group = memory_group_for(session)  -- own group, or a memory provider's root requester group
+    requires: group.specialist = null
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
-    requires: config.memory_search_enabled
+    requires: config.embedding_key_configured
 
     let params = MemorySearchParams{
         limit: top_k ?? config.search_top_k,
         min_score: min_score,                -- null: the default for the mode the search runs in
         path_prefix: path_prefix,
         source: source,
-        include_content: null
+        include_content: null,
+        include_superseded: include_superseded
     }
     let results = memory_hybrid_search(group, query, params)
 
@@ -428,18 +480,25 @@ rule MemorySearched {
     @guidance
         -- memory_hybrid_search combines vector similarity (sqlite-vec cosine distance)
         -- and FTS5 keyword match, weighted by config.vector_score_weight and
-        -- config.keyword_score_weight. If the vector index is unavailable, falls back
-        -- to keyword-only search. Returns a list of MemorySearchResult values.
+        -- config.keyword_score_weight. Without the sqlite-vec index the vector half is an
+        -- in-process cosine scan over the stored embeddings and the search stays hybrid;
+        -- it runs keyword-only only when the query itself cannot be embedded (below).
+        -- Returns a list of MemorySearchResult values.
         -- Results are per file: chunks of one file are grouped into one result, ranked by
         -- its best chunk, and limit counts files. Within a file, chunks whose line ranges
         -- overlap (adjacent chunks overlap by design) merge into one location keeping the
         -- better score; at most config.search_locations_per_file locations are listed,
         -- best first, and more_locations counts the rest — a term common in one file shows
         -- as one result with a count, not as the whole result list.
+        -- Superseded notes (MemoryFile.superseded) are left out before ranking unless
+        -- include_superseded is true: search answers with current knowledge, and history
+        -- stays findable on request. A superseded note is still indexed, and still read
+        -- and listed by path; the successor's supersedes and its superseded_by link them.
         -- path_prefix and source narrow the candidate set before ranking: a result inside
         -- the filter is never displaced by better-ranked results outside it, so a filtered
         -- search returns up to limit results whenever that many match.
-        -- The query embedding counts against the shared embedding budget. If no permit is
+        -- The query embedding counts against the shared (per-account, all-group) embedding
+        -- budget. If no permit is
         -- granted within config.search_embed_wait (RPM/TPM cool-down, or the daily stop
         -- in force), the search runs keyword-only rather than waiting.
         -- Keyword-only results are scored by keyword match alone — weighted by
@@ -449,20 +508,23 @@ rule MemorySearched {
         -- restarting, or busy), the container runs the keyword-only search itself against
         -- the read-only index mount, with the same filters. Either way the response says
         -- which mode produced it (hybrid | keyword) so the agent can tell.
-        -- Not available in specialist containers: memory search, get, and list are not
-        -- registered in the specialist container MCP server (gated by isSpecialist at
-        -- startup). Specialists that need memory access must use the query_memory tool,
-        -- which routes through a memory-provider specialist type.
+        -- memory_group_for(session) is a black box (see the module header): the
+        -- session's own group for a non-specialist session; for a memory-provider
+        -- specialist's task session, the root requester group of its task chain,
+        -- whose index it reads read-only; null for every other specialist session,
+        -- whose container gets neither the memory tools nor an index mount. The host
+        -- answers a search only over memory_group_for(session) - a container cannot
+        -- name another group's index.
 }
 
 -- An agent retrieves the full content of a specific memory file by path.
 rule MemoryFileRead {
     when: AgentMemoryGet(session, group, path, parse_frontmatter?)
 
-    requires: session.agent_group = group
-    requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
+    requires: group = memory_group_for(session)  -- own group, or a memory provider's root requester group
+    requires: group.specialist = null
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
-    requires: config.memory_search_enabled
+    requires: config.embedding_key_configured
     requires: exists MemoryFile{group: group, path: path, status: indexed}
 
     ensures: MemoryFileContentReturned(group: group, path: path)
@@ -470,17 +532,17 @@ rule MemoryFileRead {
     @guidance
         -- Implemented by memory_get_file_content(group_folder, path, parse_frontmatter).
         -- parse_frontmatter defaults to true when absent.
-        -- Not available in specialist containers (see specialist restriction note on MemorySearched).
+        -- Same access as search: memory_group_for(session) (see MemorySearched).
 }
 
 -- An agent lists files in its group's memory workspace.
 rule MemoryListed {
     when: AgentMemoryList(session, group, list_params?)
 
-    requires: session.agent_group = group
-    requires: group.specialist = null       -- memory MCP tools are not registered in specialist containers
+    requires: group = memory_group_for(session)  -- own group, or a memory provider's root requester group
+    requires: group.specialist = null
     requires: group.folder in config.memory_search_groups  -- memory inactive for non-allowlisted groups
-    requires: config.memory_search_enabled
+    requires: config.embedding_key_configured
 
     let params = list_params ?? MemoryListParams{
         path_prefix: null,
@@ -494,7 +556,7 @@ rule MemoryListed {
     ensures: MemoryListCompleted(group: group, files: files)
 
     @guidance
-        -- Not available in specialist containers (see MemorySearched guidance).
+        -- Same access as search: memory_group_for(session) (see MemorySearched).
 }
 
 ------------------------------------------------------------
@@ -507,7 +569,9 @@ rule MemoryListed {
 -- additional mounts marked `index`, stored as extra/<mount>/…. The container config
 -- that marks a mount is not modelled here, so the extra/ branch states the shape only;
 -- the host indexes no other extra/ path.
--- Non-specialist agents write to the workspace folders directly (group dir is mounted RW).
+-- Non-specialist agents write to memory/ and zettel/ directly (group dir is mounted RW).
+-- zotero-md/ is the exception: it belongs to the Zotero sync (zotero.allium), and agents,
+-- the main agent included, only read it.
 -- Specialist agents land files there via commit_to_memory on result delivery
 -- (group dir is mounted RO for specialists; the host performs the copy).
 invariant MemoryFilesWithinWorkspace {
@@ -525,9 +589,10 @@ invariant ChunksPresentOnlyWhenIndexed {
         f.indexed_at = null implies f.chunks.count = 0
 }
 
--- Memory indexing does not apply to specialist agent groups. Specialist containers
--- do not mount the memory directory, do not run a watcher, and do not register the
--- memory MCP tools, so no MemoryFile should ever be created for a specialist group.
+-- Memory indexing does not apply to specialist agent groups: nothing in a specialist
+-- group's folder is watched or indexed, so no MemoryFile should ever be created for
+-- one. (A memory-provider specialist reads its root requester group's index; that
+-- index's files belong to that group.)
 invariant NoMemoryFilesForSpecialistGroups {
     for f in MemoryFiles:
         f.group.specialist = null
@@ -549,14 +614,15 @@ surface MemoryMcpTools {
     facing agent: sessions/Session
 
     provides:
-        AgentMemorySearch(agent, group, query, top_k?, path_prefix?, source?, min_score?)
+        AgentMemorySearch(agent, group, query, top_k?, path_prefix?, source?, min_score?, include_superseded?)
         AgentMemoryGet(agent, group, path, parse_frontmatter?)
         AgentMemoryList(agent, group, list_params?)
 
     @guidance
-        -- Specialist sessions are excluded: this surface is not registered in specialist
-        -- containers (gated by isSpecialist at startup in container/agent-runner/src/mcp-tools/).
-        -- Equivalently, when agent.agent_group.specialist != null the surface is absent.
-        -- Specialists that need memory access route through a memory-provider specialist
-        -- via the agent-to-agent query_memory tool.
+        -- Offered to a session exactly when memory_group_for(session) names an indexed
+        -- group: every non-specialist session of an allowlisted group, and a
+        -- memory-provider specialist's task session (over its root requester group's
+        -- index, read-only). Other specialist sessions do not get the surface; they
+        -- dispatch a memory provider as a sub-task. The group argument is filled in by
+        -- the host from the session, never chosen by the agent.
 }

@@ -113,8 +113,12 @@ entity ItemFile {
 
     @guidance
         -- Storage: each ItemFile instance is a markdown file at
-        -- groups/<folder>/zotero-md/<item_key>.md in the host filesystem,
-        -- mounted into the agent container at /workspace/agent/zotero-md.
+        -- groups/<folder>/zotero-md/<item_key>.md in the host filesystem.
+        -- The folder belongs to this module's host processes (sync and
+        -- enrichment), which are its only writers. Agents only read it: it is
+        -- mounted read-only into every container that is given it - the
+        -- group's own at /workspace/agent/zotero-md, the researcher's under
+        -- /workspace/extra (memory-graph.allium).
         -- There is no DB row for an ItemFile; the file IS the entity.
         --
         -- Field mapping (see container/tools/zotero-sync.mjs buildMarkdown):
@@ -208,7 +212,7 @@ rule SyncStateInitialised {
 }
 
 -- When a sync check falls due, attempt a lightweight version pre-check by querying
--- the Zotero API before committing to a full container-based sync.
+-- the Zotero API before committing to a full sync.
 rule SyncCheckDue {
     when: state: SyncState.is_due
 
@@ -218,7 +222,7 @@ rule SyncCheckDue {
 -- ---- Pre-Check ----
 
 -- If the pre-check API call fails (network error, bad credentials, timeout),
--- skip this sync cycle and advance the schedule without spawning a container.
+-- skip this sync cycle and advance the schedule without running the sync.
 -- There is no point running a full sync if the API is unreachable.
 rule PreCheckFailed {
     when: ZoteroPreCheckRequested(state)
@@ -231,7 +235,7 @@ rule PreCheckFailed {
 }
 
 -- If the pre-check confirms the library version is unchanged, skip the full sync
--- and advance the next check time without spawning a container.
+-- and advance the next check time without running the sync.
 rule LibraryUnchanged {
     when: ZoteroPreCheckRequested(state)
 
@@ -263,7 +267,8 @@ rule LibraryChanged {
 
 -- Fetch all new and modified items since last_version, upsert their item files, remove
 -- files for deleted items, update sync state, and emit a completion event.
--- The sync runs inside a container agent with access to the Zotero API credentials.
+-- The sync runs as a host process, which holds the Zotero API credentials; no
+-- agent, container or model turn is involved.
 rule LibrarySynced {
     when: ZoteroSyncRequested(state)
 
@@ -308,8 +313,11 @@ rule LibrarySynced {
         -- so the schedule stays regular even when sync is delayed. Missed intervals are
         -- skipped forward until the next future slot. Cron mode finds the next cron tick
         -- after now, respecting the configured timezone.
-        -- The sync runs as a container agent prompt; zotero-sync.mjs writes a JSON
-        -- summary and zotero-state.json which the host merges back into SyncState.
+        -- The host runs zotero-sync.mjs as a child process with the credentials in its
+        -- environment and a time limit; it writes the item files, a JSON summary and
+        -- zotero-state.json, which the host merges back into SyncState. A run that
+        -- fails or times out changes no SyncState, so the next due check tries again
+        -- (next_check was already advanced when the sync was started).
 }
 
 -- ---- Notification ----
@@ -378,7 +386,9 @@ rule EnrichmentTriggeredAfterSync {
 
 -- The user can also ask for enrichment at any time. This forgets earlier
 -- not_found results, so every item without an abstract is looked up again,
--- in bounded runs as usual.
+-- in bounded runs as usual. The request reaches the host as an admin command
+-- (ncl zotero retry-abstracts), which the main agent may issue on the user's
+-- behalf; agents cannot write the item files themselves.
 -- allium-ignore allium.rule.unreachableTrigger
 rule EnrichmentTriggeredOnRequest {
     when: UserRequestedEnrichment(group)
@@ -421,8 +431,9 @@ rule EnrichmentRun {
         -- never-looked-up items) put items with a DOI, an arXiv ID or a DOI in the
         -- URL before title-only items, since identifier lookups are cheap and
         -- usually succeed.
-        -- The run is a pre-task script (no agent turn), so it costs no model tokens;
-        -- the budget keeps it inside the script timeout. Each item's outcome is
+        -- The run is a host process (no agent, no model turn), so it costs no model
+        -- tokens; the budget keeps it inside its time limit. The PDF step needs
+        -- pdftotext on the host. Each item's outcome is
         -- written to its file as soon as the item is done, so a run that is cut
         -- short keeps the work already finished. An item interrupted mid-lookup is
         -- left unmarked and comes round again.
@@ -566,6 +577,10 @@ invariant ActiveSyncStateHasNextCheck {
 -- resolved (2026-10-11): unbounded enrichment runs died with their container and, recording nothing,
 --           restarted on the same items; runs are now budgeted, drain the backlog on every sync check
 --           (EnrichmentBacklogScheduled), and record not_found / inconclusive per item (AbstractLookupRecorded)
--- resolved: pre-check failure skips the sync and advances the schedule (fail-closed, no container spawn);
+-- resolved (2026-10-28): sync and enrichment run as host processes; zotero-md is read-only to agents.
+--           The sync used to be an agent prompt that only ran zotero-sync.mjs (one tool call, ~50k
+--           tokens of context, and it failed twice on a lost conversation); it also wrote from
+--           whichever session of the group had no messaging group.
+-- resolved: pre-check failure skips the sync and advances the schedule (fail-closed, no sync run);
 --           current code (hasNewZoteroItems) diverges — it is fail-open and should be fixed
 -- resolved: deleted item files are removed permanently; recovery via Borg backups if needed

@@ -155,9 +155,12 @@ entity SpecialistTask {
     requester_group: identity/AgentGroup?
     requester_task: SpecialistTask?
     -- The session that dispatched this task. For root tasks this is the
-    -- main-agent session that receives the result; for sub-tasks this is
-    -- the parent specialist's per-task session. Result routing for sub-
-    -- tasks follows requester_task, not this field.
+    -- main-agent session that receives the result while it is still
+    -- active; once it is not, the result goes to the requester group's
+    -- current session for the same conversation (current_requester_session,
+    -- see SpecialistResultRoutedToMain). For sub-tasks this is the parent
+    -- specialist's per-task session. Result routing for sub-tasks follows
+    -- requester_task, not this field.
     requester_session: sessions/Session
     depth: Integer
     chain_delegation_count: Integer
@@ -1244,51 +1247,78 @@ rule DispatchFilesTransferred {
 }
 
 -- Root tasks (dispatched by the main group) route their result back into
--- the main group's agent_shared session as a triggering inbound message.
+-- the main group's agent_shared session as a triggering inbound message:
+-- the session that dispatched the task while it is still active, otherwise
+-- the requester group's current session for the same conversation.
 --
 -- When a ContainerTransfer exists for the task, the file-handover side of
 -- routing is dispatched here too: commit_to_memory = true copies files into
 -- the requester group's memory area and records the workspace-relative
 -- paths on the parent task; commit_to_memory = false stages files for
 -- placement in the requester invocation's ipc-in mount on its next start.
+-- The commit does not depend on any session: the report belongs to the
+-- group, not to the session that asked for it, so it is written even when
+-- no session can receive the message. Only the message (and with it any
+-- ipc-in staging) needs a session; with none, the message is not
+-- delivered and the uncommitted transfer is parked
+-- (UnroutedTransferOrphaned).
 -- The result text used in the inbound message is the already-rewritten
 -- transfer.result_text when a transfer exists, otherwise the formatted
--- task outcome.
+-- task outcome; a commit appends the committed paths.
 
 rule SpecialistResultRoutedToMain {
     when: SpecialistResultReady(task)
     requires: task.requester_group != null
-    let main_session = task.requester_session
+    let main_session = current_requester_session(task)
     let transfer = ContainerTransfer{task: task}
     let returned = ContainerTransfer{failed_task: task}
-    requires: main_session.status = active
     ensures:
         if exists transfer and transfer.commit_to_memory:
             for f in transfer.files:
                 f.memory_path = group_memory_report_path(task.requester_group, f.original_name)
             task.committed_files = group_memory_report_paths(task.requester_group, transfer)
             transfer.status = committed
-        let message = sessions/InboundMessage.created(
-            session: main_session,
-            seq: next_inbound_seq(main_session),
-            kind: "chat",
-            status: pending,
-            trigger: true,
-            content: routed_message_text(task, transfer),
-            process_after: null,
-            tries: 0,
-            created_at: now
-        )
-        if exists transfer and not transfer.commit_to_memory:
-            transfer.routed_message = message
-        if exists returned:
-            returned.routed_message = message
-        sessions/SessionWoken(session: main_session)
+        if exists main_session:
+            let message = sessions/InboundMessage.created(
+                session: main_session,
+                seq: next_inbound_seq(main_session),
+                kind: "chat",
+                status: pending,
+                trigger: true,
+                content: routed_message_text(task, transfer),
+                process_after: null,
+                tries: 0,
+                created_at: now
+            )
+            if exists transfer and not transfer.commit_to_memory:
+                transfer.routed_message = message
+            if exists returned:
+                returned.routed_message = message
+            sessions/SessionWoken(session: main_session)
 
     @guidance
+        -- current_requester_session(task) is a black box resolving the
+        -- session the result is delivered to: task.requester_session while
+        -- its status is active; otherwise the requester group's active
+        -- session for the same conversation - the same messaging group and
+        -- thread as task.requester_session - when one exists; otherwise
+        -- null. The main agent's session may have been closed (a daily
+        -- reset, a restart that opened a fresh session) while a long
+        -- research task ran; the result still belongs to that conversation
+        -- and reaches it. With null, no message is created: a commit still
+        -- happens (above), and an uncommitted result transfer is parked
+        -- (UnroutedTransferOrphaned).
+        --
         -- routed_message_text returns transfer.result_text when transfer is
         -- not null (already path-rewritten by resolve_delivery_paths during
-        -- delivery), otherwise format_specialist_outcome(task). For a failed
+        -- delivery), otherwise format_specialist_outcome(task). When the
+        -- transfer was committed to memory, the host then appends a line
+        -- naming every committed path (task.committed_files, workspace-
+        -- relative, in delivery order), whatever the specialist wrote in its
+        -- result text. The main agent works from exactly those paths - it
+        -- never has to guess which report is the new one, which a "newest
+        -- file in the reports folder" heuristic gets wrong when two research
+        -- tasks overlap (memory-graph.allium ReportAndNoteCreated). For a failed
         -- task that gave back the files it was handed
         -- (DispatchedFilesReturnedOnTaskFailed), the text then names where
         -- they are now, "{ipc_in_container_path}/{returned transfer id}/<name>". Either way,
@@ -1606,8 +1636,10 @@ rule TransferPlacedIntoLiveIpcIn {
         --     the parent task's per-task session
         --     (specialist_task_session(transfer.task.requester_task))
         --   for root-task transfers (transfer.task.requester_group != null):
-        --     transfer.task.requester_session (the main-agent session that
-        --     dispatched the root task)
+        --     current_requester_session(transfer.task) (the main-agent session
+        --     that dispatched the root task while it is active, otherwise the
+        --     group's current session for the same conversation; see
+        --     SpecialistResultRoutedToMain)
         --   for dispatch transfers (transfer.kind = dispatch):
         --     the dispatched task's per-task session
         --     (specialist_task_session(transfer.dispatched_task))
@@ -1935,9 +1967,13 @@ rule DispatchTransferExpiredOnTaskCompleted {
 -- exhausted its restarts, was cancelled with its subtree, or its group was
 -- deleted - the files it was handed go back to the session that dispatched
 -- it, so the dispatcher still has them to retry with or hand elsewhere. The
--- host copies them into a returned transfer to task.requester_session (the
--- main agent's session for a root task, the parent's per-task session for
--- a sub-task) and expires the dispatch transfer. The failure result names
+-- host copies them into a returned transfer to return_session(task) - for a
+-- sub-task the parent's per-task session (task.requester_session); for a root
+-- task current_requester_session(task), the session its failure is routed to,
+-- so the files arrive with the message that names them - and expires the
+-- dispatch transfer. A root task whose requester has no current session at all
+-- returns its files to task.requester_session, where
+-- ReturnedFilesOrphanedWithoutRecipient parks them. The failure result names
 -- where the files now are (routed_message_text); the returned transfer is
 -- placed like a result transfer (TransferPlacedIntoLiveIpcIn, or at the
 -- recipient's next start) and expires with its recipient
@@ -1950,7 +1986,7 @@ rule DispatchedFilesReturnedOnTaskFailed {
         ensures:
             let back = ContainerTransfer.created(
                 kind: returned,
-                returned_to: task.requester_session,
+                returned_to: return_session(task),
                 failed_task: task,
                 sender_invocation: given.sender_invocation,
                 commit_to_memory: false,
@@ -2141,19 +2177,24 @@ rule PendingTransferOrphanedOnDeliveringTaskFailed {
         ensures: TransferOrphaned(transfer: t)
 }
 
--- A completed task's result can find no recipient: the requesting main
--- session is gone or closed, or the parent is no longer awaiting it
--- (cancelled, timed out). Its pending transfer then has no one to place
--- into and expires rather than keeping its staging copy.
--- result_has_recipient(task) is a black box, true exactly when
--- SpecialistResultRoutedToMain or SpecialistResultRoutedToParent can route
--- the result (their requires clauses), so this rule and those are exclusive.
+-- A completed task's result can find no recipient: for a root task, no
+-- session of the requester group is active for the conversation that asked
+-- (current_requester_session is null); for a sub-task, the parent is no
+-- longer awaiting it (cancelled, timed out). Its pending transfer then has
+-- no one to place into and is parked rather than keeping its staging copy.
+-- A root-task transfer committed to memory is not parked: the commit in
+-- SpecialistResultRoutedToMain needs no recipient, and its files are
+-- already in the requester group's memory area.
+-- result_has_recipient(task) is a black box, true exactly when a message
+-- can be routed: for a root task, exists current_requester_session(task);
+-- for a sub-task, SpecialistResultRoutedToParent's requires clauses.
 
 rule UnroutedTransferOrphaned {
     when: SpecialistResultReady(task)
     let transfer = ContainerTransfer{task: task}
     requires: exists transfer
     requires: transfer.status = pending
+    requires: not (task.requester_group != null and transfer.commit_to_memory)
     requires: not result_has_recipient(task)
     ensures:
         TransferOrphaned(transfer: transfer)
@@ -2705,6 +2746,8 @@ invariant TerminalTaskHasClosedSession {
 ------------------------------------------------------------
 -- Open Questions
 ------------------------------------------------------------
+
+open question "Files a failed root task gives back (DispatchedFilesReturnedOnTaskFailed) are returned to task.requester_session, while the failure message now goes to current_requester_session(task). When the dispatching session has closed and a newer session for the same conversation receives the failure, the returned files are parked (ReturnedFilesOrphanedWithoutRecipient) although the message names ipc-in paths in the newer session. Should returned_to for a root task also resolve through current_requester_session?"
 
 open question "InboundMessage pending -> failed edge for session closure: the host marks any still-pending messages_in rows as failed when a specialist task's session is closed at terminal transition (see SpecialistTaskSessionClosed). The sessions.allium InboundMessage transition graph does not currently include a pending -> failed edge, so this fail-pending action cannot be expressed as a rule-level ensures here. Should sessions.allium add the pending -> failed edge so the cleanup can be witnessed by a rule, or should the closure rely solely on session.status = closed gating downstream wake rules to keep pending messages dormant?"
 

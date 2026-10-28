@@ -41,7 +41,11 @@ export async function handleMemorySearch(
 
   return manager.search(params.query, {
     maxResults: Math.min(params.top_k ?? config.search_top_k, 20),
-    minScore: params.min_score ?? config.min_search_score,
+    // Unset stays unset: the manager picks the floor for the mode the search
+    // actually ran in — hybrid, or keyword-only when the query could not be
+    // embedded (min_keyword_score). Defaulting here pinned keyword-only
+    // searches to the hybrid floor, dropping every weak keyword match.
+    minScore: params.min_score ?? undefined,
     pathPrefix: params.path_prefix || undefined,
     source: params.source || undefined,
     embedWaitMs: config.search_embed_wait_ms,

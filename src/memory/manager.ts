@@ -32,9 +32,18 @@ import { MEMORY_CONFIG } from './config.js';
  */
 type GroupExclusion = (groupId: string) => boolean;
 const exclusions: GroupExclusion[] = [];
+const exclusionsReady: Array<() => Promise<void>> = [];
 
-export function registerMemoryGroupExclusion(check: GroupExclusion): void {
+/**
+ * `check` must answer synchronously (it runs on the spawn path). An owner
+ * whose answer needs loading first passes `ready`: indexing waits for it, so
+ * a check that is still empty can never let one of its groups through. Host
+ * modules start in import order, and the owner's own host start may run after
+ * memory's.
+ */
+export function registerMemoryGroupExclusion(check: GroupExclusion, ready?: () => Promise<void>): void {
   exclusions.push(check);
+  if (ready) exclusionsReady.push(ready);
 }
 
 export function isMemoryGroupExcluded(groupId: string): boolean {
@@ -102,7 +111,7 @@ import { CHUNKER_VERSION, chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { GEMINI_EMBEDDING_DIMS, geminiProviderKey, isUsableEmbedding } from './embedding-identity.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
-import { TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
+import { sharedRateLimiter, TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
 import {
   openIndexDb,
   getCachedEmbedding,
@@ -282,6 +291,42 @@ export class MemoryIndexManager {
     private readonly additionalDirs: IndexedDir[] = [],
   ) {}
 
+  /** Debounced: a burst of file events becomes one sync. Set in init. */
+  private markDirty: () => void = () => {};
+
+  /** Subscribe to changes under one indexed directory. */
+  private async watch(watchDir: string): Promise<void> {
+    try {
+      const sub = await parcelWatcher.subscribe(watchDir, (err: Error | null, events: parcelWatcher.Event[]) => {
+        if (err) return;
+        const relevant = events.some((e) => !e.path.split(path.sep).some((part: string) => IGNORED_DIRS.has(part)));
+        if (relevant) this.markDirty();
+      });
+      this.watchers.push(sub);
+    } catch (err) {
+      log.warn('Memory watcher failed to start', { groupId: this.groupId, dir: watchDir, err });
+    }
+  }
+
+  /**
+   * Registered workspace folders (zettel/, zotero-md/, …) that did not exist
+   * when this manager started are indexed and watched once they do. Without
+   * this, a folder first created after host start (a group's first committed
+   * report makes zettel/) stayed out of the index until a restart.
+   */
+  private async adoptNewWorkspaceDirs(): Promise<boolean> {
+    const known = new Set(this.additionalDirs.map((d) => d.dir));
+    let adopted = false;
+    for (const d of workspaceIndexDirs(path.dirname(this.memoryDir))) {
+      if (known.has(d.dir)) continue;
+      this.additionalDirs.push(d);
+      adopted = true;
+      log.info('Memory index: new folder indexed', { groupId: this.groupId, dir: d.dir, source: d.source });
+      if (!this.closed) await this.watch(d.dir);
+    }
+    return adopted;
+  }
+
   async init(): Promise<void> {
     fsSync.mkdirSync(path.dirname(this.dbPath), { recursive: true });
 
@@ -292,7 +337,7 @@ export class MemoryIndexManager {
     const { provider } = { provider: createGeminiEmbeddingProvider({ apiKey: this.apiKey, model: this.model }) };
     this.provider = provider;
 
-    this.rateLimiter = new TokenBucketRateLimiter({
+    this.rateLimiter = sharedRateLimiter({
       accountKey: hashFile(this.apiKey).slice(0, 16),
       rpmLimit: MEMORY_CONFIG.embedding_rpm_limit,
       tpmLimit: MEMORY_CONFIG.embedding_tpm_limit,
@@ -300,7 +345,7 @@ export class MemoryIndexManager {
     });
 
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    const markDirty = () => {
+    this.markDirty = () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         this.dirty = true;
@@ -309,18 +354,7 @@ export class MemoryIndexManager {
     };
 
     const dirsToWatch = [this.memoryDir, ...this.additionalDirs.map((d) => d.dir)];
-    for (const watchDir of dirsToWatch) {
-      try {
-        const sub = await parcelWatcher.subscribe(watchDir, (err: Error | null, events: parcelWatcher.Event[]) => {
-          if (err) return;
-          const relevant = events.some((e) => !e.path.split(path.sep).some((part: string) => IGNORED_DIRS.has(part)));
-          if (relevant) markDirty();
-        });
-        this.watchers.push(sub);
-      } catch (err) {
-        log.warn('Memory watcher failed to start', { groupId: this.groupId, dir: watchDir, err });
-      }
-    }
+    for (const watchDir of dirsToWatch) await this.watch(watchDir);
 
     // Periodic sync every 24h in case watcher misses events
     this.periodicTimer = setInterval(
@@ -428,6 +462,9 @@ export class MemoryIndexManager {
   }
 
   private async _doSync(force: boolean): Promise<void> {
+    // Checked on every sync, dirty or not: nothing watches a folder that does
+    // not exist yet, so no event would ever mark its arrival.
+    if (await this.adoptNewWorkspaceDirs()) this.dirty = true;
     if (!force && !this.dirty) return;
     if (!force) {
       let outcome: SyncOutcome = 'interrupted';
@@ -747,8 +784,9 @@ export class MemoryIndexManager {
   ): Promise<{ mode: 'hybrid' | 'keyword'; results: MemorySearchResult[] }> {
     if (!query.trim() || this.closed) return { mode: 'keyword', results: [] };
 
-    // Trigger background sync if dirty; search on current state immediately.
-    if (this.dirty) void this.sync();
+    // A background sync, which also picks up folders created since the last
+    // one; search on the current state immediately. Cheap when nothing changed.
+    void this.sync();
 
     let queryVec: number[] = [];
     try {
@@ -1043,6 +1081,7 @@ export async function initMemoryManagers(params: {
     return;
   }
 
+  await Promise.all(exclusionsReady.map((ready) => ready()));
   for (const group of params.groups) {
     if (isMemoryGroupExcluded(group.id)) continue;
     if (params.allowedFolders && !params.allowedFolders.has(group.folder)) continue;
@@ -1079,6 +1118,7 @@ export async function initMemoryManagerForGroup(params: {
   allowedFolders?: Set<string>;
 }): Promise<void> {
   if (!params.apiKey) return;
+  await Promise.all(exclusionsReady.map((ready) => ready()));
   if (isMemoryGroupExcluded(params.group.id)) return;
   if (params.allowedFolders && !params.allowedFolders.has(params.group.folder)) return;
 

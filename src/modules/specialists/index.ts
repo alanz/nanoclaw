@@ -60,12 +60,22 @@ registerDeliveryAction(
  */
 const specialistGroups = new Set<string>();
 
+// Loaded once, by whichever needs it first: memory's host start (which runs
+// before this module's — module order) waits on it before indexing anything.
+// Membership is fixed for an install's lifetime, and the exclusion check runs
+// on a path that must stay synchronous.
+let specialistGroupsLoaded: Promise<void> | null = null;
+function loadSpecialistGroups(): Promise<void> {
+  specialistGroupsLoaded ??= (async () => {
+    const { getDb } = await import('../../db/index.js');
+    const rows = await getDb().all<{ agent_group_id: string }>('SELECT agent_group_id FROM specialists');
+    for (const row of rows) specialistGroups.add(row.agent_group_id);
+  })();
+  return specialistGroupsLoaded;
+}
+
 onHostStart(async () => {
-  // Warm the set once; membership is fixed for an install's lifetime, and the
-  // exclusion check runs on a path that must stay synchronous.
-  const { getDb } = await import('../../db/index.js');
-  const rows = await getDb().all<{ agent_group_id: string }>('SELECT agent_group_id FROM specialists');
-  for (const row of rows) specialistGroups.add(row.agent_group_id);
+  await loadSpecialistGroups();
 
   const reclaimed = await sweepTransferStaging();
   if (reclaimed > 0) log.info('specialists: reclaimed staging of finished transfers', { count: reclaimed });
@@ -76,7 +86,7 @@ onHostStart(async () => {
   if (removed > 0) log.info('specialists: removed directories of ended invocations', { count: removed });
 });
 
-registerMemoryGroupExclusion((groupId) => specialistGroups.has(groupId));
+registerMemoryGroupExclusion((groupId) => specialistGroups.has(groupId), loadSpecialistGroups);
 
 /**
  * Recovery tick.

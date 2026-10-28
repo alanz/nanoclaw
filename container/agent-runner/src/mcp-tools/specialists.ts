@@ -123,7 +123,7 @@ const dispatchSubTask: McpToolDefinition = {
           type: 'array',
           items: { type: 'string' },
           description:
-            'Files to hand to the specialist with the task, Copy each into /workspace/ipc-out/ first and list it there (/workspace/ipc-out/paper.pdf); the specialist cannot see your ipc-in or workspace. Its prompt is rewritten to where the files arrive.',
+            'Files to hand to the specialist with the task. Copy each into /workspace/ipc-out/ first and list it there (/workspace/ipc-out/paper.pdf); the specialist cannot see your ipc-in or workspace. Its prompt is rewritten to where the files arrive.',
         },
       },
     },

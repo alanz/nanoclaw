@@ -38,8 +38,8 @@ surface SpecialistMcpTools {
     facing agent: sessions/Session
 
     provides:
-        AgentRequestsDispatchSpecialist(agent, specialist_group_id, prompt)
-        AgentRequestsDispatchSubTask(agent, specialist_group_id, prompt)
+        AgentRequestsDispatchSpecialist(agent, specialist_group_id, prompt, file_paths?)
+        AgentRequestsDispatchSubTask(agent, specialist_group_id, prompt, file_paths?)
         AgentRequestsDeliverSpecialistResult(agent, result_text, file_paths?, commit_to_memory?)
 }
 
@@ -73,6 +73,11 @@ enum TransferFileStatus {
     | placed -- in the recipient invocation's ipc-in mount
     | expired -- recipient task is terminal; storage may be reclaimed
 }
+
+-- Which way a transfer travels along the dispatch chain. result: a
+-- specialist's delivery back to its requester. dispatch: files handed to a
+-- specialist with the task that dispatches it.
+enum TransferKind { result | dispatch }
 
 ------------------------------------------------------------
 -- Value Types
@@ -241,6 +246,23 @@ entity SpecialistTask {
 --
 -- Routing (root vs sub-task) chooses the requester invocation; the file-
 -- handover lifecycle is the same in both cases.
+--
+-- Files also travel the other way, with a dispatch. dispatch_specialist and
+-- dispatch_sub_task take optional file_paths in the dispatcher's own ipc-out,
+-- under the same rules as a delivery. The host takes ownership of them when
+-- it processes the dispatch and records a ContainerTransfer of kind dispatch
+-- for the new task. The files are placed in the dispatched task's ipc-in
+-- when its container starts, and the prompt it reads names their ipc-in
+-- paths. They stay available to that task for its whole life - across
+-- restarts and across the re-invocations that follow its own sub-tasks -
+-- and expire when it reaches a terminal state. A dispatch transfer never
+-- commits to memory.
+--
+-- This is how a file the user sent the main agent (a PDF attached to a chat
+-- message, say) reaches a specialist: the main agent copies it into its
+-- ipc-out and dispatches with its path. A specialist's container mounts only
+-- its own group folder and its per-task session, so a path in the
+-- dispatcher's workspace means nothing to it.
 
 -- The outbound staging area for one invocation. Created fresh by the host
 -- when the invocation starts; cleared when the invocation ends. Files
@@ -270,17 +292,22 @@ entity IpcInMount {
     }
 }
 
--- A file-handover bundle from a specialist task back to its requester. Each
--- transfer carries zero or more files plus the accompanying result text and
--- the commit_to_memory flag that determines whether the files end up in the
--- requester group's memory area or in the requester invocation's ipc-in.
--- One ContainerTransfer per delivery; multiple deliveries within a single
--- task are not modelled (the deliver tool is fire-and-forget and exits the
--- container).
+-- A file-handover bundle. A result transfer goes from a specialist task back
+-- to its requester: it carries zero or more files plus the accompanying
+-- result text and the commit_to_memory flag that determines whether the
+-- files end up in the requester group's memory area or in the requester
+-- invocation's ipc-in. One result transfer per delivery; multiple deliveries
+-- within a single task are not modelled (the deliver tool is fire-and-forget
+-- and exits the container). A dispatch transfer goes from a dispatcher (the
+-- main agent or a parent specialist) to the task it dispatches: one per
+-- dispatch that names files, placed only in that task's ipc-in. Its text is
+-- the dispatched task's prompt, so it carries none of its own.
 entity ContainerTransfer {
-    task: SpecialistTask              -- the delivering task
+    kind: TransferKind
+    task: SpecialistTask when kind = result              -- the delivering task
+    dispatched_task: SpecialistTask when kind = dispatch -- the task the files go to
     sender_invocation: Invocation     -- the specific invocation that wrote ipc-out
-    result_text: String               -- the rewritten result text the requester sees
+    result_text: String when kind = result -- the rewritten result text the requester sees
     commit_to_memory: Boolean
     file_count: Integer
     sent_at: Timestamp
@@ -344,10 +371,11 @@ entity TransferFile {
 -- id (messaging_group = null, thread_id = task.id). The task prompt is
 -- written as the triggering inbound message into that session. The
 -- specialist's AgentGroup folder is mounted read-only into its container;
--- the per-task session DBs are the only mutable surfaces.
+-- the per-task session DBs are the only mutable surfaces. Files the main
+-- agent names in file_paths are handed to the task (DispatchFilesTaken).
 
 rule MainGroupDispatchesSpecialist {
-    when: AgentRequestsDispatchSpecialist(session, specialist_group_id, prompt)
+    when: AgentRequestsDispatchSpecialist(session, specialist_group_id, prompt, file_paths?)
     requires: session.agent_group.is_main = true
     let target_group = identity/AgentGroup{id: specialist_group_id}
     requires: exists target_group
@@ -357,6 +385,7 @@ rule MainGroupDispatchesSpecialist {
         platform_id: null_channel/config.singleton_platform_id
     }
     requires: exists null_mg
+    let has_files = file_paths != null and file_paths.count > 0
     ensures:
         let task = SpecialistTask.created(
             specialist_group: target_group,
@@ -382,13 +411,15 @@ rule MainGroupDispatchesSpecialist {
             last_active: now,
             created_at: now
         )
+        if has_files:
+            DispatchFilesTaken(session: session, task: task, file_paths: file_paths)
         sessions/InboundMessage.created(
             session: task_session,
             seq: next_inbound_seq(task_session),
             kind: "chat",
             status: pending,
             trigger: true,
-            content: prompt,
+            content: dispatched_prompt(prompt, task),
             process_after: null,
             tries: 0,
             created_at: now
@@ -396,6 +427,20 @@ rule MainGroupDispatchesSpecialist {
         sessions/SessionWoken(session: task_session)
 
     @guidance
+        -- dispatched_prompt(prompt, task) is a black box: the prompt as the
+        -- specialist reads it. With no dispatch transfer for the task it is
+        -- the prompt unchanged. With one, each reference to a handed-over
+        -- ipc-out path is rewritten to the path the specialist will see,
+        --   "{ipc_in_container_path}/{transfer_id}/<delivered name>"
+        -- and the prompt ends with a list of the files it was given, so a
+        -- file is found even when the dispatcher did not mention its path.
+        -- A path that was refused (see DispatchFilesTaken) is named at the
+        -- end as "[Not delivered: <path> (<reason>); ...]".
+        --
+        -- The note to the dispatcher (below) names refused paths the same
+        -- way, so the main agent learns of a lost file without waiting for
+        -- the specialist to report it.
+        --
         -- The dispatcher's session also gets a context-only note, "Specialist
         -- task dispatched (id: <task id>). Result will arrive as a follow-up
         -- message." - an InboundMessage with trigger = false, so it wakes
@@ -405,6 +450,8 @@ rule MainGroupDispatchesSpecialist {
         -- matched to its dispatch. A sub-task dispatch writes no such note:
         -- the parent specialist exits on dispatch and has one sub-task at a
         -- time, and the result it resumes with names the task it answers.
+        -- When the dispatch refused a file path, the note ends with the
+        -- same "[Not delivered: ...]" list the specialist's prompt carries.
 }
 
 ------------------------------------------------------------
@@ -539,7 +586,7 @@ rule SpecialistBootFailed {
 -- dispatch or delivery comes from.
 
 rule SpecialistDispatchesSubTask {
-    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt, file_paths?)
     requires: exists session.agent_group.specialist
     requires: session.agent_group.specialist.is_memory_provider = false
     let target_group = identity/AgentGroup{id: specialist_group_id}
@@ -561,6 +608,7 @@ rule SpecialistDispatchesSubTask {
         platform_id: null_channel/config.singleton_platform_id
     }
     requires: exists null_mg
+    let has_files = file_paths != null and file_paths.count > 0
     ensures:
         let child = SpecialistTask.created(
             specialist_group: target_group,
@@ -588,13 +636,15 @@ rule SpecialistDispatchesSubTask {
             last_active: now,
             created_at: now
         )
+        if has_files:
+            DispatchFilesTaken(session: session, task: child, file_paths: file_paths)
         sessions/InboundMessage.created(
             session: child_session,
             seq: next_inbound_seq(child_session),
             kind: "chat",
             status: pending,
             trigger: true,
-            content: task_prompt,
+            content: dispatched_prompt(task_prompt, child),
             process_after: null,
             tries: 0,
             created_at: now
@@ -602,10 +652,15 @@ rule SpecialistDispatchesSubTask {
         sessions/SessionWoken(session: child_session)
 }
 
+-- The three rejection rules below take no files: a rejected dispatch
+-- provisions no session, so DispatchFilesTaken is not emitted and the
+-- files stay in the parent's ipc-out. The parent keeps running and can
+-- dispatch again with them.
+--
 -- Depth exceeded: this dispatch would push the chain past max_specialist_depth.
 
 rule SubTaskRejectedDepth {
-    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt, file_paths?)
     requires: exists session.agent_group.specialist
     requires: session.agent_group.specialist.is_memory_provider = false
     let target_group = identity/AgentGroup{id: specialist_group_id}
@@ -645,7 +700,7 @@ rule SubTaskRejectedDepth {
 -- max_chain_delegations.
 
 rule SubTaskRejectedCount {
-    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt, file_paths?)
     requires: exists session.agent_group.specialist
     requires: session.agent_group.specialist.is_memory_provider = false
     let target_group = identity/AgentGroup{id: specialist_group_id}
@@ -686,7 +741,7 @@ rule SubTaskRejectedCount {
 -- specialist group max_same_type_dispatches times.
 
 rule SubTaskRejectedSameTypeLimit {
-    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt, file_paths?)
     requires: exists session.agent_group.specialist
     requires: session.agent_group.specialist.is_memory_provider = false
     let target_group = identity/AgentGroup{id: specialist_group_id}
@@ -736,7 +791,7 @@ rule SubTaskRejectedSameTypeLimit {
 -- The parent still moves into awaiting_sub_task while the lookup runs.
 
 rule MemoryProviderDispatched {
-    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt)
+    when: AgentRequestsDispatchSubTask(session, specialist_group_id, prompt, file_paths?)
     requires: exists session.agent_group.specialist
     requires: session.agent_group.specialist.is_memory_provider = false
     let target_group = identity/AgentGroup{id: specialist_group_id}
@@ -751,6 +806,7 @@ rule MemoryProviderDispatched {
         platform_id: null_channel/config.singleton_platform_id
     }
     requires: exists null_mg
+    let has_files = file_paths != null and file_paths.count > 0
     ensures:
         let child = SpecialistTask.created(
             specialist_group: target_group,
@@ -778,13 +834,15 @@ rule MemoryProviderDispatched {
             last_active: now,
             created_at: now
         )
+        if has_files:
+            DispatchFilesTaken(session: session, task: child, file_paths: file_paths)
         sessions/InboundMessage.created(
             session: child_session,
             seq: next_inbound_seq(child_session),
             kind: "chat",
             status: pending,
             trigger: true,
-            content: prompt,
+            content: dispatched_prompt(prompt, child),
             process_after: null,
             tries: 0,
             created_at: now
@@ -837,6 +895,7 @@ rule SpecialistDeliveredResult {
         task.closed_at = now
         if has_files:
             let transfer = ContainerTransfer.created(
+                kind: result,
                 task: task,
                 sender_invocation: invocation,
                 result_text: resolved_text,
@@ -931,6 +990,58 @@ rule TransferFilesOwned {
         -- by copy: the host does not remove the originals from ipc-out,
         -- because ipc-out is cleared at invocation end (see InvocationEnded)
         -- and the deliver tool ends the invocation.
+}
+
+-- A dispatch that names files hands them to the task it creates. The host
+-- validates each path against the dispatcher's ipc-out exactly as it does
+-- for a delivery (outside ipc-out, missing, or not a regular file: refused,
+-- never failing the dispatch), takes ownership of the rest by copy, and
+-- records a dispatch transfer for the task. The transfer is pending until
+-- the task's first container starts and IpcInPopulated places its files
+-- (TransferFilesPlaced, TransferMovedToInTransit).
+
+rule DispatchFilesTransferred {
+    when: DispatchFilesTaken(session, task, file_paths)
+    let invocation = invocation_for_session(session)
+    let delivered = deliverable_paths(invocation, file_paths)
+    requires: delivered.count > 0
+    ensures:
+        let transfer = ContainerTransfer.created(
+            kind: dispatch,
+            dispatched_task: task,
+            sender_invocation: invocation,
+            commit_to_memory: false,
+            file_count: delivered.count,
+            sent_at: now,
+            status: pending
+        )
+        HostTookOwnership(
+            invocation: invocation,
+            transfer: transfer,
+            file_paths: delivered
+        )
+
+    @guidance
+        -- deliverable_paths(invocation, paths) is a black box: the listed
+        -- paths that pass validation against the invocation's ipc-out, each
+        -- file once (as in TransferFilesOwned). When none pass, no transfer
+        -- is created; dispatched_prompt and the dispatcher's note still name
+        -- every refused path.
+        --
+        -- Ownership must be taken before the dispatcher's ipc-out is
+        -- cleared. A parent specialist's container exits on dispatch_sub_task
+        -- (its invocation ends and ipc-out is cleared, InvocationEnded), so
+        -- the host takes the files while processing the dispatch, ahead of
+        -- that clear, as it does for a delivery. The main agent's container
+        -- keeps running; its copies stay in its ipc-out until its own
+        -- invocation ends.
+        --
+        -- A sub-task dispatch writes no note to the parent (see
+        -- MainGroupDispatchesSpecialist), so a parent learns of a refused
+        -- path through its child: the child's prompt names it, and the
+        -- child can say so in its result.
+        --
+        -- No count or size limit applies to the files handed over.
 }
 
 -- Root tasks (dispatched by the main group) route their result back into
@@ -1224,7 +1335,10 @@ rule OrphanInvocationEnded {
 -- transfer_targets_invocation is a black box function: for sub-task
 -- transfers it returns true when invocation is the requester_task's next
 -- invocation; for root-task transfers it returns true when invocation is
--- the requester_group's main session's next invocation. commit-to-memory
+-- the requester_group's main session's next invocation; for dispatch
+-- transfers it returns true when invocation is the next invocation of the
+-- dispatched task's own session - its first start, and each later start
+-- after the transfer was reset to pending (TransferResetOnRecipientCrash). commit-to-memory
 -- transfers are not placed in ipc-in (they were committed to memory at
 -- routing time and transitioned to status = committed).
 
@@ -1286,8 +1400,16 @@ rule TransferPlacedIntoLiveIpcIn {
         --   for root-task transfers (transfer.task.requester_group != null):
         --     transfer.task.requester_session (the main-agent session that
         --     dispatched the root task)
-        -- This mirrors the recipient resolution in
+        --   for dispatch transfers (transfer.kind = dispatch):
+        --     the dispatched task's per-task session
+        --     (specialist_task_session(transfer.dispatched_task))
+        -- The first two mirror the recipient resolution in
         -- SpecialistResultRoutedToParent and SpecialistResultRoutedToMain.
+        --
+        -- Dispatch transfers never take this path: the lookup above finds
+        -- only result transfers (a dispatch transfer has no task), and a
+        -- dispatched task's session is created with the transfer, so no
+        -- container of it is running yet to place into.
         --
         -- active_invocation_for_session(session) returns the Invocation for
         -- which an IpcOutMount with status = active exists for that session,
@@ -1347,7 +1469,9 @@ rule InvocationEnded {
         --
         -- Files written to ipc-out before a dispatch_sub_task call are
         -- discarded when the parent container exits for the sub-task
-        -- dispatch. They will not be present in the resumed invocation's
+        -- dispatch, unless the dispatch named them in its file_paths: those
+        -- were taken by the host first and go to the child
+        -- (DispatchFilesTransferred), not back to the parent. They will not be present in the resumed invocation's
         -- ipc-out (each invocation gets a fresh, empty ipc-out per the
         -- per-invocation isolation model documented on Invocation).
         --
@@ -1522,12 +1646,30 @@ rule TransferExpiredOnRequesterTerminal {
         -- t.task.requester_task. For root-task transfers (requester_group
         -- set, requester_task null), the function returns false; expiry
         -- of those is handled by TransferExpiredOnRoutedMessageCompleted /
-        -- TransferExpiredOnRoutedMessageFailed.
+        -- TransferExpiredOnRoutedMessageFailed. For dispatch transfers it
+        -- also returns false; DispatchTransferExpiredOnTaskTerminal covers
+        -- them.
 }
 
 rule TransferExpiredOnRequesterFailed {
     when: parent: SpecialistTask.status transitions_to failed
     for t in ContainerTransfers where status in { pending, in_transit, committed } and is_transfer_for_requester(t, parent):
+        ensures: t.status = expired
+        for f in t.files:
+            ensures: f.status = expired
+}
+
+-- A dispatch transfer serves the task it was handed to for that task's
+-- whole life and expires when it reaches a terminal state, however it got
+-- there: delivered, failed, timed out, cancelled with its subtree, or its
+-- group deleted. A transfer still pending then (the task failed before its
+-- container ever started) expires too. A file the specialist wants to keep
+-- or return must be copied into its ipc-out and delivered.
+
+rule DispatchTransferExpiredOnTaskTerminal {
+    when: SpecialistTaskReachedTerminal(task)
+    for t in ContainerTransfers where kind = dispatch and dispatched_task = task
+            and status in { pending, in_transit }:
         ensures: t.status = expired
         for f in t.files:
             ensures: f.status = expired
@@ -1621,6 +1763,12 @@ rule TransferResetOnRecipientCrash {
         -- pending and the files back to owned, the next invocation's
         -- IpcInPopulated step can re-place them via TransferFilesPlaced
         -- and TransferMovedToInTransit, identical to the spawn-time path.
+        --
+        -- The same reset keeps a dispatch transfer with the task it was
+        -- handed to. That task's invocation also ends, non-terminal, when it
+        -- dispatches a sub-task of its own; the files it was given at
+        -- dispatch go back to pending and are placed again when it resumes
+        -- with the sub-task's result, as they are after a crash.
         --
         -- Counterpart (expire path). The expire branch fires when the
         -- recipient is past the point where it can still consume the
@@ -2056,6 +2204,17 @@ invariant CommitAndPlaceMutuallyExclusive {
     for t in ContainerTransfers:
         for f in t.files:
             (f.memory_path != null) implies t.commit_to_memory = true
+}
+
+-- Files handed over with a dispatch only ever reach the dispatched task's
+-- ipc-in; the requester's memory area is written by result transfers alone.
+
+invariant DispatchTransferNeverCommits {
+    for t in ContainerTransfers:
+        t.kind = dispatch implies (
+            t.commit_to_memory = false
+            and t.routed_message = null
+        )
 }
 
 -- Each TransferFile that lives in a recipient's ipc-in resolves to a

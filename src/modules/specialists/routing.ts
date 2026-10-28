@@ -23,6 +23,7 @@ import {
   placeTransferIntoActiveIpcIn,
   reclaimTransferStaging,
 } from './invocation.js';
+import { parkTransfer, returnDispatchedFiles, returnedNote } from './handover.js';
 import type { ContainerTransfer, SpecialistTask, TransferFile } from './types.js';
 
 function generateId(): string {
@@ -74,6 +75,7 @@ async function routeResultToMain(
   task: SpecialistTask,
   transfer: ContainerTransfer | null,
   postMortem: string | null,
+  returned: ContainerTransfer | null,
 ): Promise<void> {
   const session = await getSession(task.requester_session_id);
   if (!session || session.status !== 'active') {
@@ -184,6 +186,15 @@ async function routeResultToMain(
     content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
   }
 
+  // A failed task's files come back with its failure, and are done with once
+  // that message is handled (spec: SpecialistResultRoutedToMain,
+  // ReturnedFilesPlacedIntoLiveIpcIn).
+  if (returned) {
+    await getDb().run('UPDATE container_transfers SET routed_message_id = ? WHERE id = ?', messageId, returned.id);
+    await placeTransferIntoActiveIpcIn(session.id, { ...returned, routed_message_id: messageId });
+    content += await returnedNote(returned, 'Files you handed to this task, returned to your ipc-in');
+  }
+
   await sendToSession(session.agent_group_id, session.id, content, task.id, messageId);
 }
 
@@ -193,6 +204,7 @@ async function routeResultToParent(
   parentTask: SpecialistTask,
   transfer: ContainerTransfer | null,
   postMortem: string | null,
+  returned: ContainerTransfer | null,
 ): Promise<void> {
   const parentSession = await findSessionByAgentGroupAndThread(parentTask.specialist_group_id, parentTask.id);
   if (!parentSession) {
@@ -221,6 +233,10 @@ async function routeResultToParent(
   }
   // A last child that returns files is as final as one that returns text.
   content += await lastTurnParentNotice(task);
+  if (returned) {
+    await placeTransferIntoActiveIpcIn(parentSession.id, returned);
+    content += await returnedNote(returned, 'Files you handed to this sub-task, returned to your ipc-in');
+  }
 
   await sendToSession(parentSession.agent_group_id, parentSession.id, content, task.id);
 }
@@ -264,20 +280,37 @@ export async function routeResult(
 
   // notify: false when the requester is itself going away (its group is being
   // deleted): the task still ends cleanly, but nothing is sent to, or wakes, it.
-  if (opts.notify !== false) await routeToRequester(task, transfer, postMortem);
+  // A failed task gives back the files it was handed, before its failure is
+  // routed so the message can name them (spec: DispatchedFilesReturnedOnTaskFailed).
+  const returned = task.status === 'failed' ? await returnDispatchedFiles(task) : null;
+  if (opts.notify !== false) await routeToRequester(task, transfer, postMortem, returned);
+  if (returned) await parkIfRecipientGone(returned);
   // After routing, which claims this task's own just-delivered transfer; and
   // whether or not anyone was waiting, so transfers addressed to this task
   // are reclaimed however it ended.
   await expireTransfersForTerminalTask(task.id);
 }
 
+/**
+ * Returned files wait for their session even when the failure was not routed
+ * (a restarting parent finds them on its next run); only a session that is
+ * gone leaves them nowhere to go (spec: ReturnedFilesOrphanedWithoutRecipient).
+ */
+async function parkIfRecipientGone(returned: ContainerTransfer): Promise<void> {
+  const session = returned.recipient_session_id ? await getSession(returned.recipient_session_id) : undefined;
+  if (!session || session.status !== 'active') {
+    await parkTransfer(returned.id, 'returned to a session that is no longer active');
+  }
+}
+
 async function routeToRequester(
   task: SpecialistTask,
   transfer: ContainerTransfer | null,
   postMortem: string | null,
+  returned: ContainerTransfer | null,
 ): Promise<void> {
   if (task.requester_group_id) {
-    await routeResultToMain(task, transfer, postMortem);
+    await routeResultToMain(task, transfer, postMortem, returned);
     return;
   }
   if (!task.requester_task_id) return;
@@ -291,5 +324,5 @@ async function routeToRequester(
     return;
   }
   if (parent.status !== 'awaiting_sub_task') return;
-  await routeResultToParent(task, parent, transfer, postMortem);
+  await routeResultToParent(task, parent, transfer, postMortem, returned);
 }

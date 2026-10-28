@@ -2,7 +2,7 @@
  * Propagated from specs/specialists.allium: file handover and invocations —
  * InvocationStarted, OrphanInvocationEnded, TransferFilesPlaced,
  * TransferMovedToInTransit, TransferPlacedIntoLiveIpcIn, InvocationEnded,
- * InvocationEndedOnTaskTerminal, the transfer expiry/reset rules, and the
+ * InvocationEndedOnTaskTerminal, the transfer expiry/reset/orphan rules, and the
  * IpcOutMount / IpcInMount / ContainerTransfer / TransferFile status graphs.
  *
  * Every transition is driven through the real code (buildInvocationForSession,
@@ -22,6 +22,7 @@ const ROOT = '/tmp/nanoclaw-test-spec-handover';
 
 const mailbox = vi.hoisted(() => ({
   acked: [] as string[],
+  failed: [] as string[],
   pending: [] as string[],
   processing: [] as string[],
 }));
@@ -45,7 +46,10 @@ vi.mock('../../../session-manager.js', async (importOriginal) => ({
   writeSessionMessage: vi.fn(),
   withExistingMailboxSession: vi.fn(async (_ag: string, _s: string, action: (m: unknown) => unknown) =>
     action({
-      getTerminalProcessingAcks: () => mailbox.acked.map((messageId) => ({ messageId, status: 'completed' })),
+      getTerminalProcessingAcks: () => [
+        ...mailbox.acked.map((messageId) => ({ messageId, status: 'completed' })),
+        ...mailbox.failed.map((messageId) => ({ messageId, status: 'failed' })),
+      ],
       getMessageForRetry: (id: string, status: 'pending' | 'processing') =>
         (status === 'pending' ? mailbox.pending : mailbox.processing).includes(id) ? { id } : undefined,
       failPendingMessages: () => undefined,
@@ -301,12 +305,19 @@ async function setTaskStatus(id: string, status: SpecialistTask['status']): Prom
 }
 
 const staged = (transferId: string) => fs.existsSync(path.join(TRANSFERS_BASE_DIR, transferId));
+const parkedPath = async (fileId: string) =>
+  ((await getDb().get('SELECT parked_path FROM transfer_files WHERE id = ?', fileId)) as { parked_path: string | null })
+    .parked_path;
+/** A parked file's contents, in the root requester (ag-main)'s workspace. */
+const parkedContents = (transferId: string, name: string) =>
+  fs.readFileSync(path.join(ROOT, 'groups', 'ag-main', SPECIALISTS_CONFIG.orphanSubpath, transferId, name), 'utf-8');
 const inIpcIn = (invocationId: string, transferId: string, name: string) =>
   path.join(invocationIpcInPath(invocationId), transferId, name);
 
 beforeEach(async () => {
   fs.rmSync(ROOT, { recursive: true, force: true });
   mailbox.acked = [];
+  mailbox.failed = [];
   mailbox.pending = [];
   mailbox.processing = [];
   await runMigrations(await initTestDb());
@@ -1038,6 +1049,11 @@ describe('expiry on the requester task ending', () => {
       expect(await statusOf('transfer_files', `${id}-f1`)).toBe('expired');
       expect(staged(id)).toBe(false);
     }
+    // x-in reached p; x-wait never did, so it is parked in the root
+    // requester's workspace (TransferOrphaned -> TransferParked).
+    expect(await parkedPath('x-in-f1')).toBeNull();
+    expect(await parkedPath('x-wait-f1')).toBe(`${SPECIALISTS_CONFIG.orphanSubpath}/x-wait/report.md`);
+    expect(parkedContents('x-wait', 'report.md')).toBe('contents of report.md');
     expect(await statusOf('container_transfers', 'x-root')).toBe('pending');
     expect(staged('x-root')).toBe(true);
   }
@@ -1063,11 +1079,6 @@ covered(
   'rule-success.TransferExpiredOnRoutedMessageCompleted',
   'src/modules/specialists/main-transfer-expiry.test.ts',
   'expires them once the message carrying them was handled',
-);
-covered(
-  'rule-success.TransferExpiredOnRoutedMessageFailed',
-  'src/modules/specialists/main-transfer-expiry.test.ts',
-  'expires them when the message failed and will never be read',
 );
 covered(
   'rule-success.TransferResetOnRecipientCrash',
@@ -1118,9 +1129,9 @@ describe('reset on recipient exit', () => {
     expect(await edges('container_transfers', 'x')).not.toContain('in_transit>pending');
   });
 
-  obligation('rule-success.PendingTransferExpiredOnDeliveringTaskFailed', async () => {
+  obligation('rule-success.PendingTransferOrphanedOnDeliveringTaskFailed', async () => {
     // The task failed after its host took ownership of the files but before
-    // the result was routed anywhere.
+    // the result was routed anywhere: they are parked, not discarded.
     const f = await task('f', 'failed', null);
     await transfer({ id: 'x', task: 'f' });
 
@@ -1128,6 +1139,32 @@ describe('reset on recipient exit', () => {
 
     expect(await edges('container_transfers', 'x')).toEqual(['pending>expired']);
     expect(await statusOf('transfer_files', 'x-f1')).toBe('expired');
+    expect(await parkedPath('x-f1')).toBe(`${SPECIALISTS_CONFIG.orphanSubpath}/x/report.md`);
+    expect(parkedContents('x', 'report.md')).toBe('contents of report.md');
     expect(staged('x')).toBe(false);
+  });
+});
+
+describe('TransferOrphanedOnRoutedMessageFailed', () => {
+  obligation('rule-success.TransferOrphanedOnRoutedMessageFailed', async () => {
+    // A root result placed live into the running main container (in_transit),
+    // and another still waiting (pending); both messages fail, so the agent
+    // never read either. The main container's exit settles them: parked.
+    const inv = await start('sess-main');
+    const r = await task('r', 'completed', null, { noSession: true });
+    await routeResult(r, await transfer({ id: 'x-live', task: 'r' }));
+    expect(await statusOf('container_transfers', 'x-live')).toBe('in_transit');
+    await transfer({ id: 'x-wait', task: 'r', recipient: 'sess-main', routed: 'msg-wait' });
+    mailbox.failed = [(await getTransfer('x-live')).routed_message_id!, 'msg-wait'];
+
+    await endInvocationById(inv);
+
+    for (const id of ['x-live', 'x-wait']) {
+      expect(await statusOf('container_transfers', id)).toBe('expired');
+      expect(await statusOf('transfer_files', `${id}-f1`)).toBe('expired');
+      expect(await parkedPath(`${id}-f1`)).toBe(`${SPECIALISTS_CONFIG.orphanSubpath}/${id}/report.md`);
+      expect(parkedContents(id, 'report.md')).toBe('contents of report.md');
+      expect(staged(id)).toBe(false);
+    }
   });
 });

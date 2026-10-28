@@ -382,12 +382,15 @@ async function sweepTask(
     // new one. One per attempt: the id carries the attempt number, so a later
     // sweep finds it already written.
     try {
+      // Files a failed sub-task gave back while this task was down are in
+      // its ipc-in with nothing else to say so.
+      const { waitingFilesNote } = await import('./handover.js');
       await writeSessionMessage(fresh.agent_group_id, fresh.id, {
         id: `restart-${task.id}-${task.restart_attempt_count}`,
         kind: 'chat',
         timestamp: new Date().toISOString(),
         content: JSON.stringify({
-          text: task.prompt,
+          text: task.prompt + (await waitingFilesNote(fresh.id)),
           sender: 'system',
           senderId: 'system',
           specialistTaskId: task.id,

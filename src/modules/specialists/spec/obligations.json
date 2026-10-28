@@ -138,6 +138,12 @@
     "description": "Verify config parameter memory_reports_subpath has its declared default"
   },
   {
+    "id": "config-default.orphan_subpath",
+    "category": "config_default",
+    "construct": "config.orphan_subpath",
+    "description": "Verify config parameter orphan_subpath has its declared default"
+  },
+  {
     "id": "when-presence.SpecialistTask.pending_sub_task",
     "category": "when_presence",
     "construct": "SpecialistTask.pending_sub_task",
@@ -360,6 +366,18 @@
     "description": "Verify ContainerTransfer.dispatched_task is present when kind in {dispatch} and absent otherwise"
   },
   {
+    "id": "when-presence.ContainerTransfer.returned_to",
+    "category": "when_presence",
+    "construct": "ContainerTransfer.returned_to",
+    "description": "Verify ContainerTransfer.returned_to is present when kind in {returned} and absent otherwise"
+  },
+  {
+    "id": "when-presence.ContainerTransfer.failed_task",
+    "category": "when_presence",
+    "construct": "ContainerTransfer.failed_task",
+    "description": "Verify ContainerTransfer.failed_task is present when kind in {returned} and absent otherwise"
+  },
+  {
     "id": "when-presence.ContainerTransfer.result_text",
     "category": "when_presence",
     "construct": "ContainerTransfer.result_text",
@@ -418,6 +436,18 @@
     "category": "entity_fields",
     "construct": "ContainerTransfer",
     "description": "Verify all declared fields on ContainerTransfer are present with correct types"
+  },
+  {
+    "id": "entity-optional.ContainerTransfer.failed_task",
+    "category": "entity_optional",
+    "construct": "ContainerTransfer.failed_task",
+    "description": "Verify optional field ContainerTransfer.failed_task accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ContainerTransfer.returned_as",
+    "category": "entity_optional",
+    "construct": "ContainerTransfer.returned_as",
+    "description": "Verify optional field ContainerTransfer.returned_as accepts null and non-null values"
   },
   {
     "id": "entity-optional.ContainerTransfer.routed_message",
@@ -480,6 +510,12 @@
     "description": "Verify optional field TransferFile.memory_path accepts null and non-null values"
   },
   {
+    "id": "entity-optional.TransferFile.parked_path",
+    "category": "entity_optional",
+    "construct": "TransferFile.parked_path",
+    "description": "Verify optional field TransferFile.parked_path accepts null and non-null values"
+  },
+  {
     "id": "rule-success.MainGroupDispatchesSpecialist",
     "category": "rule_success",
     "construct": "MainGroupDispatchesSpecialist",
@@ -514,6 +550,36 @@
     "category": "rule_entity_creation",
     "construct": "MainGroupDispatchesSpecialist",
     "description": "Verify entity creation in rule MainGroupDispatchesSpecialist ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.MainDispatchRefused",
+    "category": "rule_success",
+    "construct": "MainDispatchRefused",
+    "description": "Verify rule MainDispatchRefused succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.MainDispatchRefused.1",
+    "category": "rule_failure",
+    "construct": "MainDispatchRefused",
+    "description": "Verify rule MainDispatchRefused is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.SubTaskDispatchRefused",
+    "category": "rule_success",
+    "construct": "SubTaskDispatchRefused",
+    "description": "Verify rule SubTaskDispatchRefused succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SubTaskDispatchRefused.1",
+    "category": "rule_failure",
+    "construct": "SubTaskDispatchRefused",
+    "description": "Verify rule SubTaskDispatchRefused is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.RefusedDispatchFilesReturned",
+    "category": "rule_success",
+    "construct": "RefusedDispatchFilesReturned",
+    "description": "Verify rule RefusedDispatchFilesReturned succeeds when all preconditions are met"
   },
   {
     "id": "rule-success.SpecialistTaskStarted",
@@ -1020,6 +1086,12 @@
     "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
   },
   {
+    "id": "rule-failure.OrphanInvocationEnded.4",
+    "category": "rule_failure",
+    "construct": "OrphanInvocationEnded",
+    "description": "Verify rule OrphanInvocationEnded is rejected when requires clause fails"
+  },
+  {
     "id": "rule-success.TransferFilesPlaced",
     "category": "rule_success",
     "construct": "TransferFilesPlaced",
@@ -1068,6 +1140,42 @@
     "description": "Verify rule TransferPlacedIntoLiveIpcIn is rejected when requires clause fails"
   },
   {
+    "id": "rule-success.ReturnedFilesPlacedIntoLiveIpcIn",
+    "category": "rule_success",
+    "construct": "ReturnedFilesPlacedIntoLiveIpcIn",
+    "description": "Verify rule ReturnedFilesPlacedIntoLiveIpcIn succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.ReturnedFilesPlacedIntoLiveIpcIn.1",
+    "category": "rule_failure",
+    "construct": "ReturnedFilesPlacedIntoLiveIpcIn",
+    "description": "Verify rule ReturnedFilesPlacedIntoLiveIpcIn is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ReturnedFilesPlacedIntoLiveIpcIn.2",
+    "category": "rule_failure",
+    "construct": "ReturnedFilesPlacedIntoLiveIpcIn",
+    "description": "Verify rule ReturnedFilesPlacedIntoLiveIpcIn is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ReturnedFilesPlacedIntoLiveIpcIn.3",
+    "category": "rule_failure",
+    "construct": "ReturnedFilesPlacedIntoLiveIpcIn",
+    "description": "Verify rule ReturnedFilesPlacedIntoLiveIpcIn is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.TransferPlacedIntoRunningInvocation",
+    "category": "rule_success",
+    "construct": "TransferPlacedIntoRunningInvocation",
+    "description": "Verify rule TransferPlacedIntoRunningInvocation succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.TransferPlacedIntoRunningInvocation.1",
+    "category": "rule_failure",
+    "construct": "TransferPlacedIntoRunningInvocation",
+    "description": "Verify rule TransferPlacedIntoRunningInvocation is rejected when requires clause fails"
+  },
+  {
     "id": "rule-success.InvocationEnded",
     "category": "rule_success",
     "construct": "InvocationEnded",
@@ -1075,6 +1183,12 @@
   },
   {
     "id": "rule-failure.InvocationEnded.1",
+    "category": "rule_failure",
+    "construct": "InvocationEnded",
+    "description": "Verify rule InvocationEnded is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.InvocationEnded.2",
     "category": "rule_failure",
     "construct": "InvocationEnded",
     "description": "Verify rule InvocationEnded is rejected when requires clause fails"
@@ -1146,10 +1260,16 @@
     "description": "Verify rule TransferExpiredOnRequesterFailed succeeds when all preconditions are met"
   },
   {
-    "id": "rule-success.DispatchTransferExpiredOnTaskTerminal",
+    "id": "rule-success.DispatchTransferExpiredOnTaskCompleted",
     "category": "rule_success",
-    "construct": "DispatchTransferExpiredOnTaskTerminal",
-    "description": "Verify rule DispatchTransferExpiredOnTaskTerminal succeeds when all preconditions are met"
+    "construct": "DispatchTransferExpiredOnTaskCompleted",
+    "description": "Verify rule DispatchTransferExpiredOnTaskCompleted succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.DispatchedFilesReturnedOnTaskFailed",
+    "category": "rule_success",
+    "construct": "DispatchedFilesReturnedOnTaskFailed",
+    "description": "Verify rule DispatchedFilesReturnedOnTaskFailed succeeds when all preconditions are met"
   },
   {
     "id": "rule-success.TransferExpiredOnRoutedMessageCompleted",
@@ -1158,10 +1278,10 @@
     "description": "Verify rule TransferExpiredOnRoutedMessageCompleted succeeds when all preconditions are met"
   },
   {
-    "id": "rule-success.TransferExpiredOnRoutedMessageFailed",
+    "id": "rule-success.TransferOrphanedOnRoutedMessageFailed",
     "category": "rule_success",
-    "construct": "TransferExpiredOnRoutedMessageFailed",
-    "description": "Verify rule TransferExpiredOnRoutedMessageFailed succeeds when all preconditions are met"
+    "construct": "TransferOrphanedOnRoutedMessageFailed",
+    "description": "Verify rule TransferOrphanedOnRoutedMessageFailed succeeds when all preconditions are met"
   },
   {
     "id": "rule-success.TransferResetOnRecipientCrash",
@@ -1194,34 +1314,82 @@
     "description": "Verify rule TransferResetOnMainRecipientExit is rejected when requires clause fails"
   },
   {
-    "id": "rule-success.PendingTransferExpiredOnDeliveringTaskFailed",
+    "id": "rule-success.PendingTransferOrphanedOnDeliveringTaskFailed",
     "category": "rule_success",
-    "construct": "PendingTransferExpiredOnDeliveringTaskFailed",
-    "description": "Verify rule PendingTransferExpiredOnDeliveringTaskFailed succeeds when all preconditions are met"
+    "construct": "PendingTransferOrphanedOnDeliveringTaskFailed",
+    "description": "Verify rule PendingTransferOrphanedOnDeliveringTaskFailed succeeds when all preconditions are met"
   },
   {
-    "id": "rule-success.UnroutedTransferExpired",
+    "id": "rule-success.UnroutedTransferOrphaned",
     "category": "rule_success",
-    "construct": "UnroutedTransferExpired",
-    "description": "Verify rule UnroutedTransferExpired succeeds when all preconditions are met"
+    "construct": "UnroutedTransferOrphaned",
+    "description": "Verify rule UnroutedTransferOrphaned succeeds when all preconditions are met"
   },
   {
-    "id": "rule-failure.UnroutedTransferExpired.1",
+    "id": "rule-failure.UnroutedTransferOrphaned.1",
     "category": "rule_failure",
-    "construct": "UnroutedTransferExpired",
-    "description": "Verify rule UnroutedTransferExpired is rejected when requires clause fails"
+    "construct": "UnroutedTransferOrphaned",
+    "description": "Verify rule UnroutedTransferOrphaned is rejected when requires clause fails"
   },
   {
-    "id": "rule-failure.UnroutedTransferExpired.2",
+    "id": "rule-failure.UnroutedTransferOrphaned.2",
     "category": "rule_failure",
-    "construct": "UnroutedTransferExpired",
-    "description": "Verify rule UnroutedTransferExpired is rejected when requires clause fails"
+    "construct": "UnroutedTransferOrphaned",
+    "description": "Verify rule UnroutedTransferOrphaned is rejected when requires clause fails"
   },
   {
-    "id": "rule-failure.UnroutedTransferExpired.3",
+    "id": "rule-failure.UnroutedTransferOrphaned.3",
     "category": "rule_failure",
-    "construct": "UnroutedTransferExpired",
-    "description": "Verify rule UnroutedTransferExpired is rejected when requires clause fails"
+    "construct": "UnroutedTransferOrphaned",
+    "description": "Verify rule UnroutedTransferOrphaned is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.ReturnedFilesOrphanedWithoutRecipient",
+    "category": "rule_success",
+    "construct": "ReturnedFilesOrphanedWithoutRecipient",
+    "description": "Verify rule ReturnedFilesOrphanedWithoutRecipient succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.ReturnedFilesOrphanedWithoutRecipient.1",
+    "category": "rule_failure",
+    "construct": "ReturnedFilesOrphanedWithoutRecipient",
+    "description": "Verify rule ReturnedFilesOrphanedWithoutRecipient is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ReturnedFilesOrphanedWithoutRecipient.2",
+    "category": "rule_failure",
+    "construct": "ReturnedFilesOrphanedWithoutRecipient",
+    "description": "Verify rule ReturnedFilesOrphanedWithoutRecipient is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ReturnedFilesOrphanedWithoutRecipient.3",
+    "category": "rule_failure",
+    "construct": "ReturnedFilesOrphanedWithoutRecipient",
+    "description": "Verify rule ReturnedFilesOrphanedWithoutRecipient is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.ReturnedTransferEndsWithRecipientTask",
+    "category": "rule_success",
+    "construct": "ReturnedTransferEndsWithRecipientTask",
+    "description": "Verify rule ReturnedTransferEndsWithRecipientTask succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.ReturnedTransferEndsWithRecipientTask.1",
+    "category": "rule_failure",
+    "construct": "ReturnedTransferEndsWithRecipientTask",
+    "description": "Verify rule ReturnedTransferEndsWithRecipientTask is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.TransferParked",
+    "category": "rule_success",
+    "construct": "TransferParked",
+    "description": "Verify rule TransferParked succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.TransferParked.1",
+    "category": "rule_failure",
+    "construct": "TransferParked",
+    "description": "Verify rule TransferParked is rejected when requires clause fails"
   },
   {
     "id": "rule-success.SpecialistContainerCrashed",
@@ -1402,6 +1570,18 @@
     "category": "invariant",
     "construct": "DispatchTransferNeverCommits",
     "description": "Verify invariant DispatchTransferNeverCommits holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.ReturnedTransferNeverCommits",
+    "category": "invariant",
+    "construct": "ReturnedTransferNeverCommits",
+    "description": "Verify invariant ReturnedTransferNeverCommits holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.NamedFilesNeverLost",
+    "category": "invariant",
+    "construct": "NamedFilesNeverLost",
+    "description": "Verify invariant NamedFilesNeverLost holds after every state-changing rule that touches constrained entities"
   },
   {
     "id": "invariant.IpcInPathsUniquePerTransfer",

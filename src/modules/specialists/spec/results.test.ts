@@ -4,7 +4,7 @@
  * SpecialistResultRoutedToParent, SpecialistFailureRoutedToRequester,
  * SpecialistTaskTimedOut, SpecialistTaskCompletedTerminal,
  * SpecialistTaskFailedTerminal, SpecialistTaskSessionClosed,
- * UnroutedTransferExpired.
+ * UnroutedTransferOrphaned.
  *
  * The real delivery, routing, invocation and recovery code runs against a
  * real central DB and a real (temporary) DATA_DIR / GROUPS_DIR. Only the
@@ -762,10 +762,10 @@ describe('SpecialistTaskReachedTerminal', () => {
   });
 });
 
-// ── UnroutedTransferExpired ──────────────────────────────────────────────────
+// ── UnroutedTransferOrphaned ─────────────────────────────────────────────────
 
-describe('UnroutedTransferExpired', () => {
-  obligation('rule-success.UnroutedTransferExpired', async () => {
+describe('UnroutedTransferOrphaned', () => {
+  obligation('rule-success.UnroutedTransferOrphaned', async () => {
     // A root result with files whose main session is closed: no recipient.
     await world({ mainStatus: 'closed' });
     await rootTask();
@@ -773,13 +773,23 @@ describe('UnroutedTransferExpired', () => {
 
     await deliver('sess-root', { result_text: 'files', file_paths: ['report.md', 'b.md'] });
 
+    // Nobody can read them: parked in the root requester's workspace
+    // (TransferParked), then expired and their staging reclaimed.
     const [transfer] = await transfersOf('task-root');
     expect(transfer.status).toBe('expired');
-    expect((await filesOf(transfer.id)).map((f) => f.status)).toEqual(['expired', 'expired']);
+    const files = await filesOf(transfer.id);
+    expect(files.map((f) => f.status)).toEqual(['expired', 'expired']);
+    for (const f of files) {
+      const rel = `${SPECIALISTS_CONFIG.orphanSubpath}/${transfer.id}/${f.original_name}`;
+      expect(f.parked_path).toBe(rel);
+      expect(fs.readFileSync(path.join(GROUPS, 'main', rel), 'utf-8')).toBe(
+        f.original_name === 'report.md' ? 'r' : 'b',
+      );
+    }
     expect(fs.existsSync(path.join(TRANSFERS_BASE_DIR, transfer.id))).toBe(false);
   });
 
-  obligation('rule-failure.UnroutedTransferExpired.1', async () => {
+  obligation('rule-failure.UnroutedTransferOrphaned.1', async () => {
     // The task delivered text only: there is no transfer of its own, and
     // another task's pending transfer is not touched.
     await world({ mainStatus: 'closed' });
@@ -804,7 +814,7 @@ describe('UnroutedTransferExpired', () => {
     expect((await filesOf('xfer-other'))[0].status).toBe('owned');
   });
 
-  obligation('rule-failure.UnroutedTransferExpired.2', async () => {
+  obligation('rule-failure.UnroutedTransferOrphaned.2', async () => {
     // The task's transfer is no longer pending (already placed, in transit).
     await world({ mainStatus: 'closed' });
     const task = await rootTask({ status: 'completed', result: 'r', closed_at: now() });
@@ -825,7 +835,7 @@ describe('UnroutedTransferExpired', () => {
     expect((await filesOf('xfer-root'))[0].status).toBe('placed');
   });
 
-  obligation('rule-failure.UnroutedTransferExpired.3', async () => {
+  obligation('rule-failure.UnroutedTransferOrphaned.3', async () => {
     // The result has a recipient (an active main session): its transfer
     // stays pending for the recipient's next invocation.
     await world();

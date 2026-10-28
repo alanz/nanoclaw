@@ -122,8 +122,18 @@ export async function buildInvocationForSession(
   // previous invocation's ended_at NULL. Ending it now keeps getActiveInvocation
   // unambiguous and prevents placeTransferIntoActiveIpcIn from routing files to
   // a stale ipc-in directory on the next result delivery.
+  //
+  // Any handover call the orphan left unhandled is handled first, so the
+  // files it named are owned before its ipc-out goes (spec:
+  // handover_calls_handled on OrphanInvocationEnded).
   const orphan = await getActiveInvocation(session.id);
   if (orphan) {
+    try {
+      const { deliverSessionMessages } = await import('../../delivery.js');
+      await deliverSessionMessages(session, { waitForInflight: true });
+    } catch (err) {
+      log.warn('specialists: draining before ending an orphaned invocation failed', { invocationId: orphan.id, err });
+    }
     await endInvocationById(orphan.id);
   }
 
@@ -196,7 +206,7 @@ async function _populateIpcIn(db: ReturnType<typeof getDb>, sessionId: string, i
     for (const file of files) {
       try {
         fs.copyFileSync(file.host_path, path.join(subdir, file.original_name));
-        await db.run("UPDATE transfer_files SET status = 'placed' WHERE id = ?", file.id);
+        await db.run("UPDATE transfer_files SET status = 'placed', reached_recipient = 1 WHERE id = ?", file.id);
       } catch (err) {
         log.warn('specialists: failed to copy transfer file to ipc-in', {
           transferId: transfer.id,
@@ -247,7 +257,7 @@ export async function placeTransferIntoActiveIpcIn(sessionId: string, transfer: 
   for (const file of files) {
     try {
       fs.copyFileSync(file.host_path, path.join(subdir, file.original_name));
-      await db.run("UPDATE transfer_files SET status = 'placed' WHERE id = ?", file.id);
+      await db.run("UPDATE transfer_files SET status = 'placed', reached_recipient = 1 WHERE id = ?", file.id);
     } catch (err) {
       log.warn('specialists: failed to copy transfer file to active ipc-in', {
         transferId: transfer.id,
@@ -320,15 +330,19 @@ export async function endInvocationById(invocationId: string): Promise<void> {
   const taskAlive = taskRow != null && taskRow.status !== 'completed' && taskRow.status !== 'failed';
 
   const inTransit = (await db.all(
-    "SELECT id, routed_message_id FROM container_transfers WHERE status = 'in_transit' AND recipient_session_id = ?",
+    "SELECT id, kind, routed_message_id FROM container_transfers WHERE status = 'in_transit' AND recipient_session_id = ?",
     inv.session_id,
-  )) as { id: string; routed_message_id: string | null }[];
+  )) as { id: string; kind: string; routed_message_id: string | null }[];
 
   // A main-agent session (no task) expires a transfer once the message that
   // carried it has been handled; one the container exited before reaching is
   // still owed to the turn that will read it, so it is kept like a live task's
   // (spec: TransferExpiredOnRoutedMessage*, TransferResetOnMainRecipientExit).
-  const owed = taskRow == null ? await unhandledRoutedMessages(inv.session_id, inTransit) : new Set<string>();
+  const { owed, failed } =
+    taskRow == null
+      ? await routedMessageOutcomes(inv.session_id, inTransit)
+      : { owed: new Set<string>(), failed: new Set<string>() };
+  const { parkTransfer } = await import('./handover.js');
 
   // A main session's transfer still pending when its message was handled never
   // reached the agent and never will: done with, like a placed one.
@@ -337,18 +351,25 @@ export async function endInvocationById(invocationId: string): Promise<void> {
       "SELECT id, routed_message_id FROM container_transfers WHERE status = 'pending' AND recipient_session_id = ? AND routed_message_id IS NOT NULL",
       inv.session_id,
     )) as { id: string; routed_message_id: string | null }[];
-    const stillOwed = await unhandledRoutedMessages(inv.session_id, waiting);
+    const stillOwed = (await routedMessageOutcomes(inv.session_id, waiting)).owed;
     for (const t of waiting.filter((w) => !stillOwed.has(w.id))) {
-      await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", t.id);
-      await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", t.id);
-      reclaimTransferStaging(t.id);
+      await parkTransfer(t.id, 'its message was handled before the files reached the agent');
     }
   }
 
   for (const t of inTransit) {
-    if (taskAlive || owed.has(t.id)) {
+    // Files handed to this task at dispatch are settled with the task, not
+    // its run: used up if it completed, given back if it failed
+    // (expireTransfersForTerminalTask, returnDispatchedFiles). A run ended at
+    // the terminal transition comes first, so expiring them here would lose
+    // a failed task's files before they could go back.
+    if (taskAlive || owed.has(t.id) || t.kind === 'dispatch') {
       await db.run("UPDATE transfer_files SET status = 'owned' WHERE transfer_id = ? AND status = 'placed'", t.id);
       await db.run("UPDATE container_transfers SET status = 'pending' WHERE id = ?", t.id);
+    } else if (failed.has(t.id)) {
+      // The message carrying them will never be handled: unread (spec:
+      // TransferOrphanedOnRoutedMessageFailed).
+      await parkTransfer(t.id, 'the message carrying it failed');
     } else {
       await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", t.id);
       await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", t.id);
@@ -372,92 +393,116 @@ export async function endInvocationById(invocationId: string): Promise<void> {
 }
 
 /**
- * The transfers, among those given, whose routed message a main-agent session
- * has not handled yet: still pending or processing on the host's side, and
- * not acked done by the container (whose ack the host may not have synced).
- * A transfer with no routed message (written before it was recorded), or a
- * session with no mailbox, counts as handled — expiring is the old behaviour.
+ * For transfers to a main-agent session, what became of each one's routed
+ * message: still owed to the agent (pending or processing on the host's side,
+ * and not acked done by the container, whose ack the host may not have
+ * synced), or failed (acked failed — it will never be handled). Anything else
+ * was handled. A transfer with no routed message (written before it was
+ * recorded), or a session with no mailbox, counts as handled.
  */
-async function unhandledRoutedMessages(
+async function routedMessageOutcomes(
   sessionId: string,
   transfers: { id: string; routed_message_id: string | null }[],
-): Promise<Set<string>> {
+): Promise<{ owed: Set<string>; failed: Set<string> }> {
   const routed = transfers.filter((t) => t.routed_message_id != null);
-  if (routed.length === 0) return new Set();
+  const none = { owed: new Set<string>(), failed: new Set<string>() };
+  if (routed.length === 0) return none;
   const session = (await getDb().get('SELECT agent_group_id FROM sessions WHERE id = ?', sessionId)) as
     | { agent_group_id: string }
     | undefined;
-  if (!session) return new Set();
-  const owed = await withExistingMailboxSession(session.agent_group_id, sessionId, (mailbox) => {
-    const done = new Set(mailbox.getTerminalProcessingAcks().map((a) => a.messageId));
-    return routed
-      .filter((t) => {
-        const id = t.routed_message_id!;
-        if (done.has(id)) return false;
-        return Boolean(mailbox.getMessageForRetry(id, 'pending') ?? mailbox.getMessageForRetry(id, 'processing'));
-      })
-      .map((t) => t.id);
+  if (!session) return none;
+  const outcome = await withExistingMailboxSession(session.agent_group_id, sessionId, (mailbox) => {
+    const acks = new Map(mailbox.getTerminalProcessingAcks().map((a) => [a.messageId, a.status as string]));
+    const owed: string[] = [];
+    const failed: string[] = [];
+    for (const t of routed) {
+      const id = t.routed_message_id!;
+      const ack = acks.get(id);
+      if (ack === 'failed') failed.push(t.id);
+      else if (ack !== undefined) continue;
+      else if (mailbox.getMessageForRetry(id, 'pending') ?? mailbox.getMessageForRetry(id, 'processing'))
+        owed.push(t.id);
+    }
+    return { owed: new Set(owed), failed: new Set(failed) };
   });
-  return new Set(owed ?? []);
+  return outcome ?? none;
 }
 
 /**
- * Expire pending and in-transit/committed transfers for a task that has
- * reached a terminal state. Called by the routing module.
+ * Settle the transfers tied to a task that has reached a terminal state.
+ * Files that reached their reader expire; files that never will are parked
+ * (spec: TransferParked) — never dropped unseen (NamedFilesNeverLost).
  *
- * For sub-task transfers: a transfer's requester is the parent task
- * (t.task.requester_task). We expire transfers from child tasks that
- * targeted this task when this task transitions to terminal. A dispatch
- * transfer (files handed to this task when it was dispatched) expires too.
+ * - Results its sub-tasks delivered to it: read ones expire, unread ones are
+ *   parked (TransferExpiredOnRequesterTerminal / ...Failed).
+ * - Its own result transfer still unrouted: parked
+ *   (UnroutedTransferOrphaned, PendingTransferOrphanedOnDeliveringTaskFailed).
+ * - Files handed to it at dispatch: used up when it completed; a failure has
+ *   already given them back (routing.ts), and anything left is parked.
+ * - Files given back to its session: read ones expire, the rest are parked
+ *   (ReturnedTransferEndsWithRecipientTask).
  */
 export async function expireTransfersForTerminalTask(taskId: string): Promise<void> {
   const db = getDb();
   if (!(await db.hasTable('container_transfers'))) return;
+  const { parkTransfer } = await import('./handover.js');
 
-  // Expire transfers WHERE the delivering task's requester_task_id = taskId
-  // (i.e. the delivery was for a sub-task of this task that became terminal).
-  // Pending ones too: files that never reached this task never will now, and
-  // left pending they would keep their staging copy for good.
-  const transfersToExpire = (await db.all(
-    `SELECT ct.id FROM container_transfers ct
+  const retire = async (id: string): Promise<void> => {
+    await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
+    await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
+    reclaimTransferStaging(id);
+  };
+
+  const fromChildren = (await db.all(
+    `SELECT ct.id, ct.status FROM container_transfers ct
        JOIN specialist_tasks st ON st.id = ct.task_id
        WHERE ct.status IN ('pending', 'in_transit', 'committed')
          AND ct.kind = 'result'
          AND st.requester_task_id = ?`,
     taskId,
-  )) as { id: string }[];
-
-  for (const { id } of transfersToExpire) {
-    await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
-    await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
-    reclaimTransferStaging(id);
+  )) as { id: string; status: string }[];
+  for (const t of fromChildren) {
+    if (t.status === 'pending') await parkTransfer(t.id, 'its requester task ended before receiving it');
+    else await retire(t.id);
   }
 
-  // Also expire pending transfers for the task itself that haven't been staged for delivery yet.
-  // Transfers with recipient_session_id already set have been routed to an ipc-in dir and must
-  // not be expired here — the delivery sweep will advance them to in_transit/committed.
-  const pendingTransfers = (await db.all(
+  // Its own result, never routed to anyone. Transfers with
+  // recipient_session_id set have been routed and are settled by their
+  // recipient (the routed message, or the parent task's end).
+  const unrouted = (await db.all(
     "SELECT id FROM container_transfers WHERE task_id = ? AND kind = 'result' AND status = 'pending' AND recipient_session_id IS NULL",
     taskId,
   )) as { id: string }[];
+  for (const { id } of unrouted) await parkTransfer(id, 'its result could not be routed');
 
-  for (const { id } of pendingTransfers) {
-    await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
-    await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
-    reclaimTransferStaging(id);
-  }
+  const task = (await db.get('SELECT status, specialist_group_id FROM specialist_tasks WHERE id = ?', taskId)) as
+    | { status: string; specialist_group_id: string }
+    | undefined;
 
-  // Files handed to this task when it was dispatched served it for its whole
-  // life, however it ended — pending ones too, when it failed before its
-  // container ever started (spec: DispatchTransferExpiredOnTaskTerminal).
   const dispatched = (await db.all(
     "SELECT id FROM container_transfers WHERE task_id = ? AND kind = 'dispatch' AND status IN ('pending', 'in_transit')",
     taskId,
   )) as { id: string }[];
-
   for (const { id } of dispatched) {
-    await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
-    await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
-    reclaimTransferStaging(id);
+    if (task?.status === 'completed') await retire(id);
+    else await parkTransfer(id, 'its task ended without using it');
+  }
+
+  const session = task
+    ? ((await db.get(
+        'SELECT id FROM sessions WHERE agent_group_id = ? AND thread_id = ? ORDER BY created_at DESC LIMIT 1',
+        task.specialist_group_id,
+        taskId,
+      )) as { id: string } | undefined)
+    : undefined;
+  if (session) {
+    const returned = (await db.all(
+      "SELECT id, status FROM container_transfers WHERE kind = 'returned' AND recipient_session_id = ? AND status IN ('pending', 'in_transit')",
+      session.id,
+    )) as { id: string; status: string }[];
+    for (const t of returned) {
+      if (t.status === 'pending') await parkTransfer(t.id, 'returned to a task that ended before receiving it');
+      else await retire(t.id);
+    }
   }
 }

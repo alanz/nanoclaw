@@ -202,8 +202,8 @@ function rewritePaths(text: string, rewrites: Map<string, string>): string {
 
 export interface TakeFilesOptions {
   kind: TransferKind;
-  /** result: the delivering task. dispatch: the task the files go to. */
-  taskId: string;
+  /** result: the delivering task. dispatch: the task the files go to. returned: none. */
+  taskId: string | null;
   /** Text whose references to the listed paths are rewritten to where the files went. */
   text: string;
   filePaths: string[];

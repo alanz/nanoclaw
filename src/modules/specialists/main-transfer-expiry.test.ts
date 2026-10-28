@@ -167,7 +167,7 @@ describe('main agent exits holding delivered files', () => {
     expect(await state()).toEqual(DONE);
   });
 
-  it('expires them when the message failed and will never be read', async () => {
+  it('expires them when the message is no longer pending or processing (handled, ack not yet synced)', async () => {
     const inv = await mainWithInvocation();
     await placed(inv, 'msg-result'); // neither pending, processing nor acked
 

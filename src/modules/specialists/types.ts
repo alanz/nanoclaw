@@ -24,13 +24,16 @@ export interface IpcInMount {
   status: IpcMountStatus;
 }
 
-export type TransferKind = 'result' | 'dispatch';
+export type TransferKind = 'result' | 'dispatch' | 'returned';
 
 export interface ContainerTransfer {
   id: string;
-  /** result: task_id is the delivering task. dispatch: task_id is the task the files go to. */
+  /**
+   * result: task_id is the delivering task. dispatch: task_id is the task the
+   * files go to. returned: files given back to recipient_session_id; no task_id.
+   */
   kind?: TransferKind;
-  task_id: string;
+  task_id: string | null;
   sender_invocation_id: string;
   result_text: string;
   commit_to_memory: number; // 0 | 1
@@ -38,8 +41,12 @@ export interface ContainerTransfer {
   sent_at: string;
   status: TransferStatus;
   recipient_session_id: string | null;
-  /** The inbound message that carried a root task's result to the main agent; null otherwise. */
+  /** The inbound message whose handling retires a transfer to a session with no task; null otherwise. */
   routed_message_id?: string | null;
+  /** returned: the failed task whose files these were; null for a refused dispatch. */
+  failed_task_id?: string | null;
+  /** dispatch: the returned transfer carrying its files back after its task failed. */
+  returned_as?: string | null;
 }
 
 export interface TransferFile {
@@ -49,6 +56,10 @@ export interface TransferFile {
   host_path: string;
   status: TransferFileStatus;
   memory_path: string | null;
+  /** Where the file was parked when nothing could read it, relative to the root requester group's folder. */
+  parked_path?: string | null;
+  /** 0 | 1 — placed in a recipient's ipc-in at least once. */
+  reached_recipient?: number;
 }
 
 export type SpecialistTaskStatus =

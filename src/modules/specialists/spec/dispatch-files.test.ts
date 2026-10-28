@@ -1,8 +1,9 @@
 /**
  * Propagated from specs/specialists.allium — files handed over with a
- * dispatch: DispatchFilesTransferred, DispatchTransferExpiredOnTaskTerminal,
- * the DispatchTransferNeverCommits invariant, the TransferKind enum and the
- * ContainerTransfer fields that depend on it.
+ * dispatch: DispatchFilesTransferred, DispatchTransferExpiredOnTaskCompleted,
+ * DispatchedFilesReturnedOnTaskFailed, the DispatchTransferNeverCommits
+ * invariant, the TransferKind enum and the ContainerTransfer fields that
+ * depend on it.
  *
  * Every test drives the real handlers (handleDispatchSpecialist,
  * handleDispatchSubTask, handleDeliverSpecialistResult) and the real
@@ -320,7 +321,7 @@ describe('DispatchFilesTransferred', () => {
     expect(t).toMatchObject({ kind: 'dispatch', task_id: child.id, status: 'pending' });
   });
 
-  it('takes no files for a rejected sub-task: they stay in the parent ipc-out', async () => {
+  it('gives a rejected sub-task its parent files back: they survive the parent exit into its next run', async () => {
     const p = await parent();
     await getDb().run(
       'UPDATE specialist_tasks SET depth = ? WHERE id = ?',
@@ -333,13 +334,38 @@ describe('DispatchFilesTransferred', () => {
       'task-parent',
     );
     const parentInvocation = await start(p);
-    const f = stage(parentInvocation, 'chunk.txt');
+    const f = stage(parentInvocation, 'chunk.txt', 'part one');
     const child = await dispatched(() =>
       handleDispatchSubTask({ specialist_group_id: 'ag-b', prompt: 'p', file_paths: [f] }, p),
     );
     expect(child.status).toBe('failed');
-    expect(await transfers()).toEqual([]);
-    expect(fs.existsSync(path.join(invocationIpcOutPath(parentInvocation), 'chunk.txt'))).toBe(true);
+    // The parent's container exits on dispatch_sub_task whatever the outcome:
+    // its ipc-out goes.
+    await endInvocationById(parentInvocation);
+    expect(fs.existsSync(invocationIpcOutPath(parentInvocation))).toBe(false);
+
+    // The host took the file first, into a returned transfer to the parent's
+    // session (no dispatch transfer: the rejected task never runs).
+    const [t] = await transfers();
+    expect(t).toMatchObject({
+      kind: 'returned',
+      task_id: null,
+      failed_task_id: null,
+      recipient_session_id: 'sess-parent',
+      sender_invocation_id: parentInvocation,
+      routed_message_id: null,
+      status: 'pending',
+    });
+    // The rejection notice wakes the parent and names where the file now is.
+    const notice = triggerOf('sess-parent');
+    expect(notice).toContain('sub-task rejected: depth limit reached');
+    expect(notice).toContain(`${IPC_IN}/${t.id}/chunk.txt`);
+
+    // The parent's next run finds it in its ipc-in.
+    const next = await start(p);
+    expect(fs.readFileSync(path.join(await ipcInOf(next), t.id, 'chunk.txt'), 'utf-8')).toBe('part one');
+    expect((await transfers())[0].status).toBe('in_transit');
+    expect((await filesOf(t.id))[0]).toMatchObject({ status: 'placed', reached_recipient: 1 });
   });
 
   it('keeps the files with the task across a re-invocation (sub-task cycle or crash)', async () => {
@@ -359,10 +385,10 @@ describe('DispatchFilesTransferred', () => {
   });
 });
 
-// ── DispatchTransferExpiredOnTaskTerminal ────────────────────────────────────
+// ── DispatchTransferExpiredOnTaskCompleted ───────────────────────────────────
 
-describe('DispatchTransferExpiredOnTaskTerminal', () => {
-  obligation('rule-success.DispatchTransferExpiredOnTaskTerminal', async () => {
+describe('DispatchTransferExpiredOnTaskCompleted', () => {
+  obligation('rule-success.DispatchTransferExpiredOnTaskCompleted', async () => {
     // Placed (in_transit), then the task delivers: expired, staging reclaimed.
     const { task } = await mainDispatchWithPaper();
     const taskSession = (await sessionOf(task.id))!;
@@ -374,20 +400,94 @@ describe('DispatchTransferExpiredOnTaskTerminal', () => {
     expect((await transfers()).find((t) => t.id === placed.id)!.status).toBe('expired');
     expect((await filesOf(placed.id)).map((f) => f.status)).toEqual(['expired']);
     expect(fs.existsSync(staging)).toBe(false);
+    // Used up, not given back or parked.
+    expect((await transfers()).find((t) => t.id === placed.id)!.returned_as ?? null).toBeNull();
+    expect((await filesOf(placed.id))[0].parked_path ?? null).toBeNull();
+    expect((await transfers()).filter((t) => t.kind === 'returned')).toEqual([]);
 
-    // Still pending (never started), then the task fails: expired too.
+    // Still pending (never started) when the task completes: expired as well.
     const second = await mainDispatchWithPaper();
-    const pending = (await transfers()).find((t) => t.task_id === second.task.id)!;
+    const pending = (await transfers()).find((t) => t.task_id === second.task.id && t.kind === 'dispatch')!;
     expect(pending.status).toBe('pending');
     const { routeResult } = await import('../routing.js');
     await getDb().run(
-      "UPDATE specialist_tasks SET status = 'failed', failure_kind = 'timeout', closed_at = ? WHERE id = ?",
+      "UPDATE specialist_tasks SET status = 'completed', result = 'r', closed_at = ? WHERE id = ?",
       now(),
       second.task.id,
     );
     await routeResult((await getTask(second.task.id))!);
     expect((await transfers()).find((t) => t.id === pending.id)!.status).toBe('expired');
     expect((await filesOf(pending.id)).map((f) => f.status)).toEqual(['expired']);
+  });
+});
+
+// ── DispatchedFilesReturnedOnTaskFailed ──────────────────────────────────────
+
+describe('DispatchedFilesReturnedOnTaskFailed', () => {
+  /** Fail `task` as the host does (timeout), and route it. */
+  async function fail(task: SpecialistTask): Promise<void> {
+    const { routeResult } = await import('../routing.js');
+    await getDb().run(
+      "UPDATE specialist_tasks SET status = 'failed', failure_kind = 'timeout', failure_detail = 'too slow', closed_at = ? WHERE id = ?",
+      now(),
+      task.id,
+    );
+    await routeResult((await getTask(task.id))!);
+  }
+
+  /** The given dispatch transfer has gone back: checks and returns the returned transfer. */
+  async function givenBack(task: SpecialistTask, given: ContainerTransfer, mainIpcIn: string): Promise<void> {
+    const now_ = (await transfers()).find((t) => t.id === given.id)!;
+    expect(now_.status).toBe('expired');
+    expect((await filesOf(given.id)).map((f) => f.status)).toEqual(['expired']);
+    expect(now_.returned_as).toBeTruthy();
+    const back = (await transfers()).find((t) => t.id === now_.returned_as)!;
+    expect(back).toMatchObject({
+      kind: 'returned',
+      task_id: null,
+      failed_task_id: task.id,
+      recipient_session_id: 'sess-main',
+      commit_to_memory: 0,
+      file_count: 1,
+    });
+    // A copy of its own, so the dispatch's staging could go.
+    const [f] = await filesOf(back.id);
+    expect(f.original_name).toBe('paper.pdf');
+    expect(f.host_path.startsWith(path.join(TRANSFERS_BASE_DIR, back.id))).toBe(true);
+    expect(fs.existsSync(path.join(TRANSFERS_BASE_DIR, given.id))).toBe(false);
+    // The main agent's container is up: placed into its live ipc-in.
+    expect(back.status).toBe('in_transit');
+    expect(f).toMatchObject({ status: 'placed', reached_recipient: 1 });
+    expect(fs.readFileSync(path.join(mainIpcIn, back.id, 'paper.pdf'), 'utf-8')).toBe(PDF);
+    // The failure message names where the files are now, and its handling
+    // is what retires the returned transfer.
+    const failure = h.writes.find(
+      (w) => w.sessionId === 'sess-main' && w.trigger && w.text.startsWith('Specialist task failed: timeout'),
+    )!;
+    expect(failure.text).toContain(`${IPC_IN}/${back.id}/paper.pdf`);
+    expect(back.routed_message_id).toBe(failure.id);
+  }
+
+  obligation('rule-success.DispatchedFilesReturnedOnTaskFailed', async () => {
+    // The task never started: its dispatch transfer is still pending.
+    const { task, mainInvocation } = await mainDispatchWithPaper();
+    const given = (await transfers()).find((t) => t.kind === 'dispatch')!;
+    expect(given.status).toBe('pending');
+    await fail(task);
+    await givenBack(task, given, await ipcInOf(mainInvocation));
+  });
+
+  it('gives back files the task had already been handed in a running container (in_transit)', async () => {
+    const { task, mainInvocation } = await mainDispatchWithPaper();
+    const taskSession = (await sessionOf(task.id))!;
+    await start(taskSession);
+    await getDb().run("UPDATE specialist_tasks SET status = 'running' WHERE id = ?", task.id);
+    const given = (await transfers()).find((t) => t.kind === 'dispatch')!;
+    expect(given.status).toBe('in_transit');
+    // routeResult ends the task's run first (InvocationEndedOnTaskTerminal);
+    // the files must still be there to give back.
+    await fail(task);
+    await givenBack(task, given, await ipcInOf(mainInvocation));
   });
 });
 
@@ -441,13 +541,20 @@ async function bothKinds(): Promise<{ dispatch: ContainerTransfer; result: Conta
 
 obligation('enum-comparable.TransferKind', async () => {
   const { dispatch, result } = await bothKinds();
+  // And a refused dispatch, whose file comes back as a returned transfer.
+  const main = (await getDb().get<Session>("SELECT * FROM sessions WHERE id = 'sess-main'"))!;
+  const mainRun = await start(main);
+  const memo = stage(mainRun, 'memo.txt', 'memo');
+  await handleDispatchSpecialist({ specialist_group_id: 'ag-main', prompt: 'p', file_paths: [memo] }, main);
   const rows = await transfers();
-  expect(new Set(rows.map((t) => t.kind))).toEqual(new Set(['result', 'dispatch']));
+  expect(new Set(rows.map((t) => t.kind))).toEqual(new Set(['result', 'dispatch', 'returned']));
+  const returned = rows.find((t) => t.kind === 'returned')!;
   // Comparable: selecting by kind partitions the transfers.
   const byKind = async (k: string) =>
     (await getDb().all<{ id: string }>('SELECT id FROM container_transfers WHERE kind = ?', k)).map((r) => r.id);
   expect(await byKind('dispatch')).toEqual([dispatch.id]);
   expect(await byKind('result')).toEqual([result.id]);
+  expect(await byKind('returned')).toEqual([returned.id]);
   // Every row written before the column is a result.
   const col = (
     await getDb().all<{ name: string; dflt_value: string | null }>(

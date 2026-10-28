@@ -574,6 +574,10 @@ obligation('config-default.memory_reports_subpath', () => {
   expect(SPECIALISTS_CONFIG.memoryReportsSubpath).toBe('zettel/reports');
 });
 
+obligation('config-default.orphan_subpath', () => {
+  expect(SPECIALISTS_CONFIG.orphanSubpath).toBe('handover-orphans');
+});
+
 // ── SpecialistTask: when-presence ────────────────────────────────────────────
 
 obligation('when-presence.SpecialistTask.pending_sub_task', async () => {

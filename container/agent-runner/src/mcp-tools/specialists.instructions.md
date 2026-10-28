@@ -72,7 +72,9 @@ dispatch_sub_task(
 
 To give the sub-task files, copy them into `/workspace/ipc-out/` and list
 them in `file_paths` (a file you received in `/workspace/ipc-in/` too — copy
-it first). The host takes them before your container exits.
+it first). The host takes them before your container exits. If the sub-task
+is rejected, or fails, the files come back to your `/workspace/ipc-in/` and
+the message telling you so names where they are.
 
 After calling this, end your turn immediately. Your container exits; when the
 sub-task completes, you are restarted with your conversation intact and its
@@ -111,6 +113,12 @@ The files arrive in the specialist's `/workspace/ipc-in/`, and its prompt is
 rewritten to their new paths. A path that cannot be handed over (not in
 `/workspace/ipc-out/`, missing) is named in the "Specialist task dispatched"
 note you get back, as `[Not delivered: …]`; the dispatch still goes ahead.
+
+Once you have listed a file, the host is responsible for it: you can end your
+turn. If the dispatch is refused, or the specialist fails, the files come back
+to your `/workspace/ipc-in/`, and the message that tells you names their
+paths. Copy anything you want to keep out of `/workspace/ipc-in/` during that
+turn — it is cleared afterwards.
 
 The specialist runs in its own container session. When it calls
 `deliver_specialist_result`, the host routes the result back to your session

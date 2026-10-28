@@ -180,7 +180,10 @@ registerSessionContributor(async ({ session }) => {
  * A specialist group's folder is a template every task of that type shares,
  * concurrently: mounted writable, one task could change the instructions or
  * files the next task starts from. So it is read-only, and per-task state
- * lives in the session (and ipc-out) instead.
+ * lives in the session (and ipc-out) instead. The provider's state (Claude's
+ * /home/node/.claude: transcripts, settings, shell state) is the task's own
+ * too, under its session folder — shared per group, every task could read and
+ * change every other task's (spec: per-task session isolation).
  *
  * NANOCLAW_SPECIALIST lets the runner honour "exit after this turn" from
  * dispatch_sub_task and deliver_specialist_result, which frees the container's
@@ -200,6 +203,7 @@ registerSessionContributor(async ({ agentGroup, session }) => {
   const fresh = !task || task.status === 'queued' || task.status === 'awaiting_restart';
   return {
     readonlyWorkspace: true,
+    sessionScopedProviderState: true,
     env: { NANOCLAW_SPECIALIST: '1', ...(fresh ? { NANOCLAW_FRESH_CONVERSATION: '1' } : {}) },
   };
 });

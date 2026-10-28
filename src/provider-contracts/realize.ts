@@ -46,6 +46,23 @@ export function providerProjectDocSpec(contract: ProviderHostContract): ProjectD
   };
 }
 
+/**
+ * The contract as one session sees it when that session must not share its
+ * group's provider state (a specialist task: several run at once from one
+ * template group, and each must start from nothing of another's). Every
+ * group-scoped state volume becomes session-scoped, so the session gets its
+ * own copy of the volume under its session folder, realized and mounted like
+ * any session volume.
+ */
+export function withSessionScopedState(contract: ProviderHostContract): ProviderHostContract {
+  return {
+    ...contract,
+    stateVolumes: contract.stateVolumes.map((volume) =>
+      volume.scope === 'group' ? { ...volume, scope: 'session' as const } : volume,
+    ),
+  };
+}
+
 export function providerStateVolumePath(
   volume: ProviderStateVolume,
   agentGroupId: string,
@@ -135,6 +152,9 @@ export async function realizeProviderSpawnSurfaces(
 
   for (const file of contract.files) {
     if (file.prepare.when === 'every-spawn') prepareSpawnFile(file, volumes, agentGroupId, sessionDirectory);
+    else if (volumes.get(file.volumeId)?.scope === 'session') {
+      seedSessionFile(file, volumes, agentGroupId, sessionDirectory);
+    }
   }
 
   for (const backing of contract.skillBackings) {
@@ -233,6 +253,60 @@ function providerFileTransformer(name: ProviderFileTransformerId): ProviderFileT
     );
   }
   return transformer;
+}
+
+/**
+ * A group-init file on a session-scoped volume (a group volume made
+ * session-scoped by `withSessionScopedState`): the session's copy starts as
+ * the group's — reconciled, so the same settings the group's sessions run
+ * with — or, with no group copy, the declared content. Create-if-missing, and
+ * written through the directory's descriptor as at group init: the session
+ * folder is a read-write mount, so a name planted there is refused.
+ */
+function seedSessionFile(
+  file: ProviderHostContract['files'][number],
+  volumes: ReadonlyMap<string, ProviderStateVolume>,
+  agentGroupId: string,
+  sessionDirectory: string,
+): void {
+  if (file.prepare.operation !== 'create-if-missing') return;
+  const volume = volumes.get(file.volumeId)!;
+  const root = providerStateVolumeRoot(volume, agentGroupId, sessionDirectory);
+  const filePath = resolveWithinRoot(
+    providerStateVolumePath(volume, agentGroupId, sessionDirectory),
+    file.relativePath,
+  );
+  const groupCopy = resolveWithinRoot(
+    providerStateVolumePath({ ...volume, scope: 'group' }, agentGroupId),
+    file.relativePath,
+  );
+  let content: Buffer = Buffer.from(file.prepare.content);
+  try {
+    if (fs.lstatSync(groupCopy).isFile()) content = fs.readFileSync(groupCopy);
+  } catch {
+    // No group copy: the declared content.
+  }
+  let dir: AnchoredDir | null;
+  try {
+    dir = AnchoredDir.open(root, segmentsWithinRoot(root, path.dirname(filePath)));
+  } catch (err) {
+    log.warn('Provider file not seeded: unsafe directory', { path: filePath, err });
+    return;
+  }
+  if (!dir) return;
+  try {
+    try {
+      dir.lstat(path.basename(filePath));
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    dir.writeNewFile(path.basename(filePath), content);
+  } catch (err) {
+    log.warn('Provider file not seeded: unsafe entry', { path: filePath, err });
+  } finally {
+    dir.close();
+  }
 }
 
 function prepareSpawnFile(

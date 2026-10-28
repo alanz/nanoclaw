@@ -7,8 +7,9 @@
  * tell a fetch that hung from an API error from a model that went quiet.
  *
  * Sources, read-only: the task session's current conversation id in its
- * outbound.db, that conversation's Claude transcript (the group's shared
- * .claude-shared/projects dir), and the newest runner run log in the session
+ * outbound.db, that conversation's Claude transcript (the task's own
+ * .claude-shared/projects dir in its session folder, or the group's for a
+ * task from before that), and the newest runner run log in the session
  * folder. Each is optional — a specialist that never started has none.
  */
 import fs from 'fs';
@@ -128,8 +129,17 @@ function conversationId(agentGroupId: string, sessionId: string): string | null 
   }
 }
 
-function transcriptPath(agentGroupId: string, id: string): string | null {
-  const dir = path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared', 'projects', '-workspace-agent');
+function transcriptPath(agentGroupId: string, id: string, sessionId?: string): string | null {
+  // A task's Claude state is its own (session-scoped); before that, the group's.
+  if (sessionId) {
+    const own = transcriptPathIn(path.join(DATA_DIR, 'v2-sessions', agentGroupId, sessionId), id);
+    if (own) return own;
+  }
+  return transcriptPathIn(path.join(DATA_DIR, 'v2-sessions', agentGroupId), id);
+}
+
+function transcriptPathIn(stateRoot: string, id: string): string | null {
+  const dir = path.join(stateRoot, '.claude-shared', 'projects', '-workspace-agent');
   const live = path.join(dir, `${id}.jsonl`);
   if (fs.existsSync(live)) return live;
   try {
@@ -169,7 +179,7 @@ export function buildPostMortem(agentGroupId: string, sessionId: string): string
   try {
     const lines: string[] = [];
     const id = conversationId(agentGroupId, sessionId);
-    const transcript = id ? transcriptPath(agentGroupId, id) : null;
+    const transcript = id ? transcriptPath(agentGroupId, id, sessionId) : null;
     if (transcript) lines.push(...summariseTranscript(readTail(transcript)));
     const logLine = lastRunLogLine(agentGroupId, sessionId);
     if (logLine) lines.push(`• Last log line: ${logLine}`);

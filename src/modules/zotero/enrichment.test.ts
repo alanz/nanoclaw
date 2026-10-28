@@ -18,10 +18,40 @@ vi.mock('../../config.js', async () => {
   };
 });
 
+// The host runs the Zotero scripts as child processes: capture each run, and
+// answer it as the script would.
+const runs = vi.hoisted(
+  () =>
+    [] as Array<{
+      args: string[];
+      env: Record<string, string | undefined>;
+      finish: (stdout: string, err?: Error) => void;
+    }>,
+);
+vi.mock('child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('child_process')>()),
+  execFile: (
+    _cmd: string,
+    args: string[],
+    opts: { env: Record<string, string | undefined> },
+    cb: (err: Error | null, stdout: string, stderr: string) => void,
+  ) => {
+    runs.push({ args, env: opts.env, finish: (stdout, err) => cb(err ?? null, stdout, '') });
+  },
+}));
+vi.mock('../../env.js', () => ({
+  readEnvFile: () => ({ ZOTERO_API_KEY: 'zk', ZOTERO_USER_ID: '42' }),
+}));
+
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
-import { getDb } from '../../db/connection.js';
-import { withExistingMailboxSession } from '../../session-manager.js';
-import { ENRICHMENT_RUN_BUDGET_SECONDS, enrichmentBacklog, itemInBacklog, queueEnrichmentTask } from './sync.js';
+import {
+  ENRICHMENT_RUN_BUDGET_SECONDS,
+  enrichmentBacklog,
+  itemInBacklog,
+  runEnrichment,
+  runSync,
+  zoteroScriptBusy,
+} from './sync.js';
 
 const AG = 'ag-zotero';
 const FOLDER = 'zot';
@@ -40,15 +70,8 @@ function writeItem(key: string, text: string): void {
   fs.writeFileSync(path.join(MD_DIR, `${key}.md`), text);
 }
 
-async function enrichTasks(): Promise<Array<{ id: string; content: string }>> {
-  const session = (await getDb().get(
-    'SELECT id FROM sessions WHERE agent_group_id = ? AND messaging_group_id IS NULL',
-    AG,
-  )) as { id: string } | undefined;
-  if (!session) return [];
-  const tasks = await withExistingMailboxSession(AG, session.id, (m) => m.listLiveTasks('pending'));
-  return (tasks ?? []).filter((t) => t.id.startsWith('task-zotero-enrich-'));
-}
+/** Let the queued run start (it chains behind any earlier one). */
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(async () => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
@@ -106,24 +129,69 @@ describe('enrichmentBacklog', () => {
   });
 });
 
-describe('queueEnrichmentTask', () => {
-  it('queues a budgeted script task that never wakes the agent', async () => {
-    expect(await queueEnrichmentTask(FOLDER)).toBe(true);
-    const [task] = await enrichTasks();
-    const content = JSON.parse(task.content) as { script: string };
-    expect(content.script).toContain('node /app/tools/zotero-abstracts.mjs --dir /workspace/agent/zotero-md');
-    expect(content.script).toContain(`--budget-seconds ${ENRICHMENT_RUN_BUDGET_SECONDS}`);
-    expect(content.script).toContain('"wakeAgent":false');
-    expect(ENRICHMENT_RUN_BUDGET_SECONDS).toBeLessThan(30); // container pre-task script timeout
+describe('host runs (zotero.allium: sync and enrichment are host processes)', () => {
+  it('an enrichment pass runs zotero-abstracts.mjs on the group folder, budgeted, with the key', async () => {
+    runs.length = 0;
+    const done = runEnrichment(FOLDER);
+    await tick();
+    expect(runs).toHaveLength(1);
+    const [run] = runs;
+    expect(path.basename(run.args[0])).toBe('zotero-abstracts.mjs');
+    expect(run.args.slice(1)).toEqual(['--dir', MD_DIR, '--budget-seconds', String(ENRICHMENT_RUN_BUDGET_SECONDS)]);
+    expect([run.env.ZOTERO_API_KEY, run.env.ZOTERO_USER_ID]).toEqual(['zk', '42']);
+    run.finish('{"backlog":3,"enriched":1}\n');
+    expect(await done).toEqual({ backlog: 3, enriched: 1 });
   });
 
-  it('does not queue a second run while one is still waiting', async () => {
-    expect(await queueEnrichmentTask(FOLDER)).toBe(true);
-    expect(await queueEnrichmentTask(FOLDER)).toBe(false);
-    expect(await enrichTasks()).toHaveLength(1);
+  it('a retry on request forgets not_found records first', async () => {
+    runs.length = 0;
+    const done = runEnrichment(FOLDER, { retryNotFound: true });
+    await tick();
+    expect(runs[0].args).toContain('--retry-not-found');
+    runs[0].finish('{}\n');
+    await done;
   });
 
-  it('does nothing for an unknown group', async () => {
-    expect(await queueEnrichmentTask('nope')).toBe(false);
+  it('a sync writes into the group folder and its state file there', async () => {
+    runs.length = 0;
+    const done = runSync(FOLDER, 3301);
+    await tick();
+    const groupDir = path.join(TEST_ROOT, 'groups', FOLDER);
+    expect(path.basename(runs[0].args[0])).toBe('zotero-sync.mjs');
+    expect(runs[0].args.slice(1)).toEqual([
+      '--since',
+      '3301',
+      '--output',
+      path.join(groupDir, 'zotero-md'),
+      '--state',
+      path.join(groupDir, 'zotero-state.json'),
+    ]);
+    expect(fs.existsSync(path.join(groupDir, 'zotero-md'))).toBe(true);
+    runs[0].finish('{"newCount":0}\n');
+    await done;
+  });
+
+  it('one script at a time: a second waits for the first', async () => {
+    runs.length = 0;
+    const first = runEnrichment(FOLDER);
+    const second = runSync(FOLDER, 1);
+    await tick();
+    expect(runs).toHaveLength(1);
+    expect(zoteroScriptBusy()).toBe(true);
+    runs[0].finish('{}\n');
+    await first;
+    await tick();
+    expect(runs).toHaveLength(2);
+    runs[1].finish('{}\n');
+    await second;
+    expect(zoteroScriptBusy()).toBe(false);
+  });
+
+  it('a failed run resolves to null rather than throwing', async () => {
+    runs.length = 0;
+    const done = runEnrichment(FOLDER);
+    await tick();
+    runs[0].finish('', new Error('exit 1'));
+    expect(await done).toBeNull();
   });
 });

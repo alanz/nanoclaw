@@ -2,15 +2,16 @@
 /**
  * Zotero library sync — fetches items from Zotero API and writes markdown files.
  *
- * Usage: node zotero-sync.mjs --since VERSION --output DIR
- * Env:   ZOTERO_API_KEY, ZOTERO_USER_ID, ZOTERO_API_BASE (optional; the host's
- *        credential-proxy route, which attaches the real key)
+ * Usage: node zotero-sync.mjs --since VERSION --output DIR [--state FILE]
+ * Env:   ZOTERO_API_KEY, ZOTERO_USER_ID, ZOTERO_API_BASE (optional)
+ *
+ * Run by the host (src/modules/zotero/sync.ts), which holds the credentials.
  *
  * Outputs a JSON summary to stdout:
  *   { newCount, deletedCount, newVersion, totalItems, items: [{key, title}] }
  *
- * Also writes /workspace/agent/zotero-state.json with the full sync result
- * so the NanoClaw host process can update its database after the container exits.
+ * Also writes the state file (--state; default /workspace/agent/zotero-state.json)
+ * with the full sync result, which the host merges into its sync state.
  */
 
 import fs from 'fs';
@@ -23,11 +24,13 @@ function parseArgs() {
   const args = process.argv.slice(2);
   let since = 0;
   let output = '/workspace/agent/zotero-md';
+  let state = '/workspace/agent/zotero-state.json';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--since') since = parseInt(args[++i], 10) || 0;
     else if (args[i] === '--output') output = args[++i];
+    else if (args[i] === '--state') state = args[++i];
   }
-  return { since, output };
+  return { since, output, state };
 }
 
 function getCredentials() {
@@ -220,12 +223,12 @@ export async function syncLibrary({ since, output, stateFile, apiBase, userId, a
 }
 
 async function main() {
-  const { since, output } = parseArgs();
+  const { since, output, state } = parseArgs();
   const { apiKey, userId } = getCredentials();
   const result = await syncLibrary({
     since,
     output,
-    stateFile: '/workspace/agent/zotero-state.json',
+    stateFile: state,
     apiBase: process.env.ZOTERO_API_BASE || 'https://api.zotero.org',
     userId,
     apiKey,

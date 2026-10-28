@@ -35,7 +35,7 @@ import { createAgentGroup } from '../../db/agent-groups.js';
 import { computeNextZoteroCheck } from './schedule.js';
 import { fetchLibraryVersion } from './pre-check.js';
 import { buildSyncSummary } from './notify.js';
-import { queueEnrichmentTask, readSyncResult } from './sync.js';
+import { readSyncResult, runEnrichment } from './sync.js';
 import {
   getZoteroSyncState,
   upsertZoteroSyncState,
@@ -723,16 +723,17 @@ describe('EnrichmentTriggeredAfterSync rule', () => {
 // ─── Rule: EnrichmentTriggeredOnRequest ──────────────────────────────────────
 // obligation: rule-success.EnrichmentTriggeredOnRequest
 // Triggered by UserRequestedEnrichment (external trigger — no local emitter in spec).
-// The implementation is `zotero-abstracts.mjs --retry-not-found`, run by the agent.
+// The implementation is `ncl zotero retry-abstracts`: the host runs
+// `zotero-abstracts.mjs --retry-not-found` (runEnrichment with retryNotFound).
 // NOTE: allium analyse reports this as an unreachable trigger — there is no local
 // surface that emits UserRequestedEnrichment. The rule is tested here structurally.
 
 describe('EnrichmentTriggeredOnRequest rule', () => {
   it('enrichment can be requested for a group regardless of sync state', async () => {
-    // The agent runs zotero-abstracts.mjs --retry-not-found: forgetNotFound clears
+    // The host runs zotero-abstracts.mjs --retry-not-found: forgetNotFound clears
     // the not_found records (tested in zotero-tools.test.mjs), and the hourly
     // EnrichmentBacklogScheduled runs take those items up again.
-    expect(typeof queueEnrichmentTask).toBe('function');
+    expect(typeof runEnrichment).toBe('function');
   });
 });
 

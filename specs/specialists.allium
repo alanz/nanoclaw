@@ -2570,10 +2570,13 @@ invariant RunningTaskIsLeaf {
 -- messaging_group = the null-channel singleton MessagingGroup and
 -- thread_id = task.id, making it unique to that task. (See null-channel.allium
 -- for the singleton's role.) The specialist's AgentGroup folder (CLAUDE.md,
--- skills) is mounted read-only and shared across all tasks of the same type;
--- the only writable surfaces visible to the container are the per-task
--- inbound.db and outbound.db. A running task therefore cannot alter the
--- type template or another task's session state.
+-- skills) is mounted read-only and shared across all tasks of the same type.
+-- Everything writable the container sees is the task's own: its per-task
+-- session (inbound.db, outbound.db and session folder), the provider's state
+-- (for Claude, its home .claude directory, kept per task rather than per
+-- group), and its invocation's ipc-out. Nothing writable is shared with
+-- another task. A running task therefore cannot alter the type template or
+-- another task's state.
 
 -- File handover invariants
 --

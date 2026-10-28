@@ -46,6 +46,42 @@ export function registerMemoryGroupExclusion(check: GroupExclusion, ready?: () =
   if (ready) exclusionsReady.push(ready);
 }
 
+/**
+ * Which group's index a session may read, and where that group's workspace is
+ * in the session's container (spec: memory_group_for). A session reads its own
+ * group's index — unless an owner module says otherwise: a memory-provider
+ * specialist reads the index of the main group its task serves, and every
+ * other specialist reads none. Memory does not know what a specialist is; the
+ * owner registers a delegate. A delegate answers the access, null for no
+ * memory, or undefined when the session is not its business.
+ */
+export interface MemoryAccess {
+  groupId: string;
+  /** Container path of that group's workspace — where its indexed files are read. */
+  workspacePath: string;
+}
+export type MemoryAccessSession = { id: string; agent_group_id: string; thread_id?: string | null };
+type MemoryAccessDelegate = (session: MemoryAccessSession) => Promise<MemoryAccess | null | undefined>;
+const accessDelegates: MemoryAccessDelegate[] = [];
+
+export function registerMemoryAccessDelegate(delegate: MemoryAccessDelegate): void {
+  accessDelegates.push(delegate);
+}
+
+export async function memoryAccessFor(session: MemoryAccessSession): Promise<MemoryAccess | null> {
+  for (const delegate of accessDelegates) {
+    try {
+      const access = await delegate(session);
+      if (access !== undefined) return access;
+    } catch (err) {
+      log.error('Memory access delegate threw', { sessionId: session.id, err });
+      return null;
+    }
+  }
+  if (isMemoryGroupExcluded(session.agent_group_id)) return null;
+  return { groupId: session.agent_group_id, workspacePath: '/workspace/agent' };
+}
+
 export function isMemoryGroupExcluded(groupId: string): boolean {
   for (const check of exclusions) {
     try {
@@ -119,6 +155,7 @@ import {
   deleteFileChunks,
   insertChunk,
   upsertFileRecord,
+  namesSupersededBy,
   getIndexFingerprint,
   setLastFullReindex,
   adoptUnkeyedCacheRows,
@@ -553,13 +590,18 @@ export class MemoryIndexManager {
       seenPaths.add(repoPath);
 
       const contentHash = hashFile(content);
+      const superseded = namesSupersededBy(content);
 
       // Check if already indexed with same hash
       // The source too: a folder relabelled keeps its paths and content.
-      const existing = this.index.db.prepare('SELECT hash, source FROM files WHERE path = ?').get(repoPath) as
-        | { hash: string; source: string }
-        | undefined;
+      const existing = this.index.db
+        .prepare('SELECT hash, source, superseded FROM files WHERE path = ?')
+        .get(repoPath) as { hash: string; source: string; superseded: number } | undefined;
       if (existing?.hash === contentHash && existing.source === fileSource && !force) {
+        // Unchanged, but an index from before the flag learns it here.
+        if (existing.superseded !== (superseded ? 1 : 0)) {
+          this.index.db.prepare('UPDATE files SET superseded = ? WHERE path = ?').run(superseded ? 1 : 0, repoPath);
+        }
         counts.skipped++;
         continue;
       }
@@ -692,6 +734,7 @@ export class MemoryIndexManager {
             hash: contentHash,
             mtimeMs: stat.mtimeMs,
             size: stat.size,
+            superseded,
           });
         })();
       } catch (err) {
@@ -778,6 +821,8 @@ export class MemoryIndexManager {
       minScore?: number;
       pathPrefix?: string;
       source?: string;
+      /** Include superseded notes (default: leave them out). */
+      includeSuperseded?: boolean;
       includeContent?: boolean;
       embedWaitMs?: number;
     },
@@ -815,6 +860,7 @@ export class MemoryIndexManager {
       minScore,
       pathPrefix: opts?.pathPrefix,
       source: opts?.source,
+      includeSuperseded: opts?.includeSuperseded,
       vectorWeight: keywordOnly ? 0 : VECTOR_WEIGHT,
       textWeight: keywordOnly ? 1 : TEXT_WEIGHT,
       candidatesMultiplier: CANDIDATES_MULTIPLIER,

@@ -18,7 +18,7 @@ import { unguarded } from '../../guard/index.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
 import { registerBootCrashExemption } from '../boot-crash/index.js';
-import { registerMemoryGroupExclusion } from '../../memory/manager.js';
+import { registerMemoryAccessDelegate, registerMemoryGroupExclusion } from '../../memory/manager.js';
 import { getSpecialist, getTask } from './db.js';
 import './group-delete.js';
 import './relay.js';
@@ -87,6 +87,55 @@ onHostStart(async () => {
 });
 
 registerMemoryGroupExclusion((groupId) => specialistGroups.has(groupId), loadSpecialistGroups);
+
+/**
+ * Memory read access for specialist sessions (spec: memory.allium
+ * memory_group_for). A memory-provider specialist reads the index of the main
+ * group its task chain serves — its whole purpose — through the read-only
+ * mount of that group's folder its container config carries. Every other
+ * specialist reads none; it asks a memory provider instead.
+ */
+registerMemoryAccessDelegate(async (session) => {
+  await loadSpecialistGroups();
+  if (!specialistGroups.has(session.agent_group_id)) return undefined;
+  const specialist = await getSpecialist(session.agent_group_id);
+  if (!specialist?.is_memory_provider) return null;
+  const task = session.thread_id ? await getTask(session.thread_id) : undefined;
+  if (!task || task.specialist_group_id !== session.agent_group_id) return null;
+  const { rootGroupOfTask } = await import('./handover.js');
+  const rootGroupId = await rootGroupOfTask(task.id);
+  if (!rootGroupId) return null;
+  const workspacePath = await mountedWorkspaceOf(session.agent_group_id, rootGroupId);
+  if (!workspacePath) {
+    log.warn('specialists: memory provider has no mount of the group it serves — no memory access', {
+      sessionId: session.id,
+      rootGroupId,
+    });
+    return null;
+  }
+  return { groupId: rootGroupId, workspacePath };
+});
+
+/** Where `groupId`'s folder is mounted in `viewerGroupId`'s containers, if it is. */
+async function mountedWorkspaceOf(viewerGroupId: string, groupId: string): Promise<string | null> {
+  const [{ getContainerConfig }, { getAgentGroup }, { GROUPS_DIR }, path] = await Promise.all([
+    import('../../db/container-configs.js'),
+    import('../../db/agent-groups.js'),
+    import('../../config.js'),
+    import('path'),
+  ]);
+  const group = await getAgentGroup(groupId);
+  const config = await getContainerConfig(viewerGroupId);
+  if (!group || !config) return null;
+  const folder = path.resolve(GROUPS_DIR, group.folder);
+  const mounts = (
+    typeof config.additional_mounts === 'string' ? JSON.parse(config.additional_mounts) : config.additional_mounts
+  ) as Array<{ hostPath: string; containerPath?: string }>;
+  const mount = mounts.find((m) => path.resolve(m.hostPath) === folder);
+  if (!mount) return null;
+  const name = mount.containerPath ?? path.basename(mount.hostPath);
+  return `/workspace/extra/${name}`;
+}
 
 /**
  * Recovery tick.

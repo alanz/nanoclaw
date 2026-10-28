@@ -38,7 +38,7 @@ async function filesOf(transferId: string, status?: string): Promise<TransferFil
 }
 
 /** The group the root of a task chain was dispatched from: the main agent's. */
-async function rootGroupOfTask(taskId: string): Promise<string | null> {
+export async function rootGroupOfTask(taskId: string): Promise<string | null> {
   let task = await getTask(taskId);
   for (let hops = 0; task && task.requester_task_id && hops < 100; hops++) {
     task = await getTask(task.requester_task_id);
@@ -145,7 +145,10 @@ export async function parkTransfer(transferId: string, reason: string): Promise<
  * the session that dispatched it, the dispatch transfer retired. Returns the
  * returned transfer, or null when there was nothing to give back.
  */
-export async function returnDispatchedFiles(task: SpecialistTask): Promise<ContainerTransfer | null> {
+export async function returnDispatchedFiles(
+  task: SpecialistTask,
+  returnTo: string = task.requester_session_id,
+): Promise<ContainerTransfer | null> {
   const db = getDb();
   if (!(await db.hasTable('container_transfers'))) return null;
   const given = (await db.get(
@@ -181,7 +184,7 @@ export async function returnDispatchedFiles(task: SpecialistTask): Promise<Conta
     file_count: copies.length,
     sent_at: new Date().toISOString(),
     status: 'pending',
-    recipient_session_id: task.requester_session_id,
+    recipient_session_id: returnTo,
     routed_message_id: null,
     failed_task_id: task.id,
     returned_as: null,
@@ -213,7 +216,7 @@ export async function returnDispatchedFiles(task: SpecialistTask): Promise<Conta
   log.info('specialists: files handed to a failed task returned to its dispatcher', {
     taskId: task.id,
     transferId: backId,
-    sessionId: task.requester_session_id,
+    sessionId: returnTo,
     files: copies.length,
   });
   return back;

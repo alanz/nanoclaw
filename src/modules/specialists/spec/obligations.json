@@ -996,12 +996,6 @@
     "description": "Verify rule SpecialistResultRoutedToMain is rejected when requires clause fails"
   },
   {
-    "id": "rule-failure.SpecialistResultRoutedToMain.2",
-    "category": "rule_failure",
-    "construct": "SpecialistResultRoutedToMain",
-    "description": "Verify rule SpecialistResultRoutedToMain is rejected when requires clause fails"
-  },
-  {
     "id": "rule-success.SpecialistResultRoutedToParent",
     "category": "rule_success",
     "construct": "SpecialistResultRoutedToParent",
@@ -1339,6 +1333,12 @@
   },
   {
     "id": "rule-failure.UnroutedTransferOrphaned.3",
+    "category": "rule_failure",
+    "construct": "UnroutedTransferOrphaned",
+    "description": "Verify rule UnroutedTransferOrphaned is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.UnroutedTransferOrphaned.4",
     "category": "rule_failure",
     "construct": "UnroutedTransferOrphaned",
     "description": "Verify rule UnroutedTransferOrphaned is rejected when requires clause fails"

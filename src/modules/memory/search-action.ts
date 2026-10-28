@@ -7,7 +7,7 @@
 import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
 import { log } from '../../log.js';
-import { isMemoryGroupExcluded } from '../../memory/manager.js';
+import { memoryAccessFor } from '../../memory/manager.js';
 import { handleMemorySearch, type MemorySearchResponse } from '../../memory/search.js';
 import { writeSessionMessage } from '../../session-manager.js';
 
@@ -32,17 +32,20 @@ registerDeliveryAction(
 
     let response: MemorySearchResponse | { error: string };
     try {
-      // The group is the calling session's, never one named in the request.
-      response = isMemoryGroupExcluded(session.agent_group_id)
+      // The group is the one the calling session may read — its own, or for a
+      // memory provider the group its task serves — never one named in the request.
+      const access = await memoryAccessFor(session);
+      response = !access
         ? { mode: 'unavailable', results: [] }
         : await handleMemorySearch({
             session,
-            group_id: session.agent_group_id,
+            group_id: access.groupId,
             query,
             top_k: typeof content.top_k === 'number' ? content.top_k : undefined,
             path_prefix: optionalString(content.path_prefix),
             source: optionalString(content.source),
             min_score: scoreIn(content.min_score),
+            include_superseded: content.include_superseded === true,
           });
     } catch (err) {
       response = { error: err instanceof Error ? err.message : String(err) };
@@ -63,5 +66,5 @@ registerDeliveryAction(
       results: 'results' in response ? response.results.length : 0,
     });
   },
-  unguarded("read-only search of the calling session's own group index"),
+  unguarded('read-only search of the one group index the calling session may read'),
 );

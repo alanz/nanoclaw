@@ -14,10 +14,11 @@ export const MEMORY_CONFIG = {
   embedding_rpm_limit: 50,
   embedding_tpm_limit: 15_000,
   embedding_rpd_budget: 900,
-  memory_search_enabled: true,
 } as const;
 
-// Widened type so tests can pass { memory_search_enabled: false } without a literal mismatch.
+// Widened type so tests can pass other values without a literal mismatch. There
+// is no enable flag: memory is on exactly when an embedding key is configured
+// (spec: embedding_key_configured), checked where the managers start.
 export type MemoryConfig = {
   chunk_tokens: number;
   chunk_overlap_tokens: number;
@@ -32,5 +33,4 @@ export type MemoryConfig = {
   embedding_rpm_limit: number;
   embedding_tpm_limit: number;
   embedding_rpd_budget: number;
-  memory_search_enabled: boolean;
 };

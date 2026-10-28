@@ -1,17 +1,13 @@
 import { MEMORY_CONFIG, type MemoryConfig } from './config.js';
-import { getMemoryManager } from './manager.js';
+import { getMemoryManager, memoryAccessFor, type MemoryAccessSession } from './manager.js';
 
-type Session = { id: string; agent_group_id: string };
+type Session = MemoryAccessSession;
 
-function assertSessionMatchesGroup(session: Session, group_id: string): void {
-  if (session.agent_group_id !== group_id) {
-    throw new Error(`Session agent_group_id "${session.agent_group_id}" does not match group "${group_id}"`);
-  }
-}
-
-function assertSearchEnabled(config: MemoryConfig): void {
-  if (!config.memory_search_enabled) {
-    throw new Error('memory_search_enabled is false');
+/** A session searches only the one group it may read (spec: memory_group_for). */
+async function assertSessionMayRead(session: Session, group_id: string): Promise<void> {
+  const access = await memoryAccessFor(session);
+  if (access?.groupId !== group_id) {
+    throw new Error(`Session of group "${session.agent_group_id}" may not search the memory of group "${group_id}"`);
   }
 }
 
@@ -30,11 +26,11 @@ export async function handleMemorySearch(
     path_prefix?: string;
     source?: string;
     min_score?: number;
+    include_superseded?: boolean;
   },
   config: MemoryConfig = MEMORY_CONFIG,
 ): Promise<MemorySearchResponse> {
-  assertSearchEnabled(config);
-  assertSessionMatchesGroup(params.session, params.group_id);
+  await assertSessionMayRead(params.session, params.group_id);
 
   const manager = getMemoryManager(params.group_id);
   if (!manager) return { mode: 'unavailable', results: [] };
@@ -48,6 +44,7 @@ export async function handleMemorySearch(
     minScore: params.min_score ?? undefined,
     pathPrefix: params.path_prefix || undefined,
     source: params.source || undefined,
+    includeSuperseded: params.include_superseded === true,
     embedWaitMs: config.search_embed_wait_ms,
   });
 }

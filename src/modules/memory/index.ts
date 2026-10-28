@@ -19,12 +19,7 @@ import { getAllAgentGroups } from '../../db/agent-groups.js';
 import { readEnvFile } from '../../env.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
-import {
-  closeAllMemoryManagers,
-  getMemoryManager,
-  initMemoryManagers,
-  isMemoryGroupExcluded,
-} from '../../memory/manager.js';
+import { closeAllMemoryManagers, getMemoryManager, initMemoryManagers, memoryAccessFor } from '../../memory/manager.js';
 import '../../db/migrations/module-memory.js';
 import './search-action.js';
 
@@ -65,19 +60,23 @@ onHostShutdown(() => closeAllMemoryManagers());
 // Search goes to the host (search-action.ts); get, list and the keyword-only
 // fallback read the index directly via bun:sqlite, so the container needs the
 // group's index dir mounted, and NANOCLAW_MEMORY_ENABLED to register the tools.
-// Keyed on the host running a manager for the group — it is allowlisted in
+// The group is the one the session may read (memoryAccessFor: its own, or for
+// a memory-provider specialist the group its task serves). Keyed on the host
+// running a manager for that group — it is allowlisted in
 // MEMORY_SEARCH_GROUPS and an embedding key is set — not on the index dir
 // existing: a group taken off the list (or an install whose key was removed)
 // keeps its old dir, and was handed tools over a frozen index the host no
 // longer searches. A directory mount, not the index file: Apple Container
 // binds directories only.
-registerSessionContributor(({ agentGroup }) => {
-  if (isMemoryGroupExcluded(agentGroup.id)) return undefined;
-  if (!getMemoryManager(agentGroup.id)) return undefined;
-  const indexDir = path.join(DATA_DIR, 'v2-memory', agentGroup.id);
+registerSessionContributor(async ({ session }) => {
+  const access = await memoryAccessFor(session);
+  if (!access || !getMemoryManager(access.groupId)) return undefined;
+  const indexDir = path.join(DATA_DIR, 'v2-memory', access.groupId);
   if (!fs.existsSync(indexDir)) return undefined;
   return {
     mounts: [{ hostPath: indexDir, containerPath: '/workspace/memory', readonly: true }],
-    env: { NANOCLAW_MEMORY_ENABLED: '1' },
+    // Where the indexed group's files are in this container: its own
+    // workspace, or (a memory provider) the read-only mount of the group it serves.
+    env: { NANOCLAW_MEMORY_ENABLED: '1', NANOCLAW_MEMORY_WORKSPACE: access.workspacePath },
   };
 });

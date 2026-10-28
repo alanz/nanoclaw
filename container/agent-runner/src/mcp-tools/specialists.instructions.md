@@ -27,6 +27,9 @@ requester.
 ### Workflow
 
 1. **Do the work.** Use available tools to complete the assigned task.
+   Files your dispatcher handed you are in `/workspace/ipc-in/` (read-only);
+   the end of your prompt lists their paths. They stay there for the whole
+   task, including after a sub-task returns.
 
 2. **Deliver the result.** When done, call:
    ```
@@ -67,6 +70,10 @@ dispatch_sub_task(
 )
 ```
 
+To give the sub-task files, copy them into `/workspace/ipc-out/` and list
+them in `file_paths` (a file you received in `/workspace/ipc-in/` too — copy
+it first). The host takes them before your container exits.
+
 After calling this, end your turn immediately. Your container exits; when the
 sub-task completes, you are restarted with your conversation intact and its
 result arrives as a new message. `/workspace/ipc-out` starts empty again, so
@@ -87,6 +94,23 @@ dispatch_specialist(
   prompt="Description of the task."
 )
 ```
+
+The specialist cannot see your workspace, so a path to a file of yours means
+nothing to it. To hand it a file — a PDF the user sent, say — copy the file
+into `/workspace/ipc-out/` and list it:
+
+```
+dispatch_specialist(
+  specialist_group_id="<id>",
+  prompt="Read the attached paper and report on it.",
+  file_paths=["/workspace/ipc-out/paper.pdf"]
+)
+```
+
+The files arrive in the specialist's `/workspace/ipc-in/`, and its prompt is
+rewritten to their new paths. A path that cannot be handed over (not in
+`/workspace/ipc-out/`, missing) is named in the "Specialist task dispatched"
+note you get back, as `[Not delivered: …]`; the dispatch still goes ahead.
 
 The specialist runs in its own container session. When it calls
 `deliver_specialist_result`, the host routes the result back to your session

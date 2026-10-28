@@ -18,7 +18,7 @@ import { getLiveTaskForSession, updateTaskStatus } from './db.js';
 import { routeResult } from './routing.js';
 import { getActiveInvocation, hostStagingPath, TRANSFERS_BASE_DIR } from './invocation.js';
 import { SPECIALISTS_CONFIG } from './config.js';
-import type { ContainerTransfer, TransferFile } from './types.js';
+import type { ContainerTransfer, TransferFile, TransferKind } from './types.js';
 
 function genId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -71,7 +71,14 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
   let transfer: ContainerTransfer | null = null;
   let refused: RefusedFile[] = [];
   if (filePaths.length > 0 && (await getDb().hasTable('invocations'))) {
-    ({ transfer, refused } = await _buildTransfer(session, task.id, resultText, filePaths, effectiveCommit));
+    ({ transfer, refused } = await takeIpcOutFiles(session, {
+      kind: 'result',
+      taskId: task.id,
+      text: resultText,
+      filePaths,
+      commitToMemory: effectiveCommit,
+      recipientSessionId: null,
+    }));
   }
   // The text the requester reads: path-rewritten, with any refusal note.
   const finalText = transfer ? transfer.result_text : resultText + refusalNote(refused);
@@ -89,12 +96,12 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
   log.info('specialists: task completed', { taskId: task.id, agentGroupId: session.agent_group_id });
 }
 
-interface RefusedFile {
+export interface RefusedFile {
   path: string;
   reason: string;
 }
 
-function refusalNote(refused: RefusedFile[]): string {
+export function refusalNote(refused: RefusedFile[]): string {
   if (refused.length === 0) return '';
   return `\n\n[Not delivered: ${refused.map((f) => `${f.path} (${f.reason})`).join('; ')}]`;
 }
@@ -193,19 +200,37 @@ function rewritePaths(text: string, rewrites: Map<string, string>): string {
   return text.replace(new RegExp(pattern, 'g'), (match) => rewrites.get(match) ?? match);
 }
 
+export interface TakeFilesOptions {
+  kind: TransferKind;
+  /** result: the delivering task. dispatch: the task the files go to. */
+  taskId: string;
+  /** Text whose references to the listed paths are rewritten to where the files went. */
+  text: string;
+  filePaths: string[];
+  commitToMemory: boolean;
+  /** Known up front for a dispatch (the new task's session); set at routing for a result. */
+  recipientSessionId: string | null;
+}
+
+export interface TakenFiles {
+  /** Null when the invocation is missing or no file could be taken. */
+  transfer: ContainerTransfer | null;
+  refused: RefusedFile[];
+  /** `text` with the listed paths rewritten; no refusal note. */
+  text: string;
+  /** Where each taken file is for its recipient, in the order listed. */
+  placed: string[];
+}
+
 /**
- * Copy files from ipc-out to host staging and create ContainerTransfer +
- * TransferFile rows. Returns the ContainerTransfer (status='pending'), or null
- * if the invocation is missing or no file could be taken, plus the files it
- * refused and why.
+ * Copy files from the session's ipc-out to host staging and create the
+ * ContainerTransfer (status='pending') + TransferFile rows: a specialist's
+ * delivery (kind result) or the files a dispatcher hands to the task it
+ * dispatches (kind dispatch). A path that cannot be taken is refused, with
+ * the reason, rather than failing the call.
  */
-async function _buildTransfer(
-  session: Session,
-  taskId: string,
-  resultText: string,
-  filePaths: string[],
-  commitToMemory: boolean,
-): Promise<{ transfer: ContainerTransfer | null; refused: RefusedFile[] }> {
+export async function takeIpcOutFiles(session: Session, opts: TakeFilesOptions): Promise<TakenFiles> {
+  const { kind, taskId, filePaths, commitToMemory } = opts;
   const db = getDb();
   const refused: RefusedFile[] = [];
 
@@ -215,7 +240,12 @@ async function _buildTransfer(
       sessionId: session.id,
       taskId,
     });
-    return { transfer: null, refused: filePaths.map((p) => ({ path: p, reason: 'no ipc-out for this run' })) };
+    return {
+      transfer: null,
+      refused: filePaths.map((p) => ({ path: p, reason: 'no ipc-out for this run' })),
+      text: opts.text,
+      placed: [],
+    };
   }
 
   const transferId = genId('xfer');
@@ -223,6 +253,7 @@ async function _buildTransfer(
 
   // Copy files to staging; collect how each path is rewritten in result_text
   const transferFiles: Array<{ id: string; originalName: string; hostPath: string }> = [];
+  const placed: string[] = [];
   const rewrites = new Map<string, string>();
   // Each file once, under a name unique in this transfer (the spec's
   // IpcInPathsUniquePerTransfer): staging and ipc-in are keyed by name.
@@ -235,7 +266,7 @@ async function _buildTransfer(
   for (const containerPath of filePaths) {
     const resolved = resolveIpcOutFile(invocation.ipc_out_host_path, containerPath);
     if ('error' in resolved) {
-      log.warn('specialists: refused a delivered file', { taskId, path: containerPath, reason: resolved.error });
+      log.warn('specialists: refused a file', { kind, taskId, path: containerPath, reason: resolved.error });
       refused.push({ path: containerPath, reason: resolved.error });
       continue;
     }
@@ -263,40 +294,41 @@ async function _buildTransfer(
     transferFiles.push({ id: fileId, originalName: basename, hostPath: destPath });
     delivered.set(resolved.hostPath, basename);
     names.add(basename);
+    placed.push(deliveredPath(basename, transferId, commitToMemory));
     addRewrites(rewrites, containerPath, deliveredPath(basename, transferId, commitToMemory));
   }
 
-  let rewrittenText = rewritePaths(resultText, rewrites);
+  const rewrittenText = rewritePaths(opts.text, rewrites);
 
   if (transferFiles.length === 0) {
     // All files failed to copy — no transfer
     try {
       fs.rmSync(stagingDir, { recursive: true, force: true });
     } catch {}
-    return { transfer: null, refused };
+    return { transfer: null, refused, text: rewrittenText, placed };
   }
 
-  // The requester reads this text; say what did not come through.
-  rewrittenText += refusalNote(refused);
-
-  // Insert ContainerTransfer
+  // Insert ContainerTransfer. A result's requester reads its text, so it
+  // says what did not come through; a dispatch's text is the task's prompt,
+  // which its caller records on the task.
   const transfer: ContainerTransfer = {
     id: transferId,
+    kind,
     task_id: taskId,
     sender_invocation_id: invocation.id,
-    result_text: rewrittenText,
+    result_text: kind === 'result' ? rewrittenText + refusalNote(refused) : '',
     commit_to_memory: commitToMemory ? 1 : 0,
     file_count: transferFiles.length,
     sent_at: now,
     status: 'pending',
-    recipient_session_id: null,
+    recipient_session_id: opts.recipientSessionId,
   };
 
   await db.run(
     `INSERT INTO container_transfers
-       (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
+       (id, kind, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
      VALUES
-       (@id, @task_id, @sender_invocation_id, @result_text, @commit_to_memory, @file_count, @sent_at, @status, @recipient_session_id)`,
+       (@id, @kind, @task_id, @sender_invocation_id, @result_text, @commit_to_memory, @file_count, @sent_at, @status, @recipient_session_id)`,
     transfer,
   );
 
@@ -319,10 +351,11 @@ async function _buildTransfer(
 
   log.debug('specialists: ContainerTransfer created', {
     transferId,
+    kind,
     taskId,
     fileCount: transferFiles.length,
     commitToMemory,
   });
 
-  return { transfer, refused };
+  return { transfer, refused, text: rewrittenText, placed };
 }

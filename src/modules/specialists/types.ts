@@ -24,8 +24,12 @@ export interface IpcInMount {
   status: IpcMountStatus;
 }
 
+export type TransferKind = 'result' | 'dispatch';
+
 export interface ContainerTransfer {
   id: string;
+  /** result: task_id is the delivering task. dispatch: task_id is the task the files go to. */
+  kind?: TransferKind;
   task_id: string;
   sender_invocation_id: string;
   result_text: string;

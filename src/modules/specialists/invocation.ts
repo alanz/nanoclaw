@@ -407,7 +407,8 @@ async function unhandledRoutedMessages(
  *
  * For sub-task transfers: a transfer's requester is the parent task
  * (t.task.requester_task). We expire transfers from child tasks that
- * targeted this task when this task transitions to terminal.
+ * targeted this task when this task transitions to terminal. A dispatch
+ * transfer (files handed to this task when it was dispatched) expires too.
  */
 export async function expireTransfersForTerminalTask(taskId: string): Promise<void> {
   const db = getDb();
@@ -421,6 +422,7 @@ export async function expireTransfersForTerminalTask(taskId: string): Promise<vo
     `SELECT ct.id FROM container_transfers ct
        JOIN specialist_tasks st ON st.id = ct.task_id
        WHERE ct.status IN ('pending', 'in_transit', 'committed')
+         AND ct.kind = 'result'
          AND st.requester_task_id = ?`,
     taskId,
   )) as { id: string }[];
@@ -435,11 +437,25 @@ export async function expireTransfersForTerminalTask(taskId: string): Promise<vo
   // Transfers with recipient_session_id already set have been routed to an ipc-in dir and must
   // not be expired here — the delivery sweep will advance them to in_transit/committed.
   const pendingTransfers = (await db.all(
-    "SELECT id FROM container_transfers WHERE task_id = ? AND status = 'pending' AND recipient_session_id IS NULL",
+    "SELECT id FROM container_transfers WHERE task_id = ? AND kind = 'result' AND status = 'pending' AND recipient_session_id IS NULL",
     taskId,
   )) as { id: string }[];
 
   for (const { id } of pendingTransfers) {
+    await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
+    await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
+    reclaimTransferStaging(id);
+  }
+
+  // Files handed to this task when it was dispatched served it for its whole
+  // life, however it ended — pending ones too, when it failed before its
+  // container ever started (spec: DispatchTransferExpiredOnTaskTerminal).
+  const dispatched = (await db.all(
+    "SELECT id FROM container_transfers WHERE task_id = ? AND kind = 'dispatch' AND status IN ('pending', 'in_transit')",
+    taskId,
+  )) as { id: string }[];
+
+  for (const { id } of dispatched) {
     await db.run("UPDATE transfer_files SET status = 'expired' WHERE transfer_id = ?", id);
     await db.run("UPDATE container_transfers SET status = 'expired' WHERE id = ?", id);
     reclaimTransferStaging(id);

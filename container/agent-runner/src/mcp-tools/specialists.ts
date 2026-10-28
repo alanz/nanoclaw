@@ -34,6 +34,15 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
+/** file_paths as given: absent, or a list of path strings. */
+function parseFilePaths(raw: unknown): string[] | string {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.some((p) => typeof p !== 'string' || p.length === 0)) {
+    return 'file_paths must be a list of paths in /workspace/ipc-out/';
+  }
+  return raw as string[];
+}
+
 const dispatchSpecialist: McpToolDefinition = {
   tool: {
     name: 'dispatch_specialist',
@@ -53,6 +62,12 @@ const dispatchSpecialist: McpToolDefinition = {
           type: 'string',
           description: 'The task prompt to give the specialist.',
         },
+        file_paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Files to hand to the specialist with the task, e.g. a PDF the user sent. Copy each into /workspace/ipc-out/ first and list it there (/workspace/ipc-out/paper.pdf); the specialist cannot see your workspace. Its prompt is rewritten to where the files arrive.',
+        },
       },
     },
   },
@@ -66,6 +81,8 @@ const dispatchSpecialist: McpToolDefinition = {
     if (!prompt || typeof prompt !== 'string') {
       return err('prompt is required');
     }
+    const filePaths = parseFilePaths(args.file_paths);
+    if (typeof filePaths === 'string') return err(filePaths);
 
     writeMessageOut({
       id: generateId(),
@@ -74,6 +91,7 @@ const dispatchSpecialist: McpToolDefinition = {
         action: 'dispatch_specialist',
         specialist_group_id: specialistGroupId,
         prompt,
+        ...(filePaths.length > 0 ? { file_paths: filePaths } : {}),
       }),
     });
 
@@ -101,6 +119,12 @@ const dispatchSubTask: McpToolDefinition = {
           type: 'string',
           description: 'The task prompt to give the sub-specialist.',
         },
+        file_paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Files to hand to the specialist with the task, Copy each into /workspace/ipc-out/ first and list it there (/workspace/ipc-out/paper.pdf); the specialist cannot see your ipc-in or workspace. Its prompt is rewritten to where the files arrive.',
+        },
       },
     },
   },
@@ -114,6 +138,8 @@ const dispatchSubTask: McpToolDefinition = {
     if (!prompt || typeof prompt !== 'string') {
       return err('prompt is required');
     }
+    const filePaths = parseFilePaths(args.file_paths);
+    if (typeof filePaths === 'string') return err(filePaths);
 
     writeMessageOut({
       id: generateId(),
@@ -122,6 +148,7 @@ const dispatchSubTask: McpToolDefinition = {
         action: 'dispatch_sub_task',
         specialist_group_id: specialistGroupId,
         prompt,
+        ...(filePaths.length > 0 ? { file_paths: filePaths } : {}),
       }),
     });
 

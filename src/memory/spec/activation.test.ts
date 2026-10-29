@@ -130,11 +130,11 @@ const rowFor = (k: GroupKey) => indexRows(k)?.files.find((f) => f.path === repoP
 
 // ── The switch and the allowlist ─────────────────────────────────────────────
 
-// The spec declares embedding_key_configured = true by default. In the code
-// the switch is MEMORY_SEARCH_GEMINI_API_KEY, which nothing sets by default:
-// an install with no settings runs no memory at all. (That a key alone turns
-// memory on, with no other flag, is shown by config-default.memory_search_groups
-// below; that no key means no memory, by the rule-failure.*.3 tests.)
+// The switch is MEMORY_SEARCH_GEMINI_API_KEY (embedding_key_configured,
+// default false): an install with no settings runs no memory at all. (That a
+// key alone turns memory on, with no other flag, is shown by
+// config-default.memory_search_groups below; that no key means no memory, by
+// the rule-failure.*.3 tests.)
 obligation('config-default.embedding_key_configured', async () => {
   // Default false: the key is an operator secret, so a fresh install has none
   // and memory is off for every group until one is set.

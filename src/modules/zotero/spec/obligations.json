@@ -1,0 +1,398 @@
+[
+  {
+    "id": "enum-comparable.AbstractSource",
+    "category": "enum_comparable",
+    "construct": "AbstractSource",
+    "description": "Verify fields typed with enum AbstractSource are comparable"
+  },
+  {
+    "id": "enum-comparable.AbstractLookupResult",
+    "category": "enum_comparable",
+    "construct": "AbstractLookupResult",
+    "description": "Verify fields typed with enum AbstractLookupResult are comparable"
+  },
+  {
+    "id": "entity-fields.ZoteroLibrary",
+    "category": "entity_fields",
+    "construct": "ZoteroLibrary",
+    "description": "Verify all declared fields on ZoteroLibrary are present with correct types"
+  },
+  {
+    "id": "entity-fields.ZoteroItem",
+    "category": "entity_fields",
+    "construct": "ZoteroItem",
+    "description": "Verify all declared fields on ZoteroItem are present with correct types"
+  },
+  {
+    "id": "entity-optional.ZoteroItem.year",
+    "category": "entity_optional",
+    "construct": "ZoteroItem.year",
+    "description": "Verify optional field ZoteroItem.year accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ZoteroItem.doi",
+    "category": "entity_optional",
+    "construct": "ZoteroItem.doi",
+    "description": "Verify optional field ZoteroItem.doi accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ZoteroItem.url",
+    "category": "entity_optional",
+    "construct": "ZoteroItem.url",
+    "description": "Verify optional field ZoteroItem.url accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ZoteroItem.abstract",
+    "category": "entity_optional",
+    "construct": "ZoteroItem.abstract",
+    "description": "Verify optional field ZoteroItem.abstract accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ZoteroItem.pdf_attachment",
+    "category": "entity_optional",
+    "construct": "ZoteroItem.pdf_attachment",
+    "description": "Verify optional field ZoteroItem.pdf_attachment accepts null and non-null values"
+  },
+  {
+    "id": "entity-fields.PdfAttachment",
+    "category": "entity_fields",
+    "construct": "PdfAttachment",
+    "description": "Verify all declared fields on PdfAttachment are present with correct types"
+  },
+  {
+    "id": "entity-fields.SyncState",
+    "category": "entity_fields",
+    "construct": "SyncState",
+    "description": "Verify all declared fields on SyncState are present with correct types"
+  },
+  {
+    "id": "entity-optional.SyncState.last_sync",
+    "category": "entity_optional",
+    "construct": "SyncState.last_sync",
+    "description": "Verify optional field SyncState.last_sync accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.SyncState.next_check",
+    "category": "entity_optional",
+    "construct": "SyncState.next_check",
+    "description": "Verify optional field SyncState.next_check accepts null and non-null values"
+  },
+  {
+    "id": "derived.SyncState.is_due",
+    "category": "derived",
+    "construct": "SyncState.is_due",
+    "description": "Verify derived value SyncState.is_due computes correctly"
+  },
+  {
+    "id": "entity-fields.ItemFile",
+    "category": "entity_fields",
+    "construct": "ItemFile",
+    "description": "Verify all declared fields on ItemFile are present with correct types"
+  },
+  {
+    "id": "entity-optional.ItemFile.abstract",
+    "category": "entity_optional",
+    "construct": "ItemFile.abstract",
+    "description": "Verify optional field ItemFile.abstract accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ItemFile.abstract_source",
+    "category": "entity_optional",
+    "construct": "ItemFile.abstract_source",
+    "description": "Verify optional field ItemFile.abstract_source accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ItemFile.abstract_lookup_at",
+    "category": "entity_optional",
+    "construct": "ItemFile.abstract_lookup_at",
+    "description": "Verify optional field ItemFile.abstract_lookup_at accepts null and non-null values"
+  },
+  {
+    "id": "entity-optional.ItemFile.abstract_lookup_result",
+    "category": "entity_optional",
+    "construct": "ItemFile.abstract_lookup_result",
+    "description": "Verify optional field ItemFile.abstract_lookup_result accepts null and non-null values"
+  },
+  {
+    "id": "entity-fields.DigestEntry",
+    "category": "entity_fields",
+    "construct": "DigestEntry",
+    "description": "Verify all declared fields on DigestEntry are present with correct types"
+  },
+  {
+    "id": "config-default.default_sync_interval",
+    "category": "config_default",
+    "construct": "config.default_sync_interval",
+    "description": "Verify config parameter default_sync_interval has its declared default"
+  },
+  {
+    "id": "config-default.pre_check_timeout",
+    "category": "config_default",
+    "construct": "config.pre_check_timeout",
+    "description": "Verify config parameter pre_check_timeout has its declared default"
+  },
+  {
+    "id": "config-default.sync_request_timeout",
+    "category": "config_default",
+    "construct": "config.sync_request_timeout",
+    "description": "Verify config parameter sync_request_timeout has its declared default"
+  },
+  {
+    "id": "config-default.max_pdf_size",
+    "category": "config_default",
+    "construct": "config.max_pdf_size",
+    "description": "Verify config parameter max_pdf_size has its declared default"
+  },
+  {
+    "id": "config-default.min_abstract_length",
+    "category": "config_default",
+    "construct": "config.min_abstract_length",
+    "description": "Verify config parameter min_abstract_length has its declared default"
+  },
+  {
+    "id": "config-default.max_abstract_length",
+    "category": "config_default",
+    "construct": "config.max_abstract_length",
+    "description": "Verify config parameter max_abstract_length has its declared default"
+  },
+  {
+    "id": "config-default.abstract_retry_interval",
+    "category": "config_default",
+    "construct": "config.abstract_retry_interval",
+    "description": "Verify config parameter abstract_retry_interval has its declared default"
+  },
+  {
+    "id": "config-default.enrichment_run_budget",
+    "category": "config_default",
+    "construct": "config.enrichment_run_budget",
+    "description": "Verify config parameter enrichment_run_budget has its declared default"
+  },
+  {
+    "id": "rule-success.SyncStateInitialised",
+    "category": "rule_success",
+    "construct": "SyncStateInitialised",
+    "description": "Verify rule SyncStateInitialised succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.SyncCheckDue",
+    "category": "rule_success",
+    "construct": "SyncCheckDue",
+    "description": "Verify rule SyncCheckDue succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.PreCheckFailed",
+    "category": "rule_success",
+    "construct": "PreCheckFailed",
+    "description": "Verify rule PreCheckFailed succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.PreCheckFailed.1",
+    "category": "rule_failure",
+    "construct": "PreCheckFailed",
+    "description": "Verify rule PreCheckFailed is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.LibraryUnchanged",
+    "category": "rule_success",
+    "construct": "LibraryUnchanged",
+    "description": "Verify rule LibraryUnchanged succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.LibraryUnchanged.1",
+    "category": "rule_failure",
+    "construct": "LibraryUnchanged",
+    "description": "Verify rule LibraryUnchanged is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.LibraryChanged",
+    "category": "rule_success",
+    "construct": "LibraryChanged",
+    "description": "Verify rule LibraryChanged succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.LibraryChanged.1",
+    "category": "rule_failure",
+    "construct": "LibraryChanged",
+    "description": "Verify rule LibraryChanged is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.LibrarySynced",
+    "category": "rule_success",
+    "construct": "LibrarySynced",
+    "description": "Verify rule LibrarySynced succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.ChangesNotified",
+    "category": "rule_success",
+    "construct": "ChangesNotified",
+    "description": "Verify rule ChangesNotified succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.ChangesNotified.1",
+    "category": "rule_failure",
+    "construct": "ChangesNotified",
+    "description": "Verify rule ChangesNotified is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-entity-creation.ChangesNotified.1",
+    "category": "rule_entity_creation",
+    "construct": "ChangesNotified",
+    "description": "Verify entity creation in rule ChangesNotified ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.EnrichmentBacklogScheduled",
+    "category": "rule_success",
+    "construct": "EnrichmentBacklogScheduled",
+    "description": "Verify rule EnrichmentBacklogScheduled succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.EnrichmentBacklogScheduled.1",
+    "category": "rule_failure",
+    "construct": "EnrichmentBacklogScheduled",
+    "description": "Verify rule EnrichmentBacklogScheduled is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.EnrichmentTriggeredAfterSync",
+    "category": "rule_success",
+    "construct": "EnrichmentTriggeredAfterSync",
+    "description": "Verify rule EnrichmentTriggeredAfterSync succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.EnrichmentTriggeredAfterSync.1",
+    "category": "rule_failure",
+    "construct": "EnrichmentTriggeredAfterSync",
+    "description": "Verify rule EnrichmentTriggeredAfterSync is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.EnrichmentTriggeredAfterSync.2",
+    "category": "rule_failure",
+    "construct": "EnrichmentTriggeredAfterSync",
+    "description": "Verify rule EnrichmentTriggeredAfterSync is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.EnrichmentTriggeredOnRequest",
+    "category": "rule_success",
+    "construct": "EnrichmentTriggeredOnRequest",
+    "description": "Verify rule EnrichmentTriggeredOnRequest succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.EnrichmentRun",
+    "category": "rule_success",
+    "construct": "EnrichmentRun",
+    "description": "Verify rule EnrichmentRun succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.AbstractLookupRecorded",
+    "category": "rule_success",
+    "construct": "AbstractLookupRecorded",
+    "description": "Verify rule AbstractLookupRecorded succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.AbstractLookupRecorded.1",
+    "category": "rule_failure",
+    "construct": "AbstractLookupRecorded",
+    "description": "Verify rule AbstractLookupRecorded is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.AbstractEnriched",
+    "category": "rule_success",
+    "construct": "AbstractEnriched",
+    "description": "Verify rule AbstractEnriched succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.AbstractEnriched.1",
+    "category": "rule_failure",
+    "construct": "AbstractEnriched",
+    "description": "Verify rule AbstractEnriched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.AbstractEnriched.2",
+    "category": "rule_failure",
+    "construct": "AbstractEnriched",
+    "description": "Verify rule AbstractEnriched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.AbstractEnriched.3",
+    "category": "rule_failure",
+    "construct": "AbstractEnriched",
+    "description": "Verify rule AbstractEnriched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.AbstractEnriched.4",
+    "category": "rule_failure",
+    "construct": "AbstractEnriched",
+    "description": "Verify rule AbstractEnriched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.PdfAbstractExtracted",
+    "category": "rule_success",
+    "construct": "PdfAbstractExtracted",
+    "description": "Verify rule PdfAbstractExtracted succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.PdfAbstractExtracted.1",
+    "category": "rule_failure",
+    "construct": "PdfAbstractExtracted",
+    "description": "Verify rule PdfAbstractExtracted is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.PdfAbstractExtracted.2",
+    "category": "rule_failure",
+    "construct": "PdfAbstractExtracted",
+    "description": "Verify rule PdfAbstractExtracted is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.PdfAbstractExtracted.3",
+    "category": "rule_failure",
+    "construct": "PdfAbstractExtracted",
+    "description": "Verify rule PdfAbstractExtracted is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.PdfAbstractExtracted.4",
+    "category": "rule_failure",
+    "construct": "PdfAbstractExtracted",
+    "description": "Verify rule PdfAbstractExtracted is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.PdfAbstractExtracted.5",
+    "category": "rule_failure",
+    "construct": "PdfAbstractExtracted",
+    "description": "Verify rule PdfAbstractExtracted is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.PdfAbstractExtracted.6",
+    "category": "rule_failure",
+    "construct": "PdfAbstractExtracted",
+    "description": "Verify rule PdfAbstractExtracted is rejected when requires clause fails"
+  },
+  {
+    "id": "invariant.SyncStateIsSingleton",
+    "category": "invariant",
+    "construct": "SyncStateIsSingleton",
+    "description": "Verify invariant SyncStateIsSingleton holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.UniqueItemFilesPerGroup",
+    "category": "invariant",
+    "construct": "UniqueItemFilesPerGroup",
+    "description": "Verify invariant UniqueItemFilesPerGroup holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.AbstractSourceImpliesAbstract",
+    "category": "invariant",
+    "construct": "AbstractSourceImpliesAbstract",
+    "description": "Verify invariant AbstractSourceImpliesAbstract holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.AbstractLookupRecordComplete",
+    "category": "invariant",
+    "construct": "AbstractLookupRecordComplete",
+    "description": "Verify invariant AbstractLookupRecordComplete holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.ActiveSyncStateHasNextCheck",
+    "category": "invariant",
+    "construct": "ActiveSyncStateHasNextCheck",
+    "description": "Verify invariant ActiveSyncStateHasNextCheck holds after every state-changing rule that touches constrained entities"
+  }
+]

@@ -151,6 +151,34 @@ describe('decideStuckAction', () => {
       ).toEqual({ action: 'ok' });
     });
 
+    // A follow-up pushed into a live query is completed on push: mid-turn the
+    // container holds no claim, and a stream gap past the 30 s task ceiling
+    // reaped it with the follow-up unanswered.
+    it('does not apply while a turn is in progress', () => {
+      expect(
+        decideStuckAction({
+          now: BASE,
+          heartbeatMtimeMs: BASE - IDLE - 1,
+          containerState: null,
+          claims: [],
+          turnInProgress: true,
+          idleCeilingMs: IDLE,
+        }),
+      ).toEqual({ action: 'ok' });
+    });
+
+    it('a turn in progress still answers to the absolute ceiling, not as an idle reap', () => {
+      const res = decideStuckAction({
+        now: BASE,
+        heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+        containerState: null,
+        claims: [],
+        turnInProgress: true,
+        idleCeilingMs: IDLE,
+      });
+      expect(res).toMatchObject({ action: 'kill-ceiling', ceilingMs: ABSOLUTE_CEILING_MS, idle: false });
+    });
+
     it('never exceeds the absolute ceiling', () => {
       const res = decideStuckAction({
         now: BASE,

@@ -148,7 +148,8 @@ describe('at the threshold', () => {
     await settled();
 
     expect(mockFailPending).toHaveBeenCalled();
-    const text = mockDeliver.mock.calls[0][4];
+    // Content goes to the adapter as JSON, which the registry adapter parses.
+    const text = (JSON.parse(mockDeliver.mock.calls[0][4] as string) as { text: string }).text;
     expect(text).toContain('EROFS: read-only file system');
     expect(text).toContain('2 pending messages');
   });

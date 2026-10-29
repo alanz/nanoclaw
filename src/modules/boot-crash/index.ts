@@ -161,15 +161,19 @@ async function failSessionIfContainerCannotStart(sessionId: string): Promise<voi
     const mg = await getMessagingGroup(session.messaging_group_id);
     const adapter = getDeliveryAdapter();
     if (!mg || !adapter) return;
+    const text =
+      `I couldn't start up to handle that — the container failed ${BOOT_CRASH_THRESHOLD} times in a row.\n\n` +
+      `Last error: ${reason}\n\n` +
+      `${failed} pending message${failed === 1 ? '' : 's'} ${failed === 1 ? 'was' : 'were'} dropped. ` +
+      `Check \`logs/nanoclaw.error.log\` for details.`;
+    // The delivery adapter takes the message content as JSON, as messages_out
+    // carries it; plain prose fails its parse and the notice is lost.
     await adapter.deliver(
       mg.channel_type,
       mg.platform_id,
       session.thread_id ?? null,
       'text',
-      `I couldn't start up to handle that — the container failed ${BOOT_CRASH_THRESHOLD} times in a row.\n\n` +
-        `Last error: ${reason}\n\n` +
-        `${failed} pending message${failed === 1 ? '' : 's'} ${failed === 1 ? 'was' : 'were'} dropped. ` +
-        `Check \`logs/nanoclaw.error.log\` for details.`,
+      JSON.stringify({ text }),
       undefined,
       mg.instance,
     );

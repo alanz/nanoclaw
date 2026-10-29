@@ -114,6 +114,18 @@ export function validateMcpServerName(name: string): void {
   }
 }
 
+// Package names are interpolated into the per-group image's Dockerfile RUN
+// lines, so every intake path (install_packages, `ncl groups config
+// add-package`) and the build itself hold names to these shapes. Duplicated in
+// container/agent-runner/src/mcp-tools/self-mod.ts — keep the two in sync.
+const APT_PACKAGE_RE = /^[a-z0-9][a-z0-9._+-]*$/;
+const NPM_PACKAGE_RE = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+/** Whether `name` is a well-formed apt or npm package name. */
+export function isValidPackageName(kind: 'apt' | 'npm', name: unknown): boolean {
+  return typeof name === 'string' && (kind === 'apt' ? APT_PACKAGE_RE : NPM_PACKAGE_RE).test(name);
+}
+
 // The Agent Plugins fixed cwd shapes: ./p, ${PLUGIN_ROOT}[/p], ${PLUGIN_DATA}[/p].
 const CWD_FORM_RE = /^(?:\.\/|\$\{PLUGIN_ROOT\}(?:\/|$)|\$\{PLUGIN_DATA\}(?:\/|$))/;
 

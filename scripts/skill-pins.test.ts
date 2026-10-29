@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -293,6 +294,18 @@ describe('scanCliTools', () => {
       other: [],
       problems: ['c.json: put each entry on its own lines; sync edits a pin by line'],
     });
+  });
+});
+
+describe('collect', () => {
+  // Another test (setup/channels/run-channel-skill.test.ts) creates and removes
+  // a scratch skill in the real .claude/skills while this file scans it. An
+  // entry that vanishes between readdir and stat — here a dangling symlink,
+  // which readdir lists and stat cannot resolve — has no pins: skip it.
+  it('skips a skill entry that vanished after the directory was listed', () => {
+    const root = makeRepo({ '.claude/skills/add-real/SKILL.md': '# add real\n' });
+    symlinkSync(join(root, 'gone'), join(root, '.claude/skills/add-gone'));
+    expect(() => collect(root)).not.toThrow();
   });
 });
 

@@ -50,6 +50,12 @@ export interface CustomOperation {
    * (handler validates by hand, stray flags ignored).
    */
   args?: ColumnDef[];
+  /**
+   * Throws on unacceptable args. Runs with argument parsing, which dispatch
+   * does before an approval hold — so a request this rejects never reaches an
+   * admin's approval card.
+   */
+  validate?: (args: Record<string, unknown>) => void;
   /** Ready-to-paste invocations, rendered under EXAMPLES in deep help. */
   examples?: string[];
   /** Operator-only: never runnable from inside a container (see CommandDef.hostOnly). */
@@ -523,17 +529,22 @@ export function registerResource(def: ResourceDef): void {
         access: op.access,
         hostOnly: op.hostOnly,
         resource: def.plural,
-        parseArgs: declared
-          ? (raw) => {
-              try {
-                return validateArgs(declared, normalizeArgs(raw));
-              } catch (e) {
-                const usage = renderVerbHelp(def, verb);
-                const msg = e instanceof Error ? e.message : String(e);
-                throw new Error(usage ? `${msg}\n\n${usage}` : msg, { cause: e });
-              }
+        parseArgs: (raw) => {
+          let args: Record<string, unknown>;
+          if (declared) {
+            try {
+              args = validateArgs(declared, normalizeArgs(raw));
+            } catch (e) {
+              const usage = renderVerbHelp(def, verb);
+              const msg = e instanceof Error ? e.message : String(e);
+              throw new Error(usage ? `${msg}\n\n${usage}` : msg, { cause: e });
             }
-          : (raw) => normalizeArgs(raw),
+          } else {
+            args = normalizeArgs(raw);
+          }
+          op.validate?.(args);
+          return args;
+        },
         handler: async (args, ctx) => op.handler(args as Record<string, unknown>, ctx),
         formatHuman: op.formatHuman,
       });

@@ -72,14 +72,29 @@ export function decideStuckAction(args: {
   /** Due inbound messages, claimed or not. Defaults to none. */
   dueMessages?: number;
   /**
+   * The container is answering a turn (container_state.turn_started_at). A
+   * follow-up pushed into a live query is completed on push, so mid-turn the
+   * container can hold no claim and run no tool — yet it is not idle.
+   */
+  turnInProgress?: boolean;
+  /**
    * Reap an idle container once silent this long (capped at the absolute
    * ceiling). Defaults to the ceiling.
    */
   idleCeilingMs?: number;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims, dueMessages = 0, idleCeilingMs } = args;
+  const {
+    now,
+    heartbeatMtimeMs,
+    containerStartedAtMs,
+    containerState,
+    claims,
+    dueMessages = 0,
+    turnInProgress = false,
+    idleCeilingMs,
+  } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
-  const idle = claims.length === 0 && !containerState?.currentTool && dueMessages === 0;
+  const idle = claims.length === 0 && !containerState?.currentTool && dueMessages === 0 && !turnInProgress;
 
   // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
   // container hasn't had any SDK activity yet so no heartbeat file exists —
@@ -365,6 +380,7 @@ async function enforceRunningContainerSla(
     containerState: outDb.getContainerState(),
     claims: gatedClaims,
     dueMessages: inDb.countDueMessages(),
+    turnInProgress: outDb.isTurnInProgress(),
     idleCeilingMs: (await isChatSession(session)) ? CONTAINER_IDLE_MS : TASK_CONTAINER_IDLE_MS,
   });
 

@@ -313,13 +313,17 @@ async function notifyFailure(row: ConversationRow, placeholder: string): Promise
     const mg = await getMessagingGroup(session.messaging_group_id);
     const adapter = getDeliveryAdapter();
     if (!mg || !adapter) return;
+    const text =
+      `I couldn't write a summary of an earlier conversation after ${row.summary_attempts} attempts. ` +
+      `The conversation is archived at ${row.archive_path}; a placeholder is at ${placeholder}.`;
+    // The delivery adapter takes the message content as JSON, as messages_out
+    // carries it; plain prose fails its parse and the notice is lost.
     await adapter.deliver(
       mg.channel_type,
       mg.platform_id,
       session.thread_id ?? null,
       'text',
-      `I couldn't write a summary of an earlier conversation after ${row.summary_attempts} attempts. ` +
-        `The conversation is archived at ${row.archive_path}; a placeholder is at ${placeholder}.`,
+      JSON.stringify({ text }),
       undefined,
       mg.instance,
     );

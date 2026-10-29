@@ -359,13 +359,18 @@ export class MemoryIndexManager {
    * zettel/ — and a mount newly marked `index` in the group's container
    * config. Without this, both stayed out of the index until a restart.
    */
+  private mountReadFailed = false;
+
   private async adoptNewDirs(): Promise<boolean> {
     const known = new Set(this.additionalDirs.map((d) => d.dir));
     let mounts: IndexedDir[] = [];
     try {
       mounts = await indexedMountDirs(this.groupId);
     } catch (err) {
-      log.warn('Memory index: could not read the indexed mounts', { groupId: this.groupId, err });
+      // Read at every sync; a lasting failure is said once per manager.
+      if (!this.mountReadFailed)
+        log.warn('Memory index: could not read the indexed mounts', { groupId: this.groupId, err });
+      this.mountReadFailed = true;
     }
     let adopted = false;
     for (const d of [...workspaceIndexDirs(path.dirname(this.memoryDir)), ...mounts]) {
@@ -850,13 +855,19 @@ export class MemoryIndexManager {
 
     let queryVec: number[] = [];
     try {
-      await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms);
+      await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms, estimateTokens(query));
       const vec: number[] = await this.provider.embedQuery(query);
       if (!isUsableEmbedding(vec, GEMINI_EMBEDDING_DIMS)) {
         throw new Error(`unusable query embedding (${(vec as number[]).length} values)`);
       }
       queryVec = vec;
     } catch (err) {
+      // The query drew on the shared budget, so its refusals feed back as a
+      // sync's do: a daily 429 starts the 24h stop, any other the cool-down.
+      if (isEmbeddingRateLimitError(err)) {
+        if (err.quotaType === 'rpd') this.rateLimiter.depleteQuotaForType('rpd');
+        else this.rateLimiter.depleteQuotaForType(err.quotaType, err.retryDelayMs);
+      }
       log.warn('Memory search: query embed failed, falling back to FTS', { groupId: this.groupId, err });
     }
     const mode = queryVec.length > 0 ? 'hybrid' : 'keyword';
@@ -904,12 +915,13 @@ export class MemoryIndexManager {
    * granted after the deadline is still spent from the budget — one request,
    * the price of not cancelling inside the limiter.
    */
-  private async searchPermit(waitMs: number): Promise<void> {
+  /** A permit for one query embedding, charged its tokens like a sync batch. */
+  private async searchPermit(waitMs: number, tokens: number): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`no embedding permit within ${waitMs}ms`)), waitMs);
     });
-    const permit = this.rateLimiter.acquirePermit(1, waitMs);
+    const permit = this.rateLimiter.acquirePermit(1, waitMs, tokens);
     // Once the deadline wins nobody awaits the permit; a later rejection
     // must not surface as an unhandled one.
     permit.catch(() => {});

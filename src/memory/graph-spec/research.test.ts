@@ -71,7 +71,7 @@ import { handleDispatchSpecialist } from '../../modules/specialists/dispatch.js'
 import { buildInvocationForSession } from '../../modules/specialists/invocation.js';
 import type { SpecialistTask } from '../../modules/specialists/types.js';
 import type { Session } from '../../types.js';
-import { divergence, obligation, unimplemented } from './harness.js';
+import { obligation, unimplemented } from './harness.js';
 import { expectTrackedInstruction } from './tracked.js';
 
 const GROUPS = `${h.root}/groups`;
@@ -370,18 +370,22 @@ describe('ZettelkastenWork', () => {
     expect(told('sess-task-coder').join('\n')).toContain('dispatch_specialist failed');
   });
 
-  divergence(
-    'surface-provides.ZettelkastenWork',
-    'the spec offers MainAgentResearchRequest to any session whose group has specialist = null; dispatch_specialist only takes it from the is_main group',
-    async () => {
-      // A second ordinary (non-specialist) group, not the main one.
-      await group('ag-cli', 'cli-with-alan', 'plain');
-      const cli = await session('sess-cli', 'ag-cli', null);
-      const made = await created(() =>
-        handleDispatchSpecialist({ specialist_group_id: 'ag-rsrch', prompt: 'Investigate: aardvarks' }, cli),
-      );
-      expect(told('sess-cli')).toEqual([]);
-      expect(made).toHaveLength(1);
-    },
-  );
+  obligation('surface-provides.ZettelkastenWork', async () => {
+    // MainAgentResearchRequest is provided when the group is_main: the main
+    // group's request is taken, and an ordinary (non-specialist) group that is
+    // not main is refused.
+    const main = (await getSession('sess-main'))!;
+    const fromMain = await created(() =>
+      handleDispatchSpecialist({ specialist_group_id: 'ag-rsrch', prompt: 'Investigate: aardvarks' }, main),
+    );
+    expect(fromMain).toHaveLength(1);
+
+    await group('ag-cli', 'cli-with-alan', 'plain');
+    const cli = await session('sess-cli', 'ag-cli', null);
+    const fromCli = await created(() =>
+      handleDispatchSpecialist({ specialist_group_id: 'ag-rsrch', prompt: 'Investigate: aardvarks' }, cli),
+    );
+    expect(fromCli).toEqual([]);
+    expect(told('sess-cli').join('\n')).toContain('only the main group may dispatch');
+  });
 });

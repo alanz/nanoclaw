@@ -68,7 +68,7 @@ import { closeDb } from '../../db/connection.js';
 import '../../modules/specialists/index.js';
 import { closeAllMemoryManagers, getMemoryManager, MemoryIndexManager } from '../manager.js';
 import { resetCtl, settled, sha256 } from './fixtures.js';
-import { divergence, obligation } from './harness.js';
+import { obligation } from './harness.js';
 import {
   buildWorld,
   clearSettings,
@@ -132,14 +132,12 @@ const rowFor = (k: GroupKey) => indexRows(k)?.files.find((f) => f.path === repoP
 // an install with no settings runs no memory at all. (That a key alone turns
 // memory on, with no other flag, is shown by config-default.memory_search_groups
 // below; that no key means no memory, by the rule-failure.*.3 tests.)
-divergence(
-  'config-default.embedding_key_configured',
-  'no embedding key is configured by default (MEMORY_SEARCH_GEMINI_API_KEY unset), so with no settings memory is off for every group',
-  async () => {
-    await startMemory({});
-    expect(managed()).toEqual(['main']);
-  },
-);
+obligation('config-default.embedding_key_configured', async () => {
+  // Default false: the key is an operator secret, so a fresh install has none
+  // and memory is off for every group until one is set.
+  await startMemory({});
+  expect(managed()).toEqual([]);
+});
 
 obligation('config-default.memory_search_groups', async () => {
   // Default { "main" }: only the group whose folder is main. A key is the

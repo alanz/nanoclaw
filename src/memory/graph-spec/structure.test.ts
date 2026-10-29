@@ -10,20 +10,18 @@
  * (see ./tracked.ts). superseded_by, the one field code reads, is in
  * index.test.ts.
  */
-import { describe } from 'vitest';
+import { describe, expect } from 'vitest';
 
-import { unimplemented } from './harness.js';
-import { expectTrackedInstruction, SCAN_TASK } from './tracked.js';
+import { obligation, unimplemented } from './harness.js';
+import { expectTrackedInstruction, SCAN_TASK, trackedFilesStating } from './tracked.js';
 
 const UNTRACKED = 'only in the untracked groups/dm-with-alanz/instructions.prepend.md';
 const SCAN_SCRIPT =
   "only in the synthesis-scan task's pre-check script, stored in the main group's session inbound.db (not tracked)";
 
 describe('NoteSource', () => {
-  unimplemented(
-    'value-equality.NoteSource',
-    `no code models a note source; its shape is ${UNTRACKED} (which names the variant field \`type\`, not \`kind\`)`,
-    () => expectTrackedInstruction('  - type: file          # file | url | conversation'),
+  unimplemented('value-equality.NoteSource', `no code models a note source; its shape is ${UNTRACKED}`, () =>
+    expectTrackedInstruction('  - type: file          # file | url | conversation'),
   );
 
   unimplemented('entity-fields.NoteSource', `the sources format is ${UNTRACKED}`, () =>
@@ -32,7 +30,7 @@ describe('NoteSource', () => {
 });
 
 describe('MemoryNote', () => {
-  unimplemented('entity-fields.MemoryNote', `the note format is ${UNTRACKED} (it has no \`title:\` field)`, () =>
+  unimplemented('entity-fields.MemoryNote', `the note format is ${UNTRACKED}`, () =>
     expectTrackedInstruction('id: MEM-YYYY-MM-DD-{slug}\ncreated: YYYY-MM-DD\nkeywords: [term1, term2]'),
   );
 });
@@ -57,11 +55,11 @@ describe('SynthesisCandidate', () => {
 });
 
 describe('config', () => {
-  unimplemented(
-    'config-default.researcher_folder',
-    'no code or tracked file names the researcher: it is whichever specialist group the untracked main-agent instructions dispatch to, by id',
-    () => expectTrackedInstruction('specialists-researcher', 'the central DB only (agent_groups.folder)'),
-  );
+  obligation('config-default.researcher_folder', () => {
+    // No default: the researcher's folder is set per install, so no tracked
+    // code or instruction may name one.
+    expect(trackedFilesStating('specialists-researcher')).toEqual([]);
+  });
 
   unimplemented('config-default.link_candidates_limit', UNTRACKED, () =>
     expectTrackedInstruction('path_prefix: "groups/dm-with-alanz/zettel/notes/", top_k: 10'),

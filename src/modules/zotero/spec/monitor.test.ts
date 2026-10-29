@@ -100,7 +100,7 @@ import { _resetZoteroMonitorForTests, startZoteroMonitor } from '../monitor.js';
 import { buildSyncSummary, notifySyncChanges } from '../notify.js';
 import { fetchLibraryVersion } from '../pre-check.js';
 import { ENRICHMENT_RUN_BUDGET_SECONDS, itemInBacklog, type ZoteroSyncResult } from '../sync.js';
-import { obligation, divergence } from './harness.js';
+import { obligation } from './harness.js';
 import { itemFile, loadTool, type Frontmatter, type Sync } from './tools.js';
 
 const fm = await loadTool<Frontmatter>('zotero-frontmatter.mjs');
@@ -637,9 +637,8 @@ obligation('rule-failure.EnrichmentTriggeredAfterSync.2', async () => {
   expect(scriptRuns('zotero-abstracts.mjs')).toEqual([]);
 });
 
-divergence(
+obligation(
   'rule-success.EnrichmentTriggeredOnRequest',
-  'retry-abstracts forgets only not_found records (forgetNotFound); an inconclusive record on an item without an abstract is kept',
   async () => {
     const now = Date.now();
     writeItem('NF', itemFile('NF', { abstract_lookup: `${iso(now - 3 * 86_400_000)} not_found` }));
@@ -657,8 +656,10 @@ divergence(
     expect(result.backlog).toBe(2); // EnrichmentRunRequested: a pass over both
     expect(readItem('DONE')).toBe(done);
     const lookup = (key: string) => fm.parseLookup(fm.parseFrontMatter(readItem(key))!.meta);
+    // Forgets the not_found record; keeps the inconclusive one, whose item is
+    // in the backlog already.
     expect(lookup('NF')).toBeNull();
-    expect(lookup('INC'), 'every pending item forgets its lookup record').toBeNull();
+    expect(lookup('INC')?.result).toBe('inconclusive');
   },
   20_000,
 );

@@ -51,9 +51,14 @@ function trackedCorpus(): Array<{ file: string; text: string }> {
  * `unimplemented` claim) while it is only in `untrackedHome` — the untracked
  * instructions by default, the synthesis-scan task (SCAN_TASK), or nowhere.
  */
-export function expectTrackedInstruction(phrase: string, untrackedHome: string = MAIN_INSTRUCTIONS): void {
-  const hits = trackedCorpus()
+/** The git-tracked source and instruction files that state `phrase` verbatim. */
+export function trackedFilesStating(phrase: string): string[] {
+  return trackedCorpus()
     .filter((f) => f.text.includes(phrase))
     .map((f) => f.file);
+}
+
+export function expectTrackedInstruction(phrase: string, untrackedHome: string = MAIN_INSTRUCTIONS): void {
+  const hits = trackedFilesStating(phrase);
   expect(hits, `no git-tracked file states "${phrase}" (today it is in: ${untrackedHome})`).not.toEqual([]);
 }

@@ -234,6 +234,7 @@ config {
     chunk_tokens: Integer = 400
     chunk_overlap_tokens: Integer = 80
     search_top_k: Integer = 6                -- files per search
+    search_max_top_k: Integer = 20           -- upper bound on a requested top_k; a larger one is capped
     search_locations_per_file: Integer = 3
     min_search_score: Decimal = 0.35
     min_keyword_score: Decimal = 0.1             -- floor for keyword-only results, scored by keyword alone
@@ -469,7 +470,7 @@ rule MemorySearched {
     requires: config.embedding_key_configured
 
     let params = MemorySearchParams{
-        limit: top_k ?? config.search_top_k,
+        limit: min(top_k ?? config.search_top_k, config.search_max_top_k),
         min_score: min_score,                -- null: the default for the mode the search runs in
         path_prefix: path_prefix,
         source: source,

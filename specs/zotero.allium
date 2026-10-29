@@ -371,6 +371,10 @@ rule EnrichmentBacklogScheduled {
     requires: backlog.count > 0
 
     ensures: EnrichmentRunRequested(group: state.group)
+
+    @guidance
+        -- Not stacked: while a sync or lookup pass is still running or queued, the
+        -- check requests none; the next due check tries again.
 }
 
 -- After a sync that added new items, run a lookup pass straight away rather than
@@ -525,14 +529,20 @@ rule PdfAbstractExtracted {
 
     @guidance
         -- The PDF is downloaded from the Zotero file server via the items/{key}/children
-        -- endpoint. Only items with linkMode = imported_file and contentType = application/pdf
-        -- have a downloadable attachment.
-        -- Extraction uses pdftotext on the first 4 pages. The abstract section is
-        -- delimited by "Abstract" as a start marker and section headers such as
-        -- "Introduction" or "Keywords" as end markers.
+        -- endpoint. Only attachments Zotero stores (linkMode imported_file or
+        -- imported_url) whose contentType names PDF have a downloadable file; a linked
+        -- file or linked URL does not. A PDF whose size the API does not report is
+        -- downloaded anyway; the download's time limit bounds it.
+        -- Extraction uses pdftotext on the first 4 pages. The abstract starts at an
+        -- "Abstract" or "ABSTRACT" heading opening a line (not the word in running
+        -- text) and ends at the next section heading opening a line, capitalised as
+        -- headings are ("Introduction", "1. INTRODUCTION", "Keywords"). With no end
+        -- heading, the whole remainder is the candidate, so over-long text is
+        -- rejected rather than cut to a prefix.
         -- Dehyphenation joins line-broken words before length validation.
-        -- If extraction fails or yields nothing, the abstract is left unset; the
-        -- outcome is recorded by AbstractLookupRecorded.
+        -- If extraction yields nothing, the abstract is left unset; the outcome is
+        -- recorded by AbstractLookupRecorded. A PDF that could not be fetched, or that
+        -- pdftotext could not read, left the source unasked: inconclusive.
 }
 
 ------------------------------------------------------------

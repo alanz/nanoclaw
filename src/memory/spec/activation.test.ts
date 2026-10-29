@@ -13,7 +13,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { afterAll, beforeAll, beforeEach, expect, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 
 import type { Ctl } from './fixtures.js';
 
@@ -64,7 +64,10 @@ vi.mock('../../modules/specialists/invocation.js', () => ({
   sweepTransferStaging: vi.fn(),
 }));
 
+import { withSessionContributions } from '../../container-runner.js';
+import { createAgentGroup, getAgentGroup } from '../../db/agent-groups.js';
 import { closeDb } from '../../db/connection.js';
+import { createSession, getSession } from '../../db/sessions.js';
 import '../../modules/specialists/index.js';
 import { closeAllMemoryManagers, getMemoryManager, MemoryIndexManager } from '../manager.js';
 import { resetCtl, settled, sha256 } from './fixtures.js';
@@ -150,6 +153,40 @@ obligation('config-default.memory_search_groups', async () => {
   await startMemory({ key: KEY, groups: ' main , side ' });
   expect(managed()).toEqual(['main', 'side']);
   expect(rowFor('side')?.hash).toBe(sha256(FILES.side.content));
+});
+
+// A group created while the host runs (/init-first-agent, `ncl groups create`)
+// depends on nothing a restart would change: allowlisted and a key set, it is
+// indexed and its sessions get the tools. Weed check 2026-10-29: only host
+// start created managers, so it waited for a restart.
+it('indexes an allowlisted group created while the host runs, and its first session gets the tools', async () => {
+  await startMemory({ key: KEY, groups: 'main,late' });
+  const created = new Date().toISOString();
+  await createAgentGroup({ id: 'ag-late', name: 'ag-late', folder: 'late', agent_provider: null, created_at: created });
+  fs.mkdirSync(path.join(env.root, 'groups', 'late', 'memory'), { recursive: true });
+  fs.writeFileSync(path.join(env.root, 'groups', 'late', 'memory', 'index.md'), '# Late\n\nMade after host start.\n');
+  await createSession({
+    id: 'sess-late',
+    agent_group_id: 'ag-late',
+    messaging_group_id: null,
+    thread_id: null,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    processing_state: 'idle',
+    last_active: created,
+    created_at: created,
+  } as never);
+  expect(getMemoryManager('ag-late')).toBeUndefined();
+
+  const c = await withSessionContributions(
+    {},
+    { session: (await getSession('sess-late'))!, agentGroup: (await getAgentGroup('ag-late'))! },
+  );
+  expect(getMemoryManager('ag-late')).toBeDefined();
+  expect(c.env?.NANOCLAW_MEMORY_ENABLED).toBe('1');
+  await settled(getMemoryManager('ag-late')!);
+  expect(embeddedText()).toContain('Made after host start.');
 });
 
 // ── FileDiscovered ───────────────────────────────────────────────────────────

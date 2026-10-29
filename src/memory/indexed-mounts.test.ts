@@ -109,6 +109,31 @@ describe('indexing a mount', () => {
   });
 });
 
+// Weed check 2026-10-29: indexed mounts were read only when the manager
+// started, so a mount marked `index` later waited for a restart.
+describe('a mount marked index after the manager started', () => {
+  it('is indexed on the next sync', async () => {
+    await createAgentGroup({ id: 'ag-main', name: 'Andy', folder: 'main', agent_provider: null, created_at: 'x' });
+    await ensureContainerConfig('ag-main');
+    const memoryDir = path.join(root, 'memory');
+    fs.mkdirSync(memoryDir);
+    const manager = new MemoryIndexManager('ag-main', 'main', memoryDir, path.join(root, 'index.db'), 'k', 'm');
+    await manager.init();
+    await manager.sync({ force: true });
+
+    await updateContainerConfigJson('ag-main', 'additional_mounts', [
+      { hostPath: org, containerPath: 'org', readonly: true, index: true },
+    ]);
+    await manager.sync();
+
+    const rows = (manager as unknown as { index: { db: import('better-sqlite3').Database } }).index.db
+      .prepare('SELECT path FROM files ORDER BY path')
+      .all() as Array<{ path: string }>;
+    expect(rows.map((r) => r.path)).toEqual(['extra/org/gtd.org', 'extra/org/projects/nanoclaw.org']);
+    await manager.close();
+  });
+});
+
 // The Zettelkasten lives beside memory/, not in it: its notes are permanent,
 // where memory/ is updated and pruned in place. It is indexed as its own
 // source, so a search can ask for notes alone.

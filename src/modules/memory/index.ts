@@ -19,7 +19,13 @@ import { getAllAgentGroups } from '../../db/agent-groups.js';
 import { readEnvFile } from '../../env.js';
 import { onHostShutdown, onHostStart } from '../../host-lifecycle.js';
 import { log } from '../../log.js';
-import { closeAllMemoryManagers, getMemoryManager, initMemoryManagers, memoryAccessFor } from '../../memory/manager.js';
+import {
+  closeAllMemoryManagers,
+  getMemoryManager,
+  initMemoryManagerForGroup,
+  initMemoryManagers,
+  memoryAccessFor,
+} from '../../memory/manager.js';
 import '../../db/migrations/module-memory.js';
 import './search-action.js';
 
@@ -29,7 +35,41 @@ function setting(key: (typeof SETTINGS)[number]): string | undefined {
   return process.env[key] ?? readEnvFile([...SETTINGS])[key];
 }
 
+/** What host start found; memory is off (nothing to adopt) while unset. */
+let active: { apiKey: string; model?: string; allowedFolders: Set<string> } | undefined;
+let adoptTimer: ReturnType<typeof setInterval> | undefined;
+
+const ADOPT_INTERVAL_MS = 60_000;
+
+/**
+ * An allowlisted group created while the host runs (/init-first-agent, `ncl
+ * groups create`) gets its manager — an index, and the memory tools — without
+ * a restart (specs/memory.allium FileDiscovered, MemoryIndexCreated,
+ * MemoryMcpTools depend on nothing else). Run on a timer and before a session
+ * of a group without one starts; core has no group-created hook.
+ */
+async function adoptNewGroups(): Promise<void> {
+  if (!active) return;
+  for (const g of await getAllAgentGroups()) {
+    if (getMemoryManager(g.id) || !active.allowedFolders.has(g.folder)) continue;
+    await initMemoryManagerForGroup({
+      dataDir: DATA_DIR,
+      groupsDir: GROUPS_DIR,
+      apiKey: active.apiKey,
+      model: active.model,
+      group: { id: g.id, folder: g.folder },
+      allowedFolders: active.allowedFolders,
+    });
+    if (getMemoryManager(g.id)) log.info('Memory index: new group indexed', { groupId: g.id, folder: g.folder });
+  }
+}
+
 onHostStart(async () => {
+  // Nothing from an earlier start carries over: with no key, nothing adopts.
+  if (adoptTimer) clearInterval(adoptTimer);
+  adoptTimer = undefined;
+  active = undefined;
+
   const apiKey = setting('MEMORY_SEARCH_GEMINI_API_KEY') ?? '';
   if (!apiKey) {
     log.info('Memory search disabled: MEMORY_SEARCH_GEMINI_API_KEY not set');
@@ -53,9 +93,20 @@ onHostStart(async () => {
     allowedFolders,
   });
   log.info('Memory managers initialized', { groups: groups.length, indexed: allowedFolders.size });
+
+  active = { apiKey, model: setting('MEMORY_SEARCH_MODEL'), allowedFolders };
+  adoptTimer = setInterval(() => {
+    adoptNewGroups().catch((err) => log.warn('Memory: adopting new groups failed', { err }));
+  }, ADOPT_INTERVAL_MS);
+  adoptTimer.unref();
 });
 
-onHostShutdown(() => closeAllMemoryManagers());
+onHostShutdown(() => {
+  if (adoptTimer) clearInterval(adoptTimer);
+  adoptTimer = undefined;
+  active = undefined;
+  return closeAllMemoryManagers();
+});
 
 // Search goes to the host (search-action.ts); get, list and the keyword-only
 // fallback read the index directly via bun:sqlite, so the container needs the
@@ -70,7 +121,9 @@ onHostShutdown(() => closeAllMemoryManagers());
 // binds directories only.
 registerSessionContributor(async ({ session }) => {
   const access = await memoryAccessFor(session);
-  if (!access || !getMemoryManager(access.groupId)) return undefined;
+  if (!access) return undefined;
+  if (!getMemoryManager(access.groupId)) await adoptNewGroups();
+  if (!getMemoryManager(access.groupId)) return undefined;
   const indexDir = path.join(DATA_DIR, 'v2-memory', access.groupId);
   if (!fs.existsSync(indexDir)) return undefined;
   return {

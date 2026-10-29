@@ -623,7 +623,7 @@ registerResource({
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
         '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <name> [--ro] [--index]; ' +
         'the mount lands at /workspace/extra/<name>, and --host must be under a mount-allowlist root. ' +
-        "--index also indexes the mount's .md/.org files into the group's memory search (host restart to apply). " +
+        "--index also indexes the mount's .md/.org files into the group's memory search (from its next sync). " +
         'Re-running for an existing mount sets its flags to the ones given.',
       handler: async (args) => {
         const id = args.id as string;
@@ -667,7 +667,7 @@ registerResource({
         await updateContainerConfigJson(id, 'additional_mounts', existing);
         return {
           added: mount,
-          ...(mount.index ? { indexed: true, indexNote: 'Restart the host for memory search to index it.' } : {}),
+          ...(mount.index ? { indexed: true, indexNote: 'Memory search indexes it from its next sync.' } : {}),
           // Where it actually lands — the stored containerPath is a name, not a
           // path, and the difference is not otherwise discoverable.
           mountedAt: `/workspace/extra/${check.resolvedContainerPath}`,

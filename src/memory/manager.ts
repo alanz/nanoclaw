@@ -116,6 +116,8 @@ export interface IndexedDir {
  * extra directories were never indexed.) Only mounts the allowlist accepts:
  * the indexer reads nothing the container could not.
  */
+const warnedRejectedMounts = new Set<string>();
+
 export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
   const row = await getContainerConfig(groupId);
   if (!row) return [];
@@ -130,11 +132,16 @@ export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
     if (!mount.index) continue;
     const check = validateMount(mount);
     if (!check.allowed) {
-      log.warn('Indexed mount not indexed — rejected by the mount allowlist', {
-        groupId,
-        hostPath: mount.hostPath,
-        reason: check.reason,
-      });
+      // Read again at every sync (adoptNewDirs): say so once, not per search.
+      const key = `${groupId}\0${mount.hostPath}`;
+      if (!warnedRejectedMounts.has(key)) {
+        warnedRejectedMounts.add(key);
+        log.warn('Indexed mount not indexed — rejected by the mount allowlist', {
+          groupId,
+          hostPath: mount.hostPath,
+          reason: check.reason,
+        });
+      }
       continue;
     }
     const name = check.resolvedContainerPath!;
@@ -346,16 +353,24 @@ export class MemoryIndexManager {
   }
 
   /**
-   * Registered workspace folders (zettel/, zotero-md/, …) that did not exist
-   * when this manager started are indexed and watched once they do. Without
-   * this, a folder first created after host start (a group's first committed
-   * report makes zettel/) stayed out of the index until a restart.
+   * Indexed roots that appeared after this manager started are indexed and
+   * watched from the next sync on: a registered workspace folder (zettel/,
+   * zotero-md/, …) created later — a group's first committed report makes
+   * zettel/ — and a mount newly marked `index` in the group's container
+   * config. Without this, both stayed out of the index until a restart.
    */
-  private async adoptNewWorkspaceDirs(): Promise<boolean> {
+  private async adoptNewDirs(): Promise<boolean> {
     const known = new Set(this.additionalDirs.map((d) => d.dir));
+    let mounts: IndexedDir[] = [];
+    try {
+      mounts = await indexedMountDirs(this.groupId);
+    } catch (err) {
+      log.warn('Memory index: could not read the indexed mounts', { groupId: this.groupId, err });
+    }
     let adopted = false;
-    for (const d of workspaceIndexDirs(path.dirname(this.memoryDir))) {
+    for (const d of [...workspaceIndexDirs(path.dirname(this.memoryDir)), ...mounts]) {
       if (known.has(d.dir)) continue;
+      known.add(d.dir);
       this.additionalDirs.push(d);
       adopted = true;
       log.info('Memory index: new folder indexed', { groupId: this.groupId, dir: d.dir, source: d.source });
@@ -501,7 +516,7 @@ export class MemoryIndexManager {
   private async _doSync(force: boolean): Promise<void> {
     // Checked on every sync, dirty or not: nothing watches a folder that does
     // not exist yet, so no event would ever mark its arrival.
-    if (await this.adoptNewWorkspaceDirs()) this.dirty = true;
+    if (await this.adoptNewDirs()) this.dirty = true;
     if (!force && !this.dirty) return;
     if (!force) {
       let outcome: SyncOutcome = 'interrupted';
@@ -1082,6 +1097,8 @@ export function getMemoryManager(groupId: string): MemoryIndexManager | undefine
   return managers.get(groupId);
 }
 
+const startingManagers = new Map<string, Promise<MemoryIndexManager>>();
+
 export async function ensureMemoryManager(params: {
   groupId: string;
   groupFolder: string;
@@ -1093,19 +1110,31 @@ export async function ensureMemoryManager(params: {
 }): Promise<MemoryIndexManager> {
   const existing = managers.get(params.groupId);
   if (existing) return existing;
+  // Host start, the adoption timer and a spawning session can all ask for the
+  // same group at once; one manager (and one index connection) per group.
+  const starting = startingManagers.get(params.groupId);
+  if (starting) return starting;
 
-  const manager = new MemoryIndexManager(
-    params.groupId,
-    params.groupFolder,
-    params.memoryDir,
-    params.dbPath,
-    params.apiKey,
-    params.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL,
-    params.additionalDirs ?? [],
-  );
-  await manager.init();
-  managers.set(params.groupId, manager);
-  return manager;
+  const start = (async () => {
+    const manager = new MemoryIndexManager(
+      params.groupId,
+      params.groupFolder,
+      params.memoryDir,
+      params.dbPath,
+      params.apiKey,
+      params.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL,
+      params.additionalDirs ?? [],
+    );
+    await manager.init();
+    managers.set(params.groupId, manager);
+    return manager;
+  })();
+  startingManagers.set(params.groupId, start);
+  try {
+    return await start;
+  } finally {
+    startingManagers.delete(params.groupId);
+  }
 }
 
 export async function closeAllMemoryManagers(): Promise<void> {
@@ -1126,35 +1155,14 @@ export async function initMemoryManagers(params: {
     log.warn('Memory search disabled: MEMORY_SEARCH_GEMINI_API_KEY not set');
     return;
   }
-
-  await Promise.all(exclusionsReady.map((ready) => ready()));
-  for (const group of params.groups) {
-    if (isMemoryGroupExcluded(group.id)) continue;
-    if (params.allowedFolders && !params.allowedFolders.has(group.folder)) continue;
-    const memoryDir = path.join(params.groupsDir, group.folder, 'memory');
-    const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
-    const dbPath = path.join(dbDir, 'index.db');
-
-    const additionalDirs = [
-      ...workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
-      ...(await indexedMountDirs(group.id)),
-    ];
-
-    await ensureMemoryManager({
-      groupId: group.id,
-      groupFolder: group.folder,
-      memoryDir,
-      dbPath,
-      apiKey: params.apiKey,
-      model: params.model,
-      additionalDirs,
-    }).catch((err) => {
-      log.warn('Failed to init memory manager for group', { groupId: group.id, err });
-    });
-  }
+  for (const group of params.groups) await initMemoryManagerForGroup({ ...params, group });
 }
 
-/** Create a memory manager for a newly created agent group (called from group-init). */
+/**
+ * Start the memory manager for one group, if memory is on for it (key set,
+ * not excluded, folder allowlisted). At host start for every group, and later
+ * for a group created while the host runs (modules/memory adoptNewGroups).
+ */
 export async function initMemoryManagerForGroup(params: {
   dataDir: string;
   groupsDir: string;
@@ -1165,12 +1173,16 @@ export async function initMemoryManagerForGroup(params: {
 }): Promise<void> {
   if (!params.apiKey) return;
   await Promise.all(exclusionsReady.map((ready) => ready()));
-  if (isMemoryGroupExcluded(params.group.id)) return;
-  if (params.allowedFolders && !params.allowedFolders.has(params.group.folder)) return;
-
   const { group } = params;
+  if (isMemoryGroupExcluded(group.id)) return;
+  if (params.allowedFolders && !params.allowedFolders.has(group.folder)) return;
+
   const memoryDir = path.join(params.groupsDir, group.folder, 'memory');
   const dbPath = path.join(params.dataDir, 'v2-memory', group.id, 'index.db');
+  const additionalDirs = [
+    ...workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
+    ...(await indexedMountDirs(group.id)),
+  ];
 
   await ensureMemoryManager({
     groupId: group.id,
@@ -1179,7 +1191,7 @@ export async function initMemoryManagerForGroup(params: {
     dbPath,
     apiKey: params.apiKey,
     model: params.model,
-    additionalDirs: workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
+    additionalDirs,
   }).catch((err) => {
     log.warn('Failed to init memory manager for group', { groupId: group.id, err });
   });

@@ -193,20 +193,31 @@ async function getPdfAttachment(itemKey, timeoutMs) {
 
 // ── Abstract extraction ───────────────────────────────────────────────────────
 
-const END_MARKERS = /\b(1[\s.]?\s*Introduction|Introduction|Keywords?|Categories|Index Terms|CCS Concepts|ACM Reference|General Terms|Subject Areas|Contents)\b/i;
+const END_MARKERS = /\b(1[\s.]?\s*Introduction|Introduction|Key ?words?|Categories|Index Terms|CCS Concepts|ACM Reference|General Terms|Subject Areas|Contents)\b/i;
 
-function extractAbstractFromText(text) {
+// The abstract's heading: "Abstract" or "ABSTRACT" opening a line ("Abstract.",
+// "Abstract—", "Abstract We …" and "ABSTRACT\n" all occur), never running on
+// into a lowercase word. Case-sensitive and line-anchored: the word itself
+// ("abstract syntax tree", "Abstract data types are …") is common in the body,
+// and matching it there stored body text as the abstract.
+const START_MARKER = /(?:^|\n)[ \t]*(?:Abstract|ABSTRACT)\b(?![ \t]+[a-z])[.:\s—–-]*/;
+
+export function extractAbstractFromText(text) {
   text = text.replace(/(\w)-\n(\w)/g, '$1$2');
   text = text.replace(/[ \t]+/g, ' ');
 
-  const m = text.match(/\bAbstract\b[:\s—–]*\n?/i);
+  const m = START_MARKER.exec(text);
   if (!m) return null;
 
   const after = text.slice(m.index + m[0].length);
   const end = END_MARKERS.exec(after);
   const raw = end ? after.slice(0, end.index) : after.slice(0, 2000);
 
-  const cleaned = raw.replace(/\s+/g, ' ').trim();
+  // Leading punctuation is left over from the heading ("Abstract. We …").
+  const cleaned = raw
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[.:;,—–-]+\s*/, '');
   if (cleaned.length < 80) return null;
   // Longer than any real abstract: the end marker was missed or the wrong
   // "Abstract" matched, so this is body text. Reject rather than truncate.

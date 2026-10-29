@@ -21,7 +21,7 @@ import {
 } from './zotero-frontmatter.mjs';
 import { fetchWithRetry, OutOfBudget } from './zotero-enrich.mjs';
 import { forgetNotFound, runBacklogPass } from './zotero-abstracts.mjs';
-import { backoffFromResponse } from './zotero-extract-abstracts.mjs';
+import { backoffFromResponse, extractAbstractFromText } from './zotero-extract-abstracts.mjs';
 import { syncLibrary } from './zotero-sync.mjs';
 
 const FM = `---
@@ -120,6 +120,38 @@ describe('hasAbstract', () => {
   it('sees the abstract of an item with no author/year line', () => {
     assert.equal(hasAbstract('# T\n\nAn abstract.\n'), true);
     assert.equal(hasAbstract('# T\n'), false);
+  });
+});
+
+// ── extractAbstractFromText ───────────────────────────────────────────────────
+
+describe('extractAbstractFromText', () => {
+  const body = 'We present a thing that does useful work and show how it beats the alternatives on real programs.';
+  const paper = (heading) => `A Paper\nJane Doe\n\n${heading}${body}\n\n1 Introduction\nThe body.\n`;
+
+  it('takes the text under an Abstract heading, whatever follows the word', () => {
+    for (const heading of ['Abstract\n', 'ABSTRACT\n', 'Abstract. ', 'Abstract: ', 'Abstract—', 'Abstract ']) {
+      assert.equal(extractAbstractFromText(paper(heading)), body, JSON.stringify(heading));
+    }
+  });
+
+  it('ignores the word abstract in running text', () => {
+    const text = `A Paper\n\nWe walk the abstract syntax tree of the program and the abstract data type of\nqueues, which ${body}\n\n1 Introduction\n`;
+    assert.equal(extractAbstractFromText(text), null);
+  });
+
+  it('ignores a body line that opens with "Abstract" followed by a lowercase word', () => {
+    const text = `A Paper\n\nSome prose ends here.\nAbstract data types are ${body}\n\n2 Background\n`;
+    assert.equal(extractAbstractFromText(text), null);
+  });
+
+  it('ends at "Key words" as well as "Keywords"', () => {
+    const text = `A Paper\n\nAbstract. ${body}\nKey words: formalization, structure\n`;
+    assert.equal(extractAbstractFromText(text), body);
+  });
+
+  it('drops a line of leader dots to nothing', () => {
+    assert.equal(extractAbstractFromText(`Contents\nAbstract ${'.'.repeat(120)} 3\n`), null);
   });
 });
 

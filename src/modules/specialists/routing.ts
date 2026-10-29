@@ -24,6 +24,7 @@ import {
   reclaimTransferStaging,
 } from './invocation.js';
 import { parkTransfer, returnDispatchedFiles, returnedNote } from './handover.js';
+import type { Session } from '../../types.js';
 import type { ContainerTransfer, SpecialistTask, TransferFile } from './types.js';
 
 function generateId(): string {
@@ -70,6 +71,26 @@ async function sendToSession(
   }
 }
 
+/**
+ * The session a root task's result goes to (spec: current_requester_session):
+ * the one that dispatched it while it is active, else the requester group's
+ * active session for the same conversation (messaging group and thread) —
+ * a conversation's session can be closed and replaced while a task runs.
+ */
+export async function currentRequesterSession(task: SpecialistTask): Promise<Session | undefined> {
+  const original = await getSession(task.requester_session_id);
+  if (!original) return undefined;
+  if (original.status === 'active') return original;
+  return getDb().get<Session>(
+    `SELECT * FROM sessions
+       WHERE agent_group_id = ? AND messaging_group_id IS ? AND thread_id IS ? AND status = 'active'
+       ORDER BY created_at DESC LIMIT 1`,
+    original.agent_group_id,
+    original.messaging_group_id,
+    original.thread_id,
+  );
+}
+
 /** Route a completed or failed root task result to the main group session. */
 async function routeResultToMain(
   task: SpecialistTask,
@@ -77,15 +98,9 @@ async function routeResultToMain(
   postMortem: string | null,
   returned: ContainerTransfer | null,
 ): Promise<void> {
-  const session = await getSession(task.requester_session_id);
-  if (!session || session.status !== 'active') {
-    // Not written into, or woken from, a session that has been closed.
-    log.warn('specialists: cannot route result to main — requester session not found or not active', {
-      taskId: task.id,
-      status: session?.status,
-    });
-    return;
-  }
+  // The session that asked may have closed while the task ran; the result
+  // goes to the group's current session for the same conversation instead.
+  const session = await currentRequesterSession(task);
 
   let content: string;
   // Chosen up front: a staged transfer records it before the message exists,
@@ -155,14 +170,19 @@ async function routeResultToMain(
         // The spec's commit reclaims the staging copies at once: the memory
         // copies are what persist, and no ipc-in will ever want them.
         reclaimTransferStaging(transfer.id);
+        // The main agent writes its note from exactly these paths, never from
+        // "the newest report" (spec: SpecialistResultRoutedToMain, ReportAndNoteCreated).
+        content =
+          transfer.result_text +
+          (memoryPaths.length > 0 ? `\n\n[Committed to your memory: ${memoryPaths.join(', ')}]` : '');
       } else {
         log.warn('specialists: requester group not found for memory commit', {
           taskId: task.id,
           requesterGroupId: task.requester_group_id,
         });
+        content = transfer.result_text;
       }
-      content = transfer.result_text;
-    } else {
+    } else if (session) {
       // Stage for ipc-in delivery when requester container starts.
       // Also populate into the active ipc-in if the container is already running —
       // _populateIpcIn at spawn time may have run before this transfer was created.
@@ -181,9 +201,23 @@ async function routeResultToMain(
         routed_message_id: messageId,
       });
       content = transfer.result_text;
+    } else {
+      // No session to place them in: left unrouted, they are parked when the
+      // task's transfers are settled (spec: UnroutedTransferOrphaned).
+      content = transfer.result_text;
     }
   } else {
     content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
+  }
+
+  // The report above is committed whether or not anyone can be told: it is
+  // the group's, not the session's. Only the message needs a session.
+  if (!session) {
+    log.warn('specialists: cannot route result to main — no active session for the conversation', {
+      taskId: task.id,
+      requesterSessionId: task.requester_session_id,
+    });
+    return;
   }
 
   // A failed task's files come back with its failure, and are done with once
@@ -282,7 +316,11 @@ export async function routeResult(
   // deleted): the task still ends cleanly, but nothing is sent to, or wakes, it.
   // A failed task gives back the files it was handed, before its failure is
   // routed so the message can name them (spec: DispatchedFilesReturnedOnTaskFailed).
-  const returned = task.status === 'failed' ? await returnDispatchedFiles(task) : null;
+  // A root task's files follow its failure message to the current session.
+  const returnTo = task.requester_group_id
+    ? ((await currentRequesterSession(task))?.id ?? task.requester_session_id)
+    : task.requester_session_id;
+  const returned = task.status === 'failed' ? await returnDispatchedFiles(task, returnTo) : null;
   if (opts.notify !== false) await routeToRequester(task, transfer, postMortem, returned);
   if (returned) await parkIfRecipientGone(returned);
   // After routing, which claims this task's own just-delivered transfer; and

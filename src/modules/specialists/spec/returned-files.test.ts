@@ -429,6 +429,20 @@ obligation('rule-failure.OrphanInvocationEnded.4', async () => {
   expect((await filesOf(given.id)).map((f) => f.original_name)).toEqual(['memo.txt']);
 });
 
+describe('a failed root task whose requester session has closed', () => {
+  it("returns its files to the conversation's current session, with the failure", async () => {
+    const { task } = await mainDispatch();
+    await getDb().run("UPDATE sessions SET status = 'closed' WHERE id = 'sess-main'");
+    const current = await session('sess-main-2', 'ag-main', null);
+    await fail(task.id);
+
+    const [back] = await ofKind('returned');
+    expect(back.recipient_session_id).toBe(current.id);
+    const told = h.writes.filter((w) => w.sessionId === current.id).map((w) => w.text);
+    expect(told.join('\n')).toContain(`/workspace/ipc-in/${back.id}/paper.pdf`);
+  });
+});
+
 // ── ReturnedFilesPlacedIntoLiveIpcIn ─────────────────────────────────────────
 
 describe('ReturnedFilesPlacedIntoLiveIpcIn', () => {

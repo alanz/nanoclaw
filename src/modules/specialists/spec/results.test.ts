@@ -460,7 +460,12 @@ async function expectCommitted(task: SpecialistTask, transfer: ContainerTransfer
   expect(sent).toHaveLength(1);
   expect(sent[0]).toMatchObject({ kind: 'chat', trigger: true });
   expect(sent[0].processAfter).toBeUndefined();
-  expect(sent[0].body.text).toBe('See zettel/reports/report.md and zettel/reports/report-2.md');
+  // The host names the committed paths, so the main agent writes its note
+  // from exactly these (spec: SpecialistResultRoutedToMain, ReportAndNoteCreated).
+  expect(sent[0].body.text).toBe(
+    'See zettel/reports/report.md and zettel/reports/report-2.md' +
+      '\n\n[Committed to your memory: zettel/reports/report.md, zettel/reports/report-2.md]',
+  );
   expect(woken('sess-main')).toBe(true);
 }
 
@@ -501,14 +506,25 @@ describe('SpecialistResultRoutedToMain', () => {
     expect(woken('sess-main')).toBe(false);
   });
 
-  obligation('rule-failure.SpecialistResultRoutedToMain.2', async () => {
-    // The main session is closed: no commit, no message, no wake.
+  it('routes to the current session of the same conversation when the one that asked has closed', async () => {
+    await world({ mainStatus: 'closed' });
+    await session('sess-main-2', 'ag-main', null);
+    const { task } = await commitDelivery();
+
+    expect(JSON.parse(task.committed_files!)).toEqual(['zettel/reports/report.md', 'zettel/reports/report-2.md']);
+    expect(messagesTo('sess-main')).toEqual([]);
+    expect(messagesTo('sess-main-2')).toHaveLength(1);
+    expect(woken('sess-main-2')).toBe(true);
+  });
+
+  it('commits the report even when no session can be told', async () => {
+    // The report is the group's, not the session's.
     await world({ mainStatus: 'closed' });
     const { task } = await commitDelivery();
 
     expect(task.status).toBe('completed');
-    expect(task.committed_files).toBeNull();
-    expect(fs.existsSync(path.join(GROUPS, 'main', 'zettel', 'reports', 'report.md'))).toBe(false);
+    expect(JSON.parse(task.committed_files!)).toEqual(['zettel/reports/report.md', 'zettel/reports/report-2.md']);
+    expect(fs.readFileSync(path.join(GROUPS, 'main', 'zettel', 'reports', 'report.md'), 'utf-8')).toBe('the report');
     expect(messagesTo('sess-main')).toEqual([]);
     expect(woken('sess-main')).toBe(false);
   });
@@ -836,6 +852,17 @@ describe('UnroutedTransferOrphaned', () => {
   });
 
   obligation('rule-failure.UnroutedTransferOrphaned.3', async () => {
+    // A root task's transfer committed to memory needs no recipient: with no
+    // session to tell, it is committed, not parked.
+    await world({ mainStatus: 'closed' });
+    const { transfer } = await commitDelivery();
+
+    expect(transfer.status).toBe('expired');
+    expect((await filesOf(transfer.id)).every((f) => f.memory_path !== null && !f.parked_path)).toBe(true);
+    expect(fs.existsSync(path.join(GROUPS, 'main', SPECIALISTS_CONFIG.orphanSubpath))).toBe(false);
+  });
+
+  obligation('rule-failure.UnroutedTransferOrphaned.4', async () => {
     // The result has a recipient (an active main session): its transfer
     // stays pending for the recipient's next invocation.
     await world();

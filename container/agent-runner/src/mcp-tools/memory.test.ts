@@ -109,6 +109,10 @@ describe('resolveIndexedPath', () => {
 
   it("maps the group's own memory into its workspace", () => {
     expect(resolveIndexedPath('groups/dm-with-alanz/memory/notes/x.md')).toBe('/workspace/agent/memory/notes/x.md');
+    // A memory provider reads the group it serves through that group's mount.
+    expect(resolveIndexedPath('groups/dm-with-alanz/zettel/notes/MEM-x.md', '/workspace/extra/main')).toBe(
+      '/workspace/extra/main/zettel/notes/MEM-x.md',
+    );
   });
 
   it('refuses a path that would leave /workspace/extra, and the old ../ form', () => {
@@ -150,6 +154,19 @@ describe('keywordSearch', () => {
   it('source filters in SQL; path_prefix is literal, not a LIKE pattern', () => {
     expect(keywordSearch(db, { ...args, source: 'zettel' })).toHaveLength(2);
     expect(keywordSearch(db, { ...args, pathPrefix: 'groups/g/zettel/n_tes/' })).toEqual([]);
+  });
+
+  it('leaves superseded notes out unless asked, once the index records them', () => {
+    // An index from before the column: nothing is known to be superseded.
+    expect(keywordSearch(db, { ...args, source: 'zettel' })).toHaveLength(2);
+    db.exec('CREATE TABLE files (path TEXT PRIMARY KEY, superseded INTEGER NOT NULL DEFAULT 0)');
+    db.prepare('INSERT INTO files (path, superseded) VALUES (?, 1), (?, 0)').run(`${NOTES}a.md`, `${NOTES}b.md`);
+    const paths = (r: unknown[]) => (r as Array<{ path: string }>).map((x) => x.path).sort();
+    expect(paths(keywordSearch(db, { ...args, source: 'zettel' }))).toEqual([`${NOTES}b.md`]);
+    expect(paths(keywordSearch(db, { ...args, source: 'zettel', includeSuperseded: true }))).toEqual([
+      `${NOTES}a.md`,
+      `${NOTES}b.md`,
+    ]);
   });
 });
 

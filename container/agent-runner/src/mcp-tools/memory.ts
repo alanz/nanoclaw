@@ -67,7 +67,10 @@ function openDb(): Database | null {
 /**
  * Translate an indexed path to an absolute container path.
  *
- * The group's own memory: groups/<folder>/X/Y  →  /workspace/agent/X/Y
+ * The indexed group's memory: groups/<folder>/X/Y  →  <workspace>/X/Y, where
+ * <workspace> is NANOCLAW_MEMORY_WORKSPACE — /workspace/agent for the group's
+ * own sessions, or for a memory-provider specialist the read-only mount of the
+ * group it serves (e.g. /workspace/extra/main).
  * An indexed mount:       extra/<mount>/X/Y    →  /workspace/extra/<mount>/X/Y
  *
  * The host stores a mount's files as the container sees them, so the second
@@ -75,14 +78,17 @@ function openDb(): Database | null {
  * (The older `../…` form, matched against container.json's memoryIndexDirs,
  * is gone: that field never reached container.json, so it never matched.)
  */
-export function resolveIndexedPath(repoPath: string): string | null {
+export function resolveIndexedPath(
+  repoPath: string,
+  workspace = process.env.NANOCLAW_MEMORY_WORKSPACE || '/workspace/agent',
+): string | null {
   if (repoPath.startsWith('extra/')) {
     const abs = path.posix.normalize(path.posix.join('/workspace', repoPath));
     return abs.startsWith('/workspace/extra/') ? abs : null;
   }
   if (repoPath.startsWith('../')) return null;
   const stripped = repoPath.replace(/^groups\/[^/]+\//, '');
-  return path.join('/workspace/agent', stripped);
+  return path.join(workspace, stripped);
 }
 
 function parseFrontmatter(content: string): Record<string, unknown> | undefined {
@@ -119,6 +125,8 @@ export interface SearchArgs {
   topK: number;
   pathPrefix?: string;
   source?: string;
+  /** Include superseded notes; left out by default. */
+  includeSuperseded?: boolean;
   /** Applied by the keyword fallback. */
   minScore: number;
   /** The caller's own min_score, if any — the host applies its default otherwise. */
@@ -126,6 +134,10 @@ export interface SearchArgs {
 }
 
 /** Keyword-only search of the read-only index — the fallback when the host does not answer. */
+function hasSupersededColumn(db: Database): boolean {
+  return (db.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>).some((c) => c.name === 'superseded');
+}
+
 export function keywordSearch(db: Database, args: SearchArgs): unknown[] {
   const ftsQuery = buildFtsQuery(args.query);
   if (!ftsQuery) return [];
@@ -141,6 +153,10 @@ export function keywordSearch(db: Database, args: SearchArgs): unknown[] {
   if (args.pathPrefix) {
     conditions.push('substr(path, 1, length(?)) = ?');
     params.push(args.pathPrefix, args.pathPrefix);
+  }
+  // An index from before the column has none; then nothing is marked superseded.
+  if (!args.includeSuperseded && hasSupersededColumn(db)) {
+    conditions.push('path NOT IN (SELECT path FROM files WHERE superseded = 1)');
   }
 
   const rows = db
@@ -240,6 +256,7 @@ async function askHost(args: SearchArgs, timeoutMs: number, signal?: AbortSignal
       path_prefix: args.pathPrefix,
       source: args.source,
       min_score: args.requestedMinScore,
+      include_superseded: args.includeSuperseded,
     }),
   });
 
@@ -288,6 +305,11 @@ export function createMemorySearch(hostTimeoutMs = HOST_TIMEOUT_MS): McpToolDefi
             type: 'number',
             description: 'Min relevance score 0–1 (default 0.35 in hybrid mode, 0.1 in keyword mode).',
           },
+          include_superseded: {
+            type: 'boolean',
+            description:
+              'Include Zettelkasten notes that have been superseded (default false: current knowledge only). Set it when asking what was believed earlier.',
+          },
         },
       },
     },
@@ -300,6 +322,7 @@ export function createMemorySearch(hostTimeoutMs = HOST_TIMEOUT_MS): McpToolDefi
         source: (args.source as string | undefined) || undefined,
         minScore: typeof args.min_score === 'number' ? args.min_score : DEFAULT_MIN_SCORE,
         requestedMinScore: typeof args.min_score === 'number' ? args.min_score : undefined,
+        includeSuperseded: args.include_superseded === true,
       };
 
       const answer = await askHost(searchArgs, hostTimeoutMs, context?.signal);
@@ -421,8 +444,10 @@ export const memoryListFiles: McpToolDefinition = {
       const params: (string | number)[] = [];
 
       if (pathPrefix) {
-        conditions.push('path LIKE ?');
-        params.push(`${pathPrefix}%`);
+        // A literal, case-sensitive prefix, as memory_search matches it. LIKE
+        // would read `_`/`%` in the prefix as wildcards and ignore ASCII case.
+        conditions.push('instr(path, ?) = 1');
+        params.push(pathPrefix);
       }
       if (source) {
         conditions.push('source = ?');

@@ -133,6 +133,13 @@ function ensureSchema(db: Database.Database, vecAvailable: boolean, dims: number
     );
     CREATE INDEX IF NOT EXISTS idx_embedding_cache_updated_at ON ${CACHE_TABLE}(updated_at);
   `);
+  // A Zettelkasten note whose frontmatter names a superseded_by (spec:
+  // MemoryFile.superseded). Search leaves these out unless asked; an index
+  // from before the column learns each file's flag on its next sync.
+  const fileCols = db.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>;
+  if (!fileCols.some((c) => c.name === 'superseded')) {
+    db.exec('ALTER TABLE files ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0');
+  }
 
   db.exec(
     `CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(` +
@@ -481,15 +488,25 @@ export function getLastVectorRepair(db: Database.Database): (VectorRepair & { at
 
 export function upsertFileRecord(
   db: Database.Database,
-  params: { path: string; source: string; hash: string; mtimeMs: number; size: number },
+  params: { path: string; source: string; hash: string; mtimeMs: number; size: number; superseded?: boolean },
 ): void {
-  db.prepare(`INSERT OR REPLACE INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)`).run(
-    params.path,
-    params.source,
-    params.hash,
-    Math.round(params.mtimeMs),
-    params.size,
-  );
+  db.prepare(
+    `INSERT OR REPLACE INTO files (path, source, hash, mtime, size, superseded) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(params.path, params.source, params.hash, Math.round(params.mtimeMs), params.size, params.superseded ? 1 : 0);
+}
+
+/**
+ * Whether a note's frontmatter names the note that superseded it
+ * (memory-graph.allium superseded_by): a non-empty `superseded_by:` value,
+ * scalar or list. Only a leading YAML block counts.
+ */
+export function namesSupersededBy(content: string): boolean {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+  if (!match) return false;
+  const line = /^superseded_by:[ \t]*(.*)$/m.exec(match[1]);
+  if (!line) return false;
+  const value = line[1].trim().replace(/^['"]|['"]$/g, '');
+  return value !== '' && value !== '[]' && value !== 'null' && value !== '~';
 }
 
 const FINGERPRINT_KEY = 'index_fingerprint_v2';
@@ -515,6 +532,8 @@ export function searchIndex(
     minScore: number;
     pathPrefix?: string;
     source?: string;
+    /** Include superseded notes (default: leave them out). */
+    includeSuperseded?: boolean;
     vectorWeight: number;
     textWeight: number;
     candidatesMultiplier: number;
@@ -535,6 +554,9 @@ export function searchIndex(
     if (opts.pathPrefix) {
       clauses.push(` AND substr(${col('path')}, 1, length(?)) = ?`);
       args.push(opts.pathPrefix, opts.pathPrefix);
+    }
+    if (!opts.includeSuperseded) {
+      clauses.push(` AND ${col('path')} NOT IN (SELECT path FROM files WHERE superseded = 1)`);
     }
     return { sql: clauses.join(''), args };
   };

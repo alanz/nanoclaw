@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../log.js', () => ({ log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
-import { TokenBucketRateLimiter } from './rate-limiter.js';
+import { sharedRateLimiter, TokenBucketRateLimiter } from './rate-limiter.js';
 
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
@@ -76,5 +76,15 @@ describe('daily quota (RPD) stop', () => {
     await limiter.acquirePermit(1);
     await limiter.acquirePermit(1);
     expect(await rpdRefusal(limiter)).toBe(true);
+  });
+});
+
+describe('sharedRateLimiter', () => {
+  it('gives every caller with one account key the same limiter: the budget is global', () => {
+    const a = sharedRateLimiter({ accountKey: 'acct-shared-1', rpmLimit: 10 });
+    const b = sharedRateLimiter({ accountKey: 'acct-shared-1', rpmLimit: 10 });
+    const c = sharedRateLimiter({ accountKey: 'acct-shared-2', rpmLimit: 10 });
+    expect(b).toBe(a);
+    expect(c).not.toBe(a);
   });
 });

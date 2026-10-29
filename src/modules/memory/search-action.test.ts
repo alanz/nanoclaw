@@ -13,7 +13,12 @@ const { mockSearch, mockWrite, excluded } = vi.hoisted(() => ({
 }));
 
 vi.mock('../../memory/search.js', () => ({ handleMemorySearch: mockSearch }));
-vi.mock('../../memory/manager.js', () => ({ isMemoryGroupExcluded: (id: string) => excluded.has(id) }));
+// The group a session may read: its own unless excluded (specialists' memory
+// providers are covered by the access delegate's own test).
+vi.mock('../../memory/manager.js', () => ({
+  memoryAccessFor: async (s: { agent_group_id: string }) =>
+    excluded.has(s.agent_group_id) ? null : { groupId: s.agent_group_id, workspacePath: '/workspace/agent' },
+}));
 vi.mock('../../session-manager.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../session-manager.js')>()),
   writeSessionMessage: mockWrite,
@@ -61,6 +66,7 @@ describe('memory_search_request', () => {
       path_prefix: 'groups/g/zettel/notes/',
       source: 'zettel',
       min_score: 0.5,
+      include_superseded: false,
     });
     expect(written()).toEqual({
       type: 'memory_search_response',

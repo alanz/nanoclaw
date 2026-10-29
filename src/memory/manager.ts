@@ -32,9 +32,54 @@ import { MEMORY_CONFIG } from './config.js';
  */
 type GroupExclusion = (groupId: string) => boolean;
 const exclusions: GroupExclusion[] = [];
+const exclusionsReady: Array<() => Promise<void>> = [];
 
-export function registerMemoryGroupExclusion(check: GroupExclusion): void {
+/**
+ * `check` must answer synchronously (it runs on the spawn path). An owner
+ * whose answer needs loading first passes `ready`: indexing waits for it, so
+ * a check that is still empty can never let one of its groups through. Host
+ * modules start in import order, and the owner's own host start may run after
+ * memory's.
+ */
+export function registerMemoryGroupExclusion(check: GroupExclusion, ready?: () => Promise<void>): void {
   exclusions.push(check);
+  if (ready) exclusionsReady.push(ready);
+}
+
+/**
+ * Which group's index a session may read, and where that group's workspace is
+ * in the session's container (spec: memory_group_for). A session reads its own
+ * group's index — unless an owner module says otherwise: a memory-provider
+ * specialist reads the index of the main group its task serves, and every
+ * other specialist reads none. Memory does not know what a specialist is; the
+ * owner registers a delegate. A delegate answers the access, null for no
+ * memory, or undefined when the session is not its business.
+ */
+export interface MemoryAccess {
+  groupId: string;
+  /** Container path of that group's workspace — where its indexed files are read. */
+  workspacePath: string;
+}
+export type MemoryAccessSession = { id: string; agent_group_id: string; thread_id?: string | null };
+type MemoryAccessDelegate = (session: MemoryAccessSession) => Promise<MemoryAccess | null | undefined>;
+const accessDelegates: MemoryAccessDelegate[] = [];
+
+export function registerMemoryAccessDelegate(delegate: MemoryAccessDelegate): void {
+  accessDelegates.push(delegate);
+}
+
+export async function memoryAccessFor(session: MemoryAccessSession): Promise<MemoryAccess | null> {
+  for (const delegate of accessDelegates) {
+    try {
+      const access = await delegate(session);
+      if (access !== undefined) return access;
+    } catch (err) {
+      log.error('Memory access delegate threw', { sessionId: session.id, err });
+      return null;
+    }
+  }
+  if (isMemoryGroupExcluded(session.agent_group_id)) return null;
+  return { groupId: session.agent_group_id, workspacePath: '/workspace/agent' };
 }
 
 export function isMemoryGroupExcluded(groupId: string): boolean {
@@ -71,6 +116,8 @@ export interface IndexedDir {
  * extra directories were never indexed.) Only mounts the allowlist accepts:
  * the indexer reads nothing the container could not.
  */
+const warnedRejectedMounts = new Set<string>();
+
 export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
   const row = await getContainerConfig(groupId);
   if (!row) return [];
@@ -85,11 +132,16 @@ export async function indexedMountDirs(groupId: string): Promise<IndexedDir[]> {
     if (!mount.index) continue;
     const check = validateMount(mount);
     if (!check.allowed) {
-      log.warn('Indexed mount not indexed — rejected by the mount allowlist', {
-        groupId,
-        hostPath: mount.hostPath,
-        reason: check.reason,
-      });
+      // Read again at every sync (adoptNewDirs): say so once, not per search.
+      const key = `${groupId}\0${mount.hostPath}`;
+      if (!warnedRejectedMounts.has(key)) {
+        warnedRejectedMounts.add(key);
+        log.warn('Indexed mount not indexed — rejected by the mount allowlist', {
+          groupId,
+          hostPath: mount.hostPath,
+          reason: check.reason,
+        });
+      }
       continue;
     }
     const name = check.resolvedContainerPath!;
@@ -102,7 +154,7 @@ import { CHUNKER_VERSION, chunkFile, type MemoryChunk } from './chunking.js';
 import { createGeminiEmbeddingProvider, DEFAULT_GEMINI_EMBEDDING_MODEL, type EmbeddingProvider } from './embeddings.js';
 import { GEMINI_EMBEDDING_DIMS, geminiProviderKey, isUsableEmbedding } from './embedding-identity.js';
 import { isEmbeddingRateLimitError } from './embedding-errors.js';
-import { TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
+import { sharedRateLimiter, TokenBucketRateLimiter, type RateLimiterSnapshot } from './rate-limiter.js';
 import {
   openIndexDb,
   getCachedEmbedding,
@@ -110,6 +162,7 @@ import {
   deleteFileChunks,
   insertChunk,
   upsertFileRecord,
+  namesSupersededBy,
   getIndexFingerprint,
   setLastFullReindex,
   adoptUnkeyedCacheRows,
@@ -282,6 +335,55 @@ export class MemoryIndexManager {
     private readonly additionalDirs: IndexedDir[] = [],
   ) {}
 
+  /** Debounced: a burst of file events becomes one sync. Set in init. */
+  private markDirty: () => void = () => {};
+
+  /** Subscribe to changes under one indexed directory. */
+  private async watch(watchDir: string): Promise<void> {
+    try {
+      const sub = await parcelWatcher.subscribe(watchDir, (err: Error | null, events: parcelWatcher.Event[]) => {
+        if (err) return;
+        const relevant = events.some((e) => !e.path.split(path.sep).some((part: string) => IGNORED_DIRS.has(part)));
+        if (relevant) this.markDirty();
+      });
+      this.watchers.push(sub);
+    } catch (err) {
+      log.warn('Memory watcher failed to start', { groupId: this.groupId, dir: watchDir, err });
+    }
+  }
+
+  /**
+   * Indexed roots that appeared after this manager started are indexed and
+   * watched from the next sync on: a registered workspace folder (zettel/,
+   * zotero-md/, …) created later — a group's first committed report makes
+   * zettel/ — and a mount newly marked `index` in the group's container
+   * config. Without this, both stayed out of the index until a restart.
+   */
+  private mountReadFailed = false;
+
+  private async adoptNewDirs(): Promise<boolean> {
+    const known = new Set(this.additionalDirs.map((d) => d.dir));
+    let mounts: IndexedDir[] = [];
+    try {
+      mounts = await indexedMountDirs(this.groupId);
+    } catch (err) {
+      // Read at every sync; a lasting failure is said once per manager.
+      if (!this.mountReadFailed)
+        log.warn('Memory index: could not read the indexed mounts', { groupId: this.groupId, err });
+      this.mountReadFailed = true;
+    }
+    let adopted = false;
+    for (const d of [...workspaceIndexDirs(path.dirname(this.memoryDir)), ...mounts]) {
+      if (known.has(d.dir)) continue;
+      known.add(d.dir);
+      this.additionalDirs.push(d);
+      adopted = true;
+      log.info('Memory index: new folder indexed', { groupId: this.groupId, dir: d.dir, source: d.source });
+      if (!this.closed) await this.watch(d.dir);
+    }
+    return adopted;
+  }
+
   async init(): Promise<void> {
     fsSync.mkdirSync(path.dirname(this.dbPath), { recursive: true });
 
@@ -292,7 +394,7 @@ export class MemoryIndexManager {
     const { provider } = { provider: createGeminiEmbeddingProvider({ apiKey: this.apiKey, model: this.model }) };
     this.provider = provider;
 
-    this.rateLimiter = new TokenBucketRateLimiter({
+    this.rateLimiter = sharedRateLimiter({
       accountKey: hashFile(this.apiKey).slice(0, 16),
       rpmLimit: MEMORY_CONFIG.embedding_rpm_limit,
       tpmLimit: MEMORY_CONFIG.embedding_tpm_limit,
@@ -300,7 +402,7 @@ export class MemoryIndexManager {
     });
 
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    const markDirty = () => {
+    this.markDirty = () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         this.dirty = true;
@@ -309,18 +411,7 @@ export class MemoryIndexManager {
     };
 
     const dirsToWatch = [this.memoryDir, ...this.additionalDirs.map((d) => d.dir)];
-    for (const watchDir of dirsToWatch) {
-      try {
-        const sub = await parcelWatcher.subscribe(watchDir, (err: Error | null, events: parcelWatcher.Event[]) => {
-          if (err) return;
-          const relevant = events.some((e) => !e.path.split(path.sep).some((part: string) => IGNORED_DIRS.has(part)));
-          if (relevant) markDirty();
-        });
-        this.watchers.push(sub);
-      } catch (err) {
-        log.warn('Memory watcher failed to start', { groupId: this.groupId, dir: watchDir, err });
-      }
-    }
+    for (const watchDir of dirsToWatch) await this.watch(watchDir);
 
     // Periodic sync every 24h in case watcher misses events
     this.periodicTimer = setInterval(
@@ -428,6 +519,9 @@ export class MemoryIndexManager {
   }
 
   private async _doSync(force: boolean): Promise<void> {
+    // Checked on every sync, dirty or not: nothing watches a folder that does
+    // not exist yet, so no event would ever mark its arrival.
+    if (await this.adoptNewDirs()) this.dirty = true;
     if (!force && !this.dirty) return;
     if (!force) {
       let outcome: SyncOutcome = 'interrupted';
@@ -516,13 +610,18 @@ export class MemoryIndexManager {
       seenPaths.add(repoPath);
 
       const contentHash = hashFile(content);
+      const superseded = namesSupersededBy(content);
 
       // Check if already indexed with same hash
       // The source too: a folder relabelled keeps its paths and content.
-      const existing = this.index.db.prepare('SELECT hash, source FROM files WHERE path = ?').get(repoPath) as
-        | { hash: string; source: string }
-        | undefined;
+      const existing = this.index.db
+        .prepare('SELECT hash, source, superseded FROM files WHERE path = ?')
+        .get(repoPath) as { hash: string; source: string; superseded: number } | undefined;
       if (existing?.hash === contentHash && existing.source === fileSource && !force) {
+        // Unchanged, but an index from before the flag learns it here.
+        if (existing.superseded !== (superseded ? 1 : 0)) {
+          this.index.db.prepare('UPDATE files SET superseded = ? WHERE path = ?').run(superseded ? 1 : 0, repoPath);
+        }
         counts.skipped++;
         continue;
       }
@@ -655,6 +754,7 @@ export class MemoryIndexManager {
             hash: contentHash,
             mtimeMs: stat.mtimeMs,
             size: stat.size,
+            superseded,
           });
         })();
       } catch (err) {
@@ -741,30 +841,43 @@ export class MemoryIndexManager {
       minScore?: number;
       pathPrefix?: string;
       source?: string;
+      /** Include superseded notes (default: leave them out). */
+      includeSuperseded?: boolean;
       includeContent?: boolean;
       embedWaitMs?: number;
     },
   ): Promise<{ mode: 'hybrid' | 'keyword'; results: MemorySearchResult[] }> {
     if (!query.trim() || this.closed) return { mode: 'keyword', results: [] };
 
-    // Trigger background sync if dirty; search on current state immediately.
-    if (this.dirty) void this.sync();
+    // A background sync, which also picks up folders created since the last
+    // one; search on the current state immediately. Cheap when nothing changed.
+    void this.sync();
 
     let queryVec: number[] = [];
     try {
-      await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms);
+      await this.searchPermit(opts?.embedWaitMs ?? MEMORY_CONFIG.search_embed_wait_ms, estimateTokens(query));
       const vec: number[] = await this.provider.embedQuery(query);
       if (!isUsableEmbedding(vec, GEMINI_EMBEDDING_DIMS)) {
         throw new Error(`unusable query embedding (${(vec as number[]).length} values)`);
       }
       queryVec = vec;
     } catch (err) {
+      // The query drew on the shared budget, so its refusals feed back as a
+      // sync's do: a daily 429 starts the 24h stop, any other the cool-down.
+      if (isEmbeddingRateLimitError(err)) {
+        if (err.quotaType === 'rpd') this.rateLimiter.depleteQuotaForType('rpd');
+        else this.rateLimiter.depleteQuotaForType(err.quotaType, err.retryDelayMs);
+      }
       log.warn('Memory search: query embed failed, falling back to FTS', { groupId: this.groupId, err });
     }
     const mode = queryVec.length > 0 ? 'hybrid' : 'keyword';
 
+    // Keyword-only results are scored by keyword alone. Weighted as in
+    // hybrid mode they would top out below 0.3, under the hybrid floor, and
+    // every keyword-only search would come back empty.
+    const keywordOnly = mode === 'keyword';
     const maxResults = opts?.maxResults ?? MEMORY_CONFIG.search_top_k;
-    const minScore = opts?.minScore ?? MEMORY_CONFIG.min_search_score;
+    const minScore = opts?.minScore ?? (keywordOnly ? MEMORY_CONFIG.min_keyword_score : MEMORY_CONFIG.min_search_score);
     const includeContent = opts?.includeContent ?? false;
     const limited = Math.min(maxResults, includeContent ? 10 : maxResults);
 
@@ -773,8 +886,9 @@ export class MemoryIndexManager {
       minScore,
       pathPrefix: opts?.pathPrefix,
       source: opts?.source,
-      vectorWeight: VECTOR_WEIGHT,
-      textWeight: TEXT_WEIGHT,
+      includeSuperseded: opts?.includeSuperseded,
+      vectorWeight: keywordOnly ? 0 : VECTOR_WEIGHT,
+      textWeight: keywordOnly ? 1 : TEXT_WEIGHT,
       candidatesMultiplier: CANDIDATES_MULTIPLIER,
       locationsPerFile: MEMORY_CONFIG.search_locations_per_file,
     });
@@ -801,12 +915,13 @@ export class MemoryIndexManager {
    * granted after the deadline is still spent from the budget — one request,
    * the price of not cancelling inside the limiter.
    */
-  private async searchPermit(waitMs: number): Promise<void> {
+  /** A permit for one query embedding, charged its tokens like a sync batch. */
+  private async searchPermit(waitMs: number, tokens: number): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`no embedding permit within ${waitMs}ms`)), waitMs);
     });
-    const permit = this.rateLimiter.acquirePermit(1, waitMs);
+    const permit = this.rateLimiter.acquirePermit(1, waitMs, tokens);
     // Once the deadline wins nobody awaits the permit; a later rejection
     // must not surface as an unhandled one.
     permit.catch(() => {});
@@ -994,6 +1109,8 @@ export function getMemoryManager(groupId: string): MemoryIndexManager | undefine
   return managers.get(groupId);
 }
 
+const startingManagers = new Map<string, Promise<MemoryIndexManager>>();
+
 export async function ensureMemoryManager(params: {
   groupId: string;
   groupFolder: string;
@@ -1005,19 +1122,31 @@ export async function ensureMemoryManager(params: {
 }): Promise<MemoryIndexManager> {
   const existing = managers.get(params.groupId);
   if (existing) return existing;
+  // Host start, the adoption timer and a spawning session can all ask for the
+  // same group at once; one manager (and one index connection) per group.
+  const starting = startingManagers.get(params.groupId);
+  if (starting) return starting;
 
-  const manager = new MemoryIndexManager(
-    params.groupId,
-    params.groupFolder,
-    params.memoryDir,
-    params.dbPath,
-    params.apiKey,
-    params.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL,
-    params.additionalDirs ?? [],
-  );
-  await manager.init();
-  managers.set(params.groupId, manager);
-  return manager;
+  const start = (async () => {
+    const manager = new MemoryIndexManager(
+      params.groupId,
+      params.groupFolder,
+      params.memoryDir,
+      params.dbPath,
+      params.apiKey,
+      params.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL,
+      params.additionalDirs ?? [],
+    );
+    await manager.init();
+    managers.set(params.groupId, manager);
+    return manager;
+  })();
+  startingManagers.set(params.groupId, start);
+  try {
+    return await start;
+  } finally {
+    startingManagers.delete(params.groupId);
+  }
 }
 
 export async function closeAllMemoryManagers(): Promise<void> {
@@ -1038,34 +1167,14 @@ export async function initMemoryManagers(params: {
     log.warn('Memory search disabled: MEMORY_SEARCH_GEMINI_API_KEY not set');
     return;
   }
-
-  for (const group of params.groups) {
-    if (isMemoryGroupExcluded(group.id)) continue;
-    if (params.allowedFolders && !params.allowedFolders.has(group.folder)) continue;
-    const memoryDir = path.join(params.groupsDir, group.folder, 'memory');
-    const dbDir = path.join(params.dataDir, 'v2-memory', group.id);
-    const dbPath = path.join(dbDir, 'index.db');
-
-    const additionalDirs = [
-      ...workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
-      ...(await indexedMountDirs(group.id)),
-    ];
-
-    await ensureMemoryManager({
-      groupId: group.id,
-      groupFolder: group.folder,
-      memoryDir,
-      dbPath,
-      apiKey: params.apiKey,
-      model: params.model,
-      additionalDirs,
-    }).catch((err) => {
-      log.warn('Failed to init memory manager for group', { groupId: group.id, err });
-    });
-  }
+  for (const group of params.groups) await initMemoryManagerForGroup({ ...params, group });
 }
 
-/** Create a memory manager for a newly created agent group (called from group-init). */
+/**
+ * Start the memory manager for one group, if memory is on for it (key set,
+ * not excluded, folder allowlisted). At host start for every group, and later
+ * for a group created while the host runs (modules/memory adoptNewGroups).
+ */
 export async function initMemoryManagerForGroup(params: {
   dataDir: string;
   groupsDir: string;
@@ -1075,12 +1184,17 @@ export async function initMemoryManagerForGroup(params: {
   allowedFolders?: Set<string>;
 }): Promise<void> {
   if (!params.apiKey) return;
-  if (isMemoryGroupExcluded(params.group.id)) return;
-  if (params.allowedFolders && !params.allowedFolders.has(params.group.folder)) return;
-
+  await Promise.all(exclusionsReady.map((ready) => ready()));
   const { group } = params;
+  if (isMemoryGroupExcluded(group.id)) return;
+  if (params.allowedFolders && !params.allowedFolders.has(group.folder)) return;
+
   const memoryDir = path.join(params.groupsDir, group.folder, 'memory');
   const dbPath = path.join(params.dataDir, 'v2-memory', group.id, 'index.db');
+  const additionalDirs = [
+    ...workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
+    ...(await indexedMountDirs(group.id)),
+  ];
 
   await ensureMemoryManager({
     groupId: group.id,
@@ -1089,7 +1203,7 @@ export async function initMemoryManagerForGroup(params: {
     dbPath,
     apiKey: params.apiKey,
     model: params.model,
-    additionalDirs: workspaceIndexDirs(path.join(params.groupsDir, group.folder)),
+    additionalDirs,
   }).catch((err) => {
     log.warn('Failed to init memory manager for group', { groupId: group.id, err });
   });

@@ -11,13 +11,15 @@
 --       the commit_to_memory flag on deliver_specialist_result, which writes
 --       committed paths to SpecialistTask.committed_files (see specialists.allium).
 --
--- Scope: MemoryNote entity and lifecycle, researcher specialist isolation model,
+-- Scope: MemoryNote and SynthesisNote entities, researcher specialist isolation model,
 --        research dispatch, report writing, note creation, link generation,
---        back-link propagation
--- Includes: researcher access model (external internet + Zotero only, no group memory),
+--        back-link propagation, supersession, the synthesis workflow
+-- Includes: researcher access model (external internet + the Zotero library, read-only;
+--           no group memory),
 --           result delivery via specialist pipeline (commit_to_memory path),
 --           note creation from research result, link candidate selection and
---           back-link propagation
+--           back-link propagation, the grow-only note space (supersession is the
+--           only way a note is retired), synthesis candidate scan and dispositions
 -- Excludes:
 --   - Specialist task lifecycle mechanics (see specialists.allium)
 --   - Memory file indexing, chunking, and hybrid search (see memory.allium)
@@ -28,6 +30,7 @@
 use "./identity.allium" as identity
 use "./specialists.allium" as specialists
 use "./memory.allium" as memory
+use "./sessions.allium" as sessions
 
 ------------------------------------------------------------
 -- Value Types
@@ -36,12 +39,13 @@ use "./memory.allium" as memory
 -- The origin of a MemoryNote's content.
 -- Always populated; records provenance for staleness detection.
 value NoteSource {
-    kind: file | url | conversation
-    path: String?          -- relative to group workspace; set when kind = file
-    url: String?           -- set when kind = url
-    mtime: Timestamp?      -- file mtime at note creation; used to detect source staleness
-    last_fetched: Timestamp?    -- set when kind = url
-    date: Timestamp?            -- set when kind = conversation
+    type: file | url | conversation
+    path: String?          -- relative to group workspace; set when type = file
+    url: String?           -- set when type = url
+    mtime: Timestamp?      -- file mtime at note creation; recorded for a future staleness
+                           -- sweep (deferred: SourceStalenessDetection); nothing reads it yet
+    last_fetched: Timestamp?    -- set when type = url
+    date: Timestamp?            -- set when type = conversation
 }
 
 ------------------------------------------------------------
@@ -61,55 +65,75 @@ value NoteSource {
 -- Each note captures a single insight with explicit graph edges (links) to
 -- related notes. Notes are created by the main agent after synthesising a
 -- researcher report; they are never created by the researcher itself.
+--
+-- Grow-only: a note's body and every frontmatter field except links and
+-- superseded_by are fixed at creation, and no note is ever deleted. A note
+-- that is wrong, incomplete or out of date is not corrected in place: a new
+-- note lists it in supersedes, and it gets superseded_by. There is no status:
+-- a superseded note stays in the graph as the record of what was believed and
+-- when. Links it already has, and links already made to it, stay valid; but
+-- once superseded it takes no new links in either direction - no new note
+-- links to it (its successor points at it through supersedes, it at its
+-- successor through superseded_by), and it is not given back-links. See the
+-- GrowOnly guarantee on ZettelkastenWork.
 entity MemoryNote {
     group: identity/AgentGroup
     id: String                         -- MEM-YYYY-MM-DD-{slug}; unique within group
-    title: String
     content: String
     keywords: Set<String>
     tags: Set<String>
-    links: Set<String>                 -- IDs of related MemoryNotes within this group
+    links: Set<String>                 -- IDs of related notes (MEM or SYN) within this group; mutable
     created: Timestamp
     sources: Set<NoteSource>           -- always non-empty; records content provenance
-    supersedes: MemoryNote?            -- non-null when this note replaces an older one
+    supersedes: Set<String>            -- IDs of notes (MEM or SYN) this note replaces; empty for most notes
+    superseded_by: String?             -- ID of the note that replaced this one; set when it is superseded; mutable
 
-    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
-    status: active | superseded | archived
-
-    -- Relationships
-    superseded_by: MemoryNote? with supersedes = this
-
-    transitions status {
-        active -> superseded           -- a newer note supersedes this one
-        active -> archived
-        superseded -> archived
-        terminal: archived
-    }
+    -- Derived
+    title: title_from_slug(id)         -- the id's slug with hyphens as spaces ("MEM-2026-10-29-dispatch-files"
+                                       -- → "dispatch files"); no title is stored, and the
+                                       -- dashboard labels nodes this way
 }
 
 -- A note that consolidates multiple MemoryNotes into a unified perspective.
 -- Created by the main agent directly (no researcher involved).
 -- Carries directed synthesis edges to the source notes it consolidates;
 -- those edges are rendered separately from general link edges in the graph.
+-- Lives in zettel/notes/ beside the MEM notes and is indexed (chunked and
+-- embedded) like them. Grow-only, exactly as MemoryNote: only links and
+-- superseded_by change after creation. A SynthesisNote may supersede notes of
+-- either kind, including an earlier SynthesisNote, and be superseded by one.
 entity SynthesisNote {
     group: identity/AgentGroup
     id: String                         -- SYN-YYYY-MM-DD-{slug}; unique within group
-    title: String
     content: String
     keywords: Set<String>
     tags: Set<String>                  -- always includes "synthesis"
-    links: Set<String>                 -- IDs of related notes within this group
+    links: Set<String>                 -- IDs of related notes (MEM or SYN) within this group; mutable
     created: Timestamp
+    sources: Set<NoteSource>           -- records content provenance (often the conversation that approved it)
     synthesises: Set<String>           -- IDs of MemoryNotes this note consolidates; always non-empty
+    supersedes: Set<String>            -- IDs of notes (MEM or SYN) this note replaces
+    superseded_by: String?             -- ID of the note that replaced this one; mutable
 
-    -- allium-ignore allium.status.unreachableValue, allium.status.noExit
-    status: active | superseded | archived
+    -- Derived
+    title: title_from_slug(id)         -- as MemoryNote
+}
 
-    transitions status {
-        active -> superseded
-        active -> archived
-        superseded -> archived
-        terminal: archived
+-- A candidate the weekly synthesis scan has dealt with: a dense tag cluster or a
+-- highly linked hub note. The record keeps the scan from offering the same
+-- candidate week after week. Deleting a record (an operator asking to
+-- reconsider a declined candidate) makes it offerable again.
+entity SynthesisCandidate {
+    group: identity/AgentGroup
+    key: String                        -- "tag:<tag>" (tag lower-cased) or "hub:<MEM-id>"
+    count: Integer                     -- tag's note count, or hub's inbound links, when last surfaced
+    disposition: surfaced | declined | synthesised
+
+    transitions disposition {
+        surfaced -> declined           -- the operator does not want this synthesis
+        surfaced -> synthesised        -- a SynthesisNote was finalised for it
+        synthesised -> surfaced        -- offered again after growing (see SynthesisCandidatesScanned)
+        terminal: declined
     }
 }
 
@@ -118,19 +142,25 @@ entity SynthesisNote {
 ------------------------------------------------------------
 
 config {
-    -- Folder name of the researcher specialist AgentGroup. Used to identify
-    -- researcher tasks in the rules below; v2 has no SpecialistType entity,
-    -- so the specialist is identified by its AgentGroup folder.
-    researcher_folder: String = "researcher"
+    -- Folder of the researcher specialist AgentGroup in this install. Used to
+    -- identify researcher tasks in the rules below; v2 has no SpecialistType
+    -- entity, so the specialist is identified by its AgentGroup folder.
+    -- Set per install, not by code: no code names the researcher. It is whichever
+    -- specialist group the main agent's instructions dispatch research to
+    -- (on this install, specialists-researcher).
+    researcher_folder: String
 
     link_candidates_limit: Integer = 10  -- max notes retrieved as link candidates per new note
     back_link_limit: Integer = 3         -- max existing notes updated with a back-link
-    min_link_score: Decimal = 0.6        -- minimum hybrid search score for a link to form
-    duplicate_check_limit: Integer = 3   -- max existing notes returned in pre-dispatch duplicate check
-    duplicate_check_score: Decimal = 0.8 -- minimum score to surface a note as a potential duplicate
+    min_link_score: Decimal = 0.5        -- minimum search score for a link candidate
+    duplicate_check_limit: Integer = 5   -- max files returned in the pre-dispatch duplicate check
+    duplicate_check_score: Decimal = 0.5 -- minimum score for a file to be judged as a potential duplicate
+    duplicate_check_source: String = "zettel"        -- the whole Zettelkasten: notes, reports and drafts
     synthesis_scan_schedule: String = "3 9 * * 6"   -- Saturday 09:03
-    synthesis_dense_tag_min: Integer = 15            -- notes per tag to qualify as a dense cluster
-    synthesis_dense_link_min: Integer = 12           -- inbound links to qualify as a dense node
+    synthesis_dense_tag_min: Integer = 10            -- notes per tag (case-folded) to qualify as a dense cluster
+    synthesis_dense_link_min: Integer = 8            -- inbound links to qualify as a hub
+    synthesis_max_candidates: Integer = 5            -- candidates offered per scan, most ripe first
+    synthesis_resurface_growth: Decimal = 1.5        -- a surfaced or synthesised candidate returns once its count grows by this factor
 }
 
 ------------------------------------------------------------
@@ -151,19 +181,25 @@ rule DuplicateCheckPerformed {
     let dup_params = memory/MemorySearchParams{
         limit: config.duplicate_check_limit,
         min_score: config.duplicate_check_score,
-        path_prefix: "zettel/notes/",
-        source: null,
-        include_content: null
+        path_prefix: null,
+        source: config.duplicate_check_source,
+        include_content: null,
+        include_superseded: null
     }
     let candidates = memory_hybrid_search(group, subject, dup_params)
 
     ensures: DuplicateCandidatesSurfaced(group: group, subject: subject, candidates: candidates)
 
     @guidance
+        -- The search covers the whole Zettelkasten (source "zettel"), so an existing
+        -- report or synthesis draft on the subject counts as well as a note.
+        -- The main agent judges the results itself from their titles and snippets: a
+        -- candidate is a file about the same subject, not merely a related one.
         -- DuplicateCandidatesSurfaced is delivered to the user as a message listing the
-        -- candidate notes with their IDs and titles. If candidates is empty, no message
-        -- is sent and ResearchDispatched fires immediately.
-        -- For URL subjects, an exact path match in sources[].url is a strong duplicate
+        -- candidates with their IDs and titles, asking whether to proceed. If there are
+        -- none, the agent says so in one line ("checked notes — nothing relevant") and
+        -- ResearchDispatched proceeds at once.
+        -- For URL subjects, an exact match in a note's sources[].url is a strong duplicate
         -- signal regardless of score.
 }
 
@@ -205,7 +241,9 @@ rule ResearchDispatched {
         -- main_session_for_group resolves the long-running main-agent session whose
         -- agent_group is the requesting group. The result is routed back into that
         -- session via specialists.SpecialistResultRoutedToMain when the researcher
-        -- delivers; the committed report path lands in task.committed_files.
+        -- delivers (or, if it has closed meanwhile, into the group's current session
+        -- for the same conversation); the committed report path lands in
+        -- task.committed_files either way.
         --
         -- In practice this rule shares its trigger with DuplicateCheckPerformed.
         -- The two rules are intentionally not mutually exclusive on their requires
@@ -215,43 +253,71 @@ rule ResearchDispatched {
 
 -- ---- Synthesis Workflow ----
 
--- A weekly scheduled task scans the note graph for tag clusters (15+ notes per tag)
--- and high-degree nodes (12+ inbound links), then surfaces 2-4 candidates to the
--- operator. Synthesis notes are human-driven: the scan surfaces candidates only;
--- the operator decides whether to proceed.
+-- A weekly scheduled task scans the note graph for tag clusters
+-- (synthesis_dense_tag_min+ notes per tag) and hubs (synthesis_dense_link_min+
+-- inbound links), then offers up to synthesis_max_candidates of them to the
+-- operator, most ripe first. Synthesis notes are human-driven: the scan
+-- surfaces candidates only; the operator decides whether to proceed.
+-- Each offered candidate is recorded as surfaced, so the scan does not offer
+-- it again until it has grown.
 rule SynthesisCandidatesScanned {
     when: WeeklySynthesisScan(group)
 
     requires: group.specialist = null
 
-    let tag_clusters = dense_tag_clusters(
+    let offered = offerable_synthesis_candidates(
         group,
-        "zettel/notes/",
-        config.synthesis_dense_tag_min
+        config.synthesis_dense_tag_min,
+        config.synthesis_dense_link_min,
+        config.synthesis_resurface_growth,
+        config.synthesis_max_candidates
     )
-    let dense_nodes = dense_link_nodes(
-        group,
-        "zettel/notes/",
-        config.synthesis_dense_link_min
-    )
+    requires: offered.count > 0
 
-    ensures: SynthesisCandidatesDelivered(
-        group: group,
-        tag_clusters: tag_clusters,
-        dense_nodes: dense_nodes
-    )
+    ensures: SynthesisCandidatesDelivered(group: group, candidates: offered)
+    ensures:
+        for c in offered:
+            let record = SynthesisCandidate{group: group, key: c.key}
+            if exists record:
+                record.disposition = surfaced
+                record.count = c.count
+            else:
+                SynthesisCandidate.created(
+                    group: group,
+                    key: c.key,
+                    count: c.count,
+                    disposition: surfaced
+                )
 
     @guidance
         -- WeeklySynthesisScan fires from a cron scheduled task (config.synthesis_scan_schedule,
         -- currently "3 9 * * 6" — Saturday 09:03).
-        -- A pre-check script runs before the agent: it counts MEM-*.md and SYN-*.md files,
-        -- extracts tag frequencies and inbound-link counts from frontmatter, and passes the
-        -- result as task data. The agent is only woken when at least one dense cluster is found.
-        -- The agent reads the task data, samples notes from the top clusters via memory_search,
-        -- and surfaces 2-4 candidates as a digest sent to the operator.
-        -- The digest is also written to zettel/digests/YYYY-MM-DD-synthesis-scan.md.
+        -- offerable_synthesis_candidates is a black box over the notes in zettel/notes/
+        -- (MEM and SYN): it ranks tag clusters (tags case-folded) and hubs by size and
+        -- returns at most the given number, skipping any candidate whose record is
+        -- declined, and any whose record is surfaced or synthesised unless its count has
+        -- since grown by synthesis_resurface_growth. A hub that a SynthesisNote already
+        -- names counts as synthesised.
+        -- A pre-check script runs before the agent and computes the candidates; the agent
+        -- is only woken when there is at least one to offer. The candidates are recorded
+        -- as surfaced once that run's digest exists.
+        -- The agent samples notes from the candidates via memory_search and sends the
+        -- digest to the operator; it is also written to
+        -- zettel/digests/YYYY-MM-DD-synthesis-scan.md.
         -- The agent must NOT write drafts or SynthesisNotes during this step. Its job ends
         -- at identifying candidates; the operator decides whether to proceed.
+}
+
+-- The operator answers a scan by declining a candidate: not worth a synthesis,
+-- now or later. It is never offered again.
+rule SynthesisCandidateDeclined {
+    when: OperatorDeclinesSynthesisCandidate(group, candidate_key)
+
+    let record = SynthesisCandidate{group: group, key: candidate_key}
+    requires: exists record
+    requires: record.disposition = surfaced
+
+    ensures: record.disposition = declined
 }
 
 -- When the operator selects a synthesis candidate and requests a draft, the agent
@@ -260,7 +326,7 @@ rule SynthesisCandidatesScanned {
 rule SynthesisDraftCreated {
     when: OperatorRequestsSynthesisDraft(group, source_ids, slug)
 
-    requires: for id in source_ids: exists MemoryNote{group: group, id: id, status: active}
+    requires: for id in source_ids: exists MemoryNote{group: group, id: id}
 
     let draft_path = "zettel/drafts/DRAFT-SYN-" + date_of(now) + "-" + slug + "-v" + draft_version_for_slug(group, slug) + ".md"
 
@@ -281,21 +347,23 @@ rule SynthesisDraftCreated {
 -- Once the operator approves a draft, the agent writes the final SynthesisNote to
 -- zettel/notes/ and notifies the operator with a link to the new note.
 rule SynthesisNoteFinalised {
-    when: OperatorApprovesSynthesisDraft(group, source_ids, slug, approved_content)
+    when: OperatorApprovesSynthesisDraft(group, source_ids, slug, approved_content, candidate_key?)
 
-    requires: for id in source_ids: exists MemoryNote{group: group, id: id, status: active}
+    requires: for id in source_ids: exists MemoryNote{group: group, id: id}
+    requires: for id in source_ids: MemoryNote{group: group, id: id}.superseded_by = null
 
     ensures: SynthesisNote.created(
         group: group,
         id: "SYN-" + date_of(now) + "-" + slug,
-        title: extract_title(approved_content),
         content: approved_content,
         keywords: extract_keywords(approved_content),
         tags: extract_tags(approved_content) + { "synthesis" },
-        links: source_ids,
+        links: extract_links(approved_content),
         created: now,
+        sources: extract_sources(approved_content),
         synthesises: source_ids,
-        status: active
+        supersedes: extract_supersedes(approved_content),
+        superseded_by: null
     )
     ensures: UserNotifiedOfSynthesis(
         group: group,
@@ -305,11 +373,28 @@ rule SynthesisNoteFinalised {
     @guidance
         -- The agent writes the final note to zettel/notes/SYN-YYYY-MM-DD-{slug}.md.
         -- Draft files remain in zettel/drafts/ as a record of the editing process.
-        -- synthesises holds the source MemoryNote IDs for directed graph edges; links
-        -- holds the same IDs for general graph connectivity.
+        -- synthesises holds the source MemoryNote IDs for directed graph edges. links is
+        -- the note's own general connectivity, read from its frontmatter: it usually
+        -- includes the source notes but need not equal synthesises.
+        -- supersedes lists any earlier notes (MEM or SYN) the synthesis replaces;
+        -- SynthesisNoteSupersedes marks them.
         -- tags always include "synthesis" by convention.
-        -- Chokidar picks up the new file within 3 seconds and queues it for embedding.
+        -- The host's filesystem watcher picks up the new file within seconds and indexes
+        -- it (chunked and embedded) like any MEM note (memory.allium FileDiscovered).
         -- No researcher task is involved; this is a main-agent-only operation.
+}
+
+-- Finalising a synthesis for a candidate the scan offered settles that
+-- candidate: it is offered again only after it grows.
+rule SynthesisCandidateSynthesised {
+    when: OperatorApprovesSynthesisDraft(group, source_ids, slug, approved_content, candidate_key?)
+
+    requires: candidate_key != null
+    let record = SynthesisCandidate{group: group, key: candidate_key}
+    requires: exists record
+    requires: record.disposition = surfaced
+
+    ensures: record.disposition = synthesised
 }
 
 -- ---- Report and Note Creation ----
@@ -317,8 +402,9 @@ rule SynthesisNoteFinalised {
 -- When the researcher task completes, the host has already committed the report
 -- file to zettel/reports/ (via the commit_to_memory flag on deliver_specialist_result;
 -- see specialists/SpecialistResultRoutedToMain). The committed paths are recorded
--- on the task's committed_files. The main agent creates a linked MemoryNote using
--- the committed report as its source.
+-- on the task's committed_files, and the host names them in the result message it
+-- routes to the main agent. The main agent creates a linked MemoryNote from exactly
+-- those paths.
 rule ReportAndNoteCreated {
     when: task: specialists/SpecialistTask.status becomes completed
 
@@ -334,9 +420,10 @@ rule ReportAndNoteCreated {
     let link_params = memory/MemorySearchParams{
         limit: config.link_candidates_limit,
         min_score: config.min_link_score,
-        path_prefix: "zettel/notes/",
+        path_prefix: "groups/" + group.folder + "/zettel/notes/",
         source: null,
-        include_content: null
+        include_content: null,
+        include_superseded: null
     }
     let candidates = memory_hybrid_search(group, task.result, link_params)
     let links = extract_link_ids(candidates)
@@ -344,14 +431,14 @@ rule ReportAndNoteCreated {
     ensures: MemoryNote.created(
         group: group,
         id: "MEM-" + date_of(task.dispatched_at) + "-" + slug,
-        title: extract_title(task.result),
         content: task.result,
         keywords: extract_keywords(task.result),
         tags: extract_tags(task.result),
         links: links,
         created: now,
-        sources: { NoteSource{kind: file, path: report_path, mtime: now} },
-        status: active
+        sources: { NoteSource{type: file, path: report_path, mtime: now} },
+        supersedes: {},
+        superseded_by: null
     )
     ensures: UserNotifiedOfResult(
         group: group,
@@ -360,13 +447,29 @@ rule ReportAndNoteCreated {
     )
 
     @guidance
+        -- The link search leaves superseded notes out (include_superseded unset;
+        -- memory.allium MemorySearched): a superseded note takes no new links
+        -- (NoNewLinksToSuperseded).
         -- The report file is committed to zettel/reports/ by the host before this rule fires,
         -- as a result of the researcher calling deliver_specialist_result with commit_to_memory = true.
         -- task.committed_files holds the workspace-relative committed paths (e.g.
         -- "zettel/reports/2026-04-08-slug.md"); the first entry is the primary report.
+        -- The host appends those paths to the result message it routes to the main agent
+        -- (specialists/SpecialistResultRoutedToMain, routed_message_text), and the main
+        -- agent writes the note from exactly the paths named there. It never picks "the
+        -- newest file in zettel/reports/": with two research tasks overlapping that is
+        -- the other task's report.
         -- The main agent does NOT write the report — it reads it from the committed path.
+        -- If no session of the main group could receive the result, the report is still
+        -- committed (it belongs to the group) but no note is written from it until the
+        -- agent comes across it.
+        -- link_params.path_prefix is the group's zettel/notes/ prefix as the index stores
+        -- paths (groups/<folder>/zettel/notes/); it covers MEM and SYN notes alike.
+        -- If the new note replaces an existing one, it lists that note in supersedes
+        -- (see SupersedingNoteWritten for the shape); a research note normally replaces
+        -- nothing.
         -- slug_from_path extracts the date-slug portion from the report filename.
-        -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result
+        -- extract_keywords and extract_tags are LLM calls over task.result
         -- (the inline summary) or over the report file content if task.result is a brief summary.
         -- date_of formats a Timestamp as a YYYY-MM-DD date string.
         -- Writing the report to zettel/reports/ causes memory.allium's FileDiscovered
@@ -374,98 +477,192 @@ rule ReportAndNoteCreated {
         -- memory_hybrid_search is the same search used by AgentMemorySearch in memory.allium.
         -- UserNotifiedOfResult is fulfilled by the main agent replying to the user with a
         -- brief summary of what was found and a web UI link to the created note.
-        -- This is enforced by instruction (groups/main/CLAUDE.md) and by a directive
-        -- appended to the injected specialist result message.
+        -- This is enforced by the main agent's instructions; the routed result message
+        -- itself carries only the result text and the committed paths.
         -- If task.committed_files is null or empty (researcher delivered text only), this rule
         -- does not fire; the main agent may still create a note organically from the inline result.
 }
 
--- The top back_link_limit linked notes are updated to reference the new note,
--- forming bidirectional edges in the graph.
+-- Links are directed: a note's links name the notes it points to. A link need
+-- not be recorded at the other end. When a note is created, its top
+-- back_link_limit links are also recorded the other way - their targets get the
+-- new note in their links - so the notes it builds on point forward to it. That
+-- is the only retroactive change to existing notes: adding to links is one of
+-- the two changes the grow-only note space allows, and context, tags and
+-- keywords are never rewritten. A superseded target keeps its links as they were
+-- when it was superseded (the record of that point in time) and gets no
+-- back-link.
 rule BackLinksWritten {
     when: note: MemoryNote.created
-
-    requires: note.status = active
 
     let back_link_targets = top_links(note.links, config.back_link_limit)
 
     ensures:
         for target_id in back_link_targets:
-            let target = MemoryNote{group: note.group, id: target_id}
-            target.links.add(note.id)
+            let target_mem = MemoryNote{group: note.group, id: target_id}
+            let target_syn = SynthesisNote{group: note.group, id: target_id}
+            if exists target_mem and target_mem.superseded_by = null:
+                target_mem.links.add(note.id)
+            if exists target_syn and target_syn.superseded_by = null:
+                target_syn.links.add(note.id)
 
     @guidance
         -- top_links returns the first back_link_limit elements in insertion order, which
         -- corresponds to descending score order from the memory_search that populated note.links.
         -- The update is idempotent: if note.id is already in target.links, no change occurs.
-        -- Only active notes receive back-links; superseded notes are not updated.
-        -- Back-link targets must exist and be active; this is enforced by the
-        -- LinksWithinActiveGraph invariant.
+        -- A link target may be a MEM or a SYN note; every target exists (LinksResolve).
+        -- A superseded target is not given the back-link: a superseded note takes no
+        -- new links (NoNewLinksToSuperseded). The new note's own link to it stays only
+        -- if it was made from candidates, which already exclude superseded notes - so
+        -- in practice a superseded target does not arise here.
 }
 
--- ---- Note Archival ----
+-- ---- Supersession ----
 
--- A MemoryNote transitions to archived when the agent decides it is no longer
--- relevant (either directly from active, or after being superseded).
-rule MemoryNoteArchived {
-    when: note: MemoryNote.is_archive_requested
+-- A note that is wrong, incomplete or out of date is retired the only way the
+-- grow-only note space allows: the main agent writes a new note that lists it
+-- in supersedes. The old note is not edited beyond superseded_by and not
+-- deleted.
+rule SupersedingNoteWritten {
+    when: MainAgentSupersedesNotes(group, superseded_ids, slug, content)
 
-    requires: note.status in { active, superseded }
+    requires: group.specialist = null
+    requires: superseded_ids.count > 0
+    requires:
+        for id in superseded_ids:
+            exists MemoryNote{group: group, id: id} or exists SynthesisNote{group: group, id: id}
 
-    ensures: note.status = archived
+    ensures: MemoryNote.created(
+        group: group,
+        id: "MEM-" + date_of(now) + "-" + slug,
+        content: content,
+        keywords: extract_keywords(content),
+        tags: extract_tags(content),
+        links: extract_links(content),
+        created: now,
+        sources: extract_sources(content),
+        supersedes: superseded_ids,
+        superseded_by: null
+    )
+
+    @guidance
+        -- A correction is the typical case: a fact in an existing note turns out to be
+        -- wrong, and the new note carries the corrected content with the old note's ID
+        -- in supersedes. The new note's body explains what changed.
+        -- A synthesis that replaces earlier notes supersedes them the same way, through
+        -- SynthesisNoteFinalised.
+}
+
+-- Whenever a note that supersedes others is created, each superseded note gets
+-- superseded_by - the one other frontmatter change allowed after creation.
+rule MemoryNoteSupersedes {
+    when: note: MemoryNote.created
+
+    requires: note.supersedes.count > 0
+
     ensures:
-        for chunk in chunks_for_note(note):
-            not exists chunk
-
-    @guidance
-        -- This transition is agent-side: the agent writes updated frontmatter
-        -- (status: archived) to the note's markdown file, which the host memory
-        -- layer picks up via the file watcher and applies. No host rule directly
-        -- drives archival — the trigger here represents the file-write event that
-        -- follows the agent's decision. The chunk removal mirrors what FileRemoved
-        -- does in memory.allium and keeps the search index consistent.
-        -- chunks_for_note resolves the MemoryChunks belonging to the MemoryFile
-        -- whose path corresponds to this note (notes are not directly related to
-        -- MemoryFile entities in the spec; the host bridges the two).
+        for id in note.supersedes:
+            let old_mem = MemoryNote{group: note.group, id: id}
+            let old_syn = SynthesisNote{group: note.group, id: id}
+            if exists old_mem:
+                old_mem.superseded_by = note.id
+            if exists old_syn:
+                old_syn.superseded_by = note.id
 }
 
--- A SynthesisNote transitions to archived when the agent decides it is no longer
--- relevant (either directly from active, or after being superseded).
-rule SynthesisNoteArchived {
-    when: note: SynthesisNote.is_archive_requested
+rule SynthesisNoteSupersedes {
+    when: note: SynthesisNote.created
 
-    requires: note.status in { active, superseded }
+    requires: note.supersedes.count > 0
 
-    ensures: note.status = archived
+    ensures:
+        for id in note.supersedes:
+            let old_mem = MemoryNote{group: note.group, id: id}
+            let old_syn = SynthesisNote{group: note.group, id: id}
+            if exists old_mem:
+                old_mem.superseded_by = note.id
+            if exists old_syn:
+                old_syn.superseded_by = note.id
 
     @guidance
-        -- Same agent-side mechanism as MemoryNoteArchived: the agent writes
-        -- updated frontmatter and the host picks it up via the file watcher.
-        -- SynthesisNotes do not have chunks (they are not chunked for embedding),
-        -- so no chunk removal is needed.
+        -- A superseded note stays in zettel/notes/ and in the search index: it is
+        -- the record of what was believed and when. Readers follow superseded_by to
+        -- the current note.
 }
 
 ------------------------------------------------------------
 -- Invariants
 ------------------------------------------------------------
 
--- Every ID in a MemoryNote's links array references a note in the same group
--- that has not been archived.
-invariant LinksWithinActiveGraph {
+-- Every ID in a note's links array references an existing note (MEM or SYN) in
+-- the same group. Notes are never deleted, so a link that once resolved always
+-- does; a link to a note made before it was superseded stays valid.
+invariant LinksResolve {
     for note in MemoryNotes:
-        note.status = active implies (
-            for id in note.links:
-                exists MemoryNote{group: note.group, id: id, status: active | superseded}
-        )
+        for id in note.links:
+            exists MemoryNote{group: note.group, id: id} or exists SynthesisNote{group: note.group, id: id}
+    for note in SynthesisNotes:
+        for id in note.links:
+            exists MemoryNote{group: note.group, id: id} or exists SynthesisNote{group: note.group, id: id}
 }
 
--- Every ID in a SynthesisNote's synthesises array references an active or superseded
--- MemoryNote in the same group. Synthesis edges must not dangle.
-invariant SynthesisesWithinActiveGraph {
+-- A superseded note takes no new links, in either direction. Every link to it
+-- comes from a note that existed when it was superseded, or from the note that
+-- superseded it; and every link it holds is to a note that existed by then.
+-- superseded_at(group, id) is a black box: the created time of the note named
+-- in that note's superseded_by, or null while it is not superseded.
+-- created_at(group, id) is a black box: the created time of the note with that
+-- id (MEM or SYN).
+invariant NoNewLinksToSuperseded {
+    for note in MemoryNotes:
+        for id in note.links:
+            superseded_at(note.group, id) = null
+                or note.created <= superseded_at(note.group, id)
+                or id in note.supersedes
     for note in SynthesisNotes:
-        note.status = active implies (
-            for id in note.synthesises:
-                exists MemoryNote{group: note.group, id: id, status: active | superseded}
+        for id in note.links:
+            superseded_at(note.group, id) = null
+                or note.created <= superseded_at(note.group, id)
+                or id in note.supersedes
+    for note in MemoryNotes:
+        for id in note.links:
+            note.superseded_by = null
+                or created_at(note.group, id) <= superseded_at(note.group, note.id)
+    for note in SynthesisNotes:
+        for id in note.links:
+            note.superseded_by = null
+                or created_at(note.group, id) <= superseded_at(note.group, note.id)
+}
+
+-- Every ID in a SynthesisNote's synthesises array references an existing
+-- MemoryNote in the same group. Synthesis edges must not dangle.
+invariant SynthesisesResolve {
+    for note in SynthesisNotes:
+        for id in note.synthesises:
+            exists MemoryNote{group: note.group, id: id}
+}
+
+-- Supersession is recorded on both sides: every note a note supersedes exists
+-- and has superseded_by set, and a superseded_by names an existing note that
+-- lists the superseded note in its supersedes.
+invariant SupersessionRecordedOnBothSides {
+    for note in MemoryNotes:
+        for id in note.supersedes:
+            MemoryNotes.any(m => m.group = note.group and m.id = id and m.superseded_by != null)
+                or SynthesisNotes.any(y => y.group = note.group and y.id = id and y.superseded_by != null)
+    for note in SynthesisNotes:
+        for id in note.supersedes:
+            MemoryNotes.any(m => m.group = note.group and m.id = id and m.superseded_by != null)
+                or SynthesisNotes.any(y => y.group = note.group and y.id = id and y.superseded_by != null)
+    for note in MemoryNotes:
+        note.superseded_by != null implies (
+            MemoryNotes.any(m => m.group = note.group and m.id = note.superseded_by and note.id in m.supersedes)
+                or SynthesisNotes.any(y => y.group = note.group and y.id = note.superseded_by and note.id in y.supersedes)
+        )
+    for note in SynthesisNotes:
+        note.superseded_by != null implies (
+            MemoryNotes.any(m => m.group = note.group and m.id = note.superseded_by and note.id in m.supersedes)
+                or SynthesisNotes.any(y => y.group = note.group and y.id = note.superseded_by and note.id in y.supersedes)
         )
 }
 
@@ -485,33 +682,82 @@ invariant NotesCreatedByMainAgentOnly {
 -- including previously generated reports. Isolation is total: the researcher must
 -- focus solely on the subject it is tasked with investigating, without synthesising
 -- comparisons to existing knowledge or prior research.
--- Only the Zotero database (read-only) and the external internet are accessible.
--- The Zotero database may also be mounted in other specialist containers; its
--- sync and structure are governed by zotero.allium (deferred).
+-- Only the Zotero library (read-only) and the external internet are accessible.
+-- The Zotero library is the main group's zotero-md/ folder. That folder belongs to
+-- the Zotero sync (zotero.allium): agents, the main agent included, only read it,
+-- and every container that is given it mounts it read-only.
 --
--- Enforcement: container configuration level in container-runner.ts.
--- The researcher container MUST NOT be given any group workspace mount
--- (zettel/, memory/, CLAUDE.md, conversations/).
--- The researcher container MUST mount the Zotero database read-only
--- (see zotero.allium for canonical mount path).
--- External internet access (WebSearch, WebFetch, agent-browser) is available.
--- Violation of this invariant cannot be detected at runtime; it is prevented
--- by the container configuration.
+-- Isolation is a property of what the researcher's container is given, whoever
+-- dispatched it: the main agent (a root task) or another specialist (a sub-task -
+-- the coder and reviewer may ask it for research). Its container gets its own
+-- group folder read-only, the zotero-md/ folder read-only, its own task session,
+-- its own provider state and its ipc folders (specialists.allium per-task
+-- isolation), plus the internet (WebSearch, WebFetch, agent-browser). It is never
+-- given a requester's workspace - zettel/, memory/, conversations/ - nor any
+-- group's memory index or memory tools. Files it needs from its requester come
+-- only through the dispatch file handover. A sub-task's report goes back to its
+-- parent through the parent's ipc-in, not into the main group's zettel/reports/:
+-- only a root task's delivery commits to memory (specialists.allium).
+--
+-- researcher_reaches_group_memory(task) is a black box: true when the container
+-- that runs the task can read any group's workspace beyond zotero-md/, or any
+-- memory index. The host prevents it by what it mounts; it cannot be observed
+-- at runtime.
 invariant ResearcherKnowledgeIsolation {
     for task in specialists/SpecialistTasks:
-        task.specialist_group.folder = config.researcher_folder implies task.requester_group != null
+        task.specialist_group.folder = config.researcher_folder
+            implies not researcher_reaches_group_memory(task)
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- Where this module's triggers come from. The operator talks to the main agent in
+-- chat; the agent reads each request and acts on it, so the operator's requests
+-- reach these rules through the main agent's session. The weekly scan arrives in
+-- that session too, as a scheduled task (scheduling.allium).
+surface ZettelkastenWork {
+    facing agent: sessions/Session
+
+    provides:
+        MainAgentResearchRequest(group, subject) when agent.agent_group.is_main
+        OperatorRequestsSynthesisDraft(group, source_ids, slug) when agent.agent_group.specialist = null
+        OperatorApprovesSynthesisDraft(group, source_ids, slug, approved_content, candidate_key?)
+            when agent.agent_group.specialist = null
+        OperatorDeclinesSynthesisCandidate(group, candidate_key) when agent.agent_group.specialist = null
+        MainAgentSupersedesNotes(group, superseded_ids, slug, content) when agent.agent_group.specialist = null
+        WeeklySynthesisScan(group) when agent.agent_group.specialist = null
+
+    @guarantee GrowOnly
+        -- The note space in zettel/notes/ is grow-only. After a MemoryNote or
+        -- SynthesisNote is created, its body never changes and the only
+        -- frontmatter that may change is links (back-links) and superseded_by.
+        -- Once a note is superseded its links are frozen too, and no new note
+        -- links to it (NoNewLinksToSuperseded).
+        -- No note is ever deleted; supersession is the only retirement.
+        -- Synthesis drafts in zettel/drafts/ are not notes and may be revised
+        -- freely (as new versioned files).
+
+    @guidance
+        -- MainAgentResearchRequest: the operator asks the main agent to research a URL,
+        -- search phrase or Zotero entry. Only the main group: research is a root
+        -- specialist dispatch, which specialists/MainGroupDispatchesSpecialist allows
+        -- the main group alone. OperatorRequestsSynthesisDraft,
+        -- OperatorDeclinesSynthesisCandidate and OperatorApprovesSynthesisDraft: the
+        -- operator's answers to a synthesis scan or a shared draft; candidate_key names
+        -- the scan candidate a synthesis was drafted for, when there is one.
+        -- MainAgentSupersedesNotes: the main agent decides, from the conversation or
+        -- from what it reads, that existing notes are wrong or out of date.
+        -- WeeklySynthesisScan: the cron scheduled task at config.synthesis_scan_schedule,
+        -- delivered into the main group's session when its pre-check finds candidates.
+        -- This is not a tool surface: the agent fulfils these by writing files in its
+        -- workspace, which the host indexes (memory.allium).
 }
 
 ------------------------------------------------------------
 -- Deferred Specifications
 ------------------------------------------------------------
-
--- allium-ignore allium.deferred.missingLocationHint
-deferred RetroactiveLinking      -- see: memory-graph-retroactive.allium
-                                  -- When a new note is created, the context and tags of
-                                  -- its linked neighbors are updated to reflect the new
-                                  -- connection. Implements A-MEM's retroactive neighbor
-                                  -- update mechanism.
 
 -- allium-ignore allium.deferred.missingLocationHint
 deferred Consolidation           -- see: memory-graph-consolidation.allium
@@ -527,13 +773,16 @@ deferred Consolidation           -- see: memory-graph-consolidation.allium
 -- allium-ignore allium.deferred.missingLocationHint
 deferred OrphanDetection         -- see: memory-graph-consolidation.allium
                                   -- Notes with no links after a grace period are flagged
-                                  -- for review, re-linking, or archival.
+                                  -- for review or re-linking (never deleted: the note
+                                  -- space is grow-only).
 
 -- allium-ignore allium.deferred.missingLocationHint
-deferred NoteSupersession        -- see: memory-graph-supersession.allium
-                                  -- When source material changes significantly, a new note
-                                  -- supersedes the old one. The old note's links are
-                                  -- preserved and inherited by the superseding note.
+deferred SourceStalenessDetection -- see: memory-graph-staleness.allium
+                                  -- Aspirational. A sweep stats every type = file source
+                                  -- and flags notes whose source mtime differs from the
+                                  -- NoteSource.mtime recorded at creation, so the agent can
+                                  -- write a superseding note. Nothing does this today; the
+                                  -- recorded mtime is kept so the sweep can be added.
 
 -- allium-ignore allium.deferred.missingLocationHint
 deferred ZoteroSync              -- see: zotero.allium
@@ -543,4 +792,5 @@ deferred ZoteroSync              -- see: zotero.allium
                                   -- content extracted from associated PDFs. The directory is
                                   -- indexed via the Gemini embedding process and mounted
                                   -- read-only into the researcher container (and potentially
-                                  -- other specialist containers).
+                                  -- other specialist containers). The folder belongs to the
+                                  -- Zotero sync; agents only read it.

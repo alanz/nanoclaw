@@ -157,9 +157,6 @@ describe('config defaults', () => {
   it('embedding_rpd_budget = 900', async () => {
     expect(MEMORY_CONFIG.embedding_rpd_budget).toBe(900);
   });
-  it('memory_search_enabled = true', async () => {
-    expect(MEMORY_CONFIG.memory_search_enabled).toBe(true);
-  });
 });
 
 // ── Value types  [value-equality.*, entity-fields.MemorySearchResult, MemorySearchParams, MemoryListParams] ──
@@ -294,13 +291,6 @@ describe('MemorySearched rule', () => {
   it('rejects when session.agent_group_id does not match group  [rule-failure.MemorySearched.1]', async () => {
     await expect(
       handleMemorySearch({ session: SESSION_OTHER_GROUP, group_id: GROUP_ID, query: 'anything' }),
-    ).rejects.toThrow();
-  });
-
-  it('rejects when memory_search_enabled is false  [rule-failure.MemorySearched.2]', async () => {
-    const cfg = { ...MEMORY_CONFIG, memory_search_enabled: false };
-    await expect(
-      handleMemorySearch({ session: SESSION, group_id: GROUP_ID, query: 'anything' }, cfg),
     ).rejects.toThrow();
   });
 });

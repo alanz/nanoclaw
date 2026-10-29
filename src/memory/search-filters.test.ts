@@ -130,6 +130,29 @@ describe('MemoryIndexManager.search embedding permit', () => {
     await m.close();
   });
 
+  it('keyword-only with the default min_score still finds a matching file', async () => {
+    // Weighted as in hybrid mode a keyword-only score topped out below 0.3,
+    // under the 0.35 default, so every keyword-only search came back empty.
+    const memory = path.join(root, 'memory');
+    fs.mkdirSync(memory);
+    fs.writeFileSync(path.join(memory, 'note.md'), '# Zebra\n\nA note about zebra crossings.\n');
+    // Other files, so the keyword weighting has a corpus to rank against.
+    for (let i = 0; i < 8; i++)
+      fs.writeFileSync(path.join(memory, `other-${i}.md`), `# Other ${i}\n\nUnrelated words.\n`);
+    const m = new MemoryIndexManager('ag-g', 'g', memory, path.join(root, 'm.db'), 'key', MODEL);
+    await m.init();
+    // After init, which installs the shared limiter: set before, it was
+    // replaced, and the test waited on the real per-minute quota.
+    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: async () => {} };
+    await m.sync();
+    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: () => new Promise(() => {}) };
+    const answer = await m.search('zebra', { embedWaitMs: 20 });
+    expect(answer.mode).toBe('keyword');
+    expect(answer.results.map((r) => path.basename(r.path))).toEqual(['note.md']);
+    expect(answer.results[0].score).toBeGreaterThan(0.3);
+    await m.close();
+  }, 20_000);
+
   it('a permit refused after the wait does not surface as an unhandled rejection', async () => {
     const m = await manager();
     let refuse!: (err: Error) => void;

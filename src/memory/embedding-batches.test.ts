@@ -14,15 +14,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const requested = vi.hoisted(() => [] as number[]);
 
-vi.mock('./rate-limiter.js', () => ({
-  TokenBucketRateLimiter: class {
+vi.mock('./rate-limiter.js', () => {
+  class TokenBucketRateLimiter {
     async acquirePermit(_requests: number, _maxWait: number, tokens: number): Promise<void> {
       requested.push(tokens);
       if (tokens > 15_000) throw new Error(`Request of ${tokens} tokens can never be granted`);
     }
     depleteQuotaForType(): void {}
-  },
-}));
+  }
+  return { TokenBucketRateLimiter, sharedRateLimiter: () => new TokenBucketRateLimiter() };
+});
 vi.mock('./embeddings.js', () => ({
   DEFAULT_GEMINI_EMBEDDING_MODEL: 'gemini-embedding-001',
   createGeminiEmbeddingProvider: () => ({

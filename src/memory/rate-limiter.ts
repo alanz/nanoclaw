@@ -277,3 +277,22 @@ export interface RateLimiterSnapshot {
   /** Set while a daily quota stop holds. */
   rpdStoppedUntil: string | null;
 }
+
+/**
+ * The one limiter for an embedding account. There is one upstream behind one
+ * key, so its RPM, TPM and daily budget are global: every group's index
+ * manager draws on the same buckets (spec: the shared embedding budget).
+ * One limiter per manager counted each group separately, so N indexed groups
+ * could spend N times the budget against one key. The first caller's limits
+ * define the account's buckets.
+ */
+const sharedLimiters = new Map<string, TokenBucketRateLimiter>();
+
+export function sharedRateLimiter(config: RateLimitConfig): TokenBucketRateLimiter {
+  let limiter = sharedLimiters.get(config.accountKey);
+  if (!limiter) {
+    limiter = new TokenBucketRateLimiter(config);
+    sharedLimiters.set(config.accountKey, limiter);
+  }
+  return limiter;
+}

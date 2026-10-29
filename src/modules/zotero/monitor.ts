@@ -5,7 +5,7 @@ import { getZoteroSyncState, updateAfterSync, updateNextCheck, upsertZoteroSyncS
 import { notifySyncChanges } from './notify.js';
 import { fetchLibraryVersion } from './pre-check.js';
 import { computeNextZoteroCheck } from './schedule.js';
-import { enrichmentBacklog, queueEnrichmentTask, queueSyncTask, readSyncResult } from './sync.js';
+import { enrichmentBacklog, readSyncResult, runEnrichment, runSync, zoteroScriptBusy } from './sync.js';
 
 const MONITOR_POLL_MS = 30_000;
 
@@ -44,7 +44,7 @@ async function runMonitor(): Promise<void> {
     return;
   }
 
-  let state = await getZoteroSyncState();
+  const state = await getZoteroSyncState();
 
   // Bootstrap: initialise the singleton row on first run
   if (!state) {
@@ -83,7 +83,7 @@ async function runMonitor(): Promise<void> {
       // EnrichmentTriggeredAfterSync: a run straight away for new items without abstracts
       const addedKeys = (result.addedItems ?? []).map((i) => i.key);
       if (result.newCount > 0 && enrichmentBacklog(folder, new Date(), addedKeys).length > 0) {
-        await queueEnrichmentTask(folder);
+        void runEnrichment(folder);
       }
     }
 
@@ -101,7 +101,9 @@ async function runMonitor(): Promise<void> {
 
   // EnrichmentBacklogScheduled: every due check drains a little of the backlog,
   // whatever the pre-check finds
-  if (enrichmentBacklog(folder).length > 0) await queueEnrichmentTask(folder);
+  // Not stacked: a run still going (or queued) is enough. Runs go on in the
+  // background; the tick does not wait for them.
+  if (!zoteroScriptBusy() && enrichmentBacklog(folder).length > 0) void runEnrichment(folder);
 
   // Step 4: lightweight pre-check — only spawn container if library changed
   const serverVersion = await fetchLibraryVersion(state.last_version);
@@ -126,7 +128,7 @@ async function runMonitor(): Promise<void> {
     lastVersion: state.last_version,
   });
   await updateNextCheck(computeNextZoteroCheck(state));
-  queueSyncTask(folder, state.last_version);
+  void runSync(folder, state.last_version);
 }
 
 /** @internal for tests only */

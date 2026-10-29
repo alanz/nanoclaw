@@ -2,19 +2,21 @@
 /**
  * Zotero library sync — fetches items from Zotero API and writes markdown files.
  *
- * Usage: node zotero-sync.mjs --since VERSION --output DIR
- * Env:   ZOTERO_API_KEY, ZOTERO_USER_ID, ZOTERO_API_BASE (optional; the host's
- *        credential-proxy route, which attaches the real key)
+ * Usage: node zotero-sync.mjs --since VERSION --output DIR [--state FILE]
+ * Env:   ZOTERO_API_KEY, ZOTERO_USER_ID, ZOTERO_API_BASE (optional)
+ *
+ * Run by the host (src/modules/zotero/sync.ts), which holds the credentials.
  *
  * Outputs a JSON summary to stdout:
  *   { newCount, deletedCount, newVersion, totalItems, items: [{key, title}] }
  *
- * Also writes /workspace/agent/zotero-state.json with the full sync result
- * so the NanoClaw host process can update its database after the container exits.
+ * Also writes the state file (--state; default /workspace/agent/zotero-state.json)
+ * with the full sync result, which the host merges into its sync state.
  */
 
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 
 // ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -22,11 +24,13 @@ function parseArgs() {
   const args = process.argv.slice(2);
   let since = 0;
   let output = '/workspace/agent/zotero-md';
+  let state = '/workspace/agent/zotero-state.json';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--since') since = parseInt(args[++i], 10) || 0;
     else if (args[i] === '--output') output = args[++i];
+    else if (args[i] === '--state') state = args[++i];
   }
-  return { since, output };
+  return { since, output, state };
 }
 
 function getCredentials() {
@@ -148,13 +152,18 @@ function buildMarkdown(item) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-async function main() {
-  const { since, output } = parseArgs();
-  const { apiKey, userId } = getCredentials();
-  const apiBase = process.env.ZOTERO_API_BASE || 'https://api.zotero.org';
-  const base = `${apiBase}/users/${userId}`;
+/**
+ * Fetch the changes since `since`, apply them to `output`, and record the
+ * result in `stateFile`. Throws on any API failure before touching a file —
+ * the deletions included: a run that skipped them but still advanced the
+ * version would never ask for them again, and the deleted items' files would
+ * stay (and stay searchable) for good. A failed run writes no state, so the
+ * host keeps its version and the next check retries the whole sync.
+ */
+const NOT_REFERENCES = new Set(['note', 'annotation', 'attachment']);
 
-  fs.mkdirSync(output, { recursive: true });
+export async function syncLibrary({ since, output, stateFile, apiBase, userId, apiKey }) {
+  const base = `${apiBase}/users/${userId}`;
 
   // Fetch new/modified items (exclude attachments)
   const sinceParam = since > 0 ? `&since=${since}` : '';
@@ -164,20 +173,29 @@ async function main() {
   // Fetch deletions (only meaningful when we have a baseline version)
   let deletedKeys = [];
   if (since > 0) {
-    try {
-      const { data: deleted } = await fetchZotero(
-        `${base}/deleted?since=${since}`,
-        apiKey,
-      );
-      deletedKeys = Array.isArray(deleted.items) ? deleted.items : [];
-    } catch {
-      // Non-fatal — worst case we keep stale files
+    const { data: deleted } = await fetchZotero(`${base}/deleted?since=${since}`, apiKey);
+    deletedKeys = Array.isArray(deleted.items) ? deleted.items : [];
+  }
+
+  fs.mkdirSync(output, { recursive: true });
+
+  // Reference items only (zotero.allium ZoteroItem). Child notes and
+  // annotations are Zotero items too, but carry no title or abstract of their
+  // own: synced, each became an empty "(no title)" file that went through the
+  // abstract backlog and counted as a new item. One synced by an older version
+  // has its file removed when it next changes.
+  const references = [];
+  for (const item of items) {
+    if (NOT_REFERENCES.has(item.data?.itemType)) {
+      fs.rmSync(path.join(output, `${item.key}.md`), { force: true });
+      continue;
     }
+    references.push(item);
   }
 
   // Write markdown for new/modified items
   const writtenItems = [];
-  for (const item of items) {
+  for (const item of references) {
     const filepath = path.join(output, `${item.key}.md`);
     fs.writeFileSync(filepath, buildMarkdown(item), 'utf-8');
     writtenItems.push({ key: item.key, title: item.data.title || '(no title)' });
@@ -198,32 +216,48 @@ async function main() {
 
   // Write extended state file so the host process can update its DB and
   // send notifications with the right change counts and item titles.
-  const stateFile = '/workspace/agent/zotero-state.json';
   fs.writeFileSync(
     stateFile,
     JSON.stringify({
       newVersion,
       totalItems,
       lastSync,
-      newCount: items.length,
+      newCount: references.length,
       deletedCount: deleteCount,
-      addedItems: writtenItems.slice(0, 20),
+      // Every one: the host looks all of them up for an immediate enrichment
+      // run (EnrichmentTriggeredAfterSync) and counts the "…and N more".
+      addedItems: writtenItems,
     }),
     'utf-8',
   );
 
-  const result = {
-    newCount: items.length,
+  return {
+    newCount: references.length,
     deletedCount: deleteCount,
     newVersion,
     totalItems,
-    items: writtenItems.slice(0, 20),
+    items: writtenItems,
   };
+}
 
+async function main() {
+  const { since, output, state } = parseArgs();
+  const { apiKey, userId } = getCredentials();
+  const result = await syncLibrary({
+    since,
+    output,
+    stateFile: state,
+    apiBase: process.env.ZOTERO_API_BASE || 'https://api.zotero.org',
+    userId,
+    apiKey,
+  });
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 
-main().catch((err) => {
-  process.stderr.write(`zotero-sync error: ${err.message}\n`);
-  process.exit(1);
-});
+const isMain = import.meta.url === pathToFileURL(process.argv[1] || '').href;
+if (isMain) {
+  main().catch((err) => {
+    process.stderr.write(`zotero-sync error: ${err.message}\n`);
+    process.exit(1);
+  });
+}

@@ -47,12 +47,13 @@ export function addFrontMatterField(text, key, value) {
 }
 
 /**
- * Validate abstract length against configured bounds.
- * Returns null if too short, truncates at a word boundary if too long.
+ * Validate abstract length against configured bounds: null outside them.
+ * Over-long text is rejected, not truncated (zotero.allium max_abstract_length):
+ * a cut-down abstract still reads as plausible, and from PDF extraction it is
+ * usually body text the heuristic ran on into, not an abstract at all.
  */
 export function validateAbstract(text) {
-  if (!text || text.length < MIN_ABSTRACT) return null;
-  if (text.length > MAX_ABSTRACT) return text.slice(0, MAX_ABSTRACT).replace(/ \S+$/, '') + '…';
+  if (!text || text.length < MIN_ABSTRACT || text.length > MAX_ABSTRACT) return null;
   return text;
 }
 
@@ -73,13 +74,25 @@ export function removeFrontMatterField(text, key) {
   if (nl < 0) return text;
   const end = text.indexOf('\n---', nl + 1);
   if (end < 0) return text;
-  const lines = text.slice(nl + 1, end).split('\n').filter((l) => !l.startsWith(`${key}: `));
+  const lines = text
+    .slice(nl + 1, end)
+    .split('\n')
+    .filter((l) => !l.startsWith(`${key}: `));
   return text.slice(0, nl + 1) + lines.join('\n') + text.slice(end);
 }
 
-/** True when the body carries more than the heading and author/year line. */
+/**
+ * True when the body carries text beyond the `# title` heading and the bold
+ * author/year line. Judged by shape, not by counting lines: an item with
+ * neither authors nor a year has no author/year line (zotero-sync.mjs
+ * buildMarkdown), so its abstract is the second line, not the third.
+ */
 export function hasAbstract(body) {
-  return body.split('\n').filter((l) => l.trim()).length > 2;
+  const lines = body.split('\n').filter((l) => l.trim());
+  let i = 0;
+  if (lines[i]?.startsWith('# ')) i++;
+  if (lines[i] && /^\*\*[^\n]*\*\*$/.test(lines[i].trim())) i++;
+  return i < lines.length;
 }
 
 // ── Lookup records (zotero.allium AbstractLookupRecorded) ─────────────────────

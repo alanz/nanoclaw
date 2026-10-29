@@ -10,6 +10,7 @@ import {
   insertAbstract,
   addFrontMatterField,
   validateAbstract,
+  hasAbstract,
   setFrontMatterField,
   removeFrontMatterField,
   parseLookup,
@@ -20,7 +21,8 @@ import {
 } from './zotero-frontmatter.mjs';
 import { fetchWithRetry, OutOfBudget } from './zotero-enrich.mjs';
 import { forgetNotFound, runBacklogPass } from './zotero-abstracts.mjs';
-import { backoffFromResponse } from './zotero-extract-abstracts.mjs';
+import { backoffFromResponse, extractAbstractFromText } from './zotero-extract-abstracts.mjs';
+import { syncLibrary } from './zotero-sync.mjs';
 
 const FM = `---
 title: Test Paper
@@ -104,6 +106,80 @@ describe('addFrontMatterField', () => {
   });
 });
 
+// ── hasAbstract ───────────────────────────────────────────────────────────────
+
+describe('hasAbstract', () => {
+  it('is false for a heading and author/year line only', () => {
+    assert.equal(hasAbstract('# T\n\n**Doe (2020)**\n'), false);
+  });
+
+  it('is true for text after the author/year line', () => {
+    assert.equal(hasAbstract('# T\n\n**Doe (2020)**\n\nAn abstract.\n'), true);
+  });
+
+  it('sees the abstract of an item with no author/year line', () => {
+    assert.equal(hasAbstract('# T\n\nAn abstract.\n'), true);
+    assert.equal(hasAbstract('# T\n'), false);
+  });
+
+  it('reads an author/year line with a Unicode line separator in a name as that line', () => {
+    // Zotero names can carry U+2029, which `.` in a JS regex does not match.
+    assert.equal(hasAbstract('# T\n\n**Stephanie\u2029Weirich (2010)**\n'), false);
+  });
+});
+
+// ── extractAbstractFromText ───────────────────────────────────────────────────
+
+describe('extractAbstractFromText', () => {
+  const body = 'We present a thing that does useful work and show how it beats the alternatives on real programs.';
+  const paper = (heading) => `A Paper\nJane Doe\n\n${heading}${body}\n\n1 Introduction\nThe body.\n`;
+
+  it('takes the text under an Abstract heading, whatever follows the word', () => {
+    for (const heading of ['Abstract\n', 'ABSTRACT\n', 'Abstract. ', 'Abstract: ', 'Abstract—', 'Abstract ']) {
+      assert.equal(extractAbstractFromText(paper(heading)), body, JSON.stringify(heading));
+    }
+  });
+
+  it('ignores the word abstract in running text', () => {
+    const text = `A Paper\n\nWe walk the abstract syntax tree of the program and the abstract data type of\nqueues, which ${body}\n\n1 Introduction\n`;
+    assert.equal(extractAbstractFromText(text), null);
+  });
+
+  it('ignores a body line that opens with "Abstract" followed by a lowercase word', () => {
+    const text = `A Paper\n\nSome prose ends here.\nAbstract data types are ${body}\n\n2 Background\n`;
+    assert.equal(extractAbstractFromText(text), null);
+  });
+
+  it('ends at "Key words" as well as "Keywords"', () => {
+    const text = `A Paper\n\nAbstract. ${body}\nKey words: formalization, structure\n`;
+    assert.equal(extractAbstractFromText(text), body);
+  });
+
+  it('does not end at a heading word inside a sentence, even where a line wraps', () => {
+    const text = `A Paper\n\nAbstract\n${body} We survey the\ncontents of program caches.\n\n1 Introduction\n`;
+    assert.equal(extractAbstractFromText(text), `${body} We survey the contents of program caches.`);
+  });
+
+  it('ends at a numbered heading, arabic or roman, in either capitalisation', () => {
+    for (const heading of ['1 Introduction', '1. Introduction', 'I. INTRODUCTION', 'Keywords', 'KEYWORDS']) {
+      assert.equal(extractAbstractFromText(`A Paper\n\nAbstract\n${body}\n${heading}\nThe body.\n`), body, heading);
+    }
+  });
+
+  it('rejects text with no end heading that runs past the length bound, rather than keeping a prefix', () => {
+    const text = `A Paper\n\nAbstract\n${body}\n${'The body of the paper goes on. '.repeat(120)}`;
+    assert.equal(extractAbstractFromText(text), null);
+  });
+
+  it('keeps an abstract with no end heading when it is all the text there is', () => {
+    assert.equal(extractAbstractFromText(`A Paper\n\nAbstract\n${body}\n`), body);
+  });
+
+  it('drops a line of leader dots to nothing', () => {
+    assert.equal(extractAbstractFromText(`Contents\nAbstract ${'.'.repeat(120)} 3\n`), null);
+  });
+});
+
 // ── validateAbstract ──────────────────────────────────────────────────────────
 
 describe('validateAbstract', () => {
@@ -129,34 +205,26 @@ describe('validateAbstract', () => {
     assert.equal(validateAbstract(text), text);
   });
 
-  it(`truncates text longer than ${MAX_ABSTRACT} chars and appends ellipsis`, () => {
-    const text = 'a'.repeat(MAX_ABSTRACT + 100);
-    const result = validateAbstract(text);
-    assert.ok(result !== null);
-    assert.ok(result.endsWith('…'));
-    assert.ok(result.length <= MAX_ABSTRACT + 1); // +1 for the ellipsis char
+  it(`rejects text longer than ${MAX_ABSTRACT} chars rather than truncating it`, () => {
+    assert.equal(validateAbstract('a'.repeat(MAX_ABSTRACT + 1)), null);
   });
 
-  it('truncates at a word boundary, not mid-word', () => {
-    // Build a string of exactly MAX_ABSTRACT+1 chars that ends with a full word
-    const word = 'overflow';
-    const padding = 'x '.repeat(Math.floor((MAX_ABSTRACT - word.length) / 2));
-    const text = (padding + word + ' ').slice(0, MAX_ABSTRACT + 50);
-    const result = validateAbstract(text);
-    assert.ok(result !== null);
-    assert.ok(!result.slice(0, -1).endsWith(' ')); // no trailing space before ellipsis
+  it(`accepts text of exactly ${MAX_ABSTRACT} chars`, () => {
+    const text = 'a'.repeat(MAX_ABSTRACT);
+    assert.equal(validateAbstract(text), text);
   });
 });
 
 // ── Lookup records and the backlog (zotero.allium EnrichmentRun) ─────────────
 
-
 const ABSTRACT = 'A'.repeat(120);
 const NOW = new Date('2026-10-11T12:00:00.000Z');
 const daysAgo = (n) => new Date(NOW.getTime() - n * 86_400_000).toISOString();
 
-function item(fields, body = '# Title\n\nAuthor (2020)\n') {
-  return `---\n${Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n${body}`;
+function item(fields, body = '# Title\n\n**Author (2020)**\n') {
+  return `---\n${Object.entries(fields)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n')}\n---\n${body}`;
 }
 
 describe('setFrontMatterField / removeFrontMatterField', () => {
@@ -201,7 +269,7 @@ describe('inBacklog', () => {
   const parse = (fields, body) => parseFrontMatter(item(fields, body));
   it('includes an item never looked up', () => assert.equal(inBacklog(parse({ title: 'T' }), NOW), true));
   it('excludes an item that has an abstract', () =>
-    assert.equal(inBacklog(parse({ title: 'T' }, `# T\n\nA (2020)\n\n${ABSTRACT}\n`), NOW), false));
+    assert.equal(inBacklog(parse({ title: 'T' }, `# T\n\n**A (2020)**\n\n${ABSTRACT}\n`), NOW), false));
   it('excludes a recent not_found', () =>
     assert.equal(inBacklog(parse({ abstract_lookup: `${daysAgo(10)} not_found` }), NOW), false));
   it('includes a not_found older than the retry interval', () =>
@@ -226,13 +294,17 @@ describe('prioritiseBacklog', () => {
 });
 
 describe('fetchWithRetry', () => {
-  const answer = (status, body = '{}') => async () => ({ status, body });
+  const answer =
+    (status, body = '{}') =>
+    async () => ({ status, body });
   it('a 404 is an answer with no data', async () => {
     assert.deepEqual(await fetchWithRetry('u', {}, Infinity, answer(404)), { ok: true, data: null });
   });
   it('a server error or network failure is not an answer', async () => {
     assert.deepEqual(await fetchWithRetry('u', {}, Infinity, answer(500)), { ok: false });
-    const fail = async () => { throw new Error('ECONNRESET'); };
+    const fail = async () => {
+      throw new Error('ECONNRESET');
+    };
     assert.deepEqual(await fetchWithRetry('u', {}, Infinity, fail), { ok: false });
   });
   it('retries a rate limit and returns the answer that follows', async () => {
@@ -337,5 +409,120 @@ describe('backoffFromResponse (Zotero)', () => {
     assert.equal(backoffFromResponse(403, {}, T), Infinity);
     assert.equal(backoffFromResponse(401, {}, T), Infinity);
   });
-  it('ignores Retry-After on other statuses', () => assert.equal(backoffFromResponse(200, { 'retry-after': '5' }, T), 0));
+  it('ignores Retry-After on other statuses', () =>
+    assert.equal(backoffFromResponse(200, { 'retry-after': '5' }, T), 0));
+});
+
+// ── syncLibrary ───────────────────────────────────────────────────────────────
+
+describe('syncLibrary', () => {
+  // A library at version 12 that, since version 10, changed item NEW1 and
+  // deleted item GONE.
+  function zotero({ deletedFails }) {
+    return async (url) => {
+      const json = (body) => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => '12' },
+        json: async () => body,
+      });
+      if (url.includes('/deleted')) {
+        if (deletedFails) return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) };
+        return json({ items: ['GONE'] });
+      }
+      if (url.includes('start=0'))
+        return json([{ key: 'NEW1', data: { title: 'New paper', itemType: 'journalArticle' } }]);
+      return json([]);
+    };
+  }
+
+  async function run(deletedFails) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zotero-sync-'));
+    const output = path.join(dir, 'zotero-md');
+    fs.mkdirSync(output);
+    fs.writeFileSync(path.join(output, 'GONE.md'), 'deleted in Zotero\n');
+    const stateFile = path.join(dir, 'zotero-state.json');
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = zotero({ deletedFails });
+    try {
+      const result = await syncLibrary({ since: 10, output, stateFile, apiBase: 'https://z', userId: 'u', apiKey: 'k' })
+        .then((r) => ({ ok: true, r }))
+        .catch((err) => ({ ok: false, err }));
+      return { dir, output, stateFile, result };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it('applies changes and deletions, and records the new version', async () => {
+    const { output, stateFile, result } = await run(false);
+    assert.equal(result.ok, true);
+    assert.equal(fs.existsSync(path.join(output, 'NEW1.md')), true);
+    assert.equal(fs.existsSync(path.join(output, 'GONE.md')), false);
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    assert.equal(state.newVersion, 12);
+    assert.equal(state.deletedCount, 1);
+  });
+
+  /** One sync from version 10 over a library whose changed items are `items`. */
+  async function runWith(items, existing = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zotero-sync-'));
+    const output = path.join(dir, 'zotero-md');
+    fs.mkdirSync(output);
+    for (const [key, text] of Object.entries(existing)) fs.writeFileSync(path.join(output, `${key}.md`), text);
+    const stateFile = path.join(dir, 'zotero-state.json');
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => '12' },
+      json: async () => (url.includes('/deleted') ? { items: [] } : url.includes('start=0') ? items : []),
+    });
+    try {
+      await syncLibrary({ since: 10, output, stateFile, apiBase: 'https://z', userId: 'u', apiKey: 'k' });
+      return { output, state: JSON.parse(fs.readFileSync(stateFile, 'utf-8')) };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it('syncs reference items only: no file for a child note or annotation, and an old one is removed', async () => {
+    const { output, state } = await runWith(
+      [
+        { key: 'REF1', data: { title: 'A paper', itemType: 'journalArticle' } },
+        { key: 'NOTE1', data: { itemType: 'note', note: '<p>my note</p>' } },
+        { key: 'ANN1', data: { itemType: 'annotation' } },
+      ],
+      { NOTE1: '---\ntitle: (no title)\nitemType: note\nzoteroKey: NOTE1\n---\n\n# (no title)\n' },
+    );
+    assert.deepEqual(fs.readdirSync(output).sort(), ['REF1.md']);
+    assert.equal(state.newCount, 1);
+    assert.deepEqual(
+      state.addedItems.map((i) => i.key),
+      ['REF1'],
+    );
+    assert.equal(state.totalItems, 1);
+  });
+
+  it('records every added item, not just the first 20', async () => {
+    const items = Array.from({ length: 25 }, (_, i) => ({
+      key: `K${String(i).padStart(2, '0')}`,
+      data: { title: `Paper ${i}`, itemType: 'journalArticle' },
+    }));
+    const { state } = await runWith(items);
+    assert.equal(state.newCount, 25);
+    assert.equal(state.addedItems.length, 25);
+  });
+
+  // The deletions used to be fetched best-effort: on a failure the run still
+  // recorded version 12, the next run asked only for deletions since 12, and
+  // GONE.md stayed for good.
+  it('fails the whole run, writing nothing, when the deletions cannot be fetched', async () => {
+    const { output, stateFile, result } = await run(true);
+    assert.equal(result.ok, false);
+    assert.match(result.err.message, /deleted/);
+    assert.equal(fs.existsSync(stateFile), false);
+    assert.equal(fs.existsSync(path.join(output, 'GONE.md')), true);
+    assert.equal(fs.existsSync(path.join(output, 'NEW1.md')), false);
+  });
 });

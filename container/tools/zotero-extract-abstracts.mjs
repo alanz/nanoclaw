@@ -146,6 +146,13 @@ function httpDownloadToFile(url, destPath, timeoutMs = DOWNLOAD_TIMEOUT_MS) {
         const redir = res.headers.location;
         const modR = redir.startsWith('https') ? https : http;
         const req2 = modR.get(redir, { headers: { 'User-Agent': 'zotero-extract-abstracts/1.0' } }, (res2) => {
+          // The file server's answer, checked as the first one is: an error
+          // page saved as the PDF read as "no abstract" (conclusive) before.
+          if (res2.statusCode !== 200) {
+            res2.resume();
+            reject(Object.assign(new Error(`HTTP ${res2.statusCode} from file server`), { status: res2.statusCode }));
+            return;
+          }
           const file2 = fs.createWriteStream(destPath);
           res2.pipe(file2);
           file2.on('finish', () => file2.close(resolve));
@@ -193,45 +200,74 @@ async function getPdfAttachment(itemKey, timeoutMs) {
 
 // ── Abstract extraction ───────────────────────────────────────────────────────
 
-const END_MARKERS = /\b(1[\s.]?\s*Introduction|Introduction|Keywords?|Categories|Index Terms|CCS Concepts|ACM Reference|General Terms|Subject Areas|Contents)\b/i;
+// Section headings that end an abstract, matched only where a heading can be:
+// opening a line (after an optional section number: "1", "1.", "I."), and
+// capitalised as headings are ("Introduction", "INTRODUCTION"). Matched
+// case-insensitively anywhere, they ended abstracts mid-sentence: "we survey
+// the contents of program caches" stopped at "the".
+const END_HEADINGS = [
+  'Introduction', 'Keywords', 'Keyword', 'Key words', 'Key word', 'Categories', 'Index Terms',
+  'CCS Concepts', 'ACM Reference', 'General Terms', 'Subject Areas', 'Contents',
+];
+const END_MARKERS = new RegExp(
+  `(?:^|\\n)[ \\t]*(?:(?:\\d+|[IVX]+)\\.?[ \\t]+)?(?:${END_HEADINGS.flatMap((h) => [h, h.toUpperCase()]).join('|')})\\b`,
+);
 
-function extractAbstractFromText(text) {
+// The abstract's heading: "Abstract" or "ABSTRACT" opening a line ("Abstract.",
+// "Abstract—", "Abstract We …" and "ABSTRACT\n" all occur), never running on
+// into a lowercase word. Case-sensitive and line-anchored: the word itself
+// ("abstract syntax tree", "Abstract data types are …") is common in the body,
+// and matching it there stored body text as the abstract.
+const START_MARKER = /(?:^|\n)[ \t]*(?:Abstract|ABSTRACT)\b(?![ \t]+[a-z])[.:\s—–-]*/;
+
+export function extractAbstractFromText(text) {
   text = text.replace(/(\w)-\n(\w)/g, '$1$2');
   text = text.replace(/[ \t]+/g, ' ');
 
-  const m = text.match(/\bAbstract\b[:\s—–]*\n?/i);
+  const m = START_MARKER.exec(text);
   if (!m) return null;
 
   const after = text.slice(m.index + m[0].length);
   const end = END_MARKERS.exec(after);
-  const raw = end ? after.slice(0, end.index) : after.slice(0, 2000);
+  // With no heading to end it, the whole remainder is the candidate, and the
+  // length bound below rejects it unless the text really stops there (an
+  // abstract-only page). A fixed-length prefix stored body text cut short.
+  const raw = end ? after.slice(0, end.index) : after;
 
-  const cleaned = raw.replace(/\s+/g, ' ').trim();
+  // Leading punctuation is left over from the heading ("Abstract. We …").
+  const cleaned = raw
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[.:;,—–-]+\s*/, '');
   if (cleaned.length < 80) return null;
-  if (cleaned.length > 3000) return cleaned.slice(0, 3000).replace(/ \S+$/, '') + '…';
+  // Longer than any real abstract: the end marker was missed or the wrong
+  // "Abstract" matched, so this is body text. Reject rather than truncate.
+  if (cleaned.length > 3000) return null;
 
   return cleaned;
 }
 
+/**
+ * The abstract in a downloaded PDF, or null if it has none. Throws when
+ * pdftotext cannot read it (not on PATH, crashed, timed out): the PDF went
+ * unread, which is inconclusive (zotero.allium AbstractLookupRecorded), not a
+ * miss that hides the item for the retry interval.
+ */
 function extractAbstractFromPdf(pdfPath) {
-  try {
-    const text = execFileSync('pdftotext', ['-f', '1', '-l', '4', pdfPath, '-'], {
-      encoding: 'utf-8',
-      timeout: 30000,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    return extractAbstractFromText(text);
-  } catch {
-    return null;
-  }
+  const text = execFileSync('pdftotext', ['-f', '1', '-l', '4', pdfPath, '-'], {
+    encoding: 'utf-8',
+    timeout: 30000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  return extractAbstractFromText(text);
 }
 
 /**
  * zotero.allium PdfAbstractExtracted for one item. Returns { abstract } on
  * success, else { abstract: null, inconclusive, reason }. No PDF, a PDF over
  * the size limit, or a PDF without an abstract section is conclusive; an API
- * or download failure, missing credentials, a Zotero backoff, or too little
- * time left before `deadline` (ms since epoch) is not.
+ * or download failure, pdftotext failing, missing credentials, a Zotero
+ * backoff, or too little time left before `deadline` (ms since epoch) is not.
  */
 export async function findPdfAbstract(meta, opts = {}) {
   const { deadline = Infinity, maxMb = DEFAULT_MAX_PDF_MB, tmpFile = path.join(os.tmpdir(), `zotero-pdf-${process.pid}.pdf`) } = opts;

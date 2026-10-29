@@ -155,6 +155,26 @@ describe('extractAbstractFromText', () => {
     assert.equal(extractAbstractFromText(text), body);
   });
 
+  it('does not end at a heading word inside a sentence, even where a line wraps', () => {
+    const text = `A Paper\n\nAbstract\n${body} We survey the\ncontents of program caches.\n\n1 Introduction\n`;
+    assert.equal(extractAbstractFromText(text), `${body} We survey the contents of program caches.`);
+  });
+
+  it('ends at a numbered heading, arabic or roman, in either capitalisation', () => {
+    for (const heading of ['1 Introduction', '1. Introduction', 'I. INTRODUCTION', 'Keywords', 'KEYWORDS']) {
+      assert.equal(extractAbstractFromText(`A Paper\n\nAbstract\n${body}\n${heading}\nThe body.\n`), body, heading);
+    }
+  });
+
+  it('rejects text with no end heading that runs past the length bound, rather than keeping a prefix', () => {
+    const text = `A Paper\n\nAbstract\n${body}\n${'The body of the paper goes on. '.repeat(120)}`;
+    assert.equal(extractAbstractFromText(text), null);
+  });
+
+  it('keeps an abstract with no end heading when it is all the text there is', () => {
+    assert.equal(extractAbstractFromText(`A Paper\n\nAbstract\n${body}\n`), body);
+  });
+
   it('drops a line of leader dots to nothing', () => {
     assert.equal(extractAbstractFromText(`Contents\nAbstract ${'.'.repeat(120)} 3\n`), null);
   });

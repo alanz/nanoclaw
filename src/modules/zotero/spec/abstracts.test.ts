@@ -14,18 +14,21 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterAll, afterEach, beforeEach, expect, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 vi.mock('https', async () => (await import('./tools.js')).httpsMock);
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>();
   return {
     ...actual,
-    // pdftotext -f 1 -l 4 <pdf> -  →  the fake PDF is its own text
-    execFileSync: (cmd: string, args: string[], opts: unknown) =>
-      cmd === 'pdftotext'
-        ? fs.readFileSync(args[4], 'utf-8')
-        : (actual.execFileSync as (...a: unknown[]) => unknown)(cmd, args, opts),
+    // pdftotext -f 1 -l 4 <pdf> -  →  the fake PDF is its own text; a "PDF"
+    // reading PDFTOTEXT_FAILS stands for pdftotext failing (here: not on PATH)
+    execFileSync: (cmd: string, args: string[], opts: unknown) => {
+      if (cmd !== 'pdftotext') return (actual.execFileSync as (...a: unknown[]) => unknown)(cmd, args, opts);
+      const text = fs.readFileSync(args[4], 'utf-8');
+      if (text === 'PDFTOTEXT_FAILS') throw Object.assign(new Error('spawnSync pdftotext ENOENT'), { code: 'ENOENT' });
+      return text;
+    },
   };
 });
 
@@ -516,6 +519,30 @@ obligation('rule-failure.PdfAbstractExtracted.6', async () => {
   await passWithPdf();
   // Rejected text counts as extraction finding nothing (AbstractLookupRecorded).
   expect(itemOf('P')).toMatchObject({ abstract: null, abstract_source: null, abstract_lookup_result: 'not_found' });
+});
+
+// ── PDF step failures that leave the PDF unread (AbstractLookupRecorded) ────
+// "Anything that leaves a source unasked makes it inconclusive": a PDF that
+// could not be fetched or read is not a PDF without an abstract.
+
+it('records inconclusive, not not_found, when pdftotext cannot read the PDF', async () => {
+  write('P', itemFile('P'));
+  net.route = pdfRoutes('P', { size: 1000, text: 'PDFTOTEXT_FAILS' });
+  await passWithPdf();
+  expect(itemOf('P')).toMatchObject({ abstract: null, abstract_lookup_result: 'inconclusive' });
+});
+
+it('records inconclusive when the file server answers a redirected download with an error', async () => {
+  write('P', itemFile('P'));
+  const routes = pdfRoutes('P', { size: 1000, text: pdfText(words(150)) });
+  net.route = (u) =>
+    u === `${ZOTERO}/items/ATT1/file`
+      ? { status: 302, headers: { location: 'https://files.test/pdf' }, body: '' }
+      : u === 'https://files.test/pdf'
+        ? { status: 404, body: 'Not Found' }
+        : routes(u);
+  await passWithPdf();
+  expect(itemOf('P')).toMatchObject({ abstract: null, abstract_lookup_result: 'inconclusive' });
 });
 
 // ── Invariants ──────────────────────────────────────────────────────────────

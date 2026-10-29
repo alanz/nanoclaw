@@ -206,7 +206,7 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 
 `specs/` holds 13 [Allium](https://github.com/juxt/allium) specifications (~6.5k lines) describing this system's behaviour at the domain level — entities, state transitions, rules and invariants, independent of implementation. They are the intent of record; the code is one realisation of it.
 
-> **Read them; do not edit them.** Consult the relevant spec before changing behaviour in the areas it covers. **Never modify a `.allium` file without the repo owner's explicit approval** — not to "keep it in sync" after a code change, not to silence a checker warning, not as part of a larger task. If your change makes the code diverge from a spec, say so and propose the spec edit; the owner decides. This applies to the `/allium` skills too: `tend` and `weed` both write to specs, so ask before running them in write mode.
+> **Read them; do not edit them.** Consult the relevant spec before changing behaviour in the areas it covers. **Never modify a `.allium` file without the repo owner's explicit approval** — not to "keep it in sync" after a code change, not to silence a checker warning, not as part of a larger task. If your change makes the code diverge from a spec, say so and propose the spec edit; the owner decides. This applies to the `/allium` skills too: `tend` and `weed` both write to specs, so ask before running them in write mode. The autonomous `/allium <goal>` loop is no exception: upstream lets it edit specs unattended, but here it must stop at every spec edit and get the owner's approval — and non-interactive `tend`/`weed` subagents, which park questions by writing them into the spec, count as spec edits too.
 
 | Spec | Covers |
 |------|--------|
@@ -223,13 +223,15 @@ Five types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 Two traps worth knowing:
 
 - **Scope boundaries are deliberate and stated in each header.** `agent-to-agent.allium` explicitly *excludes* specialists (they live in `specialists.allium`), so searching the wrong file yields a confident wrong answer.
-- **Specialist results reach the caller via a directory, not just text.** The specialist writes to `/workspace/ipc-out`, then `deliver_specialist_result(file_paths, commit_to_memory)` hands ownership to the host, which either commits the files into the *requester's* workspace under `memory/reports/` (recorded as `committed_files` on the task) or stages them into the requester's `/workspace/ipc-in`. Files land in the **requester's** group folder — not the specialist's. See `specialists.allium:195-303`.
+- **Specialist results reach the caller via a directory, not just text.** The specialist writes to `/workspace/ipc-out`, then `deliver_specialist_result(file_paths, commit_to_memory)` hands ownership to the host, which either commits the files into the *requester's* workspace under `zettel/reports/` (recorded as `committed_files` on the task) or stages them into the requester's `/workspace/ipc-in`. Files land in the **requester's** group folder — not the specialist's. See the file-handover section of `specialists.allium`.
 
 ```bash
-allium check specs/            # currently 0 errors; 4 warnings in routing.allium
+allium check specs/            # currently 0 errors; 6 warnings in routing.allium
 ```
 
 `allium check` is read-only and always safe to run. The `/allium` skill family (`tend`, `weed`, `distill`, `propagate`) can *write* to specs — use it to report drift, and get approval before letting it edit anything under `specs/`.
+
+**After a behaviour change, check for drift.** Once a change that alters behaviour in an area a spec covers is committed, run `weed` in **check mode** (report only) against the spec(s) for that area, then `allium analyse` on them (read-only; exit 1 just means findings). Report each divergence with its proposed classification — spec bug, code bug, aspirational, intentional gap — and the owner confirms or overrides. Code bugs get fixed as code; spec bugs become proposed spec edits under the rule above. Refactors that change no behaviour, and areas no spec covers, skip this.
 
 ## This install's local modules
 
@@ -260,6 +262,13 @@ Two runtime facts that are easy to trip over:
   not itself mounted arrives normally.
 - **launchd inherits no shell PATH.** The plist must name `/opt/homebrew/bin`
   or the host starts fine and then cannot find `container` at spawn.
+- **Everything lives in the GUI session.** The host, backup, tailscale-serve and
+  Apple Container's own services are `gui/<uid>` jobs, so a GUI logout (e.g. a
+  WindowServer crash) stops them all and auto-login only fires at boot. The
+  root LaunchDaemon `com.nanoclaw.v2.host-watchdog` (`scripts/host-watchdog.sh`,
+  installed with `sudo bash scripts/install-host-watchdog.sh`) reboots after
+  5 min at the login window and samples memory every 15 min into
+  `/Library/Logs/NanoClaw/memory-samples.tsv`.
 
 ## Contributing
 

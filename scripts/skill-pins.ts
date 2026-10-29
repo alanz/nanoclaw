@@ -512,10 +512,19 @@ export function collect(root: string): Scan {
   const skillsDir = join(root, SKILLS_DIR);
   for (const name of existsSync(skillsDir) ? readdirSync(skillsDir).sort() : []) {
     const dir = `${SKILLS_DIR}/${name}`;
-    if (!statSync(join(root, dir)).isDirectory()) continue;
-    const skillMd = `${dir}/SKILL.md`;
-    if (existsSync(join(root, skillMd))) merge(scan, scanSkill(skillMd, readFileSync(join(root, skillMd), 'utf8')));
-    merge(scan, scanSkillFiles(root, dir));
+    // A skill removed while we scan (a test's scratch skill, say) has no pins.
+    // Scan it into its own result and keep that only if it stayed put.
+    const one = emptyScan();
+    try {
+      if (!statSync(join(root, dir)).isDirectory()) continue;
+      const skillMd = `${dir}/SKILL.md`;
+      if (existsSync(join(root, skillMd))) merge(one, scanSkill(skillMd, readFileSync(join(root, skillMd), 'utf8')));
+      merge(one, scanSkillFiles(root, dir));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw err;
+    }
+    merge(scan, one);
   }
   if (existsSync(join(root, CLI_TOOLS))) {
     merge(scan, scanCliTools(CLI_TOOLS, readFileSync(join(root, CLI_TOOLS), 'utf8')));

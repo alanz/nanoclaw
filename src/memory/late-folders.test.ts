@@ -53,8 +53,10 @@ describe('a workspace folder created after the manager started', () => {
     fs.mkdirSync(path.join(groupDir, 'memory'), { recursive: true });
     fs.writeFileSync(path.join(groupDir, 'memory', 'index.md'), '# Index\n\nNothing yet.\n');
     const m = new MemoryIndexManager('ag-g', 'g', path.join(groupDir, 'memory'), path.join(root, 'm.db'), 'key', 'm');
-    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: async () => {} };
     await m.init();
+    // After init, which installs the shared limiter: set before, it was
+    // replaced, and the test waited on the real per-minute quota.
+    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: async () => {} };
     await m.sync();
 
     // The group's first committed report makes zettel/.

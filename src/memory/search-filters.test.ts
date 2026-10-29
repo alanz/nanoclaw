@@ -140,8 +140,10 @@ describe('MemoryIndexManager.search embedding permit', () => {
     for (let i = 0; i < 8; i++)
       fs.writeFileSync(path.join(memory, `other-${i}.md`), `# Other ${i}\n\nUnrelated words.\n`);
     const m = new MemoryIndexManager('ag-g', 'g', memory, path.join(root, 'm.db'), 'key', MODEL);
-    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: async () => {} };
     await m.init();
+    // After init, which installs the shared limiter: set before, it was
+    // replaced, and the test waited on the real per-minute quota.
+    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: async () => {} };
     await m.sync();
     (m as unknown as WithLimiter).rateLimiter = { acquirePermit: () => new Promise(() => {}) };
     const answer = await m.search('zebra', { embedWaitMs: 20 });

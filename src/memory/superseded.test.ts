@@ -57,8 +57,10 @@ describe('search and superseded notes', () => {
     const m = new MemoryIndexManager('ag-g', 'g', path.join(groupDir, 'memory'), path.join(root, 'm.db'), 'key', 'm', [
       { dir: path.join(groupDir, 'zettel'), source: 'zettel' },
     ]);
-    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: async () => {} };
     await m.init();
+    // After init, which installs the shared limiter: set before, it was
+    // replaced, and the test waited on the real per-minute quota.
+    (m as unknown as WithLimiter).rateLimiter = { acquirePermit: async () => {} };
     await m.sync();
     return m;
   }

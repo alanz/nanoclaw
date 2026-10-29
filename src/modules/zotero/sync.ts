@@ -129,11 +129,16 @@ export function itemInBacklog(text: string, now: Date): boolean {
   const end = text.indexOf('\n---', nl + 1);
   if (nl < 0 || end < 0) return false;
   const bodyStart = end + 4 + (text[end + 4] === '\n' ? 1 : 0);
+  // Has an abstract: text beyond the `# title` heading and the bold
+  // author/year line, which an item with neither authors nor a year lacks.
   const bodyLines = text
     .slice(bodyStart)
     .split('\n')
     .filter((l) => l.trim());
-  if (bodyLines.length > 2) return false; // has an abstract
+  let i = 0;
+  if (bodyLines[i]?.startsWith('# ')) i++;
+  if (bodyLines[i] && /^\*\*.*\*\*$/.test(bodyLines[i].trim())) i++;
+  if (i < bodyLines.length) return false;
   const lookup = text.slice(nl + 1, end).match(LOOKUP_RE);
   if (!lookup || lookup[2] !== 'not_found') return true;
   const at = Date.parse(lookup[1]);

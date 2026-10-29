@@ -73,13 +73,25 @@ export function removeFrontMatterField(text, key) {
   if (nl < 0) return text;
   const end = text.indexOf('\n---', nl + 1);
   if (end < 0) return text;
-  const lines = text.slice(nl + 1, end).split('\n').filter((l) => !l.startsWith(`${key}: `));
+  const lines = text
+    .slice(nl + 1, end)
+    .split('\n')
+    .filter((l) => !l.startsWith(`${key}: `));
   return text.slice(0, nl + 1) + lines.join('\n') + text.slice(end);
 }
 
-/** True when the body carries more than the heading and author/year line. */
+/**
+ * True when the body carries text beyond the `# title` heading and the bold
+ * author/year line. Judged by shape, not by counting lines: an item with
+ * neither authors nor a year has no author/year line (zotero-sync.mjs
+ * buildMarkdown), so its abstract is the second line, not the third.
+ */
 export function hasAbstract(body) {
-  return body.split('\n').filter((l) => l.trim()).length > 2;
+  const lines = body.split('\n').filter((l) => l.trim());
+  let i = 0;
+  if (lines[i]?.startsWith('# ')) i++;
+  if (lines[i] && /^\*\*.*\*\*$/.test(lines[i].trim())) i++;
+  return i < lines.length;
 }
 
 // ── Lookup records (zotero.allium AbstractLookupRecorded) ─────────────────────

@@ -12,7 +12,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, expect, vi } from 'vitest';
 
-import { divergence, obligation } from './harness.js';
+import { obligation } from './harness.js';
 import { loadTool, type Frontmatter, type Sync } from './tools.js';
 
 const fm = await loadTool<Frontmatter>('zotero-frontmatter.mjs');
@@ -180,31 +180,27 @@ obligation('entity-fields.ItemFile', async () => {
   expect(fm.parseLookup(one.meta)).toBeNull();
 });
 
-divergence(
-  'entity-optional.ItemFile.abstract',
-  'an item with neither authors nor a year has no author/year line, and hasAbstract (more than two body lines) then reads its abstract as absent',
-  async () => {
-    const isSet = (key: string) => fm.hasAbstract(parsed('lib', key).body);
-    library.items = [
-      zitem('K1', { creators: [{ creatorType: 'author', lastName: 'Doe', firstName: 'Jane' }], date: '2020' }),
-      zitem('K2', {
-        creators: [{ creatorType: 'author', lastName: 'Doe', firstName: 'Jane' }],
-        abstractNote: ABSTRACT,
-      }),
-      zitem('BARE', { itemType: 'webpage', abstractNote: ABSTRACT }),
-    ];
-    await runSync('lib', 0);
-    // null, then set by enrichment
-    expect(isSet('K1')).toBe(false);
-    const file = path.join(root, 'lib', 'zotero-md', 'K1.md');
-    fs.writeFileSync(file, fm.applyAbstract(itemText('lib', 'K1'), ABSTRACT, 's2_doi'));
-    expect(isSet('K1')).toBe(true);
-    // set from Zotero
-    expect(isSet('K2')).toBe(true);
-    // set from Zotero, on an item with no authors and no year
-    expect(isSet('BARE'), 'BARE has an abstract from Zotero').toBe(true);
-  },
-);
+obligation('entity-optional.ItemFile.abstract', async () => {
+  const isSet = (key: string) => fm.hasAbstract(parsed('lib', key).body);
+  library.items = [
+    zitem('K1', { creators: [{ creatorType: 'author', lastName: 'Doe', firstName: 'Jane' }], date: '2020' }),
+    zitem('K2', {
+      creators: [{ creatorType: 'author', lastName: 'Doe', firstName: 'Jane' }],
+      abstractNote: ABSTRACT,
+    }),
+    zitem('BARE', { itemType: 'webpage', abstractNote: ABSTRACT }),
+  ];
+  await runSync('lib', 0);
+  // null, then set by enrichment
+  expect(isSet('K1')).toBe(false);
+  const file = path.join(root, 'lib', 'zotero-md', 'K1.md');
+  fs.writeFileSync(file, fm.applyAbstract(itemText('lib', 'K1'), ABSTRACT, 's2_doi'));
+  expect(isSet('K1')).toBe(true);
+  // set from Zotero
+  expect(isSet('K2')).toBe(true);
+  // set from Zotero, on an item with no authors and no year
+  expect(isSet('BARE'), 'BARE has an abstract from Zotero').toBe(true);
+});
 
 obligation('config-default.sync_request_timeout', async () => {
   const timeouts: number[] = [];

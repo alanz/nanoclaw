@@ -10,6 +10,7 @@ import {
   insertAbstract,
   addFrontMatterField,
   validateAbstract,
+  hasAbstract,
   setFrontMatterField,
   removeFrontMatterField,
   parseLookup,
@@ -105,6 +106,23 @@ describe('addFrontMatterField', () => {
   });
 });
 
+// ── hasAbstract ───────────────────────────────────────────────────────────────
+
+describe('hasAbstract', () => {
+  it('is false for a heading and author/year line only', () => {
+    assert.equal(hasAbstract('# T\n\n**Doe (2020)**\n'), false);
+  });
+
+  it('is true for text after the author/year line', () => {
+    assert.equal(hasAbstract('# T\n\n**Doe (2020)**\n\nAn abstract.\n'), true);
+  });
+
+  it('sees the abstract of an item with no author/year line', () => {
+    assert.equal(hasAbstract('# T\n\nAn abstract.\n'), true);
+    assert.equal(hasAbstract('# T\n'), false);
+  });
+});
+
 // ── validateAbstract ──────────────────────────────────────────────────────────
 
 describe('validateAbstract', () => {
@@ -151,13 +169,14 @@ describe('validateAbstract', () => {
 
 // ── Lookup records and the backlog (zotero.allium EnrichmentRun) ─────────────
 
-
 const ABSTRACT = 'A'.repeat(120);
 const NOW = new Date('2026-10-11T12:00:00.000Z');
 const daysAgo = (n) => new Date(NOW.getTime() - n * 86_400_000).toISOString();
 
-function item(fields, body = '# Title\n\nAuthor (2020)\n') {
-  return `---\n${Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n${body}`;
+function item(fields, body = '# Title\n\n**Author (2020)**\n') {
+  return `---\n${Object.entries(fields)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n')}\n---\n${body}`;
 }
 
 describe('setFrontMatterField / removeFrontMatterField', () => {
@@ -202,7 +221,7 @@ describe('inBacklog', () => {
   const parse = (fields, body) => parseFrontMatter(item(fields, body));
   it('includes an item never looked up', () => assert.equal(inBacklog(parse({ title: 'T' }), NOW), true));
   it('excludes an item that has an abstract', () =>
-    assert.equal(inBacklog(parse({ title: 'T' }, `# T\n\nA (2020)\n\n${ABSTRACT}\n`), NOW), false));
+    assert.equal(inBacklog(parse({ title: 'T' }, `# T\n\n**A (2020)**\n\n${ABSTRACT}\n`), NOW), false));
   it('excludes a recent not_found', () =>
     assert.equal(inBacklog(parse({ abstract_lookup: `${daysAgo(10)} not_found` }), NOW), false));
   it('includes a not_found older than the retry interval', () =>
@@ -227,13 +246,17 @@ describe('prioritiseBacklog', () => {
 });
 
 describe('fetchWithRetry', () => {
-  const answer = (status, body = '{}') => async () => ({ status, body });
+  const answer =
+    (status, body = '{}') =>
+    async () => ({ status, body });
   it('a 404 is an answer with no data', async () => {
     assert.deepEqual(await fetchWithRetry('u', {}, Infinity, answer(404)), { ok: true, data: null });
   });
   it('a server error or network failure is not an answer', async () => {
     assert.deepEqual(await fetchWithRetry('u', {}, Infinity, answer(500)), { ok: false });
-    const fail = async () => { throw new Error('ECONNRESET'); };
+    const fail = async () => {
+      throw new Error('ECONNRESET');
+    };
     assert.deepEqual(await fetchWithRetry('u', {}, Infinity, fail), { ok: false });
   });
   it('retries a rate limit and returns the answer that follows', async () => {
@@ -338,7 +361,8 @@ describe('backoffFromResponse (Zotero)', () => {
     assert.equal(backoffFromResponse(403, {}, T), Infinity);
     assert.equal(backoffFromResponse(401, {}, T), Infinity);
   });
-  it('ignores Retry-After on other statuses', () => assert.equal(backoffFromResponse(200, { 'retry-after': '5' }, T), 0));
+  it('ignores Retry-After on other statuses', () =>
+    assert.equal(backoffFromResponse(200, { 'retry-after': '5' }, T), 0));
 });
 
 // ── syncLibrary ───────────────────────────────────────────────────────────────
@@ -358,7 +382,8 @@ describe('syncLibrary', () => {
         if (deletedFails) return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) };
         return json({ items: ['GONE'] });
       }
-      if (url.includes('start=0')) return json([{ key: 'NEW1', data: { title: 'New paper', itemType: 'journalArticle' } }]);
+      if (url.includes('start=0'))
+        return json([{ key: 'NEW1', data: { title: 'New paper', itemType: 'journalArticle' } }]);
       return json([]);
     };
   }

@@ -62,7 +62,12 @@ const ABSTRACT = 'A'.repeat(120);
 
 function item(lookup?: string, abstract?: string): string {
   const fm = ['title: T', 'zoteroKey: K', ...(lookup ? [`abstract_lookup: ${lookup}`] : [])].join('\n');
-  return `---\n${fm}\n---\n# T\n\nAuthor (2020)\n${abstract ? `\n${abstract}\n` : ''}`;
+  return `---\n${fm}\n---\n# T\n\n**Author (2020)**\n${abstract ? `\n${abstract}\n` : ''}`;
+}
+
+/** An item with neither authors nor a year: no author/year line (buildMarkdown). */
+function bareItem(abstract?: string): string {
+  return `---\ntitle: T\nitemType: webpage\nzoteroKey: K\n---\n# T\n${abstract ? `\n${abstract}\n` : ''}`;
 }
 
 function writeItem(key: string, text: string): void {
@@ -98,6 +103,11 @@ describe('itemInBacklog', () => {
 
   it('excludes an item with an abstract', () => {
     expect(itemInBacklog(item(undefined, ABSTRACT), NOW)).toBe(false);
+  });
+
+  it('sees the abstract of an item with no author/year line', () => {
+    expect(itemInBacklog(bareItem(ABSTRACT), NOW)).toBe(false);
+    expect(itemInBacklog(bareItem(), NOW)).toBe(true);
   });
 
   it('excludes a not_found lookup within the retry interval, and includes one past it', () => {

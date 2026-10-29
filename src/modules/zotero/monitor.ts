@@ -44,7 +44,7 @@ async function runMonitor(): Promise<void> {
     return;
   }
 
-  let state = await getZoteroSyncState();
+  const state = await getZoteroSyncState();
 
   // Bootstrap: initialise the singleton row on first run
   if (!state) {

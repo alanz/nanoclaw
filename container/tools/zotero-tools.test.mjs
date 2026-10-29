@@ -464,6 +464,56 @@ describe('syncLibrary', () => {
     assert.equal(state.deletedCount, 1);
   });
 
+  /** One sync from version 10 over a library whose changed items are `items`. */
+  async function runWith(items, existing = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zotero-sync-'));
+    const output = path.join(dir, 'zotero-md');
+    fs.mkdirSync(output);
+    for (const [key, text] of Object.entries(existing)) fs.writeFileSync(path.join(output, `${key}.md`), text);
+    const stateFile = path.join(dir, 'zotero-state.json');
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => '12' },
+      json: async () => (url.includes('/deleted') ? { items: [] } : url.includes('start=0') ? items : []),
+    });
+    try {
+      await syncLibrary({ since: 10, output, stateFile, apiBase: 'https://z', userId: 'u', apiKey: 'k' });
+      return { output, state: JSON.parse(fs.readFileSync(stateFile, 'utf-8')) };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it('syncs reference items only: no file for a child note or annotation, and an old one is removed', async () => {
+    const { output, state } = await runWith(
+      [
+        { key: 'REF1', data: { title: 'A paper', itemType: 'journalArticle' } },
+        { key: 'NOTE1', data: { itemType: 'note', note: '<p>my note</p>' } },
+        { key: 'ANN1', data: { itemType: 'annotation' } },
+      ],
+      { NOTE1: '---\ntitle: (no title)\nitemType: note\nzoteroKey: NOTE1\n---\n\n# (no title)\n' },
+    );
+    assert.deepEqual(fs.readdirSync(output).sort(), ['REF1.md']);
+    assert.equal(state.newCount, 1);
+    assert.deepEqual(
+      state.addedItems.map((i) => i.key),
+      ['REF1'],
+    );
+    assert.equal(state.totalItems, 1);
+  });
+
+  it('records every added item, not just the first 20', async () => {
+    const items = Array.from({ length: 25 }, (_, i) => ({
+      key: `K${String(i).padStart(2, '0')}`,
+      data: { title: `Paper ${i}`, itemType: 'journalArticle' },
+    }));
+    const { state } = await runWith(items);
+    assert.equal(state.newCount, 25);
+    assert.equal(state.addedItems.length, 25);
+  });
+
   // The deletions used to be fetched best-effort: on a failure the run still
   // recorded version 12, the next run asked only for deletions since 12, and
   // GONE.md stayed for good.

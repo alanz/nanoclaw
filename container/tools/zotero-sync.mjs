@@ -160,6 +160,8 @@ function buildMarkdown(item) {
  * stay (and stay searchable) for good. A failed run writes no state, so the
  * host keeps its version and the next check retries the whole sync.
  */
+const NOT_REFERENCES = new Set(['note', 'annotation', 'attachment']);
+
 export async function syncLibrary({ since, output, stateFile, apiBase, userId, apiKey }) {
   const base = `${apiBase}/users/${userId}`;
 
@@ -177,9 +179,23 @@ export async function syncLibrary({ since, output, stateFile, apiBase, userId, a
 
   fs.mkdirSync(output, { recursive: true });
 
+  // Reference items only (zotero.allium ZoteroItem). Child notes and
+  // annotations are Zotero items too, but carry no title or abstract of their
+  // own: synced, each became an empty "(no title)" file that went through the
+  // abstract backlog and counted as a new item. One synced by an older version
+  // has its file removed when it next changes.
+  const references = [];
+  for (const item of items) {
+    if (NOT_REFERENCES.has(item.data?.itemType)) {
+      fs.rmSync(path.join(output, `${item.key}.md`), { force: true });
+      continue;
+    }
+    references.push(item);
+  }
+
   // Write markdown for new/modified items
   const writtenItems = [];
-  for (const item of items) {
+  for (const item of references) {
     const filepath = path.join(output, `${item.key}.md`);
     fs.writeFileSync(filepath, buildMarkdown(item), 'utf-8');
     writtenItems.push({ key: item.key, title: item.data.title || '(no title)' });
@@ -206,19 +222,21 @@ export async function syncLibrary({ since, output, stateFile, apiBase, userId, a
       newVersion,
       totalItems,
       lastSync,
-      newCount: items.length,
+      newCount: references.length,
       deletedCount: deleteCount,
-      addedItems: writtenItems.slice(0, 20),
+      // Every one: the host looks all of them up for an immediate enrichment
+      // run (EnrichmentTriggeredAfterSync) and counts the "…and N more".
+      addedItems: writtenItems,
     }),
     'utf-8',
   );
 
   return {
-    newCount: items.length,
+    newCount: references.length,
     deletedCount: deleteCount,
     newVersion,
     totalItems,
-    items: writtenItems.slice(0, 20),
+    items: writtenItems,
   };
 }
 

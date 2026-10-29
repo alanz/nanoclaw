@@ -3,9 +3,8 @@
  * propagated suite in ./spec/ (one test per `allium plan` obligation, see
  * src/test-utils/spec-harness.ts). What is left here is not an obligation:
  *
- *  - one test whose reading of the spec no longer matches it, kept for the
- *    owner to decide on (flagged STALE below);
- *  - extra schedule and summary cases beyond the obligations.
+ *  - extra schedule and summary cases beyond the obligations, including the
+ *    fallback for a schedule the spec does not allow.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -20,9 +19,6 @@ vi.mock('../../env.js', () => ({
 const HOUR_MS = 3_600_000;
 
 // ─── Schedule helpers (computeNextZoteroCheck) ────────────────────────────────
-// STALE: the last case asserts that a `once` schedule is accepted and treated
-// as an interval; the spec says a SyncState schedule must be cron or interval
-// ("once is not valid").
 
 describe('computeNextZoteroCheck extended', () => {
   it('interval: next check is at least one interval beyond the previous next_check', async () => {
@@ -79,17 +75,28 @@ describe('computeNextZoteroCheck extended', () => {
     expect(new Date(cronNext).getTime()).toBeGreaterThan(fromTime.getTime());
   });
 
-  it('schedule_type must be "interval" or "cron" — other values fall back to interval behaviour', async () => {
-    // The spec states: schedule.type must be cron or interval; once is not valid.
-    // The implementation only branches on 'cron'; anything else falls through to interval.
-    const state = {
-      schedule_type: 'once' as unknown as 'interval',
-      schedule_value: String(HOUR_MS),
-      next_check: new Date(Date.now() - 1000).toISOString(),
-    };
-    const next = computeNextZoteroCheck(state);
-    expect(new Date(next).getTime()).toBeGreaterThan(Date.now());
-  });
+  // zotero.allium: "schedule.type must be cron or interval; once is not valid".
+  // Only a hand edit can store anything else; the monitor falls back to the
+  // default hourly interval instead of hammering Zotero or throwing.
+  const UNUSABLE: Array<[string, string, string]> = [
+    ['a once schedule (an ISO timestamp, ~2 s if read as an interval)', 'once', '2026-01-01T09:00:00Z'],
+    ['an unknown type', 'weekly', String(HOUR_MS)],
+    ['a non-numeric interval (NaN would throw)', 'interval', 'hourly'],
+    ['an interval under a minute', 'interval', '2026'],
+    ['an unparseable cron expression', 'cron', 'not a cron'],
+  ];
+  for (const [what, type, value] of UNUSABLE) {
+    it(`falls back to the default interval for ${what}`, () => {
+      const base = new Date('2026-03-01T08:00:00.000Z');
+      const state = {
+        schedule_type: type as 'interval',
+        schedule_value: value,
+        next_check: base.toISOString(),
+      };
+      const next = computeNextZoteroCheck(state, new Date(base.getTime() + 1_000));
+      expect(new Date(next).getTime()).toBe(base.getTime() + HOUR_MS);
+    });
+  }
 });
 
 // ─── buildSyncSummary additional coverage ────────────────────────────────────

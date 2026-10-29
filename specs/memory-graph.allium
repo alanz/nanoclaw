@@ -39,13 +39,13 @@ use "./sessions.allium" as sessions
 -- The origin of a MemoryNote's content.
 -- Always populated; records provenance for staleness detection.
 value NoteSource {
-    kind: file | url | conversation
-    path: String?          -- relative to group workspace; set when kind = file
-    url: String?           -- set when kind = url
+    type: file | url | conversation
+    path: String?          -- relative to group workspace; set when type = file
+    url: String?           -- set when type = url
     mtime: Timestamp?      -- file mtime at note creation; recorded for a future staleness
                            -- sweep (deferred: SourceStalenessDetection); nothing reads it yet
-    last_fetched: Timestamp?    -- set when kind = url
-    date: Timestamp?            -- set when kind = conversation
+    last_fetched: Timestamp?    -- set when type = url
+    date: Timestamp?            -- set when type = conversation
 }
 
 ------------------------------------------------------------
@@ -79,7 +79,6 @@ value NoteSource {
 entity MemoryNote {
     group: identity/AgentGroup
     id: String                         -- MEM-YYYY-MM-DD-{slug}; unique within group
-    title: String
     content: String
     keywords: Set<String>
     tags: Set<String>
@@ -88,6 +87,11 @@ entity MemoryNote {
     sources: Set<NoteSource>           -- always non-empty; records content provenance
     supersedes: Set<String>            -- IDs of notes (MEM or SYN) this note replaces; empty for most notes
     superseded_by: String?             -- ID of the note that replaced this one; set when it is superseded; mutable
+
+    -- Derived
+    title: title_from_slug(id)         -- the id's slug with hyphens as spaces ("MEM-2026-10-29-dispatch-files"
+                                       -- → "dispatch files"); no title is stored, and the
+                                       -- dashboard labels nodes this way
 }
 
 -- A note that consolidates multiple MemoryNotes into a unified perspective.
@@ -101,7 +105,6 @@ entity MemoryNote {
 entity SynthesisNote {
     group: identity/AgentGroup
     id: String                         -- SYN-YYYY-MM-DD-{slug}; unique within group
-    title: String
     content: String
     keywords: Set<String>
     tags: Set<String>                  -- always includes "synthesis"
@@ -111,6 +114,9 @@ entity SynthesisNote {
     synthesises: Set<String>           -- IDs of MemoryNotes this note consolidates; always non-empty
     supersedes: Set<String>            -- IDs of notes (MEM or SYN) this note replaces
     superseded_by: String?             -- ID of the note that replaced this one; mutable
+
+    -- Derived
+    title: title_from_slug(id)         -- as MemoryNote
 }
 
 -- A candidate the weekly synthesis scan has dealt with: a dense tag cluster or a
@@ -139,7 +145,10 @@ config {
     -- Folder of the researcher specialist AgentGroup in this install. Used to
     -- identify researcher tasks in the rules below; v2 has no SpecialistType
     -- entity, so the specialist is identified by its AgentGroup folder.
-    researcher_folder: String = "specialists-researcher"
+    -- Set per install, not by code: no code names the researcher. It is whichever
+    -- specialist group the main agent's instructions dispatch research to
+    -- (on this install, specialists-researcher).
+    researcher_folder: String
 
     link_candidates_limit: Integer = 10  -- max notes retrieved as link candidates per new note
     back_link_limit: Integer = 3         -- max existing notes updated with a back-link
@@ -346,7 +355,6 @@ rule SynthesisNoteFinalised {
     ensures: SynthesisNote.created(
         group: group,
         id: "SYN-" + date_of(now) + "-" + slug,
-        title: extract_title(approved_content),
         content: approved_content,
         keywords: extract_keywords(approved_content),
         tags: extract_tags(approved_content) + { "synthesis" },
@@ -423,13 +431,12 @@ rule ReportAndNoteCreated {
     ensures: MemoryNote.created(
         group: group,
         id: "MEM-" + date_of(task.dispatched_at) + "-" + slug,
-        title: extract_title(task.result),
         content: task.result,
         keywords: extract_keywords(task.result),
         tags: extract_tags(task.result),
         links: links,
         created: now,
-        sources: { NoteSource{kind: file, path: report_path, mtime: now} },
+        sources: { NoteSource{type: file, path: report_path, mtime: now} },
         supersedes: {},
         superseded_by: null
     )
@@ -462,7 +469,7 @@ rule ReportAndNoteCreated {
         -- (see SupersedingNoteWritten for the shape); a research note normally replaces
         -- nothing.
         -- slug_from_path extracts the date-slug portion from the report filename.
-        -- extract_title, extract_keywords, and extract_tags are LLM calls over task.result
+        -- extract_keywords and extract_tags are LLM calls over task.result
         -- (the inline summary) or over the report file content if task.result is a brief summary.
         -- date_of formats a Timestamp as a YYYY-MM-DD date string.
         -- Writing the report to zettel/reports/ causes memory.allium's FileDiscovered
@@ -528,7 +535,6 @@ rule SupersedingNoteWritten {
     ensures: MemoryNote.created(
         group: group,
         id: "MEM-" + date_of(now) + "-" + slug,
-        title: extract_title(content),
         content: content,
         keywords: extract_keywords(content),
         tags: extract_tags(content),
@@ -715,7 +721,7 @@ surface ZettelkastenWork {
     facing agent: sessions/Session
 
     provides:
-        MainAgentResearchRequest(group, subject) when agent.agent_group.specialist = null
+        MainAgentResearchRequest(group, subject) when agent.agent_group.is_main
         OperatorRequestsSynthesisDraft(group, source_ids, slug) when agent.agent_group.specialist = null
         OperatorApprovesSynthesisDraft(group, source_ids, slug, approved_content, candidate_key?)
             when agent.agent_group.specialist = null
@@ -735,7 +741,9 @@ surface ZettelkastenWork {
 
     @guidance
         -- MainAgentResearchRequest: the operator asks the main agent to research a URL,
-        -- search phrase or Zotero entry. OperatorRequestsSynthesisDraft,
+        -- search phrase or Zotero entry. Only the main group: research is a root
+        -- specialist dispatch, which specialists/MainGroupDispatchesSpecialist allows
+        -- the main group alone. OperatorRequestsSynthesisDraft,
         -- OperatorDeclinesSynthesisCandidate and OperatorApprovesSynthesisDraft: the
         -- operator's answers to a synthesis scan or a shared draft; candidate_key names
         -- the scan candidate a synthesis was drafted for, when there is one.
@@ -770,7 +778,7 @@ deferred OrphanDetection         -- see: memory-graph-consolidation.allium
 
 -- allium-ignore allium.deferred.missingLocationHint
 deferred SourceStalenessDetection -- see: memory-graph-staleness.allium
-                                  -- Aspirational. A sweep stats every kind = file source
+                                  -- Aspirational. A sweep stats every type = file source
                                   -- and flags notes whose source mtime differs from the
                                   -- NoteSource.mtime recorded at creation, so the agent can
                                   -- write a superseding note. Nothing does this today; the

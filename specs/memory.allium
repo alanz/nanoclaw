@@ -248,7 +248,9 @@ config {
     embedding_rpd_budget: Integer = 900 -- requests per 24h window; exhausted → pause 24h, then resume
     embedding_max_consecutive_refusals: Integer = 3 -- consecutive non-daily 429s that end a sync pass
     periodic_sync_interval: Duration = 24.hours     -- a full sync runs this often without any trigger
-    embedding_key_configured: Boolean = true -- an embedding API key is set; the only on/off switch for memory
+    embedding_key_configured: Boolean = false -- an embedding API key is set; the only on/off switch for memory.
+                                              -- An operator secret, so a fresh install has none: memory is off
+                                              -- until one is set
     memory_search_groups: Set<String> = { "main" } -- folder names of groups with memory active; comma-separated in env
 }
 
@@ -299,8 +301,9 @@ rule FileDiscovered {
         -- that record, so nothing of the old file stands in the way.
         -- Includes the files of a registered workspace folder (zettel/, zotero-md/) that did
         -- not exist when the host began indexing the group: every sync looks for such
-        -- folders again — and every search runs a sync first — so a folder created later
-        -- is watched and indexed from the next sync on, without a restart.
+        -- folders again — and every search starts one, without waiting for it — so a
+        -- folder created later is watched and indexed from the next sync on, without a
+        -- restart. A file created just before a search is found by the search after.
         -- Also fires when a specialist delivers a result with commit_to_memory = true
         -- (see specialists/AgentRequestsDeliverSpecialistResult). The host copies the
         -- file into the group's zettel/reports/ before WorkspaceFileChanged is emitted,

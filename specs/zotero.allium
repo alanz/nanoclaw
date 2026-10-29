@@ -393,13 +393,16 @@ rule EnrichmentTriggeredAfterSync {
 rule EnrichmentTriggeredOnRequest {
     when: UserRequestedEnrichment(group)
 
-    let pending = ItemFiles where group = group and abstract = null
+    -- Only not_found records hold an item back (EnrichmentRun); an inconclusive
+    -- item is in the backlog already, so its record is kept for prioritisation.
+    let forgotten = ItemFiles where group = group and abstract = null
+        and abstract_lookup_result = not_found
 
     ensures:
-        for item_file in pending:
+        for item_file in forgotten:
             item_file.abstract_lookup_at = null
     ensures:
-        for item_file in pending:
+        for item_file in forgotten:
             item_file.abstract_lookup_result = null
     ensures: EnrichmentRunRequested(group: group)
 }

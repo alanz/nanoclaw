@@ -21,7 +21,7 @@ export async function upsertZoteroSyncState(state: Omit<ZoteroSyncState, 'update
   await getDb().run(
     `INSERT INTO zotero_sync_state
          (id, agent_group_id, last_version, total_items, last_sync, next_check, schedule_type, schedule_value, updated_at)
-       VALUES (1, @agent_group_id, @last_version, @total_items, @last_sync, @next_check, @schedule_type, @schedule_value, datetime('now'))
+       VALUES (1, @agent_group_id, @last_version, @total_items, @last_sync, @next_check, @schedule_type, @schedule_value, @updated_at)
        ON CONFLICT (id) DO UPDATE SET
          agent_group_id  = excluded.agent_group_id,
          last_version    = excluded.last_version,
@@ -31,14 +31,15 @@ export async function upsertZoteroSyncState(state: Omit<ZoteroSyncState, 'update
          schedule_type   = excluded.schedule_type,
          schedule_value  = excluded.schedule_value,
          updated_at      = excluded.updated_at`,
-    state,
+    { ...state, updated_at: new Date().toISOString() },
   );
 }
 
 export async function updateNextCheck(nextCheck: string): Promise<void> {
   await getDb().run(
-    "UPDATE zotero_sync_state SET next_check = ?, updated_at = datetime('now') WHERE id = 1",
+    'UPDATE zotero_sync_state SET next_check = ?, updated_at = ? WHERE id = 1',
     nextCheck,
+    new Date().toISOString(),
   );
 }
 
@@ -50,11 +51,12 @@ export async function updateAfterSync(
 ): Promise<void> {
   await getDb().run(
     `UPDATE zotero_sync_state
-       SET last_version = ?, total_items = ?, last_sync = ?, next_check = ?, updated_at = datetime('now')
+       SET last_version = ?, total_items = ?, last_sync = ?, next_check = ?, updated_at = ?
        WHERE id = 1`,
     lastVersion,
     totalItems,
     lastSync,
     nextCheck,
+    new Date().toISOString(),
   );
 }

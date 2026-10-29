@@ -281,6 +281,14 @@ obligation('config-default.search_top_k', async () => {
   expect((await search('aardvarks', { top_k: 8 })).results).toHaveLength(8);
 });
 
+obligation('config-default.search_max_top_k', async () => {
+  // Default 20: a larger top_k is capped, not refused.
+  for (let i = 0; i < 25; i++) put(`${MEM}/n${i}.md`, `# N${i}\n\nAardvarks number ${i}.\n`);
+  await start();
+  expect((await search('aardvarks', { top_k: 20 })).results).toHaveLength(20);
+  expect((await search('aardvarks', { top_k: 50 })).results).toHaveLength(20);
+});
+
 obligation('config-default.search_locations_per_file', async () => {
   put(`${MEM}/z.md`, zebraFile(7));
   ctl.queryFails = true;

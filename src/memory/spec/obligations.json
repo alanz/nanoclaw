@@ -120,6 +120,12 @@
     "description": "Verify config parameter search_top_k has its declared default"
   },
   {
+    "id": "config-default.search_max_top_k",
+    "category": "config_default",
+    "construct": "config.search_max_top_k",
+    "description": "Verify config parameter search_max_top_k has its declared default"
+  },
+  {
     "id": "config-default.search_locations_per_file",
     "category": "config_default",
     "construct": "config.search_locations_per_file",

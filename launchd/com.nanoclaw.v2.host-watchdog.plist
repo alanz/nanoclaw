@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- A LaunchDaemon (system domain, runs as root), not a LaunchAgent: it must
+     outlive a GUI logout. Installed by scripts/install-host-watchdog.sh. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nanoclaw.v2.host-watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/usr/local/libexec/nanoclaw/host-watchdog.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/NanoClaw/host-watchdog.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/NanoClaw/host-watchdog.launchd.log</string>
+</dict>
+</plist>

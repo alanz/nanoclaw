@@ -262,6 +262,13 @@ Two runtime facts that are easy to trip over:
   not itself mounted arrives normally.
 - **launchd inherits no shell PATH.** The plist must name `/opt/homebrew/bin`
   or the host starts fine and then cannot find `container` at spawn.
+- **Everything lives in the GUI session.** The host, backup, tailscale-serve and
+  Apple Container's own services are `gui/<uid>` jobs, so a GUI logout (e.g. a
+  WindowServer crash) stops them all and auto-login only fires at boot. The
+  root LaunchDaemon `com.nanoclaw.v2.host-watchdog` (`scripts/host-watchdog.sh`,
+  installed with `sudo bash scripts/install-host-watchdog.sh`) reboots after
+  5 min at the login window and samples memory every 15 min into
+  `/Library/Logs/NanoClaw/memory-samples.tsv`.
 
 ## Contributing
 

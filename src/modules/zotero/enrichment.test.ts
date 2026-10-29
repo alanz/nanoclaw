@@ -105,6 +105,11 @@ describe('itemInBacklog', () => {
     expect(itemInBacklog(item(undefined, ABSTRACT), NOW)).toBe(false);
   });
 
+  it('reads an author/year line with a Unicode line separator in a name as that line', () => {
+    const text = '---\ntitle: T\nzoteroKey: K\n---\n# T\n\n**Stephanie\u2029Weirich (2010)**\n';
+    expect(itemInBacklog(text, NOW)).toBe(true);
+  });
+
   it('sees the abstract of an item with no author/year line', () => {
     expect(itemInBacklog(bareItem(ABSTRACT), NOW)).toBe(false);
     expect(itemInBacklog(bareItem(), NOW)).toBe(true);

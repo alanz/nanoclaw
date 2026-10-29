@@ -121,6 +121,11 @@ describe('hasAbstract', () => {
     assert.equal(hasAbstract('# T\n\nAn abstract.\n'), true);
     assert.equal(hasAbstract('# T\n'), false);
   });
+
+  it('reads an author/year line with a Unicode line separator in a name as that line', () => {
+    // Zotero names can carry U+2029, which `.` in a JS regex does not match.
+    assert.equal(hasAbstract('# T\n\n**Stephanie\u2029Weirich (2010)**\n'), false);
+  });
 });
 
 // ── extractAbstractFromText ───────────────────────────────────────────────────

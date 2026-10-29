@@ -137,7 +137,7 @@ export function itemInBacklog(text: string, now: Date): boolean {
     .filter((l) => l.trim());
   let i = 0;
   if (bodyLines[i]?.startsWith('# ')) i++;
-  if (bodyLines[i] && /^\*\*.*\*\*$/.test(bodyLines[i].trim())) i++;
+  if (bodyLines[i] && /^\*\*[^\n]*\*\*$/.test(bodyLines[i].trim())) i++;
   if (i < bodyLines.length) return false;
   const lookup = text.slice(nl + 1, end).match(LOOKUP_RE);
   if (!lookup || lookup[2] !== 'not_found') return true;

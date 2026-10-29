@@ -91,7 +91,7 @@ export function hasAbstract(body) {
   const lines = body.split('\n').filter((l) => l.trim());
   let i = 0;
   if (lines[i]?.startsWith('# ')) i++;
-  if (lines[i] && /^\*\*.*\*\*$/.test(lines[i].trim())) i++;
+  if (lines[i] && /^\*\*[^\n]*\*\*$/.test(lines[i].trim())) i++;
   return i < lines.length;
 }
 

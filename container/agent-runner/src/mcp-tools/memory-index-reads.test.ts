@@ -145,13 +145,13 @@ describe('memory_list_files', () => {
     expect(a.map((f) => f.path)).toEqual([MEM]);
   });
 
-  // DIVERGENCE (specs/memory.allium MemoryListParams.path_prefix, "restrict
-  // listing to files under this path prefix"): the listing matches the prefix
-  // with SQL LIKE, so `_` and `%` in it are wildcards and files outside the
-  // prefix are listed. memory_search (host and keyword fallback) matches it
-  // literally. Expected to fail until the listing does the same.
-  it.failing('memory_list_files path_prefix is literal: LIKE wildcards in it match nothing extra', async () => {
+  it('memory_list_files path_prefix is literal: LIKE wildcards in it match nothing extra', async () => {
     expect((await list({ path_prefix: 'groups/main/m_mory/' })).map((f) => f.path)).toEqual([]);
+    expect((await list({ path_prefix: 'groups/main/%' })).map((f) => f.path)).toEqual([]);
+  });
+
+  it('memory_list_files path_prefix is case-sensitive, as memory_search matches it', async () => {
+    expect((await list({ path_prefix: 'groups/main/MEMORY/' })).map((f) => f.path)).toEqual([]);
   });
 });
 

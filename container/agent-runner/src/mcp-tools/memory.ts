@@ -444,8 +444,10 @@ export const memoryListFiles: McpToolDefinition = {
       const params: (string | number)[] = [];
 
       if (pathPrefix) {
-        conditions.push('path LIKE ?');
-        params.push(`${pathPrefix}%`);
+        // A literal, case-sensitive prefix, as memory_search matches it. LIKE
+        // would read `_`/`%` in the prefix as wildcards and ignore ASCII case.
+        conditions.push('instr(path, ?) = 1');
+        params.push(pathPrefix);
       }
       if (source) {
         conditions.push('source = ?');

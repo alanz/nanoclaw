@@ -1,0 +1,416 @@
+[
+  {
+    "id": "value-equality.NoteSource",
+    "category": "value_equality",
+    "construct": "NoteSource",
+    "description": "Verify value type NoteSource has structural equality"
+  },
+  {
+    "id": "entity-fields.NoteSource",
+    "category": "entity_fields",
+    "construct": "NoteSource",
+    "description": "Verify all declared fields on NoteSource are present with correct types"
+  },
+  {
+    "id": "entity-fields.MemoryNote",
+    "category": "entity_fields",
+    "construct": "MemoryNote",
+    "description": "Verify all declared fields on MemoryNote are present with correct types"
+  },
+  {
+    "id": "entity-optional.MemoryNote.superseded_by",
+    "category": "entity_optional",
+    "construct": "MemoryNote.superseded_by",
+    "description": "Verify optional field MemoryNote.superseded_by accepts null and non-null values"
+  },
+  {
+    "id": "entity-fields.SynthesisNote",
+    "category": "entity_fields",
+    "construct": "SynthesisNote",
+    "description": "Verify all declared fields on SynthesisNote are present with correct types"
+  },
+  {
+    "id": "entity-optional.SynthesisNote.superseded_by",
+    "category": "entity_optional",
+    "construct": "SynthesisNote.superseded_by",
+    "description": "Verify optional field SynthesisNote.superseded_by accepts null and non-null values"
+  },
+  {
+    "id": "transition-edge.SynthesisCandidate.surfaced.declined",
+    "category": "transition_edge",
+    "construct": "SynthesisCandidate.disposition",
+    "description": "Verify transition surfaced -> declined on SynthesisCandidate.disposition is reachable via a witnessing rule"
+  },
+  {
+    "id": "transition-edge.SynthesisCandidate.surfaced.synthesised",
+    "category": "transition_edge",
+    "construct": "SynthesisCandidate.disposition",
+    "description": "Verify transition surfaced -> synthesised on SynthesisCandidate.disposition is reachable via a witnessing rule"
+  },
+  {
+    "id": "transition-edge.SynthesisCandidate.synthesised.surfaced",
+    "category": "transition_edge",
+    "construct": "SynthesisCandidate.disposition",
+    "description": "Verify transition synthesised -> surfaced on SynthesisCandidate.disposition is reachable via a witnessing rule"
+  },
+  {
+    "id": "transition-rejected.SynthesisCandidate.disposition",
+    "category": "transition_rejected",
+    "construct": "SynthesisCandidate.disposition",
+    "description": "Verify undeclared transitions on SynthesisCandidate.disposition are rejected"
+  },
+  {
+    "id": "transition-terminal.SynthesisCandidate.disposition",
+    "category": "transition_terminal",
+    "construct": "SynthesisCandidate.disposition",
+    "description": "Verify terminal states on SynthesisCandidate.disposition have no outbound transitions"
+  },
+  {
+    "id": "entity-fields.SynthesisCandidate",
+    "category": "entity_fields",
+    "construct": "SynthesisCandidate",
+    "description": "Verify all declared fields on SynthesisCandidate are present with correct types"
+  },
+  {
+    "id": "config-default.researcher_folder",
+    "category": "config_default",
+    "construct": "config.researcher_folder",
+    "description": "Verify config parameter researcher_folder has its declared default"
+  },
+  {
+    "id": "config-default.link_candidates_limit",
+    "category": "config_default",
+    "construct": "config.link_candidates_limit",
+    "description": "Verify config parameter link_candidates_limit has its declared default"
+  },
+  {
+    "id": "config-default.back_link_limit",
+    "category": "config_default",
+    "construct": "config.back_link_limit",
+    "description": "Verify config parameter back_link_limit has its declared default"
+  },
+  {
+    "id": "config-default.min_link_score",
+    "category": "config_default",
+    "construct": "config.min_link_score",
+    "description": "Verify config parameter min_link_score has its declared default"
+  },
+  {
+    "id": "config-default.duplicate_check_limit",
+    "category": "config_default",
+    "construct": "config.duplicate_check_limit",
+    "description": "Verify config parameter duplicate_check_limit has its declared default"
+  },
+  {
+    "id": "config-default.duplicate_check_score",
+    "category": "config_default",
+    "construct": "config.duplicate_check_score",
+    "description": "Verify config parameter duplicate_check_score has its declared default"
+  },
+  {
+    "id": "config-default.duplicate_check_source",
+    "category": "config_default",
+    "construct": "config.duplicate_check_source",
+    "description": "Verify config parameter duplicate_check_source has its declared default"
+  },
+  {
+    "id": "config-default.synthesis_scan_schedule",
+    "category": "config_default",
+    "construct": "config.synthesis_scan_schedule",
+    "description": "Verify config parameter synthesis_scan_schedule has its declared default"
+  },
+  {
+    "id": "config-default.synthesis_dense_tag_min",
+    "category": "config_default",
+    "construct": "config.synthesis_dense_tag_min",
+    "description": "Verify config parameter synthesis_dense_tag_min has its declared default"
+  },
+  {
+    "id": "config-default.synthesis_dense_link_min",
+    "category": "config_default",
+    "construct": "config.synthesis_dense_link_min",
+    "description": "Verify config parameter synthesis_dense_link_min has its declared default"
+  },
+  {
+    "id": "config-default.synthesis_max_candidates",
+    "category": "config_default",
+    "construct": "config.synthesis_max_candidates",
+    "description": "Verify config parameter synthesis_max_candidates has its declared default"
+  },
+  {
+    "id": "config-default.synthesis_resurface_growth",
+    "category": "config_default",
+    "construct": "config.synthesis_resurface_growth",
+    "description": "Verify config parameter synthesis_resurface_growth has its declared default"
+  },
+  {
+    "id": "rule-success.DuplicateCheckPerformed",
+    "category": "rule_success",
+    "construct": "DuplicateCheckPerformed",
+    "description": "Verify rule DuplicateCheckPerformed succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.ResearchDispatched",
+    "category": "rule_success",
+    "construct": "ResearchDispatched",
+    "description": "Verify rule ResearchDispatched succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.ResearchDispatched.1",
+    "category": "rule_failure",
+    "construct": "ResearchDispatched",
+    "description": "Verify rule ResearchDispatched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ResearchDispatched.2",
+    "category": "rule_failure",
+    "construct": "ResearchDispatched",
+    "description": "Verify rule ResearchDispatched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-entity-creation.ResearchDispatched.1",
+    "category": "rule_entity_creation",
+    "construct": "ResearchDispatched",
+    "description": "Verify entity creation in rule ResearchDispatched ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.SynthesisCandidatesScanned",
+    "category": "rule_success",
+    "construct": "SynthesisCandidatesScanned",
+    "description": "Verify rule SynthesisCandidatesScanned succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SynthesisCandidatesScanned.1",
+    "category": "rule_failure",
+    "construct": "SynthesisCandidatesScanned",
+    "description": "Verify rule SynthesisCandidatesScanned is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.SynthesisCandidatesScanned.2",
+    "category": "rule_failure",
+    "construct": "SynthesisCandidatesScanned",
+    "description": "Verify rule SynthesisCandidatesScanned is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.SynthesisCandidateDeclined",
+    "category": "rule_success",
+    "construct": "SynthesisCandidateDeclined",
+    "description": "Verify rule SynthesisCandidateDeclined succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SynthesisCandidateDeclined.1",
+    "category": "rule_failure",
+    "construct": "SynthesisCandidateDeclined",
+    "description": "Verify rule SynthesisCandidateDeclined is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.SynthesisCandidateDeclined.2",
+    "category": "rule_failure",
+    "construct": "SynthesisCandidateDeclined",
+    "description": "Verify rule SynthesisCandidateDeclined is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.SynthesisDraftCreated",
+    "category": "rule_success",
+    "construct": "SynthesisDraftCreated",
+    "description": "Verify rule SynthesisDraftCreated succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SynthesisDraftCreated.1",
+    "category": "rule_failure",
+    "construct": "SynthesisDraftCreated",
+    "description": "Verify rule SynthesisDraftCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.SynthesisNoteFinalised",
+    "category": "rule_success",
+    "construct": "SynthesisNoteFinalised",
+    "description": "Verify rule SynthesisNoteFinalised succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SynthesisNoteFinalised.1",
+    "category": "rule_failure",
+    "construct": "SynthesisNoteFinalised",
+    "description": "Verify rule SynthesisNoteFinalised is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.SynthesisNoteFinalised.2",
+    "category": "rule_failure",
+    "construct": "SynthesisNoteFinalised",
+    "description": "Verify rule SynthesisNoteFinalised is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-entity-creation.SynthesisNoteFinalised.1",
+    "category": "rule_entity_creation",
+    "construct": "SynthesisNoteFinalised",
+    "description": "Verify entity creation in rule SynthesisNoteFinalised ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.SynthesisCandidateSynthesised",
+    "category": "rule_success",
+    "construct": "SynthesisCandidateSynthesised",
+    "description": "Verify rule SynthesisCandidateSynthesised succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SynthesisCandidateSynthesised.1",
+    "category": "rule_failure",
+    "construct": "SynthesisCandidateSynthesised",
+    "description": "Verify rule SynthesisCandidateSynthesised is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.SynthesisCandidateSynthesised.2",
+    "category": "rule_failure",
+    "construct": "SynthesisCandidateSynthesised",
+    "description": "Verify rule SynthesisCandidateSynthesised is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.SynthesisCandidateSynthesised.3",
+    "category": "rule_failure",
+    "construct": "SynthesisCandidateSynthesised",
+    "description": "Verify rule SynthesisCandidateSynthesised is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.ReportAndNoteCreated",
+    "category": "rule_success",
+    "construct": "ReportAndNoteCreated",
+    "description": "Verify rule ReportAndNoteCreated succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.ReportAndNoteCreated.1",
+    "category": "rule_failure",
+    "construct": "ReportAndNoteCreated",
+    "description": "Verify rule ReportAndNoteCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ReportAndNoteCreated.2",
+    "category": "rule_failure",
+    "construct": "ReportAndNoteCreated",
+    "description": "Verify rule ReportAndNoteCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ReportAndNoteCreated.3",
+    "category": "rule_failure",
+    "construct": "ReportAndNoteCreated",
+    "description": "Verify rule ReportAndNoteCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.ReportAndNoteCreated.4",
+    "category": "rule_failure",
+    "construct": "ReportAndNoteCreated",
+    "description": "Verify rule ReportAndNoteCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-entity-creation.ReportAndNoteCreated.1",
+    "category": "rule_entity_creation",
+    "construct": "ReportAndNoteCreated",
+    "description": "Verify entity creation in rule ReportAndNoteCreated ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.BackLinksWritten",
+    "category": "rule_success",
+    "construct": "BackLinksWritten",
+    "description": "Verify rule BackLinksWritten succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-success.SupersedingNoteWritten",
+    "category": "rule_success",
+    "construct": "SupersedingNoteWritten",
+    "description": "Verify rule SupersedingNoteWritten succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SupersedingNoteWritten.1",
+    "category": "rule_failure",
+    "construct": "SupersedingNoteWritten",
+    "description": "Verify rule SupersedingNoteWritten is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.SupersedingNoteWritten.2",
+    "category": "rule_failure",
+    "construct": "SupersedingNoteWritten",
+    "description": "Verify rule SupersedingNoteWritten is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.SupersedingNoteWritten.3",
+    "category": "rule_failure",
+    "construct": "SupersedingNoteWritten",
+    "description": "Verify rule SupersedingNoteWritten is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-entity-creation.SupersedingNoteWritten.1",
+    "category": "rule_entity_creation",
+    "construct": "SupersedingNoteWritten",
+    "description": "Verify entity creation in rule SupersedingNoteWritten ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.MemoryNoteSupersedes",
+    "category": "rule_success",
+    "construct": "MemoryNoteSupersedes",
+    "description": "Verify rule MemoryNoteSupersedes succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.MemoryNoteSupersedes.1",
+    "category": "rule_failure",
+    "construct": "MemoryNoteSupersedes",
+    "description": "Verify rule MemoryNoteSupersedes is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.SynthesisNoteSupersedes",
+    "category": "rule_success",
+    "construct": "SynthesisNoteSupersedes",
+    "description": "Verify rule SynthesisNoteSupersedes succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.SynthesisNoteSupersedes.1",
+    "category": "rule_failure",
+    "construct": "SynthesisNoteSupersedes",
+    "description": "Verify rule SynthesisNoteSupersedes is rejected when requires clause fails"
+  },
+  {
+    "id": "invariant.LinksResolve",
+    "category": "invariant",
+    "construct": "LinksResolve",
+    "description": "Verify invariant LinksResolve holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.NoNewLinksToSuperseded",
+    "category": "invariant",
+    "construct": "NoNewLinksToSuperseded",
+    "description": "Verify invariant NoNewLinksToSuperseded holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.SynthesisesResolve",
+    "category": "invariant",
+    "construct": "SynthesisesResolve",
+    "description": "Verify invariant SynthesisesResolve holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.SupersessionRecordedOnBothSides",
+    "category": "invariant",
+    "construct": "SupersessionRecordedOnBothSides",
+    "description": "Verify invariant SupersessionRecordedOnBothSides holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.NotesCreatedByMainAgentOnly",
+    "category": "invariant",
+    "construct": "NotesCreatedByMainAgentOnly",
+    "description": "Verify invariant NotesCreatedByMainAgentOnly holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.ResearcherKnowledgeIsolation",
+    "category": "invariant",
+    "construct": "ResearcherKnowledgeIsolation",
+    "description": "Verify invariant ResearcherKnowledgeIsolation holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "surface-actor.ZettelkastenWork",
+    "category": "surface_actor",
+    "construct": "ZettelkastenWork",
+    "description": "Verify surface ZettelkastenWork is accessible only to the specified actor"
+  },
+  {
+    "id": "surface-provides.ZettelkastenWork",
+    "category": "surface_provides",
+    "construct": "ZettelkastenWork",
+    "description": "Verify provided operations on ZettelkastenWork appear/hide based on when conditions"
+  }
+]

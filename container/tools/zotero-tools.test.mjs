@@ -148,22 +148,13 @@ describe('validateAbstract', () => {
     assert.equal(validateAbstract(text), text);
   });
 
-  it(`truncates text longer than ${MAX_ABSTRACT} chars and appends ellipsis`, () => {
-    const text = 'a'.repeat(MAX_ABSTRACT + 100);
-    const result = validateAbstract(text);
-    assert.ok(result !== null);
-    assert.ok(result.endsWith('…'));
-    assert.ok(result.length <= MAX_ABSTRACT + 1); // +1 for the ellipsis char
+  it(`rejects text longer than ${MAX_ABSTRACT} chars rather than truncating it`, () => {
+    assert.equal(validateAbstract('a'.repeat(MAX_ABSTRACT + 1)), null);
   });
 
-  it('truncates at a word boundary, not mid-word', () => {
-    // Build a string of exactly MAX_ABSTRACT+1 chars that ends with a full word
-    const word = 'overflow';
-    const padding = 'x '.repeat(Math.floor((MAX_ABSTRACT - word.length) / 2));
-    const text = (padding + word + ' ').slice(0, MAX_ABSTRACT + 50);
-    const result = validateAbstract(text);
-    assert.ok(result !== null);
-    assert.ok(!result.slice(0, -1).endsWith(' ')); // no trailing space before ellipsis
+  it(`accepts text of exactly ${MAX_ABSTRACT} chars`, () => {
+    const text = 'a'.repeat(MAX_ABSTRACT);
+    assert.equal(validateAbstract(text), text);
   });
 });
 

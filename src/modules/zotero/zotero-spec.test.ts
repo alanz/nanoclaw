@@ -3,7 +3,7 @@
  * propagated suite in ./spec/ (one test per `allium plan` obligation, see
  * src/test-utils/spec-harness.ts). What is left here is not an obligation:
  *
- *  - two tests whose reading of the spec no longer matches it, kept for the
+ *  - one test whose reading of the spec no longer matches it, kept for the
  *    owner to decide on (flagged STALE below);
  *  - extra schedule and summary cases beyond the obligations.
  */
@@ -17,27 +17,7 @@ vi.mock('../../env.js', () => ({
   readEnvFile: () => ({ ZOTERO_API_KEY: 'test-key', ZOTERO_USER_ID: '12345' }),
 }));
 
-const MAX_ABSTRACT_LENGTH = 3000; // chars
 const HOUR_MS = 3_600_000;
-
-// ─── STALE: AbstractEnriched over-long abstracts ─────────────────────────────
-// The current spec rejects an abstract over max_abstract_length ("longer
-// extracted text is rejected"); this test's reading — that truncation
-// satisfies the requires clause — is the code's behaviour, not the spec's.
-// The obligation is spec/abstracts.test.ts rule-failure.AbstractEnriched.4
-// (a divergence). This test asserts nothing about the code.
-
-describe('AbstractEnriched rule — abstract length validation (validateAbstract contract)', () => {
-  it('failure rule.4: abstract rejected when length > max_abstract_length (uncapped)', async () => {
-    // validateAbstract truncates rather than outright rejecting, but the spec
-    // says requires: found.text.length <= max_abstract_length. In the implementation
-    // validateAbstract caps the text with an ellipsis rather than returning null,
-    // so very long texts ARE accepted but truncated. The spec requires are satisfied
-    // by the truncation ensuring the stored value fits within the bound.
-    const tooLong = 'a '.repeat(MAX_ABSTRACT_LENGTH);
-    expect(tooLong.length).toBeGreaterThan(MAX_ABSTRACT_LENGTH);
-  });
-});
 
 // ─── Schedule helpers (computeNextZoteroCheck) ────────────────────────────────
 // STALE: the last case asserts that a `once` schedule is accepted and treated

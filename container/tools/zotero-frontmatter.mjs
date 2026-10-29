@@ -47,12 +47,13 @@ export function addFrontMatterField(text, key, value) {
 }
 
 /**
- * Validate abstract length against configured bounds.
- * Returns null if too short, truncates at a word boundary if too long.
+ * Validate abstract length against configured bounds: null outside them.
+ * Over-long text is rejected, not truncated (zotero.allium max_abstract_length):
+ * a cut-down abstract still reads as plausible, and from PDF extraction it is
+ * usually body text the heuristic ran on into, not an abstract at all.
  */
 export function validateAbstract(text) {
-  if (!text || text.length < MIN_ABSTRACT) return null;
-  if (text.length > MAX_ABSTRACT) return text.slice(0, MAX_ABSTRACT).replace(/ \S+$/, '') + '…';
+  if (!text || text.length < MIN_ABSTRACT || text.length > MAX_ABSTRACT) return null;
   return text;
 }
 

@@ -208,7 +208,9 @@ function extractAbstractFromText(text) {
 
   const cleaned = raw.replace(/\s+/g, ' ').trim();
   if (cleaned.length < 80) return null;
-  if (cleaned.length > 3000) return cleaned.slice(0, 3000).replace(/ \S+$/, '') + '…';
+  // Longer than any real abstract: the end marker was missed or the wrong
+  // "Abstract" matched, so this is body text. Reject rather than truncate.
+  if (cleaned.length > 3000) return null;
 
   return cleaned;
 }

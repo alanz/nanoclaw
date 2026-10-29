@@ -29,7 +29,7 @@ vi.mock('child_process', async (importOriginal) => {
   };
 });
 
-import { divergence, obligation } from './harness.js';
+import { obligation } from './harness.js';
 import {
   fastPauses,
   itemFile,
@@ -443,16 +443,12 @@ obligation('rule-failure.AbstractEnriched.3', async () => {
   expect(itemOf('A')).toMatchObject({ abstract: null, abstract_source: null });
 });
 
-divergence(
-  'rule-failure.AbstractEnriched.4',
-  'validateAbstract truncates an over-long abstract to max_abstract_length and stores it, instead of rejecting it',
-  async () => {
-    write('A', itemFile('A', { doi: '10.1000/a' }));
-    net.route = (u) => (s2(u) ? json({ abstract: words(3500) }) : undefined);
-    await passWithExternal();
-    expect(itemOf('A').abstract, 'an abstract over 3000 chars must be rejected').toBeNull();
-  },
-);
+obligation('rule-failure.AbstractEnriched.4', async () => {
+  write('A', itemFile('A', { doi: '10.1000/a' }));
+  net.route = (u) => (s2(u) ? json({ abstract: words(3500) }) : undefined);
+  await passWithExternal();
+  expect(itemOf('A').abstract, 'an abstract over 3000 chars must be rejected').toBeNull();
+});
 
 // ── PdfAbstractExtracted ────────────────────────────────────────────────────
 
@@ -514,16 +510,13 @@ obligation('rule-failure.PdfAbstractExtracted.5', async () => {
   expect(itemOf('Q')).toMatchObject({ abstract: words(80), abstract_source: 'pdf_extraction' });
 });
 
-divergence(
-  'rule-failure.PdfAbstractExtracted.6',
-  'extractAbstractFromText truncates an over-long abstract section to max_abstract_length and stores it, instead of rejecting it',
-  async () => {
-    write('P', itemFile('P'));
-    net.route = pdfRoutes('P', { size: 1000, text: pdfText(words(3500)) });
-    await passWithPdf();
-    expect(itemOf('P').abstract, 'an extracted abstract over 3000 chars must be rejected').toBeNull();
-  },
-);
+obligation('rule-failure.PdfAbstractExtracted.6', async () => {
+  write('P', itemFile('P'));
+  net.route = pdfRoutes('P', { size: 1000, text: pdfText(words(3500)) });
+  await passWithPdf();
+  // Rejected text counts as extraction finding nothing (AbstractLookupRecorded).
+  expect(itemOf('P')).toMatchObject({ abstract: null, abstract_source: null, abstract_lookup_result: 'not_found' });
+});
 
 // ── Invariants ──────────────────────────────────────────────────────────────
 

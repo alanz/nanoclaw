@@ -1,0 +1,560 @@
+[
+  {
+    "id": "value-equality.MemorySearchResult",
+    "category": "value_equality",
+    "construct": "MemorySearchResult",
+    "description": "Verify value type MemorySearchResult has structural equality"
+  },
+  {
+    "id": "entity-fields.MemorySearchResult",
+    "category": "entity_fields",
+    "construct": "MemorySearchResult",
+    "description": "Verify all declared fields on MemorySearchResult are present with correct types"
+  },
+  {
+    "id": "value-equality.MemorySearchLocation",
+    "category": "value_equality",
+    "construct": "MemorySearchLocation",
+    "description": "Verify value type MemorySearchLocation has structural equality"
+  },
+  {
+    "id": "entity-fields.MemorySearchLocation",
+    "category": "entity_fields",
+    "construct": "MemorySearchLocation",
+    "description": "Verify all declared fields on MemorySearchLocation are present with correct types"
+  },
+  {
+    "id": "value-equality.MemorySearchParams",
+    "category": "value_equality",
+    "construct": "MemorySearchParams",
+    "description": "Verify value type MemorySearchParams has structural equality"
+  },
+  {
+    "id": "entity-fields.MemorySearchParams",
+    "category": "entity_fields",
+    "construct": "MemorySearchParams",
+    "description": "Verify all declared fields on MemorySearchParams are present with correct types"
+  },
+  {
+    "id": "value-equality.MemoryListParams",
+    "category": "value_equality",
+    "construct": "MemoryListParams",
+    "description": "Verify value type MemoryListParams has structural equality"
+  },
+  {
+    "id": "entity-fields.MemoryListParams",
+    "category": "entity_fields",
+    "construct": "MemoryListParams",
+    "description": "Verify all declared fields on MemoryListParams are present with correct types"
+  },
+  {
+    "id": "transition-edge.MemoryFile.pending.indexed",
+    "category": "transition_edge",
+    "construct": "MemoryFile.status",
+    "description": "Verify transition pending -> indexed on MemoryFile.status is reachable via a witnessing rule"
+  },
+  {
+    "id": "transition-edge.MemoryFile.indexed.pending",
+    "category": "transition_edge",
+    "construct": "MemoryFile.status",
+    "description": "Verify transition indexed -> pending on MemoryFile.status is reachable via a witnessing rule"
+  },
+  {
+    "id": "transition-rejected.MemoryFile.status",
+    "category": "transition_rejected",
+    "construct": "MemoryFile.status",
+    "description": "Verify undeclared transitions on MemoryFile.status are rejected"
+  },
+  {
+    "id": "entity-fields.MemoryFile",
+    "category": "entity_fields",
+    "construct": "MemoryFile",
+    "description": "Verify all declared fields on MemoryFile are present with correct types"
+  },
+  {
+    "id": "entity-optional.MemoryFile.indexed_at",
+    "category": "entity_optional",
+    "construct": "MemoryFile.indexed_at",
+    "description": "Verify optional field MemoryFile.indexed_at accepts null and non-null values"
+  },
+  {
+    "id": "entity-relationship.MemoryFile.chunks",
+    "category": "entity_relationship",
+    "construct": "MemoryFile.chunks",
+    "description": "Verify relationship MemoryFile.chunks navigates to the correct related entities"
+  },
+  {
+    "id": "entity-fields.MemoryChunk",
+    "category": "entity_fields",
+    "construct": "MemoryChunk",
+    "description": "Verify all declared fields on MemoryChunk are present with correct types"
+  },
+  {
+    "id": "entity-fields.MemoryIndex",
+    "category": "entity_fields",
+    "construct": "MemoryIndex",
+    "description": "Verify all declared fields on MemoryIndex are present with correct types"
+  },
+  {
+    "id": "entity-optional.MemoryIndex.built_with",
+    "category": "entity_optional",
+    "construct": "MemoryIndex.built_with",
+    "description": "Verify optional field MemoryIndex.built_with accepts null and non-null values"
+  },
+  {
+    "id": "config-default.chunk_tokens",
+    "category": "config_default",
+    "construct": "config.chunk_tokens",
+    "description": "Verify config parameter chunk_tokens has its declared default"
+  },
+  {
+    "id": "config-default.chunk_overlap_tokens",
+    "category": "config_default",
+    "construct": "config.chunk_overlap_tokens",
+    "description": "Verify config parameter chunk_overlap_tokens has its declared default"
+  },
+  {
+    "id": "config-default.search_top_k",
+    "category": "config_default",
+    "construct": "config.search_top_k",
+    "description": "Verify config parameter search_top_k has its declared default"
+  },
+  {
+    "id": "config-default.search_locations_per_file",
+    "category": "config_default",
+    "construct": "config.search_locations_per_file",
+    "description": "Verify config parameter search_locations_per_file has its declared default"
+  },
+  {
+    "id": "config-default.min_search_score",
+    "category": "config_default",
+    "construct": "config.min_search_score",
+    "description": "Verify config parameter min_search_score has its declared default"
+  },
+  {
+    "id": "config-default.min_keyword_score",
+    "category": "config_default",
+    "construct": "config.min_keyword_score",
+    "description": "Verify config parameter min_keyword_score has its declared default"
+  },
+  {
+    "id": "config-default.search_host_timeout",
+    "category": "config_default",
+    "construct": "config.search_host_timeout",
+    "description": "Verify config parameter search_host_timeout has its declared default"
+  },
+  {
+    "id": "config-default.search_embed_wait",
+    "category": "config_default",
+    "construct": "config.search_embed_wait",
+    "description": "Verify config parameter search_embed_wait has its declared default"
+  },
+  {
+    "id": "config-default.vector_score_weight",
+    "category": "config_default",
+    "construct": "config.vector_score_weight",
+    "description": "Verify config parameter vector_score_weight has its declared default"
+  },
+  {
+    "id": "config-default.keyword_score_weight",
+    "category": "config_default",
+    "construct": "config.keyword_score_weight",
+    "description": "Verify config parameter keyword_score_weight has its declared default"
+  },
+  {
+    "id": "config-default.embedding_provider",
+    "category": "config_default",
+    "construct": "config.embedding_provider",
+    "description": "Verify config parameter embedding_provider has its declared default"
+  },
+  {
+    "id": "config-default.embedding_rpm_limit",
+    "category": "config_default",
+    "construct": "config.embedding_rpm_limit",
+    "description": "Verify config parameter embedding_rpm_limit has its declared default"
+  },
+  {
+    "id": "config-default.embedding_tpm_limit",
+    "category": "config_default",
+    "construct": "config.embedding_tpm_limit",
+    "description": "Verify config parameter embedding_tpm_limit has its declared default"
+  },
+  {
+    "id": "config-default.embedding_rpd_budget",
+    "category": "config_default",
+    "construct": "config.embedding_rpd_budget",
+    "description": "Verify config parameter embedding_rpd_budget has its declared default"
+  },
+  {
+    "id": "config-default.embedding_max_consecutive_refusals",
+    "category": "config_default",
+    "construct": "config.embedding_max_consecutive_refusals",
+    "description": "Verify config parameter embedding_max_consecutive_refusals has its declared default"
+  },
+  {
+    "id": "config-default.periodic_sync_interval",
+    "category": "config_default",
+    "construct": "config.periodic_sync_interval",
+    "description": "Verify config parameter periodic_sync_interval has its declared default"
+  },
+  {
+    "id": "config-default.embedding_key_configured",
+    "category": "config_default",
+    "construct": "config.embedding_key_configured",
+    "description": "Verify config parameter embedding_key_configured has its declared default"
+  },
+  {
+    "id": "config-default.memory_search_groups",
+    "category": "config_default",
+    "construct": "config.memory_search_groups",
+    "description": "Verify config parameter memory_search_groups has its declared default"
+  },
+  {
+    "id": "rule-success.FileUpdated",
+    "category": "rule_success",
+    "construct": "FileUpdated",
+    "description": "Verify rule FileUpdated succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.FileUpdated.1",
+    "category": "rule_failure",
+    "construct": "FileUpdated",
+    "description": "Verify rule FileUpdated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileUpdated.2",
+    "category": "rule_failure",
+    "construct": "FileUpdated",
+    "description": "Verify rule FileUpdated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileUpdated.3",
+    "category": "rule_failure",
+    "construct": "FileUpdated",
+    "description": "Verify rule FileUpdated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileUpdated.4",
+    "category": "rule_failure",
+    "construct": "FileUpdated",
+    "description": "Verify rule FileUpdated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileUpdated.5",
+    "category": "rule_failure",
+    "construct": "FileUpdated",
+    "description": "Verify rule FileUpdated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.FileDiscovered",
+    "category": "rule_success",
+    "construct": "FileDiscovered",
+    "description": "Verify rule FileDiscovered succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.FileDiscovered.1",
+    "category": "rule_failure",
+    "construct": "FileDiscovered",
+    "description": "Verify rule FileDiscovered is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileDiscovered.2",
+    "category": "rule_failure",
+    "construct": "FileDiscovered",
+    "description": "Verify rule FileDiscovered is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileDiscovered.3",
+    "category": "rule_failure",
+    "construct": "FileDiscovered",
+    "description": "Verify rule FileDiscovered is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileDiscovered.4",
+    "category": "rule_failure",
+    "construct": "FileDiscovered",
+    "description": "Verify rule FileDiscovered is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-entity-creation.FileDiscovered.1",
+    "category": "rule_entity_creation",
+    "construct": "FileDiscovered",
+    "description": "Verify entity creation in rule FileDiscovered ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.FileRemoved",
+    "category": "rule_success",
+    "construct": "FileRemoved",
+    "description": "Verify rule FileRemoved succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.FileRemoved.1",
+    "category": "rule_failure",
+    "construct": "FileRemoved",
+    "description": "Verify rule FileRemoved is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileRemoved.2",
+    "category": "rule_failure",
+    "construct": "FileRemoved",
+    "description": "Verify rule FileRemoved is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileRemoved.3",
+    "category": "rule_failure",
+    "construct": "FileRemoved",
+    "description": "Verify rule FileRemoved is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileRemoved.4",
+    "category": "rule_failure",
+    "construct": "FileRemoved",
+    "description": "Verify rule FileRemoved is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.FileSynced",
+    "category": "rule_success",
+    "construct": "FileSynced",
+    "description": "Verify rule FileSynced succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.FileSynced.1",
+    "category": "rule_failure",
+    "construct": "FileSynced",
+    "description": "Verify rule FileSynced is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileSynced.2",
+    "category": "rule_failure",
+    "construct": "FileSynced",
+    "description": "Verify rule FileSynced is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileSynced.3",
+    "category": "rule_failure",
+    "construct": "FileSynced",
+    "description": "Verify rule FileSynced is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.FileSynced.4",
+    "category": "rule_failure",
+    "construct": "FileSynced",
+    "description": "Verify rule FileSynced is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.MemoryIndexCreated",
+    "category": "rule_success",
+    "construct": "MemoryIndexCreated",
+    "description": "Verify rule MemoryIndexCreated succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.MemoryIndexCreated.1",
+    "category": "rule_failure",
+    "construct": "MemoryIndexCreated",
+    "description": "Verify rule MemoryIndexCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryIndexCreated.2",
+    "category": "rule_failure",
+    "construct": "MemoryIndexCreated",
+    "description": "Verify rule MemoryIndexCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryIndexCreated.3",
+    "category": "rule_failure",
+    "construct": "MemoryIndexCreated",
+    "description": "Verify rule MemoryIndexCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryIndexCreated.4",
+    "category": "rule_failure",
+    "construct": "MemoryIndexCreated",
+    "description": "Verify rule MemoryIndexCreated is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-entity-creation.MemoryIndexCreated.1",
+    "category": "rule_entity_creation",
+    "construct": "MemoryIndexCreated",
+    "description": "Verify entity creation in rule MemoryIndexCreated ensures clause produces the specified fields"
+  },
+  {
+    "id": "rule-success.IndexSettingsChanged",
+    "category": "rule_success",
+    "construct": "IndexSettingsChanged",
+    "description": "Verify rule IndexSettingsChanged succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.IndexSettingsChanged.1",
+    "category": "rule_failure",
+    "construct": "IndexSettingsChanged",
+    "description": "Verify rule IndexSettingsChanged is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.IndexSettingsChanged.2",
+    "category": "rule_failure",
+    "construct": "IndexSettingsChanged",
+    "description": "Verify rule IndexSettingsChanged is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.IndexSettingsChanged.3",
+    "category": "rule_failure",
+    "construct": "IndexSettingsChanged",
+    "description": "Verify rule IndexSettingsChanged is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.IndexSettingsChanged.4",
+    "category": "rule_failure",
+    "construct": "IndexSettingsChanged",
+    "description": "Verify rule IndexSettingsChanged is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.IndexSettingsChanged.5",
+    "category": "rule_failure",
+    "construct": "IndexSettingsChanged",
+    "description": "Verify rule IndexSettingsChanged is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.IndexBuilt",
+    "category": "rule_success",
+    "construct": "IndexBuilt",
+    "description": "Verify rule IndexBuilt succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.IndexBuilt.1",
+    "category": "rule_failure",
+    "construct": "IndexBuilt",
+    "description": "Verify rule IndexBuilt is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.MemorySearched",
+    "category": "rule_success",
+    "construct": "MemorySearched",
+    "description": "Verify rule MemorySearched succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.MemorySearched.1",
+    "category": "rule_failure",
+    "construct": "MemorySearched",
+    "description": "Verify rule MemorySearched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemorySearched.2",
+    "category": "rule_failure",
+    "construct": "MemorySearched",
+    "description": "Verify rule MemorySearched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemorySearched.3",
+    "category": "rule_failure",
+    "construct": "MemorySearched",
+    "description": "Verify rule MemorySearched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemorySearched.4",
+    "category": "rule_failure",
+    "construct": "MemorySearched",
+    "description": "Verify rule MemorySearched is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.MemoryFileRead",
+    "category": "rule_success",
+    "construct": "MemoryFileRead",
+    "description": "Verify rule MemoryFileRead succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.MemoryFileRead.1",
+    "category": "rule_failure",
+    "construct": "MemoryFileRead",
+    "description": "Verify rule MemoryFileRead is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryFileRead.2",
+    "category": "rule_failure",
+    "construct": "MemoryFileRead",
+    "description": "Verify rule MemoryFileRead is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryFileRead.3",
+    "category": "rule_failure",
+    "construct": "MemoryFileRead",
+    "description": "Verify rule MemoryFileRead is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryFileRead.4",
+    "category": "rule_failure",
+    "construct": "MemoryFileRead",
+    "description": "Verify rule MemoryFileRead is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryFileRead.5",
+    "category": "rule_failure",
+    "construct": "MemoryFileRead",
+    "description": "Verify rule MemoryFileRead is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-success.MemoryListed",
+    "category": "rule_success",
+    "construct": "MemoryListed",
+    "description": "Verify rule MemoryListed succeeds when all preconditions are met"
+  },
+  {
+    "id": "rule-failure.MemoryListed.1",
+    "category": "rule_failure",
+    "construct": "MemoryListed",
+    "description": "Verify rule MemoryListed is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryListed.2",
+    "category": "rule_failure",
+    "construct": "MemoryListed",
+    "description": "Verify rule MemoryListed is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryListed.3",
+    "category": "rule_failure",
+    "construct": "MemoryListed",
+    "description": "Verify rule MemoryListed is rejected when requires clause fails"
+  },
+  {
+    "id": "rule-failure.MemoryListed.4",
+    "category": "rule_failure",
+    "construct": "MemoryListed",
+    "description": "Verify rule MemoryListed is rejected when requires clause fails"
+  },
+  {
+    "id": "invariant.MemoryFilesWithinWorkspace",
+    "category": "invariant",
+    "construct": "MemoryFilesWithinWorkspace",
+    "description": "Verify invariant MemoryFilesWithinWorkspace holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.ChunksPresentOnlyWhenIndexed",
+    "category": "invariant",
+    "construct": "ChunksPresentOnlyWhenIndexed",
+    "description": "Verify invariant ChunksPresentOnlyWhenIndexed holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.NoMemoryFilesForSpecialistGroups",
+    "category": "invariant",
+    "construct": "NoMemoryFilesForSpecialistGroups",
+    "description": "Verify invariant NoMemoryFilesForSpecialistGroups holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "invariant.NoMemoryFilesForNonAllowlistedGroups",
+    "category": "invariant",
+    "construct": "NoMemoryFilesForNonAllowlistedGroups",
+    "description": "Verify invariant NoMemoryFilesForNonAllowlistedGroups holds after every state-changing rule that touches constrained entities"
+  },
+  {
+    "id": "surface-actor.MemoryMcpTools",
+    "category": "surface_actor",
+    "construct": "MemoryMcpTools",
+    "description": "Verify surface MemoryMcpTools is accessible only to the specified actor"
+  },
+  {
+    "id": "surface-provides.MemoryMcpTools",
+    "category": "surface_provides",
+    "construct": "MemoryMcpTools",
+    "description": "Verify provided operations on MemoryMcpTools appear/hide based on when conditions"
+  }
+]

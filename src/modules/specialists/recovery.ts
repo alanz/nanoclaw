@@ -73,7 +73,14 @@ async function owedAWake(task: SpecialistTask & { session_id: string }): Promise
  * Recursively cancel a sub-task subtree rooted at taskId.
  * Implements SubtreeCancellationApplied from specialists.allium.
  */
-async function cancelSubtree(taskId: string): Promise<void> {
+/**
+ * The failure a task gets when its container crashed again after its last
+ * allowed restart (spec: SpecialistRestartExhausted). The count is not bumped
+ * for this crash: no restart follows it.
+ */
+const RESTART_EXHAUSTED_DETAIL = 'specialist container failed and maximum restart retries were exhausted';
+
+export async function cancelSubtree(taskId: string): Promise<void> {
   const task = await getTask(taskId);
   if (!task) return;
   if (task.status === 'completed' || task.status === 'failed') return;
@@ -81,12 +88,13 @@ async function cancelSubtree(taskId: string): Promise<void> {
   const ts = new Date().toISOString();
   const failure = {
     failure_kind: 'execution_error',
-    failure_detail: 'cancelled: ancestor specialist container crashed',
+    // Ancestors end for several reasons (crash, retries, timeout, deletion).
+    failure_detail: 'cancelled: an ancestor specialist task ended',
     closed_at: ts,
     pending_sub_task_id: null,
   };
   await updateTaskStatus(task.id, 'failed', failure);
-  log.info('specialists: sub-task cancelled due to ancestor crash', { taskId: task.id });
+  log.info('specialists: sub-task cancelled — an ancestor ended', { taskId: task.id });
 
   // A cancelled task is terminal like any other (the spec's
   // SpecialistResultReady), so it goes through routeResult: that ends its
@@ -171,7 +179,9 @@ async function sweepTask(
     const child = await getTask(task.pending_sub_task_id);
     if (child) {
       const childAge = now - Date.parse(child.dispatched_at);
-      if (childAge > SPECIALISTS_CONFIG.maxSubTaskAwaitMs) {
+      // Overdue once the await window has fully elapsed (spec: dispatched_at +
+      // max_sub_task_await <= now).
+      if (childAge >= SPECIALISTS_CONFIG.maxSubTaskAwaitMs) {
         const pendingChildId = task.pending_sub_task_id;
         if (task.restart_attempt_count < SPECIALISTS_CONFIG.maxRestartRetries) {
           // SubTaskAwaitTimedOut: retries remain → awaiting_restart.
@@ -243,11 +253,12 @@ async function sweepTask(
     const detail = `container failed to start (${bootCrash.count} consecutive boot crashes): ${
       bootCrash.stderrTail.slice(-3).join(' | ') || 'no stderr captured'
     }`;
+    // Its own kind (spec: SpecialistBootFailed), and no restart count: the
+    // container never ran, so no restart was consumed.
     await updateTaskStatus(task.id, 'failed', {
-      failure_kind: 'host_restart',
+      failure_kind: 'boot_failure',
       failure_detail: detail,
       closed_at: ts,
-      restart_attempt_count: bootCrash.count,
       pending_sub_task_id: null,
     });
     if (task.pending_sub_task_id) await cancelSubtree(task.pending_sub_task_id);
@@ -255,7 +266,7 @@ async function sweepTask(
     await routeResult({
       ...task,
       status: 'failed' as const,
-      failure_kind: 'host_restart',
+      failure_kind: 'boot_failure',
       failure_detail: detail,
       closed_at: ts,
       pending_sub_task_id: null,
@@ -310,9 +321,8 @@ async function sweepTask(
       const ts = new Date().toISOString();
       await updateTaskStatus(task.id, 'failed', {
         failure_kind: 'host_restart',
-        failure_detail: `container crashed after ${task.restart_attempt_count} restart attempts`,
+        failure_detail: RESTART_EXHAUSTED_DETAIL,
         closed_at: ts,
-        restart_attempt_count: newRetryCount,
         pending_sub_task_id: null,
       });
       // ChildSubtreeCancelledOnRestartExhausted
@@ -321,7 +331,7 @@ async function sweepTask(
         ...task,
         status: 'failed' as const,
         failure_kind: 'host_restart',
-        failure_detail: `container crashed after ${task.restart_attempt_count} restart attempts`,
+        failure_detail: RESTART_EXHAUSTED_DETAIL,
         closed_at: ts,
         pending_sub_task_id: null,
       };
@@ -372,12 +382,15 @@ async function sweepTask(
     // new one. One per attempt: the id carries the attempt number, so a later
     // sweep finds it already written.
     try {
+      // Files a failed sub-task gave back while this task was down are in
+      // its ipc-in with nothing else to say so.
+      const { waitingFilesNote } = await import('./handover.js');
       await writeSessionMessage(fresh.agent_group_id, fresh.id, {
         id: `restart-${task.id}-${task.restart_attempt_count}`,
         kind: 'chat',
         timestamp: new Date().toISOString(),
         content: JSON.stringify({
-          text: task.prompt,
+          text: task.prompt + (await waitingFilesNote(fresh.id)),
           sender: 'system',
           senderId: 'system',
           specialistTaskId: task.id,

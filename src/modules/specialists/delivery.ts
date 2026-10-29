@@ -18,7 +18,7 @@ import { getLiveTaskForSession, updateTaskStatus } from './db.js';
 import { routeResult } from './routing.js';
 import { getActiveInvocation, hostStagingPath, TRANSFERS_BASE_DIR } from './invocation.js';
 import { SPECIALISTS_CONFIG } from './config.js';
-import type { ContainerTransfer, TransferFile } from './types.js';
+import type { ContainerTransfer, TransferFile, TransferKind } from './types.js';
 
 function genId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -43,9 +43,15 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
     });
     return;
   }
-  // Accept queued/running/awaiting_restart: a fast container may deliver before
-  // the 60s recovery sweep has advanced the status to 'running'.
-  if (!['queued', 'running', 'awaiting_restart'].includes(task.status)) {
+  // A fast container may deliver before the 60s recovery sweep has advanced
+  // its task to running. The delivery itself proves the container is up, so
+  // the task passes through running first, as a dispatch_sub_task call does.
+  if (task.status === 'queued' || task.status === 'awaiting_restart') {
+    log.info('specialists: task advanced to running by its own delivery', { taskId: task.id, from: task.status });
+    await updateTaskStatus(task.id, 'running');
+    task.status = 'running';
+  }
+  if (task.status !== 'running') {
     log.warn('specialists: deliver_specialist_result — task not in a deliverable state', {
       taskId: task.id,
       status: task.status,
@@ -65,9 +71,17 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
   let transfer: ContainerTransfer | null = null;
   let refused: RefusedFile[] = [];
   if (filePaths.length > 0 && (await getDb().hasTable('invocations'))) {
-    ({ transfer, refused } = await _buildTransfer(session, task.id, resultText, filePaths, effectiveCommit));
+    ({ transfer, refused } = await takeIpcOutFiles(session, {
+      kind: 'result',
+      taskId: task.id,
+      text: resultText,
+      filePaths,
+      commitToMemory: effectiveCommit,
+      recipientSessionId: null,
+    }));
   }
-  const finalText = resultText + refusalNote(refused);
+  // The text the requester reads: path-rewritten, with any refusal note.
+  const finalText = transfer ? transfer.result_text : resultText + refusalNote(refused);
 
   const now = new Date().toISOString();
   await updateTaskStatus(task.id, 'completed', {
@@ -82,12 +96,12 @@ export async function handleDeliverSpecialistResult(content: Record<string, unkn
   log.info('specialists: task completed', { taskId: task.id, agentGroupId: session.agent_group_id });
 }
 
-interface RefusedFile {
+export interface RefusedFile {
   path: string;
   reason: string;
 }
 
-function refusalNote(refused: RefusedFile[]): string {
+export function refusalNote(refused: RefusedFile[]): string {
   if (refused.length === 0) return '';
   return `\n\n[Not delivered: ${refused.map((f) => `${f.path} (${f.reason})`).join('; ')}]`;
 }
@@ -146,19 +160,77 @@ function copyNoFollow(src: string, dest: string): void {
   }
 }
 
+/** Where a delivered file is for the requester: its memory path, or its ipc-in path. */
+function deliveredPath(name: string, transferId: string, commitToMemory: boolean): string {
+  return commitToMemory
+    ? `${SPECIALISTS_CONFIG.memoryReportsSubpath}/${name}`
+    : `${SPECIALISTS_CONFIG.ipcInContainerPath}/${transferId}/${name}`;
+}
+
+/** `name`, or `name` numbered before its extension (report-2.md) if taken. */
+function uniqueName(name: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(name)) return name;
+  const ext = path.posix.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/** Map a listed path, and the absolute ipc-out form of it, to where the file went. */
+function addRewrites(rewrites: Map<string, string>, containerPath: string, to: string): void {
+  const prefix = SPECIALISTS_CONFIG.ipcOutContainerPath;
+  const normalized = path.posix.normalize(containerPath);
+  const rel = normalized.startsWith(prefix + '/') ? normalized.slice(prefix.length + 1) : normalized;
+  rewrites.set(containerPath, to);
+  rewrites.set(`${prefix}/${rel}`, to);
+}
+
 /**
- * Copy files from ipc-out to host staging and create ContainerTransfer +
- * TransferFile rows. Returns the ContainerTransfer (status='pending'), or null
- * if the invocation is missing or no file could be taken, plus the files it
- * refused and why.
+ * Rewrite every listed path in one pass, longest first, so a relative path is
+ * never rewritten inside the absolute form of itself (or of another file).
  */
-async function _buildTransfer(
-  session: Session,
-  taskId: string,
-  resultText: string,
-  filePaths: string[],
-  commitToMemory: boolean,
-): Promise<{ transfer: ContainerTransfer | null; refused: RefusedFile[] }> {
+function rewritePaths(text: string, rewrites: Map<string, string>): string {
+  if (rewrites.size === 0) return text;
+  const pattern = [...rewrites.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  return text.replace(new RegExp(pattern, 'g'), (match) => rewrites.get(match) ?? match);
+}
+
+export interface TakeFilesOptions {
+  kind: TransferKind;
+  /** result: the delivering task. dispatch: the task the files go to. returned: none. */
+  taskId: string | null;
+  /** Text whose references to the listed paths are rewritten to where the files went. */
+  text: string;
+  filePaths: string[];
+  commitToMemory: boolean;
+  /** Known up front for a dispatch (the new task's session); set at routing for a result. */
+  recipientSessionId: string | null;
+}
+
+export interface TakenFiles {
+  /** Null when the invocation is missing or no file could be taken. */
+  transfer: ContainerTransfer | null;
+  refused: RefusedFile[];
+  /** `text` with the listed paths rewritten; no refusal note. */
+  text: string;
+  /** Where each taken file is for its recipient, in the order listed. */
+  placed: string[];
+}
+
+/**
+ * Copy files from the session's ipc-out to host staging and create the
+ * ContainerTransfer (status='pending') + TransferFile rows: a specialist's
+ * delivery (kind result) or the files a dispatcher hands to the task it
+ * dispatches (kind dispatch). A path that cannot be taken is refused, with
+ * the reason, rather than failing the call.
+ */
+export async function takeIpcOutFiles(session: Session, opts: TakeFilesOptions): Promise<TakenFiles> {
+  const { kind, taskId, filePaths, commitToMemory } = opts;
   const db = getDb();
   const refused: RefusedFile[] = [];
 
@@ -168,28 +240,42 @@ async function _buildTransfer(
       sessionId: session.id,
       taskId,
     });
-    return { transfer: null, refused: filePaths.map((p) => ({ path: p, reason: 'no ipc-out for this run' })) };
+    return {
+      transfer: null,
+      refused: filePaths.map((p) => ({ path: p, reason: 'no ipc-out for this run' })),
+      text: opts.text,
+      placed: [],
+    };
   }
 
   const transferId = genId('xfer');
   const now = new Date().toISOString();
 
-  // Rewrite result_text paths and copy files to staging
+  // Copy files to staging; collect how each path is rewritten in result_text
   const transferFiles: Array<{ id: string; originalName: string; hostPath: string }> = [];
-  let rewrittenText = resultText;
+  const placed: string[] = [];
+  const rewrites = new Map<string, string>();
+  // Each file once, under a name unique in this transfer (the spec's
+  // IpcInPathsUniquePerTransfer): staging and ipc-in are keyed by name.
+  const delivered = new Map<string, string>(); // host path -> name it went under
+  const names = new Set<string>();
 
   const stagingDir = path.join(TRANSFERS_BASE_DIR, transferId);
   fs.mkdirSync(stagingDir, { recursive: true });
 
   for (const containerPath of filePaths) {
-    const basename = path.posix.basename(containerPath);
-
     const resolved = resolveIpcOutFile(invocation.ipc_out_host_path, containerPath);
     if ('error' in resolved) {
-      log.warn('specialists: refused a delivered file', { taskId, path: containerPath, reason: resolved.error });
+      log.warn('specialists: refused a file', { kind, taskId, path: containerPath, reason: resolved.error });
       refused.push({ path: containerPath, reason: resolved.error });
       continue;
     }
+    const already = delivered.get(resolved.hostPath);
+    if (already !== undefined) {
+      addRewrites(rewrites, containerPath, deliveredPath(already, transferId, commitToMemory));
+      continue;
+    }
+    const basename = uniqueName(path.posix.basename(containerPath), names);
     const destPath = hostStagingPath(transferId, basename);
 
     try {
@@ -206,46 +292,43 @@ async function _buildTransfer(
 
     const fileId = genId('tfile');
     transferFiles.push({ id: fileId, originalName: basename, hostPath: destPath });
-
-    // Rewrite path in result_text
-    if (commitToMemory) {
-      const memPath = `${SPECIALISTS_CONFIG.memoryReportsSubpath}/${basename}`;
-      rewrittenText = rewrittenText.split(containerPath).join(memPath);
-    } else {
-      const ipcInPath = `${SPECIALISTS_CONFIG.ipcInContainerPath}/${transferId}/${basename}`;
-      rewrittenText = rewrittenText.split(containerPath).join(ipcInPath);
-    }
+    delivered.set(resolved.hostPath, basename);
+    names.add(basename);
+    placed.push(deliveredPath(basename, transferId, commitToMemory));
+    addRewrites(rewrites, containerPath, deliveredPath(basename, transferId, commitToMemory));
   }
+
+  const rewrittenText = rewritePaths(opts.text, rewrites);
 
   if (transferFiles.length === 0) {
     // All files failed to copy — no transfer
     try {
       fs.rmSync(stagingDir, { recursive: true, force: true });
     } catch {}
-    return { transfer: null, refused };
+    return { transfer: null, refused, text: rewrittenText, placed };
   }
 
-  // The requester reads this text; say what did not come through.
-  rewrittenText += refusalNote(refused);
-
-  // Insert ContainerTransfer
+  // Insert ContainerTransfer. A result's requester reads its text, so it
+  // says what did not come through; a dispatch's text is the task's prompt,
+  // which its caller records on the task.
   const transfer: ContainerTransfer = {
     id: transferId,
+    kind,
     task_id: taskId,
     sender_invocation_id: invocation.id,
-    result_text: rewrittenText,
+    result_text: kind === 'result' ? rewrittenText + refusalNote(refused) : '',
     commit_to_memory: commitToMemory ? 1 : 0,
     file_count: transferFiles.length,
     sent_at: now,
     status: 'pending',
-    recipient_session_id: null,
+    recipient_session_id: opts.recipientSessionId,
   };
 
   await db.run(
     `INSERT INTO container_transfers
-       (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
+       (id, kind, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status, recipient_session_id)
      VALUES
-       (@id, @task_id, @sender_invocation_id, @result_text, @commit_to_memory, @file_count, @sent_at, @status, @recipient_session_id)`,
+       (@id, @kind, @task_id, @sender_invocation_id, @result_text, @commit_to_memory, @file_count, @sent_at, @status, @recipient_session_id)`,
     transfer,
   );
 
@@ -268,10 +351,11 @@ async function _buildTransfer(
 
   log.debug('specialists: ContainerTransfer created', {
     transferId,
+    kind,
     taskId,
     fileCount: transferFiles.length,
     commitToMemory,
   });
 
-  return { transfer, refused };
+  return { transfer, refused, text: rewrittenText, placed };
 }

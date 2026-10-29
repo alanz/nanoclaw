@@ -21,7 +21,7 @@ vi.mock('../../request-wake.js', () => ({ requestWake: vi.fn().mockResolvedValue
 vi.mock('../../channels/null-channel.js', () => ({ getNullMessagingGroupId: () => null }));
 
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { closeDb, initTestDb } from '../../db/connection.js';
+import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { createSession } from '../../db/sessions.js';
 import type { Session } from '../../types.js';
@@ -114,6 +114,17 @@ describe('a specialist with two live tasks', () => {
 
     expect((await getTask('task-older'))!.status).toBe('completed');
     expect((await getTask('task-newer'))!.status).toBe('running');
+  });
+
+  // The delivery proves the container is up, so a task the sweep has not yet
+  // seen start passes through running and completes (spec: SpecialistTaskStarted).
+  it.each(['queued', 'awaiting_restart'] as const)('completes a task delivered while still %s', async (status) => {
+    await getDb().run('UPDATE specialist_tasks SET status = ? WHERE id = ?', status, 'task-older');
+    await handleDeliverSpecialistResult({ result_text: 'fast answer' }, older);
+
+    const task = (await getTask('task-older'))!;
+    expect(task.status).toBe('completed');
+    expect(task.result).toBe('fast answer');
   });
 
   it("suspends the dispatching session's own task", async () => {

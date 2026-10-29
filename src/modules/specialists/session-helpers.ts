@@ -1,4 +1,8 @@
+import fs from 'fs';
+import path from 'path';
+
 import { getNullMessagingGroupId } from '../../channels/null-channel.js';
+import { DATA_DIR } from '../../config.js';
 import { killContainer, isContainerRunning } from '../../container-runner.js';
 import { createSession, updateSession } from '../../db/sessions.js';
 import { getDb } from '../../db/connection.js';
@@ -39,6 +43,7 @@ export async function closeSpecialistSession(session: Session): Promise<void> {
   if (isContainerRunning(session.id)) {
     killContainer(session.id, 'task-complete');
   }
+  clearTaskProviderState(session);
   try {
     // Through the mailbox seam rather than the session DB directly: storage
     // layout is the mailbox's business, and `withExistingMailboxSession`
@@ -49,6 +54,31 @@ export async function closeSpecialistSession(session: Session): Promise<void> {
       sessionId: session.id,
       err,
     });
+  }
+}
+
+/**
+ * A closed task's own provider state (its session-scoped /home/node/.claude)
+ * is done with: settings, skill links, shell state go. Its transcripts
+ * (`projects/`) stay, with the rest of the closed session folder, for
+ * post-mortems and debugging; no later task mounts them.
+ */
+function clearTaskProviderState(session: Session): void {
+  const stateDir = path.join(DATA_DIR, 'v2-sessions', session.agent_group_id, session.id, '.claude-shared');
+  let entries: string[];
+  try {
+    if (!fs.lstatSync(stateDir).isDirectory()) return;
+    entries = fs.readdirSync(stateDir);
+  } catch {
+    return; // none (a task that never started, or from before session-scoped state)
+  }
+  for (const name of entries) {
+    if (name === 'projects') continue;
+    try {
+      fs.rmSync(path.join(stateDir, name), { recursive: true, force: true });
+    } catch (err) {
+      log.warn('specialists: could not clear task provider state', { sessionId: session.id, name, err });
+    }
   }
 }
 

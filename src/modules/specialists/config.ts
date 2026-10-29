@@ -10,6 +10,8 @@ export interface SpecialistsConfig {
   ipcOutContainerPath: string;
   ipcInContainerPath: string;
   memoryReportsSubpath: string;
+  /** Where files nobody can read any more are parked, under the root requester group's folder. */
+  orphanSubpath: string;
 }
 
 export const SPECIALISTS_CONFIG: SpecialistsConfig = {
@@ -26,4 +28,5 @@ export const SPECIALISTS_CONFIG: SpecialistsConfig = {
   ipcOutContainerPath: '/workspace/ipc-out',
   ipcInContainerPath: '/workspace/ipc-in',
   memoryReportsSubpath: 'zettel/reports',
+  orphanSubpath: 'handover-orphans',
 };

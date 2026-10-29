@@ -108,6 +108,8 @@ describe('specialist workspace contribution', () => {
     const contribution = await withSessionContributions({}, { agentGroup: researcher, session: session(researcher) });
 
     expect(contribution.readonlyWorkspace).toBe(true);
+    // Its provider state is its own, not the group's shared .claude.
+    expect(contribution.sessionScopedProviderState).toBe(true);
     expect(contribution.env).toMatchObject({
       NANOCLAW_WORKSPACE_READONLY: '1',
       NANOCLAW_FRESH_CONVERSATION: '1',
@@ -140,6 +142,7 @@ describe('specialist workspace contribution', () => {
     const contribution = await withSessionContributions({}, { agentGroup: main, session: session(main) });
 
     expect(contribution.readonlyWorkspace).toBe(false);
+    expect(contribution.sessionScopedProviderState).toBe(false);
     expect(contribution.env).not.toHaveProperty('NANOCLAW_WORKSPACE_READONLY');
     expect(contribution.env).not.toHaveProperty('NANOCLAW_FRESH_CONVERSATION');
     expect(contribution.env).not.toHaveProperty('NANOCLAW_SPECIALIST');

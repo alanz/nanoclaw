@@ -22,6 +22,7 @@ vi.mock('../../db/agent-groups.js', () => ({
 vi.mock('../../db/sessions.js', () => ({ getSession: vi.fn() }));
 vi.mock('../../request-wake.js', () => ({ requestWake: vi.fn(async () => true) }));
 vi.mock('../../container-runner.js', () => ({ wakeContainer: vi.fn(async () => true) }));
+vi.mock('../../channels/null-channel.js', () => ({ getNullMessagingGroupId: vi.fn(async () => 'mg-null') }));
 vi.mock('./session-helpers.js', () => ({
   createSpecialistSession: vi.fn(async (agentGroupId: string) => ({ id: 'sess-spec', agent_group_id: agentGroupId })),
 }));

@@ -65,11 +65,12 @@ import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider contracts use a separate barrel so update-skills identity detection
 // remains tied to src/providers/index.ts.
 import './provider-contracts/index.js';
-import { getProviderHostContract } from './provider-contracts/registry.js';
+import { getProviderHostContract, type ProviderHostContract } from './provider-contracts/registry.js';
 import { resolveProviderName } from './providers/provider-name.js';
 import {
   providerStateVolumePath,
   realizeProviderSpawnSurfaces,
+  withSessionScopedState,
   syncSharedSkillLinks,
   type ProviderSpawnRealization,
 } from './provider-contracts/realize.js';
@@ -444,13 +445,16 @@ async function spawnContainer(session: Session): Promise<void> {
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
-  const resolved = await resolveProviderContribution(session, agentGroup, containerConfig);
-  const { provider, surfaces } = resolved;
   // Module contributions travel beside the provider's, not inside it: a
   // declared provider contract replaces the provider's callback mounts, and
   // module mounts (the memory index) must not be dropped with them. Env merges
   // onto the provider contribution, where it takes the contributed lane.
+  // Gathered first: one can ask for session-scoped provider state, which
+  // changes where the provider's surfaces are realized.
   const moduleContribution = await withSessionContributions({}, { agentGroup, session });
+  const sessionScopedState = moduleContribution.sessionScopedProviderState ?? false;
+  const resolved = await resolveProviderContribution(session, agentGroup, containerConfig, { sessionScopedState });
+  const { provider, surfaces } = resolved;
   const contribution: ProviderContainerContribution = {
     ...resolved.contribution,
     env: { ...(resolved.contribution.env ?? {}), ...(moduleContribution.env ?? {}) },
@@ -466,6 +470,7 @@ async function spawnContainer(session: Session): Promise<void> {
     surfaces,
     moduleContribution.mounts ?? [],
     moduleContribution.readonlyWorkspace ?? false,
+    sessionScopedState,
   );
   const mailboxEnvironment = await mailbox.runnerEnvironment(mailboxKey);
 
@@ -903,6 +908,15 @@ export interface SessionContribution extends ProviderContainerContribution {
    * come from the one decision and cannot drift apart.
    */
   readonlyWorkspace?: boolean;
+  /**
+   * Give this session its own copy of the provider's group-scoped state
+   * (for Claude, `/home/node/.claude`: transcripts, settings, shell state)
+   * under its session folder, instead of the group's shared one. For a
+   * template group whose sessions are independent tasks — a specialist's —
+   * so one task cannot read or change another's provider state. Any
+   * contributor asking for it wins.
+   */
+  sessionScopedProviderState?: boolean;
 }
 
 export interface SessionContributionContext {
@@ -927,6 +941,7 @@ export async function withSessionContributions(
   const mounts = [...(base.mounts ?? [])];
   const env = { ...(base.env ?? {}) };
   let readonlyWorkspace = false;
+  let sessionScopedProviderState = false;
   for (const contributor of sessionContributors) {
     let extra: SessionContribution | undefined;
     try {
@@ -939,9 +954,10 @@ export async function withSessionContributions(
     mounts.push(...(extra.mounts ?? []));
     Object.assign(env, extra.env ?? {});
     if (extra.readonlyWorkspace) readonlyWorkspace = true;
+    if (extra.sessionScopedProviderState) sessionScopedProviderState = true;
   }
   if (readonlyWorkspace) env.NANOCLAW_WORKSPACE_READONLY = '1';
-  return { ...base, mounts, env, readonlyWorkspace };
+  return { ...base, mounts, env, readonlyWorkspace, sessionScopedProviderState };
 }
 
 /** Kill a container for a session. */
@@ -1167,14 +1183,21 @@ export async function honorPendingStopIntents(
  */
 export { resolveProviderName };
 
+/** The provider's host contract as this session sees it (see `sessionScopedProviderState`). */
+function effectiveContract(provider: string, sessionScopedState: boolean): ProviderHostContract | undefined {
+  const contract = getProviderHostContract(provider);
+  return contract && sessionScopedState ? withSessionScopedState(contract) : contract;
+}
+
 export async function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
+  opts: { sessionScopedState?: boolean } = {},
 ): Promise<{ provider: string; contribution: ProviderContainerContribution; surfaces?: ProviderSpawnRealization }> {
   const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
   const fn = getProviderContainerConfig(provider);
-  const contract = getProviderHostContract(provider);
+  const contract = effectiveContract(provider, opts.sessionScopedState ?? false);
   if (!contract && !fn) {
     // Same as before contracts existed: the group spawns with the default
     // (Claude) surfaces. Say so once per spawn so an operator can spot it.
@@ -1221,10 +1244,12 @@ export async function buildMounts(
   moduleMounts: readonly VolumeMount[] = [],
   /** A contributor asked for the group folder read-only — see `SessionContribution`. */
   readonlyWorkspace = false,
+  /** A contributor asked for session-scoped provider state — see `SessionContribution`. */
+  sessionScopedState = false,
 ): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
 
-  const contract = getProviderHostContract(provider);
+  const contract = effectiveContract(provider, sessionScopedState);
   // Undeclared payloads stay on the legacy capability gate. Declared payloads
   // are realized below from their contract.
   const defaultSurfaces = !contract && !providerProvidesAgentSurfaces(provider);
@@ -1333,7 +1358,9 @@ export async function buildMounts(
   }
 
   // Per-group .claude-shared at /home/node/.claude (provider state, settings,
-  // skill symlinks). Per agent group, not per session.
+  // skill symlinks). Per agent group, not per session — unless a contributor
+  // asked for session-scoped provider state (a specialist task), when it is
+  // the session's own copy under its session folder.
   if (contract) {
     for (const volume of contract.stateVolumes) {
       const hostPath = providerStateVolumePath(volume, agentGroup.id, sessDir);

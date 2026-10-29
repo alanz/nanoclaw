@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { initTestDb, closeDb } from '../../db/connection.js';
+import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { createSession, getSession } from '../../db/sessions.js';
@@ -246,5 +246,146 @@ describe('failure post-mortem', () => {
     const { task } = await makeFailedRootTask();
     await routeResult({ ...task, status: 'completed', result: 'done', failure_kind: null, failure_detail: null });
     expect(buildPostMortem).not.toHaveBeenCalled();
+  });
+});
+
+// The parent of a last same-type child is told no further responses will
+// follow. That notice was appended only to a text result: a last child that
+// returned files was as final, but the parent was not told.
+describe('last-turn parent notice', () => {
+  async function lastChildOfWaitingParent(): Promise<SpecialistTask> {
+    const { specialistGroupId, requesterGroupId, requesterSessionId } = await makeFailedRootTask();
+    await createSession({
+      id: 'sess-parent',
+      agent_group_id: specialistGroupId,
+      messaging_group_id: null,
+      thread_id: 'task-parent',
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      processing_state: 'idle',
+      last_active: now(),
+      created_at: now(),
+    });
+    const base = {
+      specialist_group_id: specialistGroupId,
+      prompt: 'p',
+      requester_session_id: requesterSessionId,
+      chain_delegation_count: 1,
+      ancestor_group_ids: '[]',
+      dispatched_at: now(),
+      restart_attempt_count: 0,
+      failure_kind: null,
+      failure_detail: null,
+      committed_files: null,
+    };
+    await createTask({
+      ...base,
+      id: 'task-parent',
+      requester_group_id: requesterGroupId,
+      requester_task_id: null,
+      depth: 0,
+      is_last_same_type_dispatch: 0,
+      status: 'awaiting_sub_task',
+      closed_at: null,
+      result: null,
+      pending_sub_task_id: null,
+    });
+    const child: SpecialistTask = {
+      ...base,
+      id: 'task-last',
+      requester_group_id: null,
+      requester_task_id: 'task-parent',
+      depth: 1,
+      is_last_same_type_dispatch: 1,
+      status: 'completed',
+      closed_at: now(),
+      result: 'see the report',
+      pending_sub_task_id: null,
+    };
+    await createTask(child);
+    await getDb().run("UPDATE specialist_tasks SET pending_sub_task_id = 'task-last' WHERE id = 'task-parent'");
+    return child;
+  }
+
+  function parentText(): string {
+    const [, sessionId, message] = vi.mocked(writeSessionMessage).mock.calls.at(-1)!;
+    expect(sessionId).toBe('sess-parent');
+    return JSON.parse((message as { content: string }).content).text as string;
+  }
+
+  it('follows a text result', async () => {
+    await routeResult(await lastChildOfWaitingParent());
+    expect(parentText()).toContain('[Final iteration: no further responses');
+  });
+
+  it('follows a result that carries files', async () => {
+    const child = await lastChildOfWaitingParent();
+    const transfer = {
+      id: 'xfer-last',
+      task_id: child.id,
+      sender_invocation_id: 'inv-last',
+      result_text: 'see /workspace/ipc-in/xfer-last/report.md',
+      commit_to_memory: 0,
+      file_count: 1,
+      sent_at: now(),
+      status: 'pending',
+      recipient_session_id: null,
+    } as unknown as Parameters<typeof routeResult>[1];
+
+    await routeResult(child, transfer);
+
+    expect(parentText()).toBe(
+      'see /workspace/ipc-in/xfer-last/report.md\n\n[Final iteration: no further responses will follow from this specialist. Incorporate this as your final input and conclude your work.]',
+    );
+  });
+});
+
+// Whether a main-agent transfer's files are done with is decided by the
+// message that carried them, so routing records that message on the transfer
+// — chosen before the message is written, so a fast container cannot handle
+// it before the link exists.
+describe('a root result with staged files', () => {
+  it('records the message that carries it on the transfer', async () => {
+    const { task, requesterSessionId } = await makeFailedRootTask();
+    const completed = { ...task, status: 'completed' as const, result: 'r', failure_kind: null, failure_detail: null };
+    await getDb().run(
+      `INSERT INTO invocations (id, session_id, task_id, ipc_out_host_path, ipc_in_host_path, started_at)
+       VALUES ('inv-x', ?, NULL, '/x/out', '/x/in', ?)`,
+      requesterSessionId,
+      now(),
+    );
+    await getDb().run(
+      `INSERT INTO container_transfers (id, task_id, sender_invocation_id, result_text, commit_to_memory, file_count, sent_at, status)
+       VALUES ('xfer-root', ?, 'inv-x', 'see the report', 0, 1, ?, 'pending')`,
+      task.id,
+      now(),
+    );
+    const transfer = (await getDb().get("SELECT * FROM container_transfers WHERE id = 'xfer-root'")) as Parameters<
+      typeof routeResult
+    >[1];
+
+    await routeResult(completed, transfer);
+
+    const [, sessionId, message] = vi.mocked(writeSessionMessage).mock.calls.at(-1)!;
+    expect(sessionId).toBe(requesterSessionId);
+    const row = (await getDb().get("SELECT routed_message_id FROM container_transfers WHERE id = 'xfer-root'")) as {
+      routed_message_id: string;
+    };
+    expect(row.routed_message_id).toBe((message as { id: string }).id);
+  });
+});
+
+// The spec routes a root result only to an active main session. Routing
+// checked only that the session existed, so it would write into, and wake,
+// a session already closed.
+describe('a root result for a closed main session', () => {
+  it('is not written to it', async () => {
+    const { task, requesterSessionId } = await makeFailedRootTask();
+    await getDb().run("UPDATE sessions SET status = 'closed' WHERE id = ?", requesterSessionId);
+
+    await routeResult(task);
+
+    expect(vi.mocked(writeSessionMessage).mock.calls.filter(([, s]) => s === requesterSessionId)).toEqual([]);
   });
 });

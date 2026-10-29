@@ -105,6 +105,31 @@ describe('buildPostMortem', () => {
     );
   });
 
+  it("reads the task's own transcript, in its session folder, before the group's", () => {
+    const sessDir = path.join(dirs.data, 'v2-sessions', AG, SESS);
+    fs.mkdirSync(sessDir, { recursive: true });
+    const db = new Database(path.join(sessDir, 'outbound.db'));
+    db.exec(OUTBOUND_SCHEMA);
+    db.prepare('INSERT INTO session_state (key, value, updated_at) VALUES (?, ?, ?)').run(
+      'continuation:claude',
+      CONV,
+      new Date().toISOString(),
+    );
+    db.close();
+    const write = (root: string, query: string) => {
+      const projects = path.join(root, '.claude-shared', 'projects', '-workspace-agent');
+      fs.mkdirSync(projects, { recursive: true });
+      fs.writeFileSync(
+        path.join(projects, `${CONV}.jsonl`),
+        assistant([{ type: 'tool_use', name: 'WebSearch', input: { query } }]) + '\n',
+      );
+    };
+    write(path.join(dirs.data, 'v2-sessions', AG), 'from the group');
+    write(sessDir, 'from the task');
+
+    expect(buildPostMortem(AG, SESS)).toContain('"query":"from the task"');
+  });
+
   it('is null for a session that never ran', () => {
     expect(buildPostMortem(AG, 'sess-never')).toBeNull();
   });

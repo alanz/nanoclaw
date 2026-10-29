@@ -137,7 +137,8 @@ const activeInvocations = new Map<string, string>();
  * with its ipc directory and any in-transit files — stayed open. For a session
  * that runs again the next spawn ends it; for a closed one, never (two from
  * August were still open). Running containers get their invocation back;
- * every other open invocation is ended now.
+ * every other open invocation is ended now, after anything its container left
+ * to hand over has been handled.
  */
 async function reconcileOpenInvocations(): Promise<number> {
   const { getDb } = await import('../../db/index.js');
@@ -152,6 +153,15 @@ async function reconcileOpenInvocations(): Promise<number> {
     if (isContainerRunning(inv.session_id)) {
       activeInvocations.set(inv.session_id, inv.id);
     } else {
+      // A handover call the previous host never got to is handled before
+      // ipc-out goes: its files are the host's (spec: handover_calls_handled).
+      // Delivery is ready by now; the polls start after the modules.
+      try {
+        const session = await getSession(inv.session_id);
+        if (session) await deliverSessionMessages(session, { waitForInflight: true });
+      } catch (err) {
+        log.warn('specialists: draining before ending an orphaned invocation failed', { invocationId: inv.id, err });
+      }
       await endInvocationById(inv.id);
       ended++;
     }
@@ -170,7 +180,10 @@ registerSessionContributor(async ({ session }) => {
  * A specialist group's folder is a template every task of that type shares,
  * concurrently: mounted writable, one task could change the instructions or
  * files the next task starts from. So it is read-only, and per-task state
- * lives in the session (and ipc-out) instead.
+ * lives in the session (and ipc-out) instead. The provider's state (Claude's
+ * /home/node/.claude: transcripts, settings, shell state) is the task's own
+ * too, under its session folder — shared per group, every task could read and
+ * change every other task's (spec: per-task session isolation).
  *
  * NANOCLAW_SPECIALIST lets the runner honour "exit after this turn" from
  * dispatch_sub_task and deliver_specialist_result, which frees the container's
@@ -190,6 +203,7 @@ registerSessionContributor(async ({ agentGroup, session }) => {
   const fresh = !task || task.status === 'queued' || task.status === 'awaiting_restart';
   return {
     readonlyWorkspace: true,
+    sessionScopedProviderState: true,
     env: { NANOCLAW_SPECIALIST: '1', ...(fresh ? { NANOCLAW_FRESH_CONVERSATION: '1' } : {}) },
   };
 });
@@ -204,9 +218,10 @@ registerSessionContributor(async ({ agentGroup, session }) => {
  * clears ipc-out before deliver_specialist_result has taken its files.
  *
  * Three details matter:
- * - Only a specialist task's session has a final action to hand over. Every
- *   session gets an invocation (main sessions receive files through ipc-in),
- *   but draining an ordinary session here would be pointless work.
+ * - Every session, not only a specialist task's: the host owns any file a
+ *   handover call names from the call on (spec: handover_calls_handled), and
+ *   a main agent's container can be reaped or killed just after it dispatches
+ *   with files. Draining first means they are taken before ipc-out goes.
  * - A kill can fire this hook from inside an open mailbox session for the
  *   same session (the sweep reaps from within one), so the work runs outside
  *   it: the drain opens that mailbox itself and must queue behind the
@@ -228,8 +243,7 @@ registerSessionExitHook(({ sessionId }) => {
 async function finishInvocation(sessionId: string, invocationId: string): Promise<void> {
   try {
     const session = await getSession(sessionId);
-    const task = session?.thread_id ? await getTask(session.thread_id) : undefined;
-    if (session && task) await deliverSessionMessages(session, { waitForInflight: true });
+    if (session) await deliverSessionMessages(session, { waitForInflight: true });
   } catch (err) {
     log.warn('specialists: final outbound drain failed', { sessionId, err });
   }

@@ -23,6 +23,7 @@ import {
   placeTransferIntoActiveIpcIn,
   reclaimTransferStaging,
 } from './invocation.js';
+import { parkTransfer, returnDispatchedFiles, returnedNote } from './handover.js';
 import type { ContainerTransfer, SpecialistTask, TransferFile } from './types.js';
 
 function generateId(): string {
@@ -42,9 +43,15 @@ async function lastTurnParentNotice(task: SpecialistTask): Promise<string> {
   return `\n\n${specialist?.last_turn_parent_notice ?? SPECIALISTS_CONFIG.defaultLastTurnParentNotice}`;
 }
 
-async function sendToSession(agentGroupId: string, sessionId: string, text: string, taskId: string): Promise<void> {
+async function sendToSession(
+  agentGroupId: string,
+  sessionId: string,
+  text: string,
+  taskId: string,
+  messageId: string = generateId(),
+): Promise<void> {
   writeSessionMessage(agentGroupId, sessionId, {
-    id: generateId(),
+    id: messageId,
     kind: 'chat',
     timestamp: new Date().toISOString(),
     content: JSON.stringify({
@@ -68,14 +75,22 @@ async function routeResultToMain(
   task: SpecialistTask,
   transfer: ContainerTransfer | null,
   postMortem: string | null,
+  returned: ContainerTransfer | null,
 ): Promise<void> {
   const session = await getSession(task.requester_session_id);
-  if (!session) {
-    log.warn('specialists: cannot route result to main — requester session not found', { taskId: task.id });
+  if (!session || session.status !== 'active') {
+    // Not written into, or woken from, a session that has been closed.
+    log.warn('specialists: cannot route result to main — requester session not found or not active', {
+      taskId: task.id,
+      status: session?.status,
+    });
     return;
   }
 
   let content: string;
+  // Chosen up front: a staged transfer records it before the message exists,
+  // so a container that handles the message at once is already matched to it.
+  const messageId = generateId();
 
   if (transfer) {
     if (transfer.commit_to_memory === 1) {
@@ -151,19 +166,36 @@ async function routeResultToMain(
       // Stage for ipc-in delivery when requester container starts.
       // Also populate into the active ipc-in if the container is already running —
       // _populateIpcIn at spawn time may have run before this transfer was created.
+      // The message carrying the result decides when these files are done
+      // with: expired once it is handled, re-placed if the container exits
+      // first (endInvocationById; spec TransferExpiredOnRoutedMessage*).
       await getDb().run(
-        'UPDATE container_transfers SET recipient_session_id = ? WHERE id = ?',
+        'UPDATE container_transfers SET recipient_session_id = ?, routed_message_id = ? WHERE id = ?',
         session.id,
+        messageId,
         transfer.id,
       );
-      await placeTransferIntoActiveIpcIn(session.id, { ...transfer, recipient_session_id: session.id });
+      await placeTransferIntoActiveIpcIn(session.id, {
+        ...transfer,
+        recipient_session_id: session.id,
+        routed_message_id: messageId,
+      });
       content = transfer.result_text;
     }
   } else {
     content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
   }
 
-  await sendToSession(session.agent_group_id, session.id, content, task.id);
+  // A failed task's files come back with its failure, and are done with once
+  // that message is handled (spec: SpecialistResultRoutedToMain,
+  // ReturnedFilesPlacedIntoLiveIpcIn).
+  if (returned) {
+    await getDb().run('UPDATE container_transfers SET routed_message_id = ? WHERE id = ?', messageId, returned.id);
+    await placeTransferIntoActiveIpcIn(session.id, { ...returned, routed_message_id: messageId });
+    content += await returnedNote(returned, 'Files you handed to this task, returned to your ipc-in');
+  }
+
+  await sendToSession(session.agent_group_id, session.id, content, task.id, messageId);
 }
 
 /** Route a sub-task result to the parent specialist's per-task session, resuming the parent. */
@@ -172,6 +204,7 @@ async function routeResultToParent(
   parentTask: SpecialistTask,
   transfer: ContainerTransfer | null,
   postMortem: string | null,
+  returned: ContainerTransfer | null,
 ): Promise<void> {
   const parentSession = await findSessionByAgentGroupAndThread(parentTask.specialist_group_id, parentTask.id);
   if (!parentSession) {
@@ -196,7 +229,13 @@ async function routeResultToParent(
     await placeTransferIntoActiveIpcIn(parentSession.id, { ...transfer, recipient_session_id: parentSession.id });
     content = transfer.result_text;
   } else {
-    content = formatOutcome(task, postMortem) + (await lastTurnParentNotice(task));
+    content = formatOutcome(task, postMortem);
+  }
+  // A last child that returns files is as final as one that returns text.
+  content += await lastTurnParentNotice(task);
+  if (returned) {
+    await placeTransferIntoActiveIpcIn(parentSession.id, returned);
+    content += await returnedNote(returned, 'Files you handed to this sub-task, returned to your ipc-in');
   }
 
   await sendToSession(parentSession.agent_group_id, parentSession.id, content, task.id);
@@ -204,7 +243,7 @@ async function routeResultToParent(
 
 /**
  * Route the result of a terminal task to its requester.
- * Immediately-rejected sub-tasks (cycle/depth/count/same-type) are skipped:
+ * Immediately-rejected sub-tasks (depth/count/same-type) are skipped:
  * the parent never entered awaiting_sub_task, and AgentNotified was already
  * sent by the rejection handler.
  *
@@ -212,12 +251,16 @@ async function routeResultToParent(
  *   Existing callers (recovery.ts, dispatch.ts) pass no transfer — the default
  *   null keeps them working unchanged.
  */
-export async function routeResult(task: SpecialistTask, transfer: ContainerTransfer | null = null): Promise<void> {
+export async function routeResult(
+  task: SpecialistTask,
+  transfer: ContainerTransfer | null = null,
+  opts: { notify?: boolean } = {},
+): Promise<void> {
   // End the specialist's active invocation now that the task is terminal.
   // This is more reliable than relying on the container close event, which
   // may not fire promptly on all runtimes (e.g. Apple Container).
   const specialistSession = await findSessionByAgentGroupAndThread(task.specialist_group_id, task.id);
-  // Read before the session closes. Rejections (cycle, depth…) never ran,
+  // Read before the session closes. Rejections (depth, count…) never ran,
   // so there is nothing to read.
   const postMortem =
     task.status === 'failed' && specialistSession
@@ -235,9 +278,39 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
     await closeSpecialistSession(specialistSession);
   }
 
+  // notify: false when the requester is itself going away (its group is being
+  // deleted): the task still ends cleanly, but nothing is sent to, or wakes, it.
+  // A failed task gives back the files it was handed, before its failure is
+  // routed so the message can name them (spec: DispatchedFilesReturnedOnTaskFailed).
+  const returned = task.status === 'failed' ? await returnDispatchedFiles(task) : null;
+  if (opts.notify !== false) await routeToRequester(task, transfer, postMortem, returned);
+  if (returned) await parkIfRecipientGone(returned);
+  // After routing, which claims this task's own just-delivered transfer; and
+  // whether or not anyone was waiting, so transfers addressed to this task
+  // are reclaimed however it ended.
+  await expireTransfersForTerminalTask(task.id);
+}
+
+/**
+ * Returned files wait for their session even when the failure was not routed
+ * (a restarting parent finds them on its next run); only a session that is
+ * gone leaves them nowhere to go (spec: ReturnedFilesOrphanedWithoutRecipient).
+ */
+async function parkIfRecipientGone(returned: ContainerTransfer): Promise<void> {
+  const session = returned.recipient_session_id ? await getSession(returned.recipient_session_id) : undefined;
+  if (!session || session.status !== 'active') {
+    await parkTransfer(returned.id, 'returned to a session that is no longer active');
+  }
+}
+
+async function routeToRequester(
+  task: SpecialistTask,
+  transfer: ContainerTransfer | null,
+  postMortem: string | null,
+  returned: ContainerTransfer | null,
+): Promise<void> {
   if (task.requester_group_id) {
-    await routeResultToMain(task, transfer, postMortem);
-    await expireTransfersForTerminalTask(task.id);
+    await routeResultToMain(task, transfer, postMortem, returned);
     return;
   }
   if (!task.requester_task_id) return;
@@ -251,6 +324,5 @@ export async function routeResult(task: SpecialistTask, transfer: ContainerTrans
     return;
   }
   if (parent.status !== 'awaiting_sub_task') return;
-  await routeResultToParent(task, parent, transfer, postMortem);
-  await expireTransfersForTerminalTask(task.id);
+  await routeResultToParent(task, parent, transfer, postMortem, returned);
 }

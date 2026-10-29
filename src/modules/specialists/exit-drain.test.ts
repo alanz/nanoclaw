@@ -80,10 +80,12 @@ describe('specialist session exit', () => {
     });
   });
 
-  it('only ends the invocation of a session that is not a specialist task', async () => {
+  it('drains a session that is not a specialist task too: a handover call it made owns its files first', async () => {
     await exitSession('sess-main', null);
 
-    expect(hooks.order).toEqual(['end-invocation']);
-    expect(deliverSessionMessages).not.toHaveBeenCalled();
+    expect(hooks.order).toEqual(['drain', 'end-invocation']);
+    expect(deliverSessionMessages).toHaveBeenCalledWith(expect.objectContaining({ id: 'sess-main' }), {
+      waitForInflight: true,
+    });
   });
 });

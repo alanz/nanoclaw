@@ -15,6 +15,7 @@
  */
 import { hasTable } from './db/connection.js';
 import type { DbDriver } from './db/driver.js';
+import { log } from './log.js';
 
 export interface GroupDeleteStep {
   /** Reported in the delete's `removed` counts. */
@@ -30,6 +31,41 @@ export function registerGroupDeleteStep(step: GroupDeleteStep): void {
     throw new Error(`Group delete step already registered: ${step.name}`);
   }
   steps.push(step);
+}
+
+/**
+ * Called once a group is confirmed for deletion, BEFORE the delete's
+ * transaction: for work that must react to the group going away rather than
+ * just drop its rows — telling a surviving requester, stopping containers.
+ * Such side effects cannot live in a step, which a rollback would not undo.
+ */
+export interface GroupDeletionHook {
+  name: string;
+  run(agentGroupId: string): Promise<void>;
+}
+
+const deletionHooks: GroupDeletionHook[] = [];
+
+export function registerGroupDeletionRequested(hook: GroupDeletionHook): void {
+  if (deletionHooks.some((h) => h.name === hook.name)) {
+    throw new Error(`Group deletion hook already registered: ${hook.name}`);
+  }
+  deletionHooks.push(hook);
+}
+
+/**
+ * Run every deletion hook for one group, before its delete transaction. A hook
+ * that fails is logged and the delete goes ahead: the group is going either
+ * way, and its rows are still removed by the steps.
+ */
+export async function announceGroupDeletion(agentGroupId: string): Promise<void> {
+  for (const hook of deletionHooks) {
+    try {
+      await hook.run(agentGroupId);
+    } catch (err) {
+      log.error('Group deletion hook failed', { hook: hook.name, agentGroupId, err });
+    }
+  }
 }
 
 /** Run every registered step for one group. Call inside the delete's transaction. */

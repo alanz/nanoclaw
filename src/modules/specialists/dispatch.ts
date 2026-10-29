@@ -5,7 +5,9 @@
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { wakeContainer } from '../../container-runner.js';
 import { initSessionFolder, writeSessionMessage } from '../../session-manager.js';
+import { getNullMessagingGroupId } from '../../channels/null-channel.js';
 import { log } from '../../log.js';
+import { getDb } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import type { Session } from '../../types.js';
@@ -13,6 +15,7 @@ import {
   createTask,
   getLiveTaskForSession,
   getSpecialist,
+  getTask,
   isMainGroup,
   sameTypeDispatchCount,
   updateTaskStatus,
@@ -20,6 +23,8 @@ import {
 import { SPECIALISTS_CONFIG } from './config.js';
 import { createSpecialistSession } from './session-helpers.js';
 import { routeResult } from './routing.js';
+import { refusalNote, takeIpcOutFiles, type RefusedFile } from './delivery.js';
+import { placeTransferIntoActiveIpcIn } from './invocation.js';
 import type { Specialist, SpecialistTask } from './types.js';
 
 function generateId(): string {
@@ -32,18 +37,69 @@ function generateId(): string {
  * the time a rejection is written there may be nothing running to read it —
  * left unwoken, the task sits `running` with no container until recovery
  * mistakes it for a crash.
+ *
+ * Files the dispatch named go back to the caller (spec:
+ * RefusedDispatchFilesReturned): the host takes them from its ipc-out — which
+ * the exit after dispatch_sub_task would otherwise clear — as a returned
+ * transfer addressed to the caller's session, and the notice says where they
+ * are. A session with no task retires them once it has handled the notice.
  */
-function notifyAgent(session: Session, text: string): void {
-  void writeSessionMessage(session.agent_group_id, session.id, {
-    id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-    trigger: true,
-  })
-    .then(() => getSession(session.id))
-    .then((fresh) => (fresh ? requestWake(fresh, 'inbound-message') : false))
-    .catch((err) => log.warn('specialists: failed to notify agent', { sessionId: session.id, err }));
+async function refuse(session: Session, text: string, content: Record<string, unknown>): Promise<void> {
+  const messageId = `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let notice = text;
+  const filePaths = dispatchFilePaths(content);
+  if (filePaths.length > 0) {
+    try {
+      notice += await returnRefusedFiles(session, filePaths, messageId);
+    } catch (err) {
+      log.error('specialists: could not return the files of a refused dispatch', { sessionId: session.id, err });
+    }
+  }
+  try {
+    await writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageId,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      content: JSON.stringify({ text: notice, sender: 'system', senderId: 'system' }),
+      trigger: true,
+    });
+    const fresh = await getSession(session.id);
+    if (fresh) await requestWake(fresh, 'inbound-message');
+  } catch (err) {
+    log.warn('specialists: failed to notify agent', { sessionId: session.id, err });
+  }
+}
+
+/** Take a refused dispatch's files back into the caller's ipc-in; the note naming them. */
+async function returnRefusedFiles(session: Session, filePaths: string[], messageId: string): Promise<string> {
+  if (!(await getDb().hasTable('invocations'))) {
+    return refusalNote(filePaths.map((p) => ({ path: p, reason: 'file handover is not available' })));
+  }
+  const taken = await takeIpcOutFiles(session, {
+    kind: 'returned',
+    taskId: null,
+    text: '',
+    filePaths,
+    commitToMemory: false,
+    recipientSessionId: session.id,
+  });
+  let note = '';
+  if (taken.transfer) {
+    const ownTask = session.thread_id ? await getTask(session.thread_id) : undefined;
+    const hasTask = ownTask !== undefined && ownTask.specialist_group_id === session.agent_group_id;
+    // A task's session keeps them for the task's life; any other session
+    // until it has handled this notice (spec: routed_message).
+    if (!hasTask) {
+      await getDb().run(
+        'UPDATE container_transfers SET routed_message_id = ? WHERE id = ?',
+        messageId,
+        taken.transfer.id,
+      );
+    }
+    await placeTransferIntoActiveIpcIn(session.id, taken.transfer);
+    note = `\n\n[Your files are back in your ipc-in: ${taken.placed.join(', ')}]`;
+  }
+  return note + refusalNote(taken.refused);
 }
 
 /**
@@ -53,13 +109,14 @@ function notifyAgent(session: Session, text: string): void {
  * answered it to the user ("Noted. I'll send the report…"). The task id
  * stays visible with the agent's next message.
  */
-function noteDispatched(session: Session, taskId: string): void {
+function noteDispatched(session: Session, taskId: string, refused: RefusedFile[]): void {
   void writeSessionMessage(session.agent_group_id, session.id, {
     id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
     content: JSON.stringify({
-      text: `Specialist task dispatched (id: ${taskId}). Result will arrive as a follow-up message.`,
+      text:
+        `Specialist task dispatched (id: ${taskId}). Result will arrive as a follow-up message.` + refusalNote(refused),
       sender: 'system',
       senderId: 'system',
     }),
@@ -73,8 +130,82 @@ function formatTaskPrompt(task: SpecialistTask, specialist: Specialist | undefin
   return `${task.prompt}\n\n${notice}`;
 }
 
-async function spawnTaskSession(task: SpecialistTask): Promise<void> {
+/**
+ * Every task session lives on the null channel; without it the session cannot
+ * be created, and a task row written first would be stranded — queued with no
+ * session, invisible to the recovery sweep. So it is checked before anything
+ * is created (spec: requires exists null_mg).
+ */
+async function nullChannelReady(session: Session, tool: string, content: Record<string, unknown>): Promise<boolean> {
+  try {
+    await getNullMessagingGroupId();
+    return true;
+  } catch (err) {
+    log.error('specialists: cannot dispatch — no null channel for task sessions', { err });
+    await refuse(
+      session,
+      `${tool} failed: specialist sessions are unavailable (the null channel is not set up).`,
+      content,
+    );
+    return false;
+  }
+}
+
+/** The file_paths a dispatch names: absent, or a list of strings. */
+function dispatchFilePaths(content: Record<string, unknown>): string[] {
+  const raw = content.file_paths;
+  return Array.isArray(raw) ? raw.filter((p): p is string => typeof p === 'string' && p.length > 0) : [];
+}
+
+/**
+ * The prompt as the specialist reads it, with the files handed over: listed
+ * paths rewritten to the specialist's ipc-in, a list of the files (so one is
+ * found even when the prompt never mentions its path), and any refused path
+ * named (spec: dispatched_prompt).
+ */
+function dispatchedPrompt(rewritten: string, placed: string[], refused: RefusedFile[]): string {
+  let prompt = rewritten;
+  if (placed.length > 0) {
+    prompt +=
+      `\n\n[Files handed to you with this task (read-only; copy one into ${SPECIALISTS_CONFIG.ipcOutContainerPath} to return it): ` +
+      `${placed.join(', ')}]`;
+  }
+  return prompt + refusalNote(refused);
+}
+
+/**
+ * Provision the task's session and give it its trigger. Files the dispatch
+ * names are taken from the dispatcher's ipc-out first — before a parent
+ * specialist's exit clears it — and handed to the task as a dispatch transfer
+ * its container finds in ipc-in at every start (spec: DispatchFilesTransferred).
+ * The prompt that names them is recorded on the task, so a restart re-sends it.
+ * Returns the paths that could not be handed over.
+ */
+async function spawnTaskSession(
+  task: SpecialistTask,
+  dispatcher: Session,
+  filePaths: string[],
+): Promise<RefusedFile[]> {
   const session = await createSpecialistSession(task.specialist_group_id, task.id);
+  let refused: RefusedFile[] = [];
+  if (filePaths.length > 0) {
+    if (await getDb().hasTable('invocations')) {
+      const taken = await takeIpcOutFiles(dispatcher, {
+        kind: 'dispatch',
+        taskId: task.id,
+        text: task.prompt,
+        filePaths,
+        commitToMemory: false,
+        recipientSessionId: session.id,
+      });
+      refused = taken.refused;
+      task.prompt = dispatchedPrompt(taken.text, taken.placed, refused);
+    } else {
+      refused = filePaths.map((p) => ({ path: p, reason: 'file handover is not available' }));
+      task.prompt = dispatchedPrompt(task.prompt, [], refused);
+    }
+    await getDb().run('UPDATE specialist_tasks SET prompt = ? WHERE id = ?', task.prompt, task.id);
+  }
   initSessionFolder(session.agent_group_id, session.id);
   writeSessionMessage(session.agent_group_id, session.id, {
     id: `trigger-${task.id}`,
@@ -91,6 +222,7 @@ async function spawnTaskSession(task: SpecialistTask): Promise<void> {
   await wakeContainer(session).catch((err) =>
     log.error('specialists: failed to wake specialist container', { err, taskId: task.id }),
   );
+  return refused;
 }
 
 // ── dispatch_specialist ─────────────────────────────────────────────────────
@@ -100,25 +232,33 @@ export async function handleDispatchSpecialist(content: Record<string, unknown>,
   const prompt = content.prompt as string;
 
   if (!specialistGroupId || !prompt) {
-    notifyAgent(session, 'dispatch_specialist failed: specialist_group_id and prompt are required.');
+    await refuse(session, 'dispatch_specialist failed: specialist_group_id and prompt are required.', content);
     return;
   }
 
   if (!(await isMainGroup(session.agent_group_id))) {
-    notifyAgent(session, 'dispatch_specialist failed: only the main group may dispatch root specialist tasks.');
+    await refuse(
+      session,
+      'dispatch_specialist failed: only the main group may dispatch root specialist tasks.',
+      content,
+    );
     log.warn('specialists: non-main group attempted dispatch_specialist', { agentGroupId: session.agent_group_id });
     return;
   }
 
   const targetGroup = await getAgentGroup(specialistGroupId);
   if (!targetGroup) {
-    notifyAgent(session, `dispatch_specialist failed: agent group "${specialistGroupId}" not found.`);
+    await refuse(session, `dispatch_specialist failed: agent group "${specialistGroupId}" not found.`, content);
     return;
   }
 
   const specialist = await getSpecialist(specialistGroupId);
   if (!specialist) {
-    notifyAgent(session, `dispatch_specialist failed: agent group "${specialistGroupId}" is not a specialist.`);
+    await refuse(
+      session,
+      `dispatch_specialist failed: agent group "${specialistGroupId}" is not a specialist.`,
+      content,
+    );
     return;
   }
 
@@ -145,10 +285,11 @@ export async function handleDispatchSpecialist(content: Record<string, unknown>,
     pending_sub_task_id: null,
     committed_files: null,
   };
+  if (!(await nullChannelReady(session, 'dispatch_specialist', content))) return;
   await createTask(task);
-  await spawnTaskSession(task);
+  const refused = await spawnTaskSession(task, session, dispatchFilePaths(content));
 
-  noteDispatched(session, taskId);
+  noteDispatched(session, taskId, refused);
   log.info('specialists: root task dispatched', { taskId, specialistGroupId, requesterGroup: session.agent_group_id });
 }
 
@@ -159,35 +300,35 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
   const prompt = content.prompt as string;
 
   if (!specialistGroupId || !prompt) {
-    notifyAgent(session, 'dispatch_sub_task failed: specialist_group_id and prompt are required.');
+    await refuse(session, 'dispatch_sub_task failed: specialist_group_id and prompt are required.', content);
     return;
   }
 
   const callerSpecialist = await getSpecialist(session.agent_group_id);
   if (!callerSpecialist) {
-    notifyAgent(session, 'dispatch_sub_task failed: caller is not a specialist agent group.');
+    await refuse(session, 'dispatch_sub_task failed: caller is not a specialist agent group.', content);
     return;
   }
   if (callerSpecialist.is_memory_provider) {
-    notifyAgent(session, 'dispatch_sub_task failed: memory providers cannot delegate sub-tasks.');
+    await refuse(session, 'dispatch_sub_task failed: memory providers cannot delegate sub-tasks.', content);
     return;
   }
 
   const targetGroup = await getAgentGroup(specialistGroupId);
   if (!targetGroup) {
-    notifyAgent(session, `dispatch_sub_task failed: agent group "${specialistGroupId}" not found.`);
+    await refuse(session, `dispatch_sub_task failed: agent group "${specialistGroupId}" not found.`, content);
     return;
   }
 
   const targetSpecialist = await getSpecialist(specialistGroupId);
   if (!targetSpecialist) {
-    notifyAgent(session, `dispatch_sub_task failed: agent group "${specialistGroupId}" is not a specialist.`);
+    await refuse(session, `dispatch_sub_task failed: agent group "${specialistGroupId}" is not a specialist.`, content);
     return;
   }
 
   const parentTask = await getLiveTaskForSession(session);
   if (!parentTask) {
-    notifyAgent(session, 'dispatch_sub_task failed: no running task found for this specialist session.');
+    await refuse(session, 'dispatch_sub_task failed: no running task found for this specialist session.', content);
     return;
   }
   // The call itself proves the parent's container is up — the same evidence
@@ -203,9 +344,10 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     parentTask.status = 'running';
   }
   if (parentTask.status !== 'running') {
-    notifyAgent(
+    await refuse(
       session,
       `dispatch_sub_task failed: parent task is in state "${parentTask.status}", expected "running".`,
+      content,
     );
     return;
   }
@@ -215,6 +357,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
 
   // Memory provider — bypass chain checks, chain counters not incremented
   if (targetSpecialist.is_memory_provider) {
+    if (!(await nullChannelReady(session, 'dispatch_sub_task', content))) return;
     const taskId = generateId();
     const child: SpecialistTask = {
       id: taskId,
@@ -239,40 +382,15 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     };
     await createTask(child);
     await updateTaskStatus(parentTask.id, 'awaiting_sub_task', { pending_sub_task_id: taskId });
-    await spawnTaskSession(child);
+    await spawnTaskSession(child, session, dispatchFilePaths(content));
     log.info('specialists: memory provider dispatched', { taskId, specialistGroupId, parentTaskId: parentTask.id });
     return;
   }
 
-  // Cycle check
-  if (ancestorIds.includes(specialistGroupId)) {
-    const taskId = generateId();
-    const rejected: SpecialistTask = {
-      id: taskId,
-      specialist_group_id: specialistGroupId,
-      prompt,
-      requester_group_id: null,
-      requester_task_id: parentTask.id,
-      requester_session_id: session.id,
-      depth: parentTask.depth + 1,
-      chain_delegation_count: parentTask.chain_delegation_count + 1,
-      ancestor_group_ids: JSON.stringify([...ancestorIds, parentTask.specialist_group_id]),
-      is_last_same_type_dispatch: 0,
-      status: 'failed',
-      dispatched_at: now,
-      restart_attempt_count: 0,
-      closed_at: now,
-      result: null,
-      failure_kind: 'cycle_detected',
-      failure_detail: 'target specialist appears in dispatch chain',
-      pending_sub_task_id: null,
-      committed_files: null,
-    };
-    await createTask(rejected);
-    notifyAgent(session, 'sub-task rejected: cycle detected');
-    await routeResult(rejected);
-    return;
-  }
+  // No cycle check (specs/specialists.allium): a parent runs one sub-task at
+  // a time, so a chain is a single line, and the depth, chain-count and
+  // same-type limits below bound it — self-dispatch and returning to an
+  // earlier group included.
 
   // Depth limit
   if (parentTask.depth + 1 >= SPECIALISTS_CONFIG.maxSpecialistDepth) {
@@ -299,7 +417,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       committed_files: null,
     };
     await createTask(rejected);
-    notifyAgent(session, 'sub-task rejected: depth limit reached');
+    await refuse(session, 'sub-task rejected: depth limit reached', content);
     await routeResult(rejected);
     return;
   }
@@ -329,7 +447,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       committed_files: null,
     };
     await createTask(rejected);
-    notifyAgent(session, 'sub-task rejected: chain delegation limit reached');
+    await refuse(session, 'sub-task rejected: chain delegation limit reached', content);
     await routeResult(rejected);
     return;
   }
@@ -360,7 +478,7 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
       committed_files: null,
     };
     await createTask(rejected);
-    notifyAgent(session, 'sub-task rejected: same-type dispatch limit reached');
+    await refuse(session, 'sub-task rejected: same-type dispatch limit reached', content);
     await routeResult(rejected);
     return;
   }
@@ -396,9 +514,11 @@ export async function handleDispatchSubTask(content: Record<string, unknown>, se
     child.prompt = formatTaskPrompt(child, childSpecialist);
   }
 
+  if (!(await nullChannelReady(session, 'dispatch_sub_task', content))) return;
   await createTask(child);
   await updateTaskStatus(parentTask.id, 'awaiting_sub_task', { pending_sub_task_id: taskId });
-  await spawnTaskSession(child);
+  // A refused path reaches the parent through its child, whose prompt names it.
+  await spawnTaskSession(child, session, dispatchFilePaths(content));
 
   log.info('specialists: sub-task dispatched', {
     taskId,
